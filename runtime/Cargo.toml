@@ -1,0 +1,7 @@
+[workspace]
+resolver = "2"
+members = ["core", "host", "gol-daemon", "gol-engine", "mandel-daemon"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"

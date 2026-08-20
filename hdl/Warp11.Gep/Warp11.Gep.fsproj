@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <OutputType>Exe</OutputType>
+        <TargetFramework>net10.0</TargetFramework>
+        <WarningsAsErrors>FS0025</WarningsAsErrors>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <Compile Include="Fixed.fs"/>
+        <Compile Include="Rng.fs"/>
+        <Compile Include="Opcodes.fs"/>
+        <Compile Include="Karva.fs"/>
+        <Compile Include="Chromosome.fs"/>
+        <Compile Include="MicroProgram.fs"/>
+        <Compile Include="HwBreeding.fs"/>
+        <Compile Include="Fitness.fs"/>
+        <Compile Include="Engine.fs"/>
+        <Compile Include="Hdl.fs"/>
+        <Compile Include="Problems.fs"/>
+        <Compile Include="Srbench.fs"/>
+        <Compile Include="Cluster.fs"/>
+        <Compile Include="ClusterAxi.fs"/>
+        <Compile Include="Golden.fs"/>
+        <Compile Include="Main.fs"/>
+    </ItemGroup>
+
+    <ItemGroup>
+        <ProjectReference Include="../Warp11/Warp11.fsproj"/>
+        <ProjectReference Include="../Warp11.SimView.Desktop/Warp11.SimView.Desktop.fsproj"/>
+    </ItemGroup>
+
+</Project>

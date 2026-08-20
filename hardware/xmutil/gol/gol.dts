@@ -1,0 +1,38 @@
+/*
+ * Device tree overlay for the warp11 `gol` xmutil app.
+ *
+ * Two fragments:
+ *   1. &fpga_full firmware-name — tells the kernel's FPGA manager which
+ *      bitstream to load when the overlay is applied.
+ *   2. &amba gol@b0000000 — declares the GameOfLife64 AXI slave as a
+ *      generic-uio device so userspace can mmap it via /dev/uioN AND
+ *      block on the GoL irq (routed in the BD: GameOfLife64_axi.irq →
+ *      xlconcat → pl_ps_irq0[0] → GIC SPI 89 / 0x59, level-high).
+ *
+ * The kernel cmdline already includes `uio_pdrv_genirq.of_id=generic-uio`,
+ * so any node with compatible="generic-uio" auto-binds to uio_pdrv_genirq.
+ *
+ * Once `xmutil loadapp gol` runs and the overlay applies:
+ *   - bitstream programs the PL
+ *   - /dev/uioN appears with /sys/class/uio/uioN/name = "b0000000.gol"
+ *   - /sys/class/uio/uioN/maps/map0/{addr,size} = 0xb0000000, 0x1000
+ */
+
+/dts-v1/;
+/plugin/;
+
+&fpga_full {
+    firmware-name = "xilinx/gol/gol_bd_wrapper.bit.bin";
+};
+
+&amba {
+    #address-cells = <2>;
+    #size-cells = <2>;
+
+    gol@b0000000 {
+        compatible = "generic-uio";
+        reg = <0x0 0xb0000000 0x0 0x1000>;
+        interrupt-parent = <&gic>;
+        interrupts = <0x0 0x59 0x4>;   /* SPI 89, level-high */
+    };
+};

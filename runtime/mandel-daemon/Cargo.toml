@@ -1,0 +1,14 @@
+[package]
+name = "mandel-daemon"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+warp11-runtime = { path = "../core" }
+warp11-host = { path = "../host" }
+# Same minimal transport set as gol-daemon, for the same reason: TLS/QUIC
+# pull `ring`, which wants a C cross-compiler this machine deliberately does
+# not have.
+zenoh = { version = "1.9", default-features = false, features = [
+    "transport_tcp",
+] }

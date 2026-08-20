@@ -1,0 +1,14 @@
+[Unit]
+Description=Load u-dma-buf (udmabuf0 4 MiB WC queue, udmabuf1 1 MiB cached ring) for warp11 accelerators
+
+[Service]
+Type=oneshot
+# modprobe (not insmod-by-path): the module is DKMS-managed, so it lives in
+# /lib/modules/$(uname -r)/ and rebuilds automatically on kernel updates —
+# the 2026-07-24 reboot onto 5.15.0-1075 broke the old insmod of a
+# vermagic-1070 .ko, which is exactly what this arrangement prevents.
+ExecStart=/usr/sbin/modprobe u-dma-buf udmabuf0=4194304 udmabuf1=1048576
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

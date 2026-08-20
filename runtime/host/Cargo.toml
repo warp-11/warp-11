@@ -1,0 +1,7 @@
+[package]
+name = "warp11-host"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+warp11-runtime = { path = "../core" }

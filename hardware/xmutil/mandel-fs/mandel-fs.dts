@@ -1,0 +1,33 @@
+/*
+ * Device tree overlay for the warp11 `mandel-fs` xmutil app — the
+ * F#-elaborated Mandelbrot pod (hdl/SILICON.md).
+ *
+ * Two fragments:
+ *   1. &fpga_full firmware-name — tells the kernel's FPGA manager which
+ *      bitstream to load when the overlay is applied.
+ *   2. &amba mandelfs@b0000000 — declares the MandelPodAxi slave as a
+ *      generic-uio device so userspace can mmap the 32 KB aperture via
+ *      /dev/uioN. No interrupts property: the run-once pod has no irq
+ *      wired (the Rust driver polls done); the BD's SPI 89 route is tied
+ *      to 0 until the re-renderable fast-follow adds one.
+ *
+ * The Rust driver's MmapWindow can use /dev/mem at 0xB0000000 directly or
+ * the /dev/uioN node this declares — both are plain mmaps of the aperture.
+ */
+
+/dts-v1/;
+/plugin/;
+
+&fpga_full {
+    firmware-name = "xilinx/mandel-fs/mandelfs_bd_wrapper.bit.bin";
+};
+
+&amba {
+    #address-cells = <2>;
+    #size-cells = <2>;
+
+    mandelfs@b0000000 {
+        compatible = "generic-uio";
+        reg = <0x0 0xb0000000 0x0 0x8000>;
+    };
+};

@@ -1,0 +1,32 @@
+/*
+ * Device tree overlay for the warp11 `audio-gain` xmutil app.
+ *
+ * Two fragments:
+ *   1. &fpga_full firmware-name — the bitstream the FPGA manager programs
+ *      when the overlay applies. This alone makes line-in
+ *      pass through to line-out at unity (AudioGainSlave.volume resets
+ *      to 256 = 1.0x).
+ *   2. &amba audio_gain@b0000000 — exposes the AudioGain AXI slave as a
+ *      generic-uio device so userspace can mmap it and set the `volume`
+ *      (Q8.8) and `mute` registers. No interrupts — the path has no irq.
+ *
+ * Shares the 0xB0000000 HPM1_FPD aperture with the gol/mandel apps; only
+ * one app is loaded at a time via xmutil.
+ */
+
+/dts-v1/;
+/plugin/;
+
+&fpga_full {
+    firmware-name = "xilinx/audio-gain/audio_gain_bd_wrapper.bit.bin";
+};
+
+&amba {
+    #address-cells = <2>;
+    #size-cells = <2>;
+
+    audio_gain@b0000000 {
+        compatible = "generic-uio";
+        reg = <0x0 0xb0000000 0x0 0x1000>;
+    };
+};

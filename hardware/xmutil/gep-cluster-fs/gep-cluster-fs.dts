@@ -1,0 +1,57 @@
+/*
+ * Device tree overlay for the warp11 `gep-cluster-fs` xmutil app — the
+ * F#-elaborated WarpCPU cluster (4 breeders x 8 DIV-resident lanes, two
+ * fillers, inline parents + the op-list emitter).
+ *
+ * The F# twin of gep-cluster.dts, with one addition it should also have had:
+ * the app pins its own PL clock.
+ */
+
+/dts-v1/;
+/plugin/;
+
+&fpga_full {
+    firmware-name = "xilinx/gep-cluster-fs/gepclusterfs_bd_wrapper.bit.bin";
+};
+
+/*
+ * The DMA region for the cluster.
+ *
+ * **Deliberately NOT `dma-coherent`.** This node used to claim it, on the
+ * grounds that the master reaches DDR through S_AXI_HPC0_FPD with AxCACHE=0xF
+ * and therefore snoops the APU caches. The port is right and the AxCACHE is
+ * wrong: the F# AXI masters drive `lit 0UL 4` on both awcache and arcache
+ * (`Stdlib.fs`), so these transactions do not snoop whichever slave they reach.
+ * Coherence is a property of the transaction, not of the port.
+ *
+ * Claiming it made u-dma-buf hand out a cached mapping *and* turn
+ * sync_for_cpu/sync_for_device into no-ops, so nothing ever flushed — the exact
+ * failure `gep_cluster_first_light` documents at its O_SYNC open: "without this
+ * the fitnesses come back wrong and most ring records carry entry id 0".
+ *
+ * 4 MiB: two population regions, the pairing queue (or the marshaled
+ * inline-parent work items, three records each), the op-list ring and the
+ * fitness ring.
+ */
+&{/} {
+    udmabuf_gep_cluster_fs: udmabuf-gep-cluster-fs {
+        compatible = "ikwzm,u-dma-buf";
+        device-name = "udmabuf-gep-cluster-fs";
+        size = <0x00400000>;
+    };
+
+    gepclusterfs@b0000000 {
+        compatible = "generic-uio";
+        reg = <0x0 0xb0000000 0x0 0x1000>;
+        interrupt-parent = <&gic>;
+        interrupts = <0x0 0x59 0x4>;   /* SPI 89, level-high */
+        /* Loading a bitstream does NOT program the PS clock registers, so an
+         * app that omits this inherits whatever the previous one left — and
+         * the board's last app was a 166.67 MHz build. This design is a
+         * 100 MHz build (the operator engine's single-cycle Irwin-Hall
+         * multiply is the cap), so running it at 166 would be out of spec. */
+        clocks = <&zynqmp_clk 71>;
+        assigned-clocks = <&zynqmp_clk 71>;
+        assigned-clock-rates = <99999001>;
+    };
+};

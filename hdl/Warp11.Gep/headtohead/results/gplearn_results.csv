@@ -1,0 +1,7 @@
+problem,r2,seconds,expression
+I.14.3  m*g*z,1.000000,0.826,mul(mul(X1  X0)  X2)
+I.12.1  mu*Nn,1.000000,0.336,mul(X1  X0)
+I.13.4  0.5*m*(u^2+v^2+w^2),0.938969,153.378,sub(add(add(mul(add(X1  X2)  mul(X0  X3))  sub(add(X1  X0)  sub(mul(X0  X3)  add(0.465  add(mul(X0  0.465)  add(X1  X0))))))  sub(add(X1  X0)  mul(X0  X3)))  mul(X3  X1))
+I.39.1  1.5*pr*V,0.985658,145.302,add(sub(mul(X1  1.359)  sub(sub(X1  -2.669)  add(X1  X0)))  mul(X0  X1))
+I.25.13  q/C,1.000000,0.653,div(X0  X1)
+I.12.2  q1*q2/r^2,1.000000,1.118,div(add(sub(X1  X1)  mul(X1  X0))  mul(X2  X2))

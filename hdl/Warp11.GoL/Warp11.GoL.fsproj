@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <TargetFramework>net10.0</TargetFramework>
+        <WarningsAsErrors>FS0025</WarningsAsErrors>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <Compile Include="Core.fs"/>
+        <Compile Include="Twin.fs"/>
+        <Compile Include="Wrapper.fs"/>
+    </ItemGroup>
+
+    <ItemGroup>
+        <ProjectReference Include="../Warp11/Warp11.fsproj"/>
+    </ItemGroup>
+
+</Project>

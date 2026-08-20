@@ -1,0 +1,10 @@
+// bootgen input for converting gepcluster_bd_wrapper.bit (Vivado output) into
+// gepcluster_bd_wrapper.bit.bin (FPGA-manager-loadable format used by xmutil/
+// dfx-mgr on Zynq UltraScale+).
+//
+// Invoked indirectly via package_gepcluster.sh.
+
+all:
+{
+  [destination_device = pl] gepcluster_bd_wrapper.bit
+}

@@ -1,0 +1,54 @@
+/*
+ * Device tree overlay for the warp11 `audio-batch` xmutil app — the
+ * F#-elaborated batch audio accelerator: a block of stereo frames in PS DDR,
+ * read by the fabric, pushed through the 8-band multiband compressor, and
+ * written back.
+ *
+ * Replaces the Kotlin app of the same name, which left with the hearing-aid
+ * vertical in 2026-07. The register map is different; nothing of the old app
+ * survives but the name.
+ */
+
+/dts-v1/;
+/plugin/;
+
+&fpga_full {
+    firmware-name = "xilinx/audio-batch/audiobatch_bd_wrapper.bit.bin";
+};
+
+/*
+ * The DMA arena: input frames in, processed frames out.
+ *
+ * **Deliberately NOT `dma-coherent`**, unlike gep-cluster-fs, even though this
+ * bitstream also routes its master through S_AXI_HPC0_FPD. Coherence is a
+ * property of the *transaction*, not the port: the F# AXI masters drive
+ * AxCACHE=0 (`Stdlib.fs`), so fabric accesses do not snoop the APU caches
+ * whichever slave they reach. Claiming `dma-coherent` here would make
+ * u-dma-buf treat sync_for_cpu/sync_for_device as no-ops, and the host would
+ * read stale audio out of its own cache — silently, and only sometimes.
+ *
+ * So the driver does the syncs for real. 8 MiB holds a comfortable block at
+ * both ends: 8 bytes a frame means 4 MiB in and 4 MiB out, or about 11 seconds
+ * of 48 kHz stereo each way.
+ */
+&{/} {
+    udmabuf_audio_batch: udmabuf-audio-batch {
+        compatible = "ikwzm,u-dma-buf";
+        device-name = "udmabuf-audio-batch";
+        size = <0x00800000>;
+    };
+
+    audiobatch@b0000000 {
+        compatible = "generic-uio";
+        reg = <0x0 0xb0000000 0x0 0x1000>;
+        interrupt-parent = <&gic>;
+        interrupts = <0x0 0x59 0x4>;   /* SPI 89, level-high */
+        /* Loading a bitstream does NOT program the PS clock registers, so an
+         * app that omits this inherits whatever the previous one left. Pin it:
+         * this design's critical path is the compressor's biquad chain, and it
+         * is built and timed at 100 MHz. */
+        clocks = <&zynqmp_clk 71>;
+        assigned-clocks = <&zynqmp_clk 71>;
+        assigned-clock-rates = <99999001>;
+    };
+};

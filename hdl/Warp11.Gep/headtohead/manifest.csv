@@ -1,0 +1,7 @@
+problem,operators,n_features,train,test
+I.14.3  m*g*z,add|sub|mul,3,datasets/I_14_3_m_g_z_train.csv,datasets/I_14_3_m_g_z_test.csv
+I.12.1  mu*Nn,add|sub|mul,2,datasets/I_12_1_mu_Nn_train.csv,datasets/I_12_1_mu_Nn_test.csv
+I.13.4  0.5*m*(u^2+v^2+w^2),add|sub|mul,4,datasets/I_13_4_0_5_m_u_2_v_2_w_2_train.csv,datasets/I_13_4_0_5_m_u_2_v_2_w_2_test.csv
+I.39.1  1.5*pr*V,add|sub|mul,2,datasets/I_39_1_1_5_pr_V_train.csv,datasets/I_39_1_1_5_pr_V_test.csv
+I.25.13  q/C,add|sub|mul|div,2,datasets/I_25_13_q_C_train.csv,datasets/I_25_13_q_C_test.csv
+I.12.2  q1*q2/r^2,add|sub|mul|div,3,datasets/I_12_2_q1_q2_r_2_train.csv,datasets/I_12_2_q1_q2_r_2_test.csv

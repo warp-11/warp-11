@@ -1,0 +1,44 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <TargetFramework>net10.0-browser</TargetFramework>
+        <RuntimeIdentifier>browser-wasm</RuntimeIdentifier>
+        <OutputType>Exe</OutputType>
+        <WasmMainJSPath>wwwroot/main.js</WasmMainJSPath>
+        <WarningsAsErrors>FS0025</WarningsAsErrors>
+        <!-- `dotnet.native.js.symbols` is a 2.4 MB symbol map for the Mono
+             runtime — ~10% of the published bundle, fetched eagerly at boot by
+             every visitor, and useful only for symbolicating native stack
+             traces in devtools. It cannot simply be withheld at deploy time:
+             the boot manifest lists it, `mono_download_assets` fetches it
+             before the app starts, and a 404 there is a fatal uncaught
+             rejection rather than a degraded stack trace. Not emitting it keeps
+             it out of the manifest too. -->
+        <WasmEmitSymbolMap>false</WasmEmitSymbolMap>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <Compile Include="Program.fs"/>
+    </ItemGroup>
+
+    <!-- `WasmMainJSPath` carries main.js into the bundle; the page that loads
+         it has to be asked for by name or it is simply left behind. -->
+    <ItemGroup>
+        <WasmExtraFilesToDeploy Include="wwwroot/index.html"/>
+    </ItemGroup>
+
+    <!-- Everything below this head is a library now, so a self-contained wasm
+         build may reference it outright — no source-linking left. -->
+    <ItemGroup>
+        <ProjectReference Include="../Warp11.Tutorial/Warp11.Tutorial.fsproj"/>
+        <ProjectReference Include="../Warp11.SimView/Warp11.SimView.fsproj"/>
+    </ItemGroup>
+
+    <ItemGroup>
+        <PackageReference Include="Avalonia" Version="12.1.1"/>
+        <PackageReference Include="Avalonia.Browser" Version="12.1.1"/>
+        <PackageReference Include="Avalonia.Themes.Fluent" Version="12.1.1"/>
+        <PackageReference Include="Avalonia.FuncUI" Version="2.0.0"/>
+    </ItemGroup>
+
+</Project>

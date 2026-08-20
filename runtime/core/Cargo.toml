@@ -1,0 +1,7 @@
+[package]
+name = "warp11-runtime"
+version.workspace = true
+edition.workspace = true
+
+# No dependencies at all, and #![no_std]. This is what has to compile for a
+# target with no operating system.

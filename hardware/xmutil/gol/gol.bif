@@ -1,0 +1,10 @@
+// bootgen input for converting gol_bd_wrapper.bit (Vivado output) into
+// gol_bd_wrapper.bit.bin (FPGA-manager-loadable format used by xmutil/
+// dfx-mgr on Zynq UltraScale+).
+//
+// Invoked indirectly via package_gol.sh.
+
+all:
+{
+  [destination_device = pl] gol_bd_wrapper.bit
+}

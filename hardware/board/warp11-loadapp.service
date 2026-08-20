@@ -1,0 +1,40 @@
+# /etc/systemd/system/warp11-loadapp.service
+#
+# Load a warp11 FPGA app at boot so you don't have to `xmutil unloadapp` +
+# `xmutil loadapp <app>` by hand after every reboot. Runs as root (xmutil needs
+# it) after dfx-mgrd is up.
+#
+# Change the app: edit WARP11_APP below to the xmutil app you want as default
+# (e.g. audio-wdrc, audio-wdrc-mems, mandel, gol). The app must already be
+# installed under /lib/firmware/xilinx/<app>/ (deployBitstreamToBoard does that).
+#
+# Install (one-time):
+#   scp hardware/board/warp11-loadapp.service ubuntu@192.168.1.172:/tmp/
+#   ssh ubuntu@192.168.1.172 \
+#     'sudo install -m 644 -o root -g root /tmp/warp11-loadapp.service \
+#        /etc/systemd/system/warp11-loadapp.service \
+#      && sudo systemctl daemon-reload \
+#      && sudo systemctl enable --now warp11-loadapp.service'
+#
+# After editing the app later: re-scp, then
+#   ssh ubuntu@192.168.1.172 'sudo systemctl daemon-reload && sudo systemctl restart warp11-loadapp.service'
+#
+# Check it:  ssh ubuntu@192.168.1.172 'systemctl status warp11-loadapp.service; xmutil listapps'
+
+[Unit]
+Description=warp11: load default FPGA app at boot
+After=dfx-mgrd.service
+Wants=dfx-mgrd.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+Environment=WARP11_APP=audio-wdrc-mems
+# dfx-mgrd needs a moment after start to accept socket connections.
+ExecStartPre=/bin/sleep 5
+# Unload whatever the boot default was (ignore failure if nothing is loaded).
+ExecStart=-/usr/bin/xmutil unloadapp
+ExecStart=/usr/bin/xmutil loadapp ${WARP11_APP}
+
+[Install]
+WantedBy=multi-user.target

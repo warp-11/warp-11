@@ -1,0 +1,68 @@
+# /etc/sudoers.d/warp11
+#
+# Passwordless sudo for the warp11 deploy workflow on KV260.
+# xmutil loads/unloads the FPGA app from /lib/firmware/xilinx/.
+#
+# Install with:
+#   visudo -cf hardware/board/warp11-sudoers          # LOCALLY, first
+#   scp hardware/board/warp11-sudoers ubuntu@<board>:/tmp/warp11-sudoers
+#   ssh ubuntu@<board> 'sudo install -m 440 -o root -g root /tmp/warp11-sudoers /etc/sudoers.d/warp11 && sudo visudo -c'
+#
+# **Validate locally before shipping it.** `visudo -c` on the board runs after
+# the file is already in place, and a malformed sudoers file locks you out of
+# sudo entirely — recoverable only from the serial console. `visudo -cf` on the
+# host runs the same parser against the same bytes, before anything is at risk.
+
+ubuntu ALL=(root) NOPASSWD: /usr/bin/xmutil
+
+# Firmware deploy for the xmutil-app package flow.
+#
+# `install` matches with no arg constraints: the package scripts pass a
+# variable-length (srcs..., dest_dir) arglist that sudoers' one-wildcard-per-arg
+# matching cannot express. Risk is bounded in practice — the only caller is the
+# staging dir we scp'd ourselves.
+ubuntu ALL=(root) NOPASSWD: /usr/bin/install
+
+# Removing an app's firmware, by wildcard rather than per-app.
+#
+# This used to be two lines per app, naming `gol`, `mandel`, `audio-tone` and
+# five more — every one of them a Kotlin-era app, and none of the F# apps that
+# replaced them. So `gol-fs`, `mandel-frame`, `gep-cluster-fs` and `audio-batch`
+# could all be *installed* (via the unrestricted `install` above) and never
+# cleaned, which is how a stale Kotlin bitstream survived in
+# /lib/firmware/xilinx/audio-batch/ and got loaded in preference to the F# one:
+# xmutil reported success, the uio node appeared, and the aperture answered with
+# somebody else's registers. Twice, on 2026-08-19.
+#
+# A wildcard does not go stale when an app is added. Note that sudoers wildcards
+# do NOT match `/`, so `*/*` is one app directory and the files directly in it —
+# which is exactly the scope wanted, and no wider.
+ubuntu ALL=(root) NOPASSWD: /usr/bin/rm -f /lib/firmware/xilinx/*/*
+ubuntu ALL=(root) NOPASSWD: /usr/bin/rmdir /lib/firmware/xilinx/*
+ubuntu ALL=(root) NOPASSWD: /usr/bin/mkdir -p /lib/firmware/xilinx/*
+
+# u-dma-buf sync attributes, for the drivers that own coherency themselves.
+# The F# AXI masters drive AxCACHE=0 and therefore do not snoop, so a cached
+# mapping needs a real sync_for_cpu / sync_for_device on either side of a
+# transfer — see the note in hardware/xmutil/audio-batch/audio-batch.dts.
+#
+# By wildcard for the same reason as above: the per-app udmabuf nodes
+# (udmabuf-gep-cluster-fs, udmabuf-audio-batch) arrive with their app's dtbo,
+# and naming udmabuf0 alone missed every one of them.
+ubuntu ALL=(root) NOPASSWD: /usr/bin/chmod 0666 /sys/class/u-dma-buf/*/sync_for_device
+ubuntu ALL=(root) NOPASSWD: /usr/bin/chmod 0666 /sys/class/u-dma-buf/*/sync_for_cpu
+ubuntu ALL=(root) NOPASSWD: /usr/bin/chmod 0666 /sys/class/u-dma-buf/*/sync_offset
+ubuntu ALL=(root) NOPASSWD: /usr/bin/chmod 0666 /sys/class/u-dma-buf/*/sync_size
+ubuntu ALL=(root) NOPASSWD: /usr/bin/chmod 0666 /sys/class/u-dma-buf/*/sync_direction
+
+# The documented cure for a PS-side HP AW/W pairing skew, which survives every
+# app reload and nothing else clears.
+ubuntu ALL=(root) NOPASSWD: /usr/sbin/reboot
+
+# GONE, with the Kotlin stack (2026-08-13): the gol-driver, counter-driver and
+# gep-hw binaries this file used to name. Nothing builds them. The F# stack's
+# board binaries — gol_first_light, mandel_frame_first_light,
+# gep_cluster_first_light, audio_batch_first_light, gol_disarm — reach their
+# accelerator through /dev/uioN, which the 99-uio.rules udev rule makes
+# ubuntu-owned, so they need no sudo at all. Add an entry here only for a
+# binary that genuinely needs /dev/mem.

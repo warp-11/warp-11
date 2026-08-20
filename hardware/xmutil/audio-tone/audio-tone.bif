@@ -1,0 +1,10 @@
+// bootgen input for converting audio_tone_bd_wrapper.bit (Vivado output)
+// into audio_tone_bd_wrapper.bit.bin (FPGA-manager-loadable format used by
+// xmutil/dfx-mgr on Zynq UltraScale+).
+//
+// Invoked indirectly via package_audio_tone.sh.
+
+all:
+{
+  [destination_device = pl] audio_tone_bd_wrapper.bit
+}

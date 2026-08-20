@@ -1,0 +1,15 @@
+[package]
+name = "gol-daemon"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+warp11-runtime = { path = "../core" }
+warp11-host = { path = "../host" }
+# Minimal transport set: plain TCP listen for the host GUI (Zenoh-CS client)
+# and scouting. No TLS/QUIC — they pull `ring`, which wants a C
+# cross-compiler this machine deliberately does not have (the aarch64-musl
+# build links with the toolchain's own lld).
+zenoh = { version = "1.9", default-features = false, features = [
+    "transport_tcp",
+] }

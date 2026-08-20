@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <OutputType>Exe</OutputType>
+        <TargetFramework>net10.0</TargetFramework>
+        <WarningsAsErrors>FS0025</WarningsAsErrors>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <Compile Include="Pod.fs"/>
+        <Compile Include="Step.fs"/>
+        <Compile Include="Lane.fs"/>
+        <Compile Include="Coalescer.fs"/>
+        <Compile Include="LanePod.fs"/>
+        <Compile Include="FramePod.fs"/>
+        <Compile Include="FrameAxi.fs"/>
+        <Compile Include="FrameHost.fs"/>
+        <Compile Include="Seam.fs"/>
+        <Compile Include="Host.fs"/>
+        <Compile Include="Main.fs"/>
+    </ItemGroup>
+
+    <ItemGroup>
+        <ProjectReference Include="../Warp11/Warp11.fsproj"/>
+        <ProjectReference Include="../Warp11.SimView.Desktop/Warp11.SimView.Desktop.fsproj"/>
+    </ItemGroup>
+
+</Project>

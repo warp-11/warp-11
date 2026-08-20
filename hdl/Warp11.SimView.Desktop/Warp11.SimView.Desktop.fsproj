@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <TargetFramework>net10.0</TargetFramework>
+        <WarningsAsErrors>FS0025</WarningsAsErrors>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <Compile Include="Desktop.fs"/>
+    </ItemGroup>
+
+    <ItemGroup>
+        <PackageReference Include="Avalonia.Desktop" Version="12.1.0"/>
+    </ItemGroup>
+
+    <ItemGroup>
+        <ProjectReference Include="../Warp11/Warp11.fsproj"/>
+        <ProjectReference Include="../Warp11.SimView/Warp11.SimView.fsproj"/>
+    </ItemGroup>
+
+</Project>

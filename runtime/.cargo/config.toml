@@ -1,0 +1,22 @@
+# Cross-building the board binaries needs no cross-gcc, and this is what
+# makes that true. `cargo build --release --target aarch64-unknown-linux-musl`
+# works as a plain command because of the two settings below; before they were
+# tracked here the recipe lived in a shell history, which is how it came to be
+# reconstructed from scratch on 2026-08-13.
+#
+# `rust-lld` — the default linker driver is the host `cc`, which cannot link
+# aarch64 objects ("Relocations in generic ELF (EM: 183)"). The Rust toolchain
+# ships its own lld, so the target needs no system cross-toolchain at all.
+# rustc infers the ld flavour from the `lld` in the name.
+#
+# `-L musl-stub` — zenoh reaches `libloading`, which links `-ldl`. On glibc
+# that is a real library; on musl the dynamic-loader symbols live in libc
+# itself and no `libdl.a` is shipped, so the link fails looking for a library
+# whose contents it does not actually need. `musl-stub/libdl.a` is an empty
+# archive (the 8 bytes `!<arch>\n`) that satisfies the reference. The path is
+# relative to the workspace root, which is where cargo runs.
+#
+# Only this target is affected; host builds and `cargo test` are untouched.
+[target.aarch64-unknown-linux-musl]
+linker = "rust-lld"
+rustflags = ["-L", "musl-stub"]

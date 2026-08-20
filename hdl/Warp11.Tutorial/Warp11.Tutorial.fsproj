@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <TargetFramework>net10.0</TargetFramework>
+        <WarningsAsErrors>FS0025</WarningsAsErrors>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <Compile Include="Designs.fs"/>
+        <Compile Include="Registry.fs"/>
+        <Compile Include="Debugger.fs"/>
+    </ItemGroup>
+
+    <!-- The pages and the designs' own text travel inside the assembly: the
+         debugger shows both, and a published wasm bundle has no disk to read
+         them off. `Designs.fs` is compiled *and* embedded, so the source pane
+         shows the same bytes the design was elaborated from. -->
+    <ItemGroup>
+        <EmbeddedResource Include="Designs.fs" LogicalName="Designs.fs"/>
+        <EmbeddedResource Include="doc/*.md" LogicalName="doc/%(Filename).md"/>
+    </ItemGroup>
+
+    <ItemGroup>
+        <ProjectReference Include="../Warp11/Warp11.fsproj"/>
+        <ProjectReference Include="../Warp11.SimView/Warp11.SimView.fsproj"/>
+    </ItemGroup>
+
+</Project>

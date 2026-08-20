@@ -1,0 +1,38 @@
+{
+  // Deploy config for the static site, kept in the repo so the settings that
+  // matter are reviewable rather than living in a dashboard.
+  //
+  //     dotnet fsi site/build.fsx
+  //     cd site && npx wrangler deploy
+  //
+  // Run from `site/`, where wrangler finds this file on its own. `npx` rather
+  // than a global wrangler so the version is the one package-lock.json pins.
+  //
+  // `name` decides the *.workers.dev subdomain; change it before the first
+  // deploy if you want a different one.
+  "name": "hidden-poetry-bbe6",
+  "compatibility_date": "2026-08-17",
+
+  "assets": {
+    "directory": "./out",
+
+    // Left at the default deliberately, and there is nothing outstanding here.
+    //
+    // The history, because the obvious "fix" is the wrong one: the site used to
+    // emit ~5,700 explicit `.html` hrefs, and this setting answers each with a
+    // 307 to the extensionless URL — a redirect per navigation. Setting "none"
+    // does remove them, and also removes directory-index handling, which
+    // measured as `/`, `/try/` and `/reference/` all returning **404** on a real
+    // deployment. A front page that 404s is worse than a redirect that works.
+    //
+    // So the fix went where it belonged, in the generator: `build.fsx` emits
+    // canonical URLs (`guides/architecture`, `try/`) and `serve.py` resolves the
+    // same shapes locally. **Verified 2026-08-19: zero internal `.html` hrefs in
+    // the built tree**, so the default's redirect path is never taken, and the
+    // old `.html` URLs still resolve for anything that linked to them before.
+    // Keep it at the default: it is what makes `/try/` and `/reference/` work.
+    "html_handling": "auto-trailing-slash",
+
+    "not_found_handling": "none"
+  }
+}

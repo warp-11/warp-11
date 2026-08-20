@@ -1,0 +1,19 @@
+/*
+ * Device tree overlay for the warp11 `gep-barrel` xmutil app.
+ *
+ * Tells the kernel's FPGA manager which bitstream to load when the overlay
+ * is applied. We do NOT declare an AXI device node for GepBatch_axi here;
+ * the driver pokes the slave directly via /dev/mem at 0xB000_0000.
+ *
+ * Once `xmutil loadapp gep-barrel` runs, the kernel:
+ *   1. Resolves &fpga_full to the KV260's FPGA region.
+ *   2. Reads firmware-name => /lib/firmware/xilinx/gep-barrel/gepbarrel_bd_wrapper.bit.bin
+ *   3. Hands it to fpga_manager to program the PL.
+ */
+
+/dts-v1/;
+/plugin/;
+
+&fpga_full {
+    firmware-name = "xilinx/gep-barrel/gepbarrel_bd_wrapper.bit.bin";
+};

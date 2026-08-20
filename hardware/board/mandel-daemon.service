@@ -1,0 +1,52 @@
+# ~/.config/systemd/user/mandel-daemon.service
+#
+# The Mandelbrot accelerator's control plane: runtime/mandel-daemon, a
+# Zenoh peer serving warp11/mandel/frame + ctl/render to Warp11.MandelView.
+# Replaces the JVM mandel-server (Ktor WS on 8081), retired 2026-08-13 with
+# the rest of the Kotlin stack.
+#
+# Install (one-time), and the deploy loop afterwards:
+#   cd runtime
+#   cargo build --release --target aarch64-unknown-linux-musl -p mandel-daemon
+#   scp target/aarch64-unknown-linux-musl/release/mandel-daemon \
+#       ubuntu@192.168.1.172:warp11-driver/
+#   scp hardware/board/mandel-daemon.service \
+#       ubuntu@192.168.1.172:.config/systemd/user/
+#   ssh ubuntu@192.168.1.172 'systemctl --user daemon-reload'
+#   ssh ubuntu@192.168.1.172 'systemctl --user restart mandel-daemon.service'
+
+[Unit]
+Description=warp11 Mandelbrot accelerator control plane (Zenoh peer)
+After=network-online.target
+Wants=network-online.target
+
+# The daemon exits non-zero when the mandel-frame app is not loaded, or when
+# its startup render never completes. Both are real refusals, so a restart
+# storm is the wrong answer: give up after 3 tries in a minute and leave the
+# reason in the journal. The JVM units this replaces retried forever, which
+# the board README records as silently poisoning benchmarks at ~1 full core
+# after any reboot with the wrong bitstream loaded.
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+# The argument is the Zenoh listen endpoint; 7448 keeps it clear of
+# gol-daemon's 7447, so the two units never fight over a port even though
+# only one of their bitstreams can be loaded at a time.
+ExecStart=%h/warp11-driver/mandel-daemon tcp/0.0.0.0:7448
+Restart=on-failure
+RestartSec=2
+
+# A static musl binary: no JVM, no HOME needed, ~14 MB resident against the
+# JVM server's ~150 MB.
+#
+# Prerequisites, neither of which a --user unit can order against (both are
+# system-level, and systemd --user cannot express After= on them):
+#   - the mandel-frame app loaded (warp11-loadapp.service, or xmutil by hand)
+#   - u-dma-buf loaded (udmabuf.service) — the framebuffer is udmabuf0, and
+#     the daemon writes its sync_* attributes for the cached readback path
+# The UIO node is opened directly; the 99-uio.rules udev rule
+# (MODE=0660 OWNER=ubuntu) is what makes that work without root.
+
+[Install]
+WantedBy=default.target

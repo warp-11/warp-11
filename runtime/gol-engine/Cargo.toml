@@ -1,0 +1,11 @@
+[package]
+name = "gol-engine"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+# The same minimal transport set as gol-daemon: this engine is the daemon's
+# software twin on the wire, so the GUI cannot tell them apart.
+zenoh = { version = "1.9", default-features = false, features = [
+    "transport_tcp",
+] }

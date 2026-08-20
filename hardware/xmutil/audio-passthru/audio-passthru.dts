@@ -1,0 +1,31 @@
+/*
+ * Device tree overlay for the warp11 `audio-passthru` xmutil app.
+ *
+ * Two fragments:
+ *   1. &fpga_full firmware-name — the bitstream the FPGA manager programs
+ *      when the overlay applies. This alone makes loopback work (line-in
+ *      passes straight to line-out; AudioPassthruSlave.mute resets to 0).
+ *   2. &amba audio_passthru@b0000000 — exposes the AudioPassthru AXI slave
+ *      as a generic-uio device so userspace can optionally mmap it and
+ *      toggle the `mute` bit. No interrupts — the path has no irq.
+ *
+ * Shares the 0xB0000000 HPM1_FPD aperture with the gol/mandel apps; only
+ * one app is loaded at a time via xmutil.
+ */
+
+/dts-v1/;
+/plugin/;
+
+&fpga_full {
+    firmware-name = "xilinx/audio-passthru/audio_passthru_bd_wrapper.bit.bin";
+};
+
+&amba {
+    #address-cells = <2>;
+    #size-cells = <2>;
+
+    audio_passthru@b0000000 {
+        compatible = "generic-uio";
+        reg = <0x0 0xb0000000 0x0 0x1000>;
+    };
+};

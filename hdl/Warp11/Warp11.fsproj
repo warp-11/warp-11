@@ -1,0 +1,46 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <TargetFramework>net10.0</TargetFramework>
+        <!-- The published API reference is generated from the `///` comments in
+             this project, so they have to survive compilation. -->
+        <GenerateDocumentationFile>true</GenerateDocumentationFile>
+        <!-- The doc comments are written in Markdown — backticks, lists,
+             emphasis — so the reference has to read them that way rather than
+             printing the punctuation. -->
+        <UsesMarkdownComments>true</UsesMarkdownComments>
+        <!-- A non-exhaustive match over the IR must not compile. F#'s default is a
+             warning plus MatchFailureException at runtime; for an emitter that is
+             the difference between "handles every node" enforced and advisory. -->
+        <WarningsAsErrors>FS0025</WarningsAsErrors>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <Compile Include="Ir.fs"/>
+        <Compile Include="Keywords.fs"/>
+        <Compile Include="Layout.fs"/>
+        <Compile Include="Dsl.fs"/>
+        <Compile Include="Combinators.fs"/>
+        <Compile Include="Streams.fs"/>
+        <Compile Include="AxiLite.fs"/>
+        <Compile Include="RegMap.fs"/>
+        <Compile Include="Number.fs"/>
+        <Compile Include="NumberOperators.fs"/>
+        <Compile Include="Verilog.fs"/>
+        <Compile Include="Flatten.fs"/>
+        <Compile Include="Firrtl.fs"/>
+        <Compile Include="FirrtlImport.fs"/>
+        <Compile Include="Inventory.fs"/>
+        <Compile Include="Sim.fs"/>
+        <Compile Include="SimAxi.fs"/>
+        <Compile Include="Breakpoint.fs"/>
+        <Compile Include="Debug.fs"/>
+        <Compile Include="Catalog.fs"/>
+        <Compile Include="Vcd.fs"/>
+        <Compile Include="Diff.fs"/>
+        <Compile Include="Stdlib.fs"/>
+        <Compile Include="Audio.fs"/>
+        <Compile Include="Wav.fs"/>
+    </ItemGroup>
+
+</Project>
