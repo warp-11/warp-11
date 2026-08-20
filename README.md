@@ -35,8 +35,8 @@ this rate it gets there in the first few microseconds.*
   combinational read of the wrong one cannot elaborate — each from a real bug
   that was legal Verilog, and therefore invisible to every tool downstream.
 
-> **Status: pre-release.** Everything described here runs today, but the API is
-> not stable and there is no published package yet. See
+> **Status: pre-release.** Everything described here runs today, and the
+> packages on NuGet are prereleases — the API is not stable. See
 > [what is not built](#what-is-not-built).
 
 ## Try it without installing anything
@@ -177,7 +177,11 @@ the IR did not invent its own semantics gets measured.
 
 Being clear about this is cheaper than letting you find out:
 
-- **No published package.** You clone the repo. NuGet is planned.
+- **The packages are prereleases.** `Warp11`, `Warp11.SimView` and
+  `Warp11.SimView.Desktop` are on NuGet at `0.1.0-alpha.1`, so `dotnet add
+  package` needs `--prerelease`. They are published to hold the names and to
+  make the debugger reachable; the repo is still the better way in while the
+  API moves.
 - **The API is not stable.** It is pre-1.0 and things move.
 - **Limited hardware support.** One board is proven — a Xilinx KV260 — and
   while nothing about the toolkit is KV260-specific, nothing else has been run.

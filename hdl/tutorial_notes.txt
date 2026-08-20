@@ -1,9 +1,0 @@
-Counter:
-
-- warp11 -> Warp 11 in the readme.  Do this conversion for any written documentation.
-- Talk a little about modules and verilog at the beginning and how the F# HDL is an easier and more powerful way to write verilog.
-- do we need a reg or can we assign directly to output?
-- make r / out 64 bit.
-- don't mention Kotlin in the On description.  Would it make sense to rename On since we don't have the Kotlin restriction now?
-- probably a software developer isn't going to know what a mux tree is.  Can we use plainer terms here? 
-- Possible to make literal assignment any shorter?  i.e "r <== lit 0UL 8" -> "r <== 0UL" or "r <== 0UL 8"?  Seems like F# would be good this sort of thing?   

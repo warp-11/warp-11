@@ -19,11 +19,18 @@ cd warp-11/hdl
 dotnet build Warp11.sln
 ```
 
-**There is no NuGet package yet.** You use Warp 11 by referencing the library
-project from a clone, so your design lives beside it rather than pulling it in
-as a dependency. That is a real limitation and worth saying plainly: updating
-means `git pull`, and there is no version to pin. Packaging is a decision the
-project has not made.
+**There is a package, and this page still clones.** `Warp11` is on NuGet at
+`0.1.0-alpha.1`:
+
+```sh
+dotnet add package Warp11 --prerelease
+```
+
+That is enough to build designs and emit Verilog, and it is the right choice if
+you only want to *use* Warp 11. The clone above is the better start while the
+API moves — a prerelease pins to a version that will change under you, and from
+a clone you can read the library, step into it, and run the differential oracle
+against your own designs.
 
 ## A project of your own
 
