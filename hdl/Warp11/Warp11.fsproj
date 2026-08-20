@@ -15,6 +15,41 @@
         <WarningsAsErrors>FS0025</WarningsAsErrors>
     </PropertyGroup>
 
+    <!-- Package metadata. The library is the only project here that ships: the
+         designs, the debugger heads and the examples are users of it, not part
+         of what someone would reference.
+
+         Versioned as a prerelease deliberately. The API moves, and `-alpha`
+         says so in the one place a consumer looks — a version number is a
+         promise, and this one promises nothing yet. -->
+    <PropertyGroup>
+        <PackageId>Warp11</PackageId>
+        <Version>0.1.0-alpha.1</Version>
+        <Authors>Jason Thomas</Authors>
+        <Description>An F# hardware description language that runs on real FPGAs. One source elaborates a cycle-accurate simulator, a step-through debugger, synthesizable Verilog, and the register-map seam a host driver compiles against — so what you debug is what you deploy. Includes typed ready/valid streams, a numeric layer carrying width, fraction bits and signedness, AXI4-Lite and AXI4 masters, and low-FIRRTL import and export.</Description>
+        <PackageTags>fpga;hdl;verilog;fsharp;simulation;hardware;rtl;firrtl;xilinx</PackageTags>
+        <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
+        <PackageProjectUrl>https://warp11.org</PackageProjectUrl>
+        <RepositoryUrl>https://github.com/warp-11/warp-11</RepositoryUrl>
+        <RepositoryType>git</RepositoryType>
+        <PackageReadmeFile>README.md</PackageReadmeFile>
+        <PackageReleaseNotes>First public prerelease. The API is not stable; see the repository for what is and is not built.</PackageReleaseNotes>
+        <Copyright>Copyright 2026 Jason Thomas</Copyright>
+        <!-- Deterministic, source-linked builds: a consumer can step into this
+             code from their own debugger, and two builds of the same commit
+             produce the same package. -->
+        <PublishRepositoryUrl>true</PublishRepositoryUrl>
+        <EmbedUntrackedSources>true</EmbedUntrackedSources>
+        <IncludeSymbols>true</IncludeSymbols>
+        <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <!-- The repo README is the package's front page too. Packed to the
+             root, which is where nuget.org looks for it. -->
+        <None Include="../../README.md" Pack="true" PackagePath="\"/>
+    </ItemGroup>
+
     <ItemGroup>
         <Compile Include="Ir.fs"/>
         <Compile Include="Keywords.fs"/>
