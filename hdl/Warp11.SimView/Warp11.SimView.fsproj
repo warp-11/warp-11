@@ -26,6 +26,30 @@
         <EmbeddedResource Include="Grammars/fsharp.tmLanguage.json"/>
     </ItemGroup>
 
+
+    <PropertyGroup>
+        <PackageId>Warp11.SimView</PackageId>
+        <Version>0.1.0-alpha.1</Version>
+        <Authors>Jason Thomas</Authors>
+        <Description>The Warp 11 step-through debugger, as a component. Watch any signal at any hierarchy depth, poke inputs, page through memories, set breakpoints written as expressions over your own signal names, read a per-cycle waveform, export VCD. Platform-neutral (Avalonia + FuncUI) so the same debugger runs on the desktop and in a browser; reference Warp11.SimView.Desktop for a desktop application.</Description>
+        <PackageTags>fpga;hdl;fsharp;debugger;simulation;avalonia;waveform;vcd</PackageTags>
+        <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
+        <PackageProjectUrl>https://warp11.org</PackageProjectUrl>
+        <RepositoryUrl>https://github.com/warp-11/warp-11</RepositoryUrl>
+        <RepositoryType>git</RepositoryType>
+        <PackageReadmeFile>README.md</PackageReadmeFile>
+        <PackageReleaseNotes>First public prerelease. The API is not stable.</PackageReleaseNotes>
+        <Copyright>Copyright 2026 Jason Thomas</Copyright>
+        <PublishRepositoryUrl>true</PublishRepositoryUrl>
+        <EmbedUntrackedSources>true</EmbedUntrackedSources>
+        <IncludeSymbols>true</IncludeSymbols>
+        <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <None Include="README.md" Pack="true" PackagePath="\"/>
+    </ItemGroup>
+
     <ItemGroup>
         <PackageReference Include="Avalonia" Version="12.1.0"/>
         <PackageReference Include="Avalonia.Themes.Fluent" Version="12.1.0"/>

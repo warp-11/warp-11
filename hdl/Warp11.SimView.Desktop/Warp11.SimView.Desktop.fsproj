@@ -9,6 +9,30 @@
         <Compile Include="Desktop.fs"/>
     </ItemGroup>
 
+
+    <PropertyGroup>
+        <PackageId>Warp11.SimView.Desktop</PackageId>
+        <Version>0.1.0-alpha.1</Version>
+        <Authors>Jason Thomas</Authors>
+        <Description>Opens the Warp 11 step-through debugger as a desktop application: `Warp11.SimView.Desktop.debug "title" design` is the whole integration. Reference this from a desktop app; it brings Warp11.SimView and Warp11 with it.</Description>
+        <PackageTags>fpga;hdl;fsharp;debugger;simulation;avalonia;waveform;vcd</PackageTags>
+        <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
+        <PackageProjectUrl>https://warp11.org</PackageProjectUrl>
+        <RepositoryUrl>https://github.com/warp-11/warp-11</RepositoryUrl>
+        <RepositoryType>git</RepositoryType>
+        <PackageReadmeFile>README.md</PackageReadmeFile>
+        <PackageReleaseNotes>First public prerelease. The API is not stable.</PackageReleaseNotes>
+        <Copyright>Copyright 2026 Jason Thomas</Copyright>
+        <PublishRepositoryUrl>true</PublishRepositoryUrl>
+        <EmbedUntrackedSources>true</EmbedUntrackedSources>
+        <IncludeSymbols>true</IncludeSymbols>
+        <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <None Include="../Warp11.SimView/README.md" Pack="true" PackagePath="\"/>
+    </ItemGroup>
+
     <ItemGroup>
         <PackageReference Include="Avalonia.Desktop" Version="12.1.0"/>
     </ItemGroup>
