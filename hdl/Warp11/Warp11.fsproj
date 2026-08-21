@@ -9,39 +9,17 @@
              emphasis — so the reference has to read them that way rather than
              printing the punctuation. -->
         <UsesMarkdownComments>true</UsesMarkdownComments>
-        <!-- A non-exhaustive match over the IR must not compile. F#'s default is a
-             warning plus MatchFailureException at runtime; for an emitter that is
-             the difference between "handles every node" enforced and advisory. -->
-        <WarningsAsErrors>FS0025</WarningsAsErrors>
     </PropertyGroup>
 
-    <!-- Package metadata. The library is the only project here that ships: the
-         designs, the debugger heads and the examples are users of it, not part
-         of what someone would reference.
-
-         Versioned as a prerelease deliberately. The API moves, and `-alpha`
-         says so in the one place a consumer looks — a version number is a
-         promise, and this one promises nothing yet. -->
+    <!-- What makes this package this package. Everything shared with the two
+         debugger packages — version, licence, repository, symbol settings — is
+         in `hdl/Directory.Build.props`, because a version written once cannot
+         disagree with itself. -->
     <PropertyGroup>
         <PackageId>Warp11</PackageId>
-        <Version>0.1.0-alpha.1</Version>
-        <Authors>Jason Thomas</Authors>
         <Description>An F# hardware description language that runs on real FPGAs. One source elaborates a cycle-accurate simulator, a step-through debugger, synthesizable Verilog, and the register-map seam a host driver compiles against — so what you debug is what you deploy. Includes typed ready/valid streams, a numeric layer carrying width, fraction bits and signedness, AXI4-Lite and AXI4 masters, and low-FIRRTL import and export.</Description>
         <PackageTags>fpga;hdl;verilog;fsharp;simulation;hardware;rtl;firrtl;xilinx</PackageTags>
-        <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
-        <PackageProjectUrl>https://warp11.org</PackageProjectUrl>
-        <RepositoryUrl>https://github.com/warp-11/warp-11</RepositoryUrl>
-        <RepositoryType>git</RepositoryType>
-        <PackageReadmeFile>README.md</PackageReadmeFile>
-        <PackageReleaseNotes>First public prerelease. The API is not stable; see the repository for what is and is not built.</PackageReleaseNotes>
-        <Copyright>Copyright 2026 Jason Thomas</Copyright>
-        <!-- Deterministic, source-linked builds: a consumer can step into this
-             code from their own debugger, and two builds of the same commit
-             produce the same package. -->
-        <PublishRepositoryUrl>true</PublishRepositoryUrl>
-        <EmbedUntrackedSources>true</EmbedUntrackedSources>
-        <IncludeSymbols>true</IncludeSymbols>
-        <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+        <PackageReleaseNotes>Breaking, and safe to take: every function that returned an anonymous record now returns a named type — WrapCounter, MemReadPort, EdgeDetect, AxiLiteChannel, the audio port records and the rest. Field names are unchanged, so source that reads .count or .data still compiles; anything compiled against alpha.1 must be recompiled. The payoff is that those fields now carry documentation, which ships in the package as XML and reaches your editor. Also: doc comments on the whole public surface, and several that were silently attached to the wrong declaration are now on the right one.</PackageReleaseNotes>
     </PropertyGroup>
 
     <ItemGroup>

@@ -4,6 +4,9 @@
 # source that would silently stop being tracked.
 hdl/**/bin/
 hdl/**/obj/
+
+# Packed .nupkg/.snupkg staged for a release push — built, never committed.
+hdl/artifacts/
 /packages/
 riderModule.iml
 /_ReSharper.Caches/

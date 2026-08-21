@@ -467,6 +467,120 @@ escapes, merge arbitration; 39 of the 50 carry a live result beat — while the
 twin covers the full frame. AXI, Vivado and the board stay out of spike scope,
 which is where the trial's no-silicon qualifier now lives.
 
+## Versioning
+
+**SemVer 2.0, which is what NuGet enforces.** Prerelease identifiers compare
+segment by segment and *numeric* segments compare numerically, so the dot in
+`alpha.2` is load-bearing:
+
+```
+0.1.0-alpha.1  <  0.1.0-alpha.2  <  0.1.0-alpha.10  <  0.1.0-beta.1  <  0.1.0
+```
+
+Spelled `alpha2`/`alpha10` the segment would be a string and `alpha10` would sort
+*below* `alpha2`. Keep the dot.
+
+**All three packages move together.** One `<Version>` in
+`Directory.Build.props`, and every package takes it. This is a decision, not an
+accident: a `ProjectReference` packs as a dependency pinned to the referenced
+project's version, so versioning them independently would mean hand-managing a
+compatibility matrix across three packages that only ever ship together.
+
+**While the version is `0.x`, nothing here promises compatibility**, and
+`-alpha` says it a second time. So the question at each release is not "am I
+allowed to break this" but "which number says what actually happened":
+
+| what changed | next version |
+|---|---|
+| anything at all, while heading for an unreleased `0.1.0` | bump the prerelease: `0.1.0-alpha.N+1` |
+| the API stops moving week to week and the docs describe what is there | drop the suffix: `0.1.0` |
+| a breaking change *after* `0.1.0` shipped | `0.2.0` |
+| an addition after `0.1.0` shipped | `0.1.1` |
+| a compatibility promise you intend to keep | `1.0.0` — and not before there is a user to keep it for |
+
+The row that matters most today is the first. **`0.1.0-alpha.N` is a series of
+previews of a `0.1.0` that has never shipped**, so a breaking change between two
+alphas has broken nothing that was ever released — which is what alphas are for.
+Reach for `0.2.0-alpha.1` only once `0.1.0` itself exists; using it earlier
+claims a history that did not happen.
+
+**Say what broke in `PackageReleaseNotes`.** It is per-project on purpose — the
+three packages will not always have the same story — and it is the only place a
+consumer looking at nuget.org finds out. Breaking *source* and breaking *binary*
+are worth distinguishing there: renaming a return type from an anonymous record
+to a named one, as `0.1.0-alpha.2` did throughout, leaves `.count` and `.data`
+compiling exactly as before while forcing a recompile of anything built against
+`alpha.1`.
+
+**Assembly version is not the package version.** `<Version>0.1.0-alpha.2</Version>`
+produces `AssemblyVersion 0.1.0.0` — the prerelease suffix is dropped, and every
+`0.1.0-alpha.N` shares one assembly version. That is normal .NET behaviour and
+generally helpful for binding; it also means the assembly version cannot be used
+to tell two alphas apart.
+
+
+## Releasing the packages
+
+Three projects ship: **`Warp11`** (the library), **`Warp11.SimView`** (the
+debugger as a component) and **`Warp11.SimView.Desktop`** (the desktop head).
+Everything else here is a *user* of them.
+
+**nuget.org will not accept a re-push of a version that already exists**, so
+republishing always means a version bump. The version lives in **one place** —
+`hdl/Directory.Build.props` — along with the licence, repository and symbol
+settings all three share. It used to be written once per project, which is a
+trap worth knowing about even now that it is gone: a `ProjectReference` packs
+as a package dependency **pinned to the referenced project's version**, so
+bumping one project and not another publishes a package that depends on a
+version of its sibling newer than itself.
+
+```sh
+export PATH="$HOME/.dotnet:$PATH"
+cd hdl
+
+# 1. bump — one line, and every package moves together (see Versioning above)
+$EDITOR Directory.Build.props            # <Version>…</Version>
+#    …and PackageReleaseNotes in each of the three .fsproj files, which is
+#    per-project and is where a consumer finds out what broke
+
+# 2. the end-of-work gate, before anything is published
+dotnet build Warp11.sln
+dotnet run --project Warp11.Designs
+cd ../runtime && cargo test --workspace && cd ../hdl
+# and ./run_differential.sh if the toolchain moved — ask first, it is not cheap
+
+# 3. pack all three
+for p in Warp11 Warp11.SimView Warp11.SimView.Desktop; do
+    dotnet pack $p/$p.fsproj -c Release -o artifacts
+done
+
+# 4. read the dependency versions back before pushing anything
+unzip -p artifacts/Warp11.SimView.Desktop.<version>.nupkg \
+    Warp11.SimView.Desktop.nuspec | grep '<dependency'
+
+# 5. push. Library first — a debugger package whose dependency is not yet
+#    indexed is installable by nobody for the minutes nuget.org takes to catch up
+dotnet nuget push artifacts/Warp11.<version>.nupkg \
+    --source https://api.nuget.org/v3/index.json --api-key "$NUGET_API_KEY"
+# then Warp11.SimView, then Warp11.SimView.Desktop
+```
+
+**After the push, update the version the docs quote.** Three files state the
+published version in prose and go stale the moment it moves — this repo's
+`README.md`, `docs/start-a-project.md`, and `hdl/Warp11.SimView/README.md`.
+They are deliberately not bumped *before* the push: until it succeeds, the old
+number is the true one.
+
+`--api-key` comes from a nuget.org API key; **it is not in this repo and must
+not be.** The `.snupkg` symbol packages are pushed automatically alongside each
+`.nupkg` by `dotnet nuget push`, so there is nothing extra to do for them.
+
+**What is not published by this.** The API reference at `warp11.org/reference`
+is a separate artifact — the `///` comments ship *inside* the package as
+`lib/net10.0/Warp11.xml`, which is what gives a consumer tooltips, but the
+browsable HTML is built and deployed with the site. See `site/README.md`.
+
+
 ## Known gaps
 
 `Union2` is two-variant only (the layoutN arity tax again); tag width

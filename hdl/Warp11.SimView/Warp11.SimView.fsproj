@@ -5,7 +5,6 @@
          project owns `main` and this owns the window. -->
     <PropertyGroup>
         <TargetFramework>net10.0</TargetFramework>
-        <WarningsAsErrors>FS0025</WarningsAsErrors>
     </PropertyGroup>
 
     <ItemGroup>
@@ -29,21 +28,9 @@
 
     <PropertyGroup>
         <PackageId>Warp11.SimView</PackageId>
-        <Version>0.1.0-alpha.1</Version>
-        <Authors>Jason Thomas</Authors>
         <Description>The Warp 11 step-through debugger, as a component. Watch any signal at any hierarchy depth, poke inputs, page through memories, set breakpoints written as expressions over your own signal names, read a per-cycle waveform, export VCD. Platform-neutral (Avalonia + FuncUI) so the same debugger runs on the desktop and in a browser; reference Warp11.SimView.Desktop for a desktop application.</Description>
         <PackageTags>fpga;hdl;fsharp;debugger;simulation;avalonia;waveform;vcd</PackageTags>
-        <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
-        <PackageProjectUrl>https://warp11.org</PackageProjectUrl>
-        <RepositoryUrl>https://github.com/warp-11/warp-11</RepositoryUrl>
-        <RepositoryType>git</RepositoryType>
-        <PackageReadmeFile>README.md</PackageReadmeFile>
-        <PackageReleaseNotes>First public prerelease. The API is not stable.</PackageReleaseNotes>
-        <Copyright>Copyright 2026 Jason Thomas</Copyright>
-        <PublishRepositoryUrl>true</PublishRepositoryUrl>
-        <EmbedUntrackedSources>true</EmbedUntrackedSources>
-        <IncludeSymbols>true</IncludeSymbols>
-        <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+        <PackageReleaseNotes>Tracks Warp11 0.1.0-alpha.2, which renames several return types from anonymous records to named ones — recompile against this version rather than mixing it with alpha.1. No change to the debugger's own API. IDebugSession and the snapshot types are now fully documented, and those docs ship in the package.</PackageReleaseNotes>
     </PropertyGroup>
 
     <ItemGroup>

@@ -1,0 +1,53 @@
+<Project>
+
+    <!-- What every project under hdl/ shares. Imported automatically by MSBuild
+         before each .fsproj, so anything here can still be overridden by the
+         project that disagrees.
+
+         The version is the reason this file exists. It used to be written three
+         times, once per packable project, and a ProjectReference packs as a
+         package dependency pinned to the referenced project's Version — so
+         bumping one and forgetting another publishes Warp11.SimView.Desktop at
+         the old version while it depends on a Warp11 that is newer than itself.
+         One line here cannot disagree with itself. -->
+
+    <PropertyGroup>
+        <Version>0.1.0-alpha.2</Version>
+
+        <!-- A non-exhaustive match must not compile. F#'s default is a warning
+             plus MatchFailureException at runtime; for an emitter that is the
+             difference between "handles every node" enforced and advisory.
+             Was on the library alone and is now on everything here — measured
+             2026-08-21, a full rebuild of all sixteen projects emits zero
+             FS0025, so this costs nothing today and catches the next one. -->
+        <WarningsAsErrors>FS0025</WarningsAsErrors>
+    </PropertyGroup>
+
+    <!-- Package metadata, for the three projects that ship. Harmless on the
+         designs and the app heads, which never pack.
+
+         Deliberately NOT here: PackageId, Description and PackageTags, which
+         are the whole of what makes one package different from another, and
+         PackageReleaseNotes, which stops being shared the moment the packages
+         stop moving in lockstep. TargetFramework is not here either — the two
+         browser heads are net10.0-browser, so it is genuinely per-project and
+         hoisting a value that is not uniform is how a surprise gets built. -->
+    <PropertyGroup>
+        <Authors>Jason Thomas</Authors>
+        <Copyright>Copyright 2026 Jason Thomas</Copyright>
+        <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
+        <PackageProjectUrl>https://warp11.org</PackageProjectUrl>
+        <RepositoryUrl>https://github.com/warp-11/warp-11</RepositoryUrl>
+        <RepositoryType>git</RepositoryType>
+        <PackageReadmeFile>README.md</PackageReadmeFile>
+
+        <!-- Deterministic, source-linked builds: a consumer can step into this
+             code from their own debugger, and two builds of the same commit
+             produce the same package. -->
+        <PublishRepositoryUrl>true</PublishRepositoryUrl>
+        <EmbedUntrackedSources>true</EmbedUntrackedSources>
+        <IncludeSymbols>true</IncludeSymbols>
+        <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    </PropertyGroup>
+
+</Project>
