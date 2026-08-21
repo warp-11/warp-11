@@ -40,6 +40,7 @@ let sampleRight (packed: Expr) : Expr = slice (sampleWidth - 1) 0 packed
 /// representable range is about ±2.0.
 let biquadCoeffWidth = 32
 
+/// Fraction bits in a biquad coefficient.
 let biquadCoeffFrac = 30
 
 /// Q2.30 representation of +1.0 — the identity `b0`.
@@ -52,6 +53,29 @@ type BiquadCoeffs =
       b2: Expr
       a1: Expr
       a2: Expr }
+
+/// The direct-form-I biquad's ports. Coefficients arrive as signals rather
+/// than as elaboration-time constants, so one instance serves any response the
+/// host cares to write.
+type BiquadPorts =
+    { /// The input sample.
+      x: Expr
+      /// High for one cycle per sample. The section advances on it, so the
+      /// filter's rate is the caller's to set.
+      advance: Expr
+      /// Feed-forward coefficient on the current sample.
+      b0: Expr
+      /// Feed-forward coefficient on the previous sample.
+      b1: Expr
+      /// Feed-forward coefficient on the sample before that.
+      b2: Expr
+      /// Feedback coefficient on the previous output. Subtracted — the sign
+      /// convention is the hardware's, and `BiquadDesign` already matches it.
+      a1: Expr
+      /// Feedback coefficient on the output before that, same convention.
+      a2: Expr
+      /// The filtered sample.
+      y: Expr }
 
 /// Single-section Direct Form I biquad over a mono sample.
 ///
@@ -90,14 +114,14 @@ let biquad (name: string) (sampleWidth: int) (coeffWidth: int) (coeffFrac: int) 
     defineModule
         name
         (fun p ->
-            {| x = p.inPortAs "x" (SInt sampleWidth)
-               advance = p.inPort "advance" 1
-               b0 = p.inPortAs "b0" (SInt coeffWidth)
-               b1 = p.inPortAs "b1" (SInt coeffWidth)
-               b2 = p.inPortAs "b2" (SInt coeffWidth)
-               a1 = p.inPortAs "a1" (SInt coeffWidth)
-               a2 = p.inPortAs "a2" (SInt coeffWidth)
-               y = p.outPortAs "y" (SInt sampleWidth) |})
+            { x = p.inPortAs "x" (SInt sampleWidth)
+              advance = p.inPort "advance" 1
+              b0 = p.inPortAs "b0" (SInt coeffWidth)
+              b1 = p.inPortAs "b1" (SInt coeffWidth)
+              b2 = p.inPortAs "b2" (SInt coeffWidth)
+              a1 = p.inPortAs "a1" (SInt coeffWidth)
+              a2 = p.inPortAs "a2" (SInt coeffWidth)
+              y = p.outPortAs "y" (SInt sampleWidth) })
         (fun m io ->
             fun (x: Expr) (advance: Expr) (c: BiquadCoeffs) ->
                 x ==> io.x
@@ -218,7 +242,18 @@ let private greaterThan a b = lt b a
 /// pass-through, 512 is 2.0x, 128 is 0.5x, 0 is silence.
 let gainFracBits = 8
 
+/// The gain register value that passes a sample through unchanged.
 let gainUnity = 1UL <<< gainFracBits
+
+/// The volume stage's ports.
+type AudioGainPorts =
+    { /// The stereo stream through the stage.
+      s: StereoPorts
+      /// Gain in Q8.8: `gainUnity` passes through, 512 doubles, 128 halves,
+      /// 0 is silence.
+      volume: Expr
+      /// High forces the output to zero, whatever `volume` says.
+      mute: Expr }
 
 /// Combinational stereo volume / mute stage.
 ///
@@ -237,9 +272,9 @@ let audioGain (name: string) =
     defineModule
         name
         (fun p ->
-            {| s = stereoPorts p
-               volume = p.inPort "volume" 16
-               mute = p.inPort "mute" 1 |})
+            { s = stereoPorts p
+              volume = p.inPort "volume" 16
+              mute = p.inPort "mute" 1 })
         (fun m io ->
             fun (volume: Expr) (mute: Expr) (s: Stream<Expr * Expr>) ->
                 volume ==> io.volume
@@ -263,6 +298,14 @@ let audioGain (name: string) =
             channel "left" io.s.inLeft ==> io.s.outLeft
             channel "right" io.s.inRight ==> io.s.outRight)
 
+/// The single-band equalizer's ports.
+type AudioEqBandPorts =
+    { /// The stereo stream through the band.
+      s: StereoPorts
+      /// The five biquad coefficients in `b0, b1, b2, a1, a2` order, each
+      /// Q2.30 — `biquadUnity` is +1.0. `biquadDesign` produces them.
+      coefficients: Expr list }
+
 /// One EQ band: a biquad section per channel, both fed the same five
 /// host-written coefficients.
 ///
@@ -277,8 +320,8 @@ let audioEqBand (name: string) =
     defineModule
         name
         (fun p ->
-            {| s = stereoPorts p
-               coefficients = List.init 5 (fun i -> p.inPort $"c{i}" biquadCoeffWidth) |})
+            { s = stereoPorts p
+              coefficients = List.init 5 (fun i -> p.inPort $"c{i}" biquadCoeffWidth) })
         (fun m io ->
             fun (coefficients: Expr list) (s: Stream<Expr * Expr>) ->
                 List.iter2 (fun port c -> c ==> port) io.coefficients coefficients
@@ -301,6 +344,14 @@ let audioEqBand (name: string) =
             instanceNamed "left" section io.s.inLeft advance coefficients ==> io.s.outLeft
             instanceNamed "right" section io.s.inRight advance coefficients ==> io.s.outRight)
 
+/// The hard limiter's ports.
+type AudioLimiterPorts =
+    { /// The stereo stream through the limiter.
+      s: StereoPorts
+      /// The magnitude no sample may exceed, at sample scale. Signed,
+      /// because it is compared against samples that are.
+      threshold: Expr }
+
 /// Hard brick-wall stereo limiter — the chain's final safety stage.
 ///
 ///     out = clamp(in, -threshold, +threshold)
@@ -314,8 +365,8 @@ let audioLimiter (name: string) =
     defineModule
         name
         (fun p ->
-            {| s = stereoPorts p
-               threshold = p.inPortAs "threshold" (SInt sampleWidth) |})
+            { s = stereoPorts p
+              threshold = p.inPortAs "threshold" (SInt sampleWidth) })
         (fun m io ->
             fun (threshold: Expr) (s: Stream<Expr * Expr>) ->
                 threshold ==> io.threshold
@@ -438,6 +489,24 @@ let private gainComputer (envWide: Expr) (threshold: Expr) (ratio: Expr) : Expr 
 /// much to stay aligned.
 let compressorLatency = 2
 
+/// The stereo compressor's ports. Every parameter is a signal, so a host can
+/// retune the dynamics without a rebuild.
+type AudioCompressorPorts =
+    { /// The stereo stream through the compressor.
+      s: StereoPorts
+      /// The level above which gain reduction begins, at sample scale.
+      threshold: Expr
+      /// Compression ratio. Above the threshold, this much input change
+      /// produces one unit of output change.
+      ratio: Expr
+      /// How fast the envelope rises toward a louder signal.
+      attack: Expr
+      /// How fast it falls back toward a quieter one.
+      releaseRate: Expr
+      /// Gain applied after compression, in the same Q8.8 as `audioGain` —
+      /// which is what makes the boost-then-compress order preservable.
+      makeup: Expr }
+
 /// Single-band stereo-coupled dynamic-range compressor.
 ///
 /// Envelope detector, one envelope shared by both channels:
@@ -474,13 +543,13 @@ let audioCompressor (name: string) =
     defineModule
         name
         (fun p ->
-            {| s = stereoPorts p
-               threshold = p.inPort "threshold" sampleWidth
-               ratio = p.inPort "ratio" 8
-               attack = p.inPort "attack" 16
-               // `release` is a Verilog reserved word.
-               releaseRate = p.inPort "releaseRate" 16
-               makeup = p.inPort "makeup" 16 |})
+            { s = stereoPorts p
+              threshold = p.inPort "threshold" sampleWidth
+              ratio = p.inPort "ratio" 8
+              attack = p.inPort "attack" 16
+              // `release` is a Verilog reserved word.
+              releaseRate = p.inPort "releaseRate" 16
+              makeup = p.inPort "makeup" 16 })
         (fun m io ->
             fun (threshold: Expr) (ratio: Expr) (attack: Expr) (releaseRate: Expr) (makeup: Expr) (s: Stream<Expr * Expr>) ->
                 threshold ==> io.threshold
@@ -610,6 +679,16 @@ let private sourceStream (m: Builder) (sp: StereoSourcePorts) : Stream<Expr * Ex
       ready = sp.outReady
       layout = sampleLayout }
 
+/// The tone source's ports.
+type ToneGeneratorPorts =
+    { /// The stereo stream out. A source, so there is nothing coming in.
+      s: StereoSourcePorts
+      /// High while the tone runs. Low holds the phase where it was.
+      enable: Expr
+      /// Phase increment per sample — the frequency, as the numerically
+      /// controlled oscillator sees it.
+      step: Expr }
+
 /// Triangle-wave tone generator — a numerically-controlled oscillator sourcing
 /// a stereo stream with the same value on both channels.
 ///
@@ -627,9 +706,9 @@ let toneGenerator (name: string) =
     defineModule
         name
         (fun p ->
-            {| s = stereoSourcePorts p
-               enable = p.inPort "enable" 1
-               step = p.inPort "step" tonePhaseWidth |})
+            { s = stereoSourcePorts p
+              enable = p.inPort "enable" 1
+              step = p.inPort "step" tonePhaseWidth })
         (fun m io ->
             fun (enable: Expr) (step: Expr) ->
                 enable ==> io.enable
@@ -662,10 +741,15 @@ let toneGenerator (name: string) =
 /// maximum (just under +1.0).
 let firCoeffWidth = 16
 
+/// Fraction bits in a FIR coefficient.
 let firCoeffFrac = 15
 
+/// The filter presets a design can select at run time, as register values.
+/// `presetBypass` passes the input through.
 let presetBypass = 0
+/// A low-pass response.
 let presetLowPass = 1
+/// A high-pass response.
 let presetHighPass = 2
 
 let private coeffLimit = 1 <<< firCoeffFrac
@@ -710,6 +794,15 @@ let private designHighPass taps cutoff fs =
     let center = (taps - 1) / 2
     lp |> List.mapi (fun n v -> clampCoeff (if n = center then coeffLimit - 1 - v else -v))
 
+/// The FIR stage's ports.
+type AudioFirPorts =
+    { /// The stereo stream through the filter.
+      s: StereoPorts
+      /// Which response to apply: `presetBypass`, `presetLowPass` or
+      /// `presetHighPass`. Selected at run time, so all three sets of taps
+      /// are elaborated and one is chosen.
+      preset: Expr }
+
 /// Tone-control FIR: a stereo stage with a 2-bit `preset` selecting bypass,
 /// low-pass or high-pass. One delay line per channel feeds three parallel MAC
 /// banks and the preset muxes the accumulators, so switching presets costs a
@@ -748,8 +841,8 @@ let audioFir (name: string) (taps: int) (sampleRate: float) (lpCutoff: float) (h
     defineModule
         name
         (fun p ->
-            {| s = stereoPorts p
-               preset = p.inPort "preset" 2 |})
+            { s = stereoPorts p
+              preset = p.inPort "preset" 2 })
         (fun m io ->
             fun (preset: Expr) (s: Stream<Expr * Expr>) ->
                 preset ==> io.preset
@@ -847,6 +940,20 @@ let private stereoSink (m: Builder) (sp: StereoSinkPorts) (s: Stream<Expr * Expr
     s.valid ==> sp.inValid
     sp.inReady ==> s.ready
 
+/// The clock generator's outputs — the one place in this file where a module
+/// hands its caller the ports themselves, because clocking is what it *is*.
+type I2sMasterPorts =
+    { /// Master clock to the codec.
+      mclk: Expr
+      /// Serial bit clock.
+      sclk: Expr
+      /// Left/right word clock. High and low halves are the two channels.
+      lrclk: Expr
+      /// One fabric cycle on each edge the receiver should sample on.
+      sclkRxTick: Expr
+      /// One fabric cycle on each edge the transmitter should drive on.
+      sclkTxTick: Expr }
+
 /// I2S clock generator: one fabric clock in, the codec's MCLK / SCLK / LRCLK
 /// out, plus the two internal edge ticks `i2sRx` and `i2sTx` hang off.
 ///
@@ -873,11 +980,11 @@ let i2sMaster (name: string) (mclkHalfDiv: int) (sclkHalfDiv: int) (bitsPerSlot:
     defineModule
         name
         (fun p ->
-            {| mclk = p.outPort "mclk" 1
-               sclk = p.outPort "sclk" 1
-               lrclk = p.outPort "lrclk" 1
-               sclkRxTick = p.outPort "sclkRxTick" 1
-               sclkTxTick = p.outPort "sclkTxTick" 1 |})
+            { mclk = p.outPort "mclk" 1
+              sclk = p.outPort "sclk" 1
+              lrclk = p.outPort "lrclk" 1
+              sclkRxTick = p.outPort "sclkRxTick" 1
+              sclkTxTick = p.outPort "sclkTxTick" 1 })
         (fun m io -> fun () -> io)
         (fun io _ ->
             let mclkReg = regBit "mclk_reg"
@@ -915,6 +1022,18 @@ let i2sMaster (name: string) (mclkHalfDiv: int) (sclkHalfDiv: int) (bitsPerSlot:
 /// The stock clock generator: Fs ~= 48.8 kHz from a 100 MHz fabric clock.
 let i2sMasterDefault name = i2sMaster name 4 16 32
 
+/// The I2S receiver's ports. Clocking arrives from `i2sMaster` rather than
+/// being recovered, which is what FPGA-master operation means.
+type I2sRxPorts =
+    { /// The stereo stream out.
+      s: StereoSourcePorts
+      /// One fabric cycle on each edge to sample `sdout` on.
+      sclkTick: Expr
+      /// The current word-clock level — which channel is on the wire.
+      lrclk: Expr
+      /// Serial data in from the converter.
+      sdout: Expr }
+
 /// I2S receiver: the ADC's serial line into a stereo stream.
 ///
 /// Built for FPGA-master operation — `i2sMaster` owns the clocking and hands
@@ -931,10 +1050,10 @@ let i2sRx (name: string) =
     defineModule
         name
         (fun p ->
-            {| s = stereoSourcePorts p
-               sclkTick = p.inPort "sclkTick" 1
-               lrclk = p.inPort "lrclk" 1
-               sdout = p.inPort "sdout" 1 |})
+            { s = stereoSourcePorts p
+              sclkTick = p.inPort "sclkTick" 1
+              lrclk = p.inPort "lrclk" 1
+              sdout = p.inPort "sdout" 1 })
         (fun m io ->
             fun (sclkTick: Expr) (lrclk: Expr) (sdout: Expr) ->
                 sclkTick ==> io.sclkTick
@@ -983,6 +1102,17 @@ let i2sRx (name: string) =
                                 shifted ==> rightReg
                                 lit 1UL 1 ==> validReg))))))
 
+/// The I2S transmitter's ports, mirroring the receiver's.
+type I2sTxPorts =
+    { /// The stereo stream in.
+      s: StereoSinkPorts
+      /// One fabric cycle on each edge to drive `sdin` on.
+      sclkTick: Expr
+      /// The current word-clock level.
+      lrclk: Expr
+      /// Serial data out to the converter.
+      sdin: Expr }
+
 /// I2S transmitter: a stereo stream out to the DAC's serial line. The mirror
 /// of `i2sRx`, and it shares the frame convention exactly — one transition
 /// tick, then 24 data bits MSB-first.
@@ -997,10 +1127,10 @@ let i2sTx (name: string) =
     defineModule
         name
         (fun p ->
-            {| s = stereoSinkPorts p
-               sclkTick = p.inPort "sclkTick" 1
-               lrclk = p.inPort "lrclk" 1
-               sdin = p.outPort "sdin" 1 |})
+            { s = stereoSinkPorts p
+              sclkTick = p.inPort "sclkTick" 1
+              lrclk = p.inPort "lrclk" 1
+              sdin = p.outPort "sdin" 1 })
         (fun m io ->
             fun (sclkTick: Expr) (lrclk: Expr) (s: Stream<Expr * Expr>) ->
                 sclkTick ==> io.sclkTick
@@ -1059,6 +1189,9 @@ let i2sTx (name: string) =
 // same machine — what differs is only where the per-band makeup gains come
 // from, and those arrive as register values.
 
+/// How many bands the multiband compressor has. Eight, and stated here rather
+/// than repeated: the crossover list, the register map and the per-band
+/// compressors all size themselves from it.
 let multibandBands = 8
 
 /// Default crossover cutoffs (Hz): geometric means of log-spaced band centres
@@ -1181,6 +1314,34 @@ let bandWidth = sampleWidth + 1
 /// saturated once at the end rather than per band.
 let gainedWidth = bandWidth + 9
 
+/// One band's compressor ports. The multiband stage instantiates one of these
+/// per band and sums what comes back.
+type MonoBandCompressorPorts =
+    { /// This band's sample, signed and wider than a full-range sample —
+      /// a crossover output can exceed the input it came from.
+      band: Expr
+      /// High for one cycle per sample.
+      advance: Expr
+      /// Low passes the band through with makeup gain and no compression.
+      enable: Expr
+      /// The level above which gain reduction begins, at sample scale.
+      threshold: Expr
+      /// Compression ratio above the threshold.
+      ratio: Expr
+      /// How fast the envelope rises toward a louder signal.
+      attack: Expr
+      /// How fast it falls back toward a quieter one.
+      releaseRate: Expr
+      /// Per-band gain in Q8.8. This is the field a fitting prescription
+      /// arrives in — the fabric knows nothing about where the number came
+      /// from.
+      makeup: Expr
+      /// The band after compression and makeup.
+      gained: Expr
+      /// The detector's current level, for a host measuring what the band is
+      /// actually doing.
+      envelope: Expr }
+
 /// Mono single-band compressor — the per-band unit. The same envelope detector
 /// and gain computer as `audioCompressor`, in the same Q formats and with the
 /// same boost-first topology, but mono and emitting a wide unsaturated value
@@ -1202,16 +1363,16 @@ let monoBandCompressor (name: string) =
     defineModule
         name
         (fun p ->
-            {| band = p.inPortAs "band" (SInt bandWidth)
-               advance = p.inPort "advance" 1
-               enable = p.inPort "enable" 1
-               threshold = p.inPort "threshold" sampleWidth
-               ratio = p.inPort "ratio" 8
-               attack = p.inPort "attack" 16
-               releaseRate = p.inPort "releaseRate" 16
-               makeup = p.inPort "makeup" 16
-               gained = p.outPortAs "gained" (SInt gainedWidth)
-               envelope = p.outPort "envelope" sampleWidth |})
+            { band = p.inPortAs "band" (SInt bandWidth)
+              advance = p.inPort "advance" 1
+              enable = p.inPort "enable" 1
+              threshold = p.inPort "threshold" sampleWidth
+              ratio = p.inPort "ratio" 8
+              attack = p.inPort "attack" 16
+              releaseRate = p.inPort "releaseRate" 16
+              makeup = p.inPort "makeup" 16
+              gained = p.outPortAs "gained" (SInt gainedWidth)
+              envelope = p.outPort "envelope" sampleWidth })
         (fun m io ->
             fun (band: Expr) (advance: Expr) (enable: Expr) (threshold: Expr) (ratio: Expr) (attack: Expr) (releaseRate: Expr) (makeup: Expr) ->
                 band ==> io.band
@@ -1267,6 +1428,27 @@ let monoBandCompressor (name: string) =
             If io.enable (fun () -> applySaturated ==> gained)
             gained ==> io.gained)
 
+/// The eight-band compressor's ports. One crossover feeding one compressor per
+/// band, with independent left and right makeup gains.
+type MultibandCompressorPorts =
+    { /// The stereo stream through the whole bank.
+      s: StereoPorts
+      /// The level above which gain reduction begins, shared by every band.
+      threshold: Expr
+      /// Compression ratio, shared by every band.
+      ratio: Expr
+      /// Envelope attack rate, shared by every band.
+      attack: Expr
+      /// Envelope release rate, shared by every band.
+      releaseRate: Expr
+      /// Per-band makeup gain for the left channel, Q8.8, low band first.
+      leftGains: Expr list
+      /// The same for the right channel. Separate because the two ears are
+      /// not the same ear.
+      rightGains: Expr list
+      /// The summed output's envelope, for a host measuring the result.
+      envelope: Expr }
+
 /// 8-band stereo multiband compressor.
 ///
 /// A subtractive crossover splits each ear into eight bands with seven fixed
@@ -1299,14 +1481,14 @@ let multibandCompressor8 (name: string) (crossovers: float list) (q: float) (sam
     defineModule
         name
         (fun p ->
-            {| s = stereoPorts p
-               threshold = p.inPort "threshold" sampleWidth
-               ratio = p.inPort "ratio" 8
-               attack = p.inPort "attack" 16
-               releaseRate = p.inPort "releaseRate" 16
-               leftGains = List.init multibandBands (fun i -> p.inPort $"leftGain{i}" 16)
-               rightGains = List.init multibandBands (fun i -> p.inPort $"rightGain{i}" 16)
-               envelope = p.outPort "envelope" sampleWidth |})
+            { s = stereoPorts p
+              threshold = p.inPort "threshold" sampleWidth
+              ratio = p.inPort "ratio" 8
+              attack = p.inPort "attack" 16
+              releaseRate = p.inPort "releaseRate" 16
+              leftGains = List.init multibandBands (fun i -> p.inPort $"leftGain{i}" 16)
+              rightGains = List.init multibandBands (fun i -> p.inPort $"rightGain{i}" 16)
+              envelope = p.outPort "envelope" sampleWidth })
         (fun m io ->
             fun (threshold: Expr) (ratio: Expr) (attack: Expr) (releaseRate: Expr) (leftGains: Expr list) (rightGains: Expr list) (s: Stream<Expr * Expr>) ->
                 threshold ==> io.threshold

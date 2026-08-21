@@ -11,9 +11,10 @@
 /// binary point sits — which is why `renormTo`, `saturateTo` and `resize` are
 /// still the interesting functions.
 ///
-/// Not auto-opened while `Fixed` still exists: both define `renormTo` and
-/// friends, and the later module would shadow the earlier one for every file
-/// downstream. `open Warp11.Number` in the files that have been ported.
+/// Not auto-opened: `input` and `wire` here are deliberately the DSL's names,
+/// because a design working in numbers wants to declare them the way it always
+/// did. `open Warp11.Number` in the files that work in numbers, and the two
+/// vocabularies stay apart everywhere else.
 module Warp11.Number
 
 /// The description. Everything here is checked at elaboration, which is this
@@ -47,6 +48,10 @@ let productFormat (a: NumberFormat) (b: NumberFormat) =
       fracBits = a.fracBits + b.fracBits
       signed = a.signed }
 
+/// Arithmetic on numbers. Every operation checks the operands' formats agree
+/// and hands back the format the result actually has — which for `*` is wider
+/// than either operand, because the full product is exact and narrowing it is
+/// a decision `renormTo` or `saturateTo` makes deliberately.
 type Number with
 
     /// Add is add. Two's complement makes the gates identical either way, so
@@ -56,6 +61,7 @@ type Number with
         sameFormat "(+)" a.format b.format
         { a with bits = a.bits + b.bits }
 
+    /// Subtract, on the same argument as add.
     static member (-)(a: Number, b: Number) : Number =
         sameFormat "(-)" a.format b.format
         { a with bits = a.bits - b.bits }
@@ -106,6 +112,7 @@ let lessThan (a: Number) (b: Number) : Expr =
     sameFormat "lessThan" a.format b.format
     lt a.bits b.bits
 
+/// The same comparison with the operands the other way round.
 let greaterThan (a: Number) (b: Number) : Expr = lessThan b a
 
 /// Equality needs no variant: the bits are equal or they are not.
@@ -182,17 +189,29 @@ let wire name (x: Number) : Number =
 /// Format witnesses. One line each, binding the three numbers together — the
 /// trust point, and everything downstream of it is checked.
 let signedInt w : NumberFormat = { totalWidth = w; fracBits = 0; signed = true }
+/// An unsigned integer of `w` bits.
 let unsignedInt w : NumberFormat = { totalWidth = w; fracBits = 0; signed = false }
 
+/// A signed fixed-point format: `totalWidth` bits, `fracBits` of them below the
+/// binary point.
 let signedFixed totalWidth fracBits : NumberFormat =
     { totalWidth = totalWidth; fracBits = fracBits; signed = true }
 
+/// The unsigned fixed-point format.
 let unsignedFixed totalWidth fracBits : NumberFormat =
     { totalWidth = totalWidth; fracBits = fracBits; signed = false }
 
+/// The formats this codebase actually uses, named the way the literature names
+/// them. `q4_4` is 8 bits with 4 below the point — the audio gain format.
 let q4_4 = signedFixed 8 4
+/// 16 bits, 7 below the point — an audio sample.
 let q9_7 = signedFixed 16 7
+/// 32 bits, 28 below the point — Mandelbrot's coordinate format.
 let q4_28 = signedFixed 32 28
+/// 64 bits, 55 below the point.
 let q9_55 = signedFixed 64 55
+/// What a `q4_4` product *is*, rather than what a caller wishes it were. Stated
+/// as the product so the two cannot disagree.
 let q8_8 = productFormat q4_4 q4_4
+/// Likewise for `q4_28`.
 let q8_56 = productFormat q4_28 q4_28

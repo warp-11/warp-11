@@ -566,6 +566,8 @@ let streamProbeCounters (name: string) (s: Stream<'p>) : Stream<'p> * StallCount
     b.RegisterProbe name
     s, { blocked = blocked; starved = starved }
 
+/// The fire-and-forget probe: the counters are planted and recorded, and
+/// `streamReport` finds them later rather than the caller wiring them.
 let streamProbe (name: string) (s: Stream<'p>) : Stream<'p> = fst (streamProbeCounters name s)
 
 /// Every probe in the design with its counters, prefixed by instance path to
@@ -775,6 +777,9 @@ let streamConflate3
 // inside the connect, which is what a higher-level flow operator will need
 // (it cannot take pre-created instances and still decide its own lane count).
 
+/// What a one-to-many wormhole does with a beat. Required rather than
+/// defaulted — the types cannot tell dispatch from broadcast, and guessing
+/// wrong is a design that runs.
 type FanOut =
     /// Each beat to exactly one lane — the lowest-index ready one wins.
     | Balance
@@ -937,7 +942,11 @@ module Stream =
           laneCount = 1
           stallProbe = None }
 
+    /// Replicate a stage across `n` lanes. The stage says nothing about this; a
+    /// lane count is a property of the pipeline that uses it, and `farm` owns the
+    /// distribute and collect.
     let lanes n (s: StageSpec<'i, 'o>) = { s with laneCount = n }
+    /// Probe this stage's intake, so `streamReport` can say whether it is the wall.
     let probed name (s: StageSpec<'i, 'o>) = { s with stallProbe = Some name }
 
     /// One stage, realized: probe the intake link if asked (blocked there
@@ -963,6 +972,7 @@ module Stream =
     let pipeline2 (a: StageSpec<'a, 'b>) (b: StageSpec<'b, 'c>) (s: Stream<'a>) : Stream<'c> =
         runSpec (runSpec s a) b
 
+    /// Three stages, each free to change the payload type.
     let pipeline3 (a: StageSpec<'a, 'b>) (b: StageSpec<'b, 'c>) (c: StageSpec<'c, 'd>) (s: Stream<'a>) : Stream<'d> =
         runSpec (runSpec (runSpec s a) b) c
 

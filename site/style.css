@@ -463,7 +463,18 @@ main.api summary::marker { content: ""; }
 main.api .fsdocs-source-link,
 main.api iconify-icon { display: none; }
 main.api .fsdocs-summary p { margin: 0.2rem 0; }
-main.api details > dl.fsdocs-returns { margin: 0.4rem 0 0; font-size: 0.88rem; color: var(--muted); }
+/* The signature, under the description. fsdocs emits each member's parameter
+   and return types inside its `<details>`; `build.fsx` opens that, so these are
+   on the page rather than a hover away. Sized down and muted — the description
+   is what a reader came for, and the types are the reference under it. The
+   empty `dd`s are per-parameter doc slots, which this codebase leaves to the
+   summary, so they collapse rather than spacing the list out. */
+main.api details > dl.fsdocs-params,
+main.api details > dl.fsdocs-returns { margin: 0.45rem 0 0; font-size: 0.88rem; color: var(--muted); }
+main.api dl.fsdocs-params dt { margin: 0.15rem 0; }
+main.api dl.fsdocs-params dd:empty,
+main.api dl.fsdocs-returns dd:empty { display: none; }
+main.api .fsdocs-param-name { color: var(--text); }
 
 main.api table { display: table; table-layout: fixed; }
 main.api td:first-child { width: 30%; vertical-align: top; }
@@ -472,6 +483,32 @@ main.api dl.fsdocs-metadata { color: var(--muted); font-size: 0.9rem; }
 main.api dl.fsdocs-metadata dt { display: inline; }
 main.api dl.fsdocs-metadata dd { display: inline; margin: 0 1rem 0 0.2rem; }
 main.api h2 { border-top: 0; padding-top: 0; margin-top: 0; }
+
+/* The signature tooltip. fsdocs renders every member's parameter and return
+   types into a `popover` div and shows it on hover; the box it draws in belongs
+   to fsdocs' own stylesheet, which this site does not load — so it is restated
+   here in this site's colours. `inset: unset` matters: the script positions the
+   popover with `left`/`top`, which the user-agent's centering would otherwise
+   win against. */
+main.api [data-fsdocs-tip] { cursor: help; }
+
+div.fsdocs-tip {
+    background: var(--panel);
+    color: var(--text);
+    border: 1px solid var(--rule);
+    border-radius: 6px;
+    box-shadow: 0 8px 28px rgba(0, 0, 0, 0.22);
+    padding: 0.7rem 0.9rem;
+    font-size: 0.85rem;
+    line-height: 1.55;
+    max-width: 46rem;
+    overflow-x: auto;
+}
+
+div.fsdocs-tip:popover-open { position: fixed; inset: unset; margin: 0; }
+div.fsdocs-tip ul { margin: 0.25rem 0 0; padding-left: 0; list-style: none; }
+div.fsdocs-tip code { background: none; padding: 0; color: var(--code); }
+div.fsdocs-tip a { color: var(--accent); }
 
 aside li.nav-header {
     list-style: none;

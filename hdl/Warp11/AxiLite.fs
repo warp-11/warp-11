@@ -19,28 +19,37 @@ let internal zeroExtend32 (e: Expr) =
     elif width e < 32 then cat (lit 0UL (32 - width e)) e
     else failwith $"axiLiteSlave: a %d{width e}-bit read value — the bus is 32"
 
-/// The sixteen `s_axi_*` ports and both one-outstanding handshakes.
-///
-/// `answersAfter` is how many cycles the read side waits between accepting an
-/// address and sampling RDATA. It is the slowest read source's depth, and the
-/// caller works it out — the channel cannot, because a source needs the held
-/// address that the channel has not raised yet.
-///
-/// The read channel is behind `beginRead` rather than raised with the rest, and
-/// that is structural rather than tidiness: **declaration order is emission
-/// order**, and whichever slave is calling this declares its own registers
-/// between the two channels. Raising the read channel here would move every
-/// register in every register map to the far side of it. `beginRead` returns
-/// the read word — live on the accept cycle, held after — and is called once.
-///
-/// One-outstanding is the scheme both slaves already had. It is also the thing
-/// a later pass replaces: RDATA is a 0-cycle mux over registers *and* a 1-cycle
-/// window read, correct only because RVALID happens to rise exactly one cycle
-/// after the AR accept. Nothing states that alignment and nothing checks it.
+/// The raw `s_axi_*` ports and the finished write channel, as the two read
+/// channels above see them. Private: a slave reaches this through
+/// `axiLiteChannel` or `axiLiteChannelPipelined`, never directly.
+type private AxiLitePorts =
+    { /// Width of a word index — the address width less the two byte bits.
+      wordWidth: int
+      /// The write data bus.
+      wdata: Expr
+      /// High on the cycle a write is accepted.
+      writeFire: Expr
+      /// The write address as a word index.
+      awWord: Expr
+      /// The raw read address, still in bytes.
+      araddr: Expr
+      /// The host is presenting a read address.
+      arvalid: Expr
+      /// The slave accepts it. Driven by whichever read channel is in use.
+      arready: Expr
+      /// The read data bus, for the read channel to drive.
+      rdata: Expr
+      /// The read response code.
+      rresp: Expr
+      /// The slave is presenting read data.
+      rvalid: Expr
+      /// The host takes it.
+      rready: Expr }
+
 /// The sixteen ports and the one-outstanding write channel, shared between the
 /// classic channel and the pipelined one — declaration for declaration, so the
 /// extraction is invisible in the emission.
-let private axiLitePortsAndWrite (addrWidth: int) =
+let private axiLitePortsAndWrite (addrWidth: int) : AxiLitePorts =
     let wordWidth = addrWidth - 2
 
     let awaddr = input "s_axi_awaddr" addrWidth
@@ -75,19 +84,72 @@ let private axiLitePortsAndWrite (addrWidth: int) =
     let awWord = wire "aw_word" wordWidth
     slice (addrWidth - 1) 2 awaddr ==> awWord
 
-    {| wordWidth = wordWidth
-       wdata = wdata
-       writeFire = writeFire
-       awWord = awWord
-       araddr = araddr
-       arvalid = arvalid
-       arready = arready
-       rdata = rdata
-       rresp = rresp
-       rvalid = rvalid
-       rready = rready |}
+    { wordWidth = wordWidth
+      wdata = wdata
+      writeFire = writeFire
+      awWord = awWord
+      araddr = araddr
+      arvalid = arvalid
+      arready = arready
+      rdata = rdata
+      rresp = rresp
+      rvalid = rvalid
+      rready = rready }
 
-let axiLiteChannel (addrWidth: int) (answersAfter: int) =
+/// What `beginRead` hands back at the moment a read address is accepted.
+type ReadAccept =
+    { /// The accepted address as a word index — live on the accept cycle and
+      /// held after, so a source reading a memory keeps presenting it.
+      word: Expr
+      /// High from the accept until the host takes RDATA, which is exactly
+      /// the span a source must serve the held word for. Composition rather
+      /// than declaration: a slave with no use for it emits what it always
+      /// did.
+      inFlight: Expr }
+
+/// The one-outstanding AXI-Lite channel, as the slave above it sees it.
+type AxiLiteChannel =
+    { /// Width of a word index — the address width less the two byte bits.
+      wordWidth: int
+      /// The write data bus.
+      wdata: Expr
+      /// High on the cycle a write is accepted.
+      writeFire: Expr
+      /// The write address as a word index.
+      awWord: Expr
+      /// Raise the read channel. Called once, and after the slave has
+      /// declared its own registers — declaration order is emission order,
+      /// so raising it earlier would move every register in every register
+      /// map to the far side of it.
+      beginRead: unit -> ReadAccept
+      /// How many cycles after the AR accept RDATA is sampled. Every read
+      /// source has to be ready by then, and `requireSourceFits` is how a
+      /// source says whether it is — the number is stated once, by the caller
+      /// that knows the sources, instead of being a coincidence between this
+      /// file and whatever they happen to cost.
+      answersAfter: int
+      /// The read data bus, for the slave to drive.
+      rdata: Expr }
+
+/// The sixteen `s_axi_*` ports and both one-outstanding handshakes.
+///
+/// `answersAfter` is how many cycles the read side waits between accepting an
+/// address and sampling RDATA. It is the slowest read source's depth, and the
+/// caller works it out — the channel cannot, because a source needs the held
+/// address that the channel has not raised yet.
+///
+/// The read channel is behind `beginRead` rather than raised with the rest, and
+/// that is structural rather than tidiness: **declaration order is emission
+/// order**, and whichever slave is calling this declares its own registers
+/// between the two channels. Raising the read channel here would move every
+/// register in every register map to the far side of it. `beginRead` returns
+/// the read word — live on the accept cycle, held after — and is called once.
+///
+/// One-outstanding is the scheme both slaves already had. It is also the thing
+/// a later pass replaces: RDATA is a 0-cycle mux over registers *and* a 1-cycle
+/// window read, correct only because RVALID happens to rise exactly one cycle
+/// after the AR accept. Nothing states that alignment and nothing checks it.
+let axiLiteChannel (addrWidth: int) (answersAfter: int) : AxiLiteChannel =
     let io = axiLitePortsAndWrite addrWidth
     let wordWidth = io.wordWidth
     let wdata = io.wdata
@@ -146,21 +208,36 @@ let axiLiteChannel (addrWidth: int) (answersAfter: int) =
         // it emits exactly what it always did. It is what an arbitrated read
         // source keys on: high from the accept until the host takes RDATA,
         // which is precisely the span the source must serve the held word for.
-        {| word = readWord
-           inFlight = readFire ||| rvalidR |}
+        { word = readWord
+          inFlight = readFire ||| rvalidR }
 
-    {| wordWidth = wordWidth
-       wdata = wdata
-       writeFire = writeFire
-       awWord = awWord
-       beginRead = beginRead
-       /// How many cycles after the AR accept RDATA is sampled. Every read
-       /// source has to be ready by then, and `requireSourceFits` is how a
-       /// source says whether it is — the number is stated once, by the caller
-       /// that knows the sources, instead of being a coincidence between this
-       /// file and whatever they happen to cost.
-       answersAfter = answersAfter
-       rdata = rdata |}
+    { wordWidth = wordWidth
+      wdata = wdata
+      writeFire = writeFire
+      awWord = awWord
+      beginRead = beginRead
+      answersAfter = answersAfter
+      rdata = rdata }
+
+/// The several-in-flight channel. The write half is the classic one's; the
+/// read half is a different contract, which is why this is a different type
+/// rather than the same one with three fields sometimes meaningless.
+type AxiLiteChannelPipelined =
+    { /// Width of a word index.
+      wordWidth: int
+      /// The write data bus.
+      wdata: Expr
+      /// High on the cycle a write is accepted.
+      writeFire: Expr
+      /// The write address as a word index.
+      awWord: Expr
+      /// The accepted read address, presented for exactly the accept cycle.
+      word: Expr
+      /// High on that accept cycle.
+      present: Expr
+      /// Where the slave puts the response for `word`, exactly
+      /// `answersAfter` cycles later.
+      answer: Expr }
 
 /// The read channel with several transactions in flight — the AXI-Lite channel
 /// AXI itself always permitted, opt-in because nothing on this board's host
@@ -188,7 +265,7 @@ let axiLiteChannel (addrWidth: int) (answersAfter: int) =
 /// that address exactly `answersAfter` cycles later. A memory read port fed
 /// `word` does this naturally at depth 1; a combinational register mux over
 /// `word` needs one capture register to arrive at the same time.
-let axiLiteChannelPipelined (addrWidth: int) (answersAfter: int) (maxOutstanding: int) =
+let axiLiteChannelPipelined (addrWidth: int) (answersAfter: int) (maxOutstanding: int) : AxiLiteChannelPipelined =
     if maxOutstanding < 2 then
         failwith $"axiLiteChannelPipelined with %d{maxOutstanding} outstanding — one outstanding is axiLiteChannel"
 
@@ -243,13 +320,13 @@ let axiLiteChannelPipelined (addrWidth: int) (answersAfter: int) (maxOutstanding
     io.rready ==> responses.ready
     lit 0UL 2 ==> io.rresp
 
-    {| wordWidth = wordWidth
-       wdata = io.wdata
-       writeFire = io.writeFire
-       awWord = io.awWord
-       word = word
-       present = accept
-       answer = answer |}
+    { wordWidth = wordWidth
+      wdata = io.wdata
+      writeFire = io.writeFire
+      awWord = io.awWord
+      word = word
+      present = accept
+      answer = answer }
 
 /// A read source has to have its answer by the time the channel samples RDATA.
 ///

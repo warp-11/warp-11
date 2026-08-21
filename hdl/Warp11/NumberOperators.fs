@@ -18,6 +18,8 @@ module Warp11.NumberOperators
 
 open Warp11.Number
 
+/// The three things that can drive a net, resolved statically. Public because
+/// `==>` is `inline` and an inline body has to reach whatever it calls.
 type Driver =
     | Driver
 

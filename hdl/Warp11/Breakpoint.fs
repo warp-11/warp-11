@@ -420,12 +420,18 @@ let parseWith widthOf memOf (text: string) : Result<Expr, string> =
 let parse (sim: Sim) text =
     parseWith (fun n -> sim.TryWidth n) (fun n -> sim.TryMemShape n) text
 
+/// A compiled breakpoint: the text the user typed, the expression it parsed
+/// to, and a predicate over the running design. `isHit` closes over the Sim's
+/// state, so it answers about *now* every time it is called.
 type Breakpoint =
     { text: string
       expr: Expr
       /// True when the design's current state satisfies the expression.
       isHit: unit -> bool }
 
+/// Parse and compile a breakpoint expression against a design. `Error` carries
+/// a message meant for whoever typed it — this is a user-facing parser, so a
+/// failure is a result rather than an exception.
 let compile (sim: Sim) (text: string) : Result<Breakpoint, string> =
     parse sim text
     |> Result.map (fun e ->

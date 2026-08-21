@@ -32,6 +32,12 @@
 </div>
 <footer>warp11 — an F# HDL that runs on real FPGAs. Pre-release.</footer>
 {{fsdocs-tooltips}}
+<!-- fsdocs puts each member's parameter and return TYPES in a hover tooltip and
+     nowhere else, so without this script the reference shows names and no types
+     at all. Self-hosted from the `content/` tree fsdocs generates beside the
+     pages; none of its other scripts are loaded, because this site has no theme
+     toggle and its own search. -->
+<script type="module" src="/content/fsdocs-tips.js"></script>
 {{fsdocs-body-extra}}
 </body>
 </html>

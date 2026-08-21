@@ -6,6 +6,8 @@
 /// Not auto-opened: `SignalKind`'s cases would shadow `Decl`'s.
 module Warp11.Inventory
 
+/// What a signal is. `Decl` without the type and without the memory case,
+/// because a table wants to sort by this and nothing else about it.
 [<RequireQualifiedAccess>]
 type SignalKind =
     | Input
@@ -13,6 +15,7 @@ type SignalKind =
     | Wire
     | Reg
 
+/// One signal, under the name the Sim knows it by.
 type SignalEntry =
     { name: string
       width: int
@@ -24,12 +27,15 @@ type SignalEntry =
       /// nested. Empty for the top module's own signals.
       group: string }
 
+/// One memory, likewise. Kept apart from the signals because a memory is
+/// addressed rather than watched, and the debugger shows it differently.
 type MemEntry =
     { name: string
       addrWidth: int
       wordWidth: int
       group: string }
 
+/// The whole table for one design.
 type ModuleInventory =
     { topName: string
       signals: SignalEntry list
@@ -49,6 +55,8 @@ let rec private instancePrefixes outer (m: ModuleDef) =
           yield prefix
           yield! instancePrefixes prefix inst.child ]
 
+/// Build the inventory for a design. Flattens it the way the Sim does, so
+/// every name here is one `Sim.Peek` accepts.
 let ofDesign (design: ModuleDef) : ModuleInventory =
     let flat = flatten design
     let prefixes = System.Collections.Generic.HashSet<string>(instancePrefixes "" design)

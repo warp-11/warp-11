@@ -16,11 +16,15 @@ open System.Numerics
 open System.Threading
 open Warp11.Inventory
 
+/// One watched signal's current value. `BigInteger` because a signal may be
+/// wider than 64 bits and a viewer should not have to care.
 type WatchValue =
     { name: string
       width: int
       value: BigInteger }
 
+/// What a view needs to show about a breakpoint — never the compiled predicate,
+/// which belongs to the session's thread.
 type BreakpointView =
     { text: string
       enabled: bool
@@ -54,6 +58,7 @@ type Trace =
       firstCycle: int
       signals: TraceSignal list }
 
+    /// How many samples the trace holds.
     member t.Length =
         match t.signals with
         | [] -> 0
@@ -81,13 +86,23 @@ type Snapshot =
       /// The breakpoint that stopped the run, if one did.
       hit: string option }
 
+/// A running design a viewer can drive: step it, run it, watch signals, set
+/// breakpoints, read memories.
+///
+/// An interface rather than a class because the debugger has more than one
+/// thing behind it — a local Sim, and a session over a wire — and a view is
+/// written once against the shape rather than twice against the two.
 type IDebugSession =
     inherit System.IDisposable
+    /// The design under debug.
     abstract Design: ModuleDef
+    /// Everything in it that can be watched, as a table.
     abstract Inventory: ModuleInventory
     /// Fires on the session's own thread — a view marshals.
     [<CLIEvent>]
     abstract Published: IEvent<Snapshot>
+    /// The most recent snapshot, for a view that has just attached and missed the
+    /// last event.
     abstract Latest: Snapshot
 
     /// One step of the run loop, for a host that owns no thread to run it on —
@@ -96,8 +111,11 @@ type IDebugSession =
     /// answers true and does nothing, so a host may call it unconditionally.
     abstract Pump: unit -> bool
 
+    /// Add a signal to the watch list, whose values ride every snapshot.
     abstract Watch: name: string -> unit
+    /// Drop a signal from the watch list.
     abstract Unwatch: name: string -> unit
+    /// Set a signal in the running design.
     abstract Poke: name: string * value: BigInteger -> unit
 
     /// Sample these signals into every snapshot from now on — the channel an
@@ -108,6 +126,7 @@ type IDebugSession =
     /// on. Out-of-range asks are clamped to the memory rather than refused —
     /// paging past the end is a scroll, not a mistake.
     abstract ViewMemory: name: string * start: int * count: int -> unit
+    /// Stop carrying a memory window in snapshots.
     abstract ClearMemoryView: unit -> unit
 
     /// Start filling the trace ring, one sample per *cycle*. `everySignal`
@@ -115,6 +134,7 @@ type IDebugSession =
     /// shorter to stay inside the memory budget, and `Latest.capacity` says how
     /// much shorter. Returns what went wrong, if anything.
     abstract StartRecording: everySignal: bool -> Result<unit, string>
+    /// Stop filling the ring. What was recorded stays readable.
     abstract StopRecording: unit -> unit
     /// The ring, unrolled oldest-first. Empty when nothing has been recorded.
     abstract Trace: unit -> Trace
@@ -126,12 +146,18 @@ type IDebugSession =
     /// Compiled on the caller's thread, so a bad expression comes back as an
     /// error where it was typed rather than as a message from a worker.
     abstract AddBreakpoint: text: string -> Result<unit, string>
+    /// Remove a breakpoint by the text it was added with.
     abstract RemoveBreakpoint: text: string -> unit
+    /// Arm or disarm a breakpoint without forgetting it.
     abstract EnableBreakpoint: text: string * enabled: bool -> unit
 
+    /// Reset the design.
     abstract Reset: unit -> unit
+    /// Advance a fixed number of cycles, then go idle.
     abstract Step: cycles: int -> unit
+    /// Run freely until paused or until a breakpoint hits.
     abstract Run: unit -> unit
+    /// Stop a run at the next cycle boundary.
     abstract Pause: unit -> unit
 
 type private Command =
@@ -508,6 +534,9 @@ type DebugSession(design: ModuleDef, ?ownThread: bool) =
         commands.Enqueue command
         wake.Set() |> ignore
 
+    /// The simulator underneath, for a host that needs something the session
+    /// protocol does not carry. Touching it from another thread races the run
+    /// loop — a session that owns its thread is the one driving this.
     member _.Sim = sim
 
     interface IDebugSession with

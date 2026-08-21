@@ -17,9 +17,14 @@ let private memoize f =
 // The semantics, independent of whether they become a Verilog module. Width is a
 // parameter even where the logic ignores it — widths live in the values, so only
 // the port declarations of a wrapped version ever need it.
+/// Multiply, as inline logic. The width parameter is ignored — widths live in
+/// the values — and exists so this has the same shape as `mulOf`, which needs
+/// one to declare its ports.
 let mulLogic (_: int) = mul
+/// Add, as inline logic, on the same rule.
 let adderLogic (_: int) = add
 
+/// Increment that stops at all-ones instead of wrapping, as inline logic.
 let satIncLogic w =
     let top = lit ((1UL <<< w) - 1UL) w
     fun x -> mux (eq x top) x (x + lit 1UL w)
@@ -30,17 +35,24 @@ let satInc (x: Expr) = satIncLogic (width x) x
 
 // The same semantics wrapped in a module. Same type as the logic above, so a use
 // site cannot tell which it was given.
+/// Multiply as an instantiated module, one `Mul{w}` per width however many
+/// call sites reach for it. Same type as `mulLogic`, so which of the two a
+/// design was given is invisible where it is used.
 let mulOf =
     memoize (fun w -> liftBinary (fnModule2 $"Mul%d{w}" ("a", w) ("b", w) "product" (mulLogic w)))
 
+/// Add as an instantiated module, memoized per width.
 let adderOf =
     memoize (fun w -> liftBinary (fnModule2 $"Adder%d{w}" ("a", w) ("b", w) "sum" (adderLogic w)))
 
+/// Saturating increment as an instantiated module, memoized per width.
 let satIncOf =
     memoize (fun w -> liftUnary (fnModule1 $"SatInc%d{w}" ("x", w) "y" (satIncLogic w)))
 
 // Stateful stdlib entries. Same use-site type as everything above — a delay register
 // is Expr -> Expr exactly as an inline increment is — but applying one adds a cycle.
+/// One register, as a module — `Expr -> Expr` exactly as an inline increment
+/// is, except that applying it costs a cycle.
 let delayOf =
     memoize (fun w ->
         liftUnary (
@@ -49,6 +61,8 @@ let delayOf =
                 d ==> r
                 r)))
 
+/// A free-running counter as a module: enable in, count out, wrapping at its
+/// own register width. `counter` is the one with a period and a `wrap` term.
 let counterOf =
     memoize (fun w ->
         liftUnary (
@@ -106,6 +120,9 @@ type Barrel =
 
         delayChain name width stages source
 
+/// Build a barrel over a cone of the given latency. Refuses `threads <=
+/// latency` at elaboration, which is where the whole no-handshake argument
+/// either holds or does not.
 let barrel (latency: int) (threads: int) =
     if latency < 1 then
         failwith $"a barrel needs a pipelined cone, got latency %d{latency}"
@@ -115,6 +132,19 @@ let barrel (latency: int) (threads: int) =
             $"need threads > %d{latency} to hide the pipeline latency, got %d{threads} — at or below it a thread's next issue races its own writeback"
 
     { latency = latency; threads = threads }
+
+/// The generator's ports. State goes in and one word comes out, so the
+/// registers holding the state belong to whoever instantiates this — which is
+/// what lets a barrel keep a separate stream per thread from one instance.
+type Xoshiro128Ports =
+    { /// High replaces the state with `sIn` instead of advancing it.
+      load: Expr
+      /// The four 32-bit state words, low index first.
+      sIn: Expr list
+      /// High advances the generator by one step.
+      step: Expr
+      /// This step's output word.
+      word: Expr }
 
 /// xoshiro128++ (Blackman/Vigna) as a synthesizable core: 4×32-bit state, one
 /// 32-bit word per `step` — shifts, xors, rotates and two adds, no
@@ -132,10 +162,10 @@ let xoshiro128pp name =
     defineModule
         name
         (fun p ->
-            {| load = p.inPort "load" 1
-               sIn = List.init 4 (fun i -> p.inPort $"s{i}_in" 32)
-               step = p.inPort "step" 1
-               word = p.outPort "word" 32 |})
+            { load = p.inPort "load" 1
+              sIn = List.init 4 (fun i -> p.inPort $"s{i}_in" 32)
+              step = p.inPort "step" 1
+              word = p.outPort "word" 32 })
         (fun m io ->
             fun (load: Expr) (sIn: Expr list) (step: Expr) ->
                 load ==> io.load
@@ -308,6 +338,26 @@ let oneHotToUInt (bits: Expr list) : Expr =
     let w = max 1 (ceilLog2 (List.length bits))
     mux1H bits [ for i in 0 .. List.length bits - 1 -> lit (uint64 i) w ]
 
+/// An enable that is the constant 1. A counter told to run every cycle should
+/// emit what a hand-written one emits — no `1'd1 &` on its wrap term and no
+/// gate on its increment — which is the same rule the fan helpers follow when
+/// N is 1: a combinator that degenerates cleanly costs nothing to reach for.
+let private alwaysEnabled (enable: Expr) =
+    match enable with
+    | Lit (1UL, UInt 1) -> true
+    | _ -> false
+
+/// What `counter` and `counterTo` hand back. One type for both, deliberately:
+/// a fixed period and a runtime bound are the same counter with a different
+/// idea of where the end is.
+type WrapCounter =
+    { /// The current value.
+      count: Expr
+      /// High on exactly the cycle rollover happens. Usually the interesting
+      /// half — a clock divider flips on it, a timer fires on it, a barrel
+      /// wave advances on it, and the count itself is incidental.
+      wrap: Expr }
+
 /// A counter that wraps, and — the part that earns it — says when.
 ///
 /// Counts `0 .. n-1` while `enable` is high and returns to zero after `n-1`.
@@ -324,16 +374,7 @@ let oneHotToUInt (bits: Expr list) : Expr =
 /// Distinct from `counterOf`, which is a *module* that counts freely and wraps
 /// only at its register width — that one exists to show a stateful stdlib entry
 /// used as a plain function, and has no limit and no wrap.
-/// An enable that is the constant 1. A counter told to run every cycle should
-/// emit what a hand-written one emits — no `1'd1 &` on its wrap term and no
-/// gate on its increment — which is the same rule the fan helpers follow when
-/// N is 1: a combinator that degenerates cleanly costs nothing to reach for.
-let private alwaysEnabled (enable: Expr) =
-    match enable with
-    | Lit (1UL, UInt 1) -> true
-    | _ -> false
-
-let counter (name: string) (n: int) (enable: Expr) =
+let counter (name: string) (n: int) (enable: Expr) : WrapCounter =
     if n < 1 then
         failwith $"counter '{name}' needs a positive period, got %d{n}"
 
@@ -348,10 +389,10 @@ let counter (name: string) (n: int) (enable: Expr) =
 
     if alwaysEnabled enable then
         step ()
-        {| count = count; wrap = atLast |}
+        { count = count; wrap = atLast }
     else
         If enable step
-        {| count = count; wrap = enable &&& atLast |}
+        { count = count; wrap = enable &&& atLast }
 
 /// The same, with a bound the design computes at runtime: counts `0 .. last`
 /// **inclusive** and wraps after it.
@@ -364,7 +405,7 @@ let counter (name: string) (n: int) (enable: Expr) =
 /// meanings cannot be confused at a call site.
 ///
 /// Chisel has no equivalent; `Counter` is compile-time-`n` only.
-let counterTo (name: string) (last: Expr) (enable: Expr) =
+let counterTo (name: string) (last: Expr) (enable: Expr) : WrapCounter =
     let w = width last
     let count = reg name w
     let atLast = eq count last
@@ -375,10 +416,10 @@ let counterTo (name: string) (last: Expr) (enable: Expr) =
 
     if alwaysEnabled enable then
         step ()
-        {| count = count; wrap = atLast |}
+        { count = count; wrap = atLast }
     else
         If enable step
-        {| count = count; wrap = enable &&& atLast |}
+        { count = count; wrap = enable &&& atLast }
 
 // ---------------------------------------------------------------------------
 // State machines. The encoded state register every sequencer in this codebase
@@ -896,6 +937,15 @@ let private log2 n =
 let axiWriteBeatLayout (addrWidth: int) (dataWidth: int) : Layout<Expr * Expr * Expr> =
     layout3 ("addr", addrWidth) ("data", dataWidth) ("strb", dataWidth / 8)
 
+/// What the shared write-master core hands back to the three entries built on
+/// it. `idle` is an option because raising it declares a wire, and a caller
+/// that never asked for quiescence should emit exactly what it always did.
+type private WriterCore =
+    { /// High when no write is in flight, if this core was asked to expose it.
+      idle: Expr option
+      /// One cycle per write response the slave returned.
+      bAck: Expr }
+
 /// AXI4 write master, elaborated inline in the current design (the scratch-
 /// slave scheme, like `axiLiteSlave`): consumes a ready/valid stream of
 /// (addr, data, strb) beats and issues one single-beat AXI4 write per beat —
@@ -912,7 +962,7 @@ let private axiMasterWriterCore
     (dataWidth: int)
     (maxOutstanding: int)
     (beats: Stream<Expr * Expr * Expr>)
-    : {| idle: Expr option; bAck: Expr |} =
+    : WriterCore =
     if dataWidth <> 32 && dataWidth <> 64 && dataWidth <> 128 then
         failwith $"axiMasterWriter dataWidth must be 32, 64 or 128, got %d{dataWidth}"
 
@@ -995,7 +1045,7 @@ let private axiMasterWriterCore
         bPending ==> bready
         let bAck = wireBit "b_ack"
         (bPending &&& bvalid) ==> bAck
-        {| idle = Some idle; bAck = bAck |}
+        { idle = Some idle; bAck = bAck }
     else
         // ring of N slots; enq/aw/w/b pointers carry an extra bit so full is
         // distinguishable from empty, and modular subtraction is the count
@@ -1054,14 +1104,14 @@ let private axiMasterWriterCore
         let bAck = wireBit "b_ack"
         bvalid ==> bAck
 
-        {| idle =
+        { idle =
             (if exposeIdle then
                  let idle = wireBit "writer_idle"
                  eq enqPtr bPtr ==> idle
                  Some idle
              else
                  None)
-           bAck = bAck |}
+          bAck = bAck }
 
 let private axiReadValidate (addrWidth: int) (dataWidth: int) (maxOutstanding: int) =
     if dataWidth <> 32 && dataWidth <> 64 && dataWidth <> 128 then
@@ -1306,6 +1356,16 @@ let axiMasterReaderBurst
 let axiMasterWriter (addrWidth: int) (dataWidth: int) (maxOutstanding: int) (beats: Stream<Expr * Expr * Expr>) =
     axiMasterWriterCore false addrWidth dataWidth maxOutstanding beats |> ignore
 
+/// What `axiMasterWriterTracked` hands back: the master's quiescence, and the
+/// acknowledgement that makes it trustworthy.
+type TrackedWriter =
+    { /// High when no write is in flight.
+      idle: Expr
+      /// One cycle per write response the *slave* returned — which is what
+      /// makes a count of completed writes a count of writes that landed,
+      /// rather than of beats handed to the master.
+      bAck: Expr }
+
 /// The writer plus both levels a completion-tracking master needs: `idle`
 /// (nothing in flight) and `bAck`, one pulse per accepted write response.
 /// `bAck` is the honest "this write has reached memory" event — a design that
@@ -1316,9 +1376,9 @@ let axiMasterWriterTracked
     (dataWidth: int)
     (maxOutstanding: int)
     (beats: Stream<Expr * Expr * Expr>)
-    : {| idle: Expr; bAck: Expr |} =
+    : TrackedWriter =
     let w = axiMasterWriterCore true addrWidth dataWidth maxOutstanding beats
-    {| idle = w.idle.Value; bAck = w.bAck |}
+    { idle = w.idle.Value; bAck = w.bAck }
 
 /// The writer plus its quiescence level: high when no write is in flight
 /// (`enq_ptr = b_ptr` on the ring; all three pendings clear at N=1).

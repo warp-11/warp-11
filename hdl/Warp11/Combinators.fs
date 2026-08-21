@@ -23,6 +23,30 @@ let delayChain (name: string) (width: int) (stages: int) (source: Expr) =
         current ==> r
         r)
 
+/// How many cycles `memReadPort` takes to answer — a property of the memory
+/// rather than of any particular read, so something that has to be *sized*
+/// around a read can ask before elaborating one. The AXI-Lite channel does
+/// exactly that: it has to know how long to wait before raising the registers
+/// that do the waiting, and it cannot elaborate a port to find out because the
+/// port needs the address the channel has not held yet.
+///
+/// One, for every storage there is. It stops being one the day a port is backed
+/// by something slower than a block, and everything that asks will follow.
+let memReadDepth (_: Mem) = 1
+
+/// What `memReadPort` hands back: the word, how late it is, and a way to
+/// carry anything else across the same distance.
+type MemReadPort =
+    { /// The word, `depth` cycles after the address was presented.
+      data: Expr
+      /// How many cycles late `data` is. Read it rather than assuming one —
+      /// that is what makes this a port rather than a value.
+      depth: int
+      /// Carry a signal across the read so it arrives beside `data`. The
+      /// registers are named by the caller, so a waveform still reads the way
+      /// it did.
+      through: string -> Expr -> Expr }
+
 /// A memory read that **owns its own latency**, and carries whatever the read
 /// was about through it.
 ///
@@ -48,24 +72,13 @@ let delayChain (name: string) (width: int) (stages: int) (source: Expr) =
 /// This is `withContext`'s bargain at a scale that does not want a FIFO: no
 /// handshake, no backpressure, one register per carried signal, and the caller
 /// names them so a waveform still reads the way it did.
-/// How many cycles `memReadPort` takes to answer — a property of the memory
-/// rather than of any particular read, so something that has to be *sized*
-/// around a read can ask before elaborating one. The AXI-Lite channel does
-/// exactly that: it has to know how long to wait before raising the registers
-/// that do the waiting, and it cannot elaborate a port to find out because the
-/// port needs the address the channel has not held yet.
-///
-/// One, for every storage there is. It stops being one the day a port is backed
-/// by something slower than a block, and everything that asks will follow.
-let memReadDepth (_: Mem) = 1
-
-let memReadPort (m: Mem) (addr: Expr) =
+let memReadPort (m: Mem) (addr: Expr) : MemReadPort =
     let data = memReadNextCycle m addr
     let depth = memReadDepth m
 
-    {| data = data
-       depth = depth
-       through = fun (name: string) (signal: Expr) -> delayChain name (width signal) depth signal |}
+    { data = data
+      depth = depth
+      through = fun name signal -> delayChain name (width signal) depth signal }
 
 /// Select from a list by index — a mux network over live values, which is what
 /// a row of per-slot registers wants (a mem would add a read cycle and a write
@@ -95,6 +108,18 @@ let oneHotLowest (bits: Expr list) : Expr list =
     ||> List.mapFold (fun noneLower b -> noneLower &&& b, noneLower &&& bnot b)
     |> fst
 
+/// What `edgeDetect` hands back: the sample, and the three comparisons
+/// against it.
+type EdgeDetect =
+    { /// The sampled copy — a register, updated only while `enable` is high.
+      previous: Expr
+      /// The signal differs from its sample, either direction.
+      changed: Expr
+      /// Low to high.
+      rising: Expr
+      /// High to low.
+      falling: Expr }
+
 /// Edge detection on a one-bit signal: `previous` samples it whenever `enable`
 /// is high, and the three outputs compare the live signal against that sample.
 /// With `enable` tied high this is the plain form; gated, it detects edges *in
@@ -103,17 +128,17 @@ let oneHotLowest (bits: Expr list) : Expr list =
 ///
 /// `previous` is a reg and `enable` gates only the sample, so a design that
 /// wants the raw delayed copy can read it.
-let edgeDetect (name: string) (enable: Expr) (signal: Expr) =
+let edgeDetect (name: string) (enable: Expr) (signal: Expr) : EdgeDetect =
     if width signal <> 1 then
         failwith $"edgeDetect '{name}' needs a 1-bit signal, got %d{width signal} bits"
 
     let previous = regBit $"{name}_previous"
     If enable (fun () -> signal ==> previous)
 
-    {| previous = previous
-       changed = signal ^^^ previous
-       rising = signal &&& bnot previous
-       falling = bnot signal &&& previous |}
+    { previous = previous
+      changed = signal ^^^ previous
+      rising = signal &&& bnot previous
+      falling = bnot signal &&& previous }
 
 /// A maximal-length Galois LFSR: `width` bits shifting one place per `step`,
 /// visiting every non-zero state exactly once before repeating — 2^width − 1
@@ -216,6 +241,8 @@ let log2Exact n =
 
     ceilLog2 n
 
+/// The predicate behind `log2Exact`, for a caller that wants to choose rather
+/// than to fail.
 let isPowerOfTwo n = n > 0 && n &&& (n - 1) = 0
 
 // ---------------------------------------------------------------------------

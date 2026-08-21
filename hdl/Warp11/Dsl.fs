@@ -32,6 +32,13 @@ type StateMachineRecord =
       states: (uint64 * string) list
       reached: System.Collections.Generic.HashSet<uint64> }
 
+/// The module under construction — the ambient thing every declaration and
+/// every `==>` reaches without being passed one.
+///
+/// Held on a stack rather than threaded through the design, which is what
+/// makes a module body ordinary F# code: `mul8 a b` is a call, not a call
+/// with a context argument. Designs rarely name this type; they get it from
+/// `design`, `moduleDef` or `defineModule` and never see it again.
 type Builder(name: string, ?clockSpec: ClockSpec) =
     do requireNotVerilogKeyword name "a module"
     let clock = defaultArg clockSpec defaultClock
@@ -118,9 +125,13 @@ type Builder(name: string, ?clockSpec: ClockSpec) =
             | Memory _ -> "a mem"
         )
 
+    /// Declare an input port.
     member this.Input(n, t: GroundType) = this.Declare(Input(n, t), n, t)
+    /// Declare an output port.
     member this.Output(n, t: GroundType) = this.Declare(Output(n, t), n, t)
+    /// Declare a wire.
     member this.Wire(n, t: GroundType) = this.Declare(Wire(n, t), n, t)
+    /// Declare a register and the value it takes under reset.
     member this.Reg(n, t: GroundType, init: uint64) = this.Declare(Reg(n, t, Some init), n, t)
 
     /// A register with no reset: it holds its value while reset is asserted.
@@ -131,9 +142,13 @@ type Builder(name: string, ?clockSpec: ClockSpec) =
 
     // A bare width still means unsigned, so every existing declaration — and the
     // `moduleDef` API's `m.Input("a", 8)` — reads exactly as it did.
+    /// An input port at a bare width, which still means unsigned.
     member this.Input(n, w: int) = this.Input(n, UInt w)
+    /// An output port at a bare width.
     member this.Output(n, w: int) = this.Output(n, UInt w)
+    /// A wire at a bare width.
     member this.Wire(n, w: int) = this.Wire(n, UInt w)
+    /// A register at a bare width.
     member this.Reg(n, w: int, init) = this.Reg(n, UInt w, init)
 
     /// The value `t` would currently read as: innermost If scope first, then base.
@@ -174,6 +189,9 @@ type Builder(name: string, ?clockSpec: ClockSpec) =
             for t, v in thenScope.Items do
                 this.Set(t, Mux(cond, v, this.PriorOrHold t))
 
+    /// Open a conditional scope. The branch's assignments are collected and folded
+    /// into the parent as muxes when the block ends, so a register with no
+    /// unconditional default holds its value and a wire without one is an error.
     member this.If(cond, thenBody: unit -> unit) =
         this.FlushPending()
 
@@ -189,6 +207,8 @@ type Builder(name: string, ?clockSpec: ClockSpec) =
         scopes.Pop() |> ignore
         pendingIf <- Some(cond, scope)
 
+    /// The other branch of the `If` immediately preceding. Anything in between
+    /// seals that `If` as else-less and this then fails.
     member this.Else(elseBody: unit -> unit) =
         match pendingIf with
         | None -> failwith "Else must immediately follow its If"
@@ -231,6 +251,10 @@ type Builder(name: string, ?clockSpec: ClockSpec) =
             failwith
                 $"'{n}' is assigned twice at the same level in '{name}' — the second would silently replace the first; a conditional override belongs inside If"
 
+    /// Drive a declared signal. A second drive at the same scope is refused — the
+    /// bug it catches is silent through elaboration, lint and synthesis — while the
+    /// scope underneath is last-connect-wins, which is how a branch merges into its
+    /// parent.
     member this.Assign(target, value) =
         match target with
         | Ref (n, _) ->
@@ -245,15 +269,23 @@ type Builder(name: string, ?clockSpec: ClockSpec) =
             this.Set(n, value)
         | _ -> failwith "assign target must be a declared signal"
 
+    /// Record a stream's ready net so `checkStreams` can judge at emission whether
+    /// it ended up with exactly one consumer.
     member _.RegisterStreamReady(ready) =
         match ready with
         | Ref (n, _) -> streamReadies.Add n
         | _ -> failwith "a stream's ready must be a declared net"
 
+    /// Record a stall probe, so `streamReport` can find its counters later.
     member _.RegisterProbe(name: string) = probes.Add name
 
+    /// Record a state machine, so the debugger can show a state register by name
+    /// rather than as the number it is.
     member _.RegisterStateMachine(record: StateMachineRecord) = machines.Add record
 
+    /// Declare a memory of 2^addrWidth words. `style` decides what it becomes on
+    /// silicon, and with it which reads are legal — the combinational read is only
+    /// allowed on distributed storage.
     member this.Memory(n, addrWidth, memWidth, init, style) : Mem =
         this.Declare(Memory(n, addrWidth, memWidth, init, style), n, UInt memWidth) |> ignore
 
@@ -262,6 +294,9 @@ type Builder(name: string, ?clockSpec: ClockSpec) =
           memWidth = memWidth
           style = style }
 
+    /// Record a write. Several writes to one memory fold into a single
+    /// priority-muxed write site, because two write sites stop a synthesiser
+    /// inferring a block RAM even when they are mutually exclusive.
     member this.Write(mem: Mem, addr, data, enable, mask: Expr option) =
         this.FlushPending() // a write is a statement: it seals a pending If
 
@@ -294,11 +329,15 @@ type Builder(name: string, ?clockSpec: ClockSpec) =
 
         asserts.Add(conds |> Seq.fold (fun claim active -> Or(Not active, claim)) cond, message)
 
+    /// A read that answers next cycle, as a register holding the word.
     member this.SyncRead(mem: Mem, addr) =
         let r = this.Reg(this.NextName $"{mem.memName}_rd", mem.memWidth, 0UL)
         this.Assign(r, MemRead(mem.memName, addr, mem.memWidth))
         r
 
+    /// Instantiate a module under a given name, returning it as a function. Its
+    /// ports become `{instName}_{port}` staging wires in this module, each carrying
+    /// the port's own type so a signed port stays signed across the boundary.
     member this.Instance<'io, 'fn>(instName: string, tm: TypedModule<'io, 'fn>) : 'fn =
         requireNotVerilogKeyword instName "an instance"
         instances.Add { instName = instName; child = tm.def }
@@ -328,9 +367,12 @@ type Builder(name: string, ?clockSpec: ClockSpec) =
                   inPortAs = netAs
                   outPortAs = netAs })
 
+    /// The same, with a name derived from the module's.
     member this.Instance<'io, 'fn>(tm: TypedModule<'io, 'fn>) : 'fn =
         this.Instance(this.NextName tm.def.name, tm)
 
+    /// Finish elaboration and hand back the module. Dangling conditionals flush
+    /// here, and a state machine with a state nothing transitions to fails here.
     member this.Def =
         this.FlushPending()
 
@@ -423,6 +465,10 @@ type Builder(name: string, ?clockSpec: ClockSpec) =
           probes = List.ofSeq probes
           stateMachines = [ for machine in machines -> machine.stateReg, machine.states ] }
 
+/// A module definition together with the two things that make it callable: how
+/// to view its ports as a typed value, and how to wire an instance up as a
+/// function of that view. `defineModule` builds one; `instance` and the `lift`
+/// family turn one into something a call site can apply.
 and TypedModule<'io, 'fn> =
     { def: ModuleDef
       io: Ports -> 'io
@@ -439,6 +485,9 @@ let internal current () =
 
     elaborating.Peek()
 
+/// Elaborate a module from a body that takes the builder explicitly. The
+/// untyped seam — no port view, no call shape — used where something wants a
+/// `ModuleDef` and nothing intends to instantiate it as a function.
 let moduleDef name (body: Builder -> unit) =
     let b = Builder(name)
     elaborating.Push b
@@ -450,6 +499,16 @@ let moduleDef name (body: Builder -> unit) =
 
     b.Def
 
+/// Define a module once, with a typed view of its ports and a call shape.
+///
+/// `io` declares the ports and packages them however the definition wants to
+/// see them; `apply` says what instantiating one *is* at a call site — usually
+/// "drive these inputs, hand back that output"; `body` is the module's
+/// contents, elaborated with the module ambient so it reads like any other
+/// design code.
+///
+/// The result is re-runnable: `io` runs again per instance, so a call site
+/// gets fresh port references rather than a shared record.
 let defineModule name (io: Ports -> 'io) (apply: Builder -> 'io -> 'fn) (body: 'io -> Builder -> unit) =
     let b = Builder(name)
 
@@ -473,6 +532,9 @@ let defineModule name (io: Ports -> 'io) (apply: Builder -> 'io -> 'fn) (body: '
       io = io
       apply = apply }
 
+/// A module that is a pure function of one input. The output width is measured
+/// by running `f` on a reference — widths live in the values, so the definition
+/// does not have to be told.
 let fnModule1 name (an, aw) outName (f: Expr -> Expr) =
     let outWidth = width (f (Ref(an, UInt aw)))
 
@@ -484,6 +546,7 @@ let fnModule1 name (an, aw) outName (f: Expr -> Expr) =
             po)
         (fun (ia, o) m -> m.Assign(o, f ia))
 
+/// The same for two inputs.
 let fnModule2 name (an, aw) (bn, bw) outName (f: Expr -> Expr -> Expr) =
     let outWidth = width (f (Ref(an, UInt aw)) (Ref(bn, UInt bw)))
 
@@ -496,6 +559,7 @@ let fnModule2 name (an, aw) (bn, bw) outName (f: Expr -> Expr -> Expr) =
             po)
         (fun (ia, ib, o) m -> m.Assign(o, f ia ib))
 
+/// The same for three.
 let fnModule3 name (an, aw) (bn, bw) (cn, cw) outName (f: Expr -> Expr -> Expr -> Expr) =
     let outWidth = width (f (Ref(an, UInt aw)) (Ref(bn, UInt bw)) (Ref(cn, UInt cw)))
 
@@ -519,6 +583,9 @@ let private designWith (b: Builder) (body: unit -> unit) =
 
     b.Def
 
+/// Elaborate a top-level design. The body is ordinary code with the module
+/// ambient, and the result is what the emitter, the simulator and the debugger
+/// all take.
 let design name (body: unit -> unit) = designWith (Builder(name)) body
 
 /// A design with named clock/reset ports — `designClocked axiClock` is how an
@@ -528,10 +595,16 @@ let designClocked spec name (body: unit -> unit) = designWith (Builder(name, spe
 // The public seams, taking a type. Public because the declaration functions
 // below are `inline` — an inline body has to reach what it calls — while the
 // ambient builder itself stays internal.
+/// Declare an input port at a ground type. `input` is the spelling to reach
+/// for; this is the seam under it.
 let declareInput name (t: GroundType) = (current ()).Input(name, t)
+/// Declare an output port at a ground type.
 let declareOutput name (t: GroundType) = (current ()).Output(name, t)
+/// Declare a wire at a ground type.
 let declareWire name (t: GroundType) = (current ()).Wire(name, t)
+/// Declare a register at a ground type, with the value it takes under reset.
 let declareReg name (t: GroundType) init = (current ()).Reg(name, t, init)
+/// Declare a register that reset does not reach.
 let declareRegNoReset name (t: GroundType) = (current ()).RegNoReset(name, t)
 
 /// Declare a port, wire or register. The second argument is a width — meaning
@@ -540,7 +613,9 @@ let declareRegNoReset name (t: GroundType) = (current ()).RegNoReset(name, t)
 ///     let count = input "count" 8            // UInt 8
 ///     let sample = input "sample" (SInt 16)  // signed, and `mul` knows it
 let inline input name spec = declareInput name (AsType $ spec)
+/// An output port, at a width or a type.
 let inline output name spec = declareOutput name (AsType $ spec)
+/// A wire, at a width or a type.
 let inline wire name spec = declareWire name (AsType $ spec)
 
 /// A register that resets to zero — which measured as 98.6% of every register
@@ -557,8 +632,11 @@ let inline regInit name spec init = declareReg name (AsType $ spec) init
 /// which also keeps "forgot the width" a compile error on the sized forms
 /// instead of a silent one-bit default.
 let inputBit name = declareInput name (UInt 1)
+/// A one-bit output port.
 let outputBit name = declareOutput name (UInt 1)
+/// A one-bit wire.
 let wireBit name = declareWire name (UInt 1)
+/// A one-bit register, resetting to zero.
 let regBit name = declareReg name (UInt 1) 0UL
 
 /// A register that holds its value through reset. Same shape as `reg` without
@@ -596,9 +674,6 @@ let connect (target: Expr) (value: Expr) = (current ()).Assign(target, value)
 /// wide a connection is.
 let inline (==>) value (target: Expr) = connect target ((Widen $ value) (width target))
 
-/// Conditional assignment scope, folding to Mux trees when the block ends —
-/// warp11's `If(cond) { } Else { }`, as two sequential statements. Inside it
-/// a reg with no unconditional default holds its value; a wire there is an error.
 /// A claim about the design, checked every cycle by a Sim built with
 /// `checkAsserts = true` and by the emitted Verilog under a simulator that
 /// honours assertions. `assert` is an F# keyword, hence the name.
@@ -606,6 +681,12 @@ let inline (==>) value (target: Expr) = connect target ((Widen $ value) (width t
 /// Written inside `If`, the claim is conditional on that branch being taken.
 let assertThat cond message = (current ()).AssertThat(cond, message)
 
+/// Conditional assignment scope, folding to Mux trees when the block ends.
+/// `If` and `Else` are two sequential statements rather than one construct.
+///
+/// Inside it a reg with no unconditional default holds its value; a wire there
+/// is an error. The scope underneath is last-connect-wins — that is how a
+/// branch merges into its parent — while a second `==>` at one level is not.
 let If cond (body: unit -> unit) = (current ()).If(cond, body)
 
 /// Must immediately follow its `If` — any intervening statement seals that If as
@@ -769,6 +850,7 @@ let internal memReadNextCycle m addr = (current ()).SyncRead(m, addr)
 /// Turn a module into a function that creates a fresh instance on every call.
 let liftUnary (tm: TypedModule<'io, Expr -> Expr>) = fun x -> (current ()).Instance(tm) x
 
+/// The same for a module of two operands.
 let liftBinary (tm: TypedModule<'io, Expr -> Expr -> Expr>) =
     fun x y -> (current ()).Instance(tm) x y
 
@@ -785,6 +867,8 @@ let stateModule1 name (an, aw) (outName, ow) (build: Expr -> Expr) =
             po)
         (fun (ia, o) m -> m.Assign(o, build ia))
 
+/// The same for a module that transforms a stream — a fresh instance per call,
+/// so a stage used twice in a chain is two instances of one definition.
 let liftStream (tm: TypedModule<'io, Stream<'p> -> Stream<'p>>) =
     fun s -> (current ()).Instance(tm) s
 

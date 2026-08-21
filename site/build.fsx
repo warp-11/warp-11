@@ -323,7 +323,13 @@ let copyReference () =
                     let rewritten =
                         Regex.Replace(html, "href=\"(/reference/[^\"#?]+)\\.html", "href=\"$1")
 
-                    File.WriteAllText(destination, rewritten)
+                    // Each member's parameter and return TYPES sit inside its
+                    // `<details>`, which fsdocs ships closed — so a reference
+                    // that shows names and no types is the default. fsdocs'
+                    // own answer is an expand/collapse button, which pulls Lit
+                    // from a CDN and iconify for its icon; opening the element
+                    // here instead costs a regex and works with JS off.
+                    File.WriteAllText(destination, rewritten.Replace("<details>", "<details open>"))
                 else
                     File.Copy(file, destination, true)
 
@@ -331,8 +337,25 @@ let copyReference () =
         else
             false
 
+    // fsdocs puts its own bare "Available Namespaces" table at
+    // `reference/index.html` and renders `site/api/index.md` — the map of what
+    // is in the library — to the output root, where nothing copies it. So the
+    // authored page takes the landing slot, and fsdocs' namespace listing stays
+    // reachable one click in at `/reference/warp11`.
+    let copyAuthoredIndex () =
+        let source = Path.Combine(built, "index.html")
+
+        if File.Exists source then
+            let destination = Path.Combine(out, "reference", "index.html")
+
+            let rewritten =
+                Regex.Replace(File.ReadAllText source, "href=\"(/reference/[^\"#?]+)\\.html", "href=\"$1")
+
+            File.WriteAllText(destination, rewritten)
+
     if copyTree "reference" then
         copyTree "content" |> ignore
+        copyAuthoredIndex ()
         true
     else
         printfn "  no API reference — run:"

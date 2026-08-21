@@ -23,6 +23,7 @@ type WavData =
       bitsPerSample: int
       samples: int16[] }
 
+    /// Frames rather than samples: a stereo file has two samples per frame.
     member this.FrameCount = this.samples.Length / this.channels
 
 /// Read a 16-bit PCM WAV. Chunk-walking rather than assuming a 44-byte header,
@@ -69,6 +70,8 @@ let readWav (bytes: byte[]) : WavData =
     | None, _ -> failwith "WAV has no fmt chunk"
     | _, None -> failwith "WAV has no data chunk"
 
+/// The bytes of a 16-bit PCM WAV file. The inverse of `readWav`, and no more
+/// general than it is.
 let writeWav (w: WavData) : byte[] =
     let dataBytes = w.samples.Length * 2
     let output = new MemoryStream()
@@ -94,7 +97,9 @@ let writeWav (w: WavData) : byte[] =
 
     output.ToArray()
 
+/// Read a WAV file from disk.
 let readWavFile (path: string) = readWav (File.ReadAllBytes path)
+/// Write a WAV file to disk.
 let writeWavFile (path: string) (w: WavData) = File.WriteAllBytes(path, writeWav w)
 
 /// A 16-bit sample widened to the design's 24-bit sample, as raw two's
@@ -127,6 +132,8 @@ type WavPorts =
       outValid: string
       outReady: string }
 
+/// The port names the audio stages in `Warp11.Audio` actually declare, so a
+/// design built out of them needs no port map at all.
 let defaultWavPorts =
     { inLeft = "in_left"
       inRight = "in_right"

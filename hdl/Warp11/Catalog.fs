@@ -8,6 +8,7 @@
 /// two, which is exactly the shape the view had before this existed.
 module Warp11.Catalog
 
+/// One design the debugger can open, and everything it needs to open it well.
 type Entry =
     { /// The only name the UI shows.
       label: string
@@ -32,6 +33,10 @@ type Entry =
       /// because the catalog is the thing that owns the prose.
       watch: string list }
 
+/// A set of designs plus the two lookups a debugger wants beside them: the
+/// prose for a binding and the source that defines it. Supplied by whoever owns
+/// the designs, which is why the debugger can show a teaching set and an oracle
+/// inventory without knowing about either.
 type Catalog =
     { /// What the picker lists, in the order it lists them.
       entries: Entry list
@@ -40,6 +45,8 @@ type Catalog =
       /// The source text that defines a binding, if it can be found.
       source: string -> string option }
 
+/// An entry with no pokes and nothing watched. `withPokes` and `withWatch` add
+/// those, so the common case stays one line.
 let entry label binding build =
     { label = label
       binding = binding

@@ -32,6 +32,10 @@ let rec private namedRef expr =
     | AsSInt v -> namedRef v
     | _ -> None
 
+/// Emit an expression, zero-extended to `target` bits. Verilog's own width
+/// rules are context-dependent and quietly so, which is why every operand is
+/// emitted at a width this side has worked out rather than at whatever the
+/// surrounding expression would have implied.
 let rec emitAt target expr =
     match expr with
     | Lit (v, t) -> $"%d{max target t.Width}'d%d{v}"
@@ -141,6 +145,7 @@ let rec emitAt target expr =
         else
             $"{{%d{target - w}'d0, {core}}}"
 
+/// Emit an expression at its own width.
 let emit expr = emitAt (width expr) expr
 
 let private nameAndWidth decl =
@@ -163,6 +168,9 @@ let private memShape m memName =
         | Memory(n, aw, w, _, _) when n = memName -> Some(aw, w)
         | _ -> None)
 
+/// Every assignment's declared width against what actually drives it, and the
+/// same for a memory write's address and data. Returns the disagreements —
+/// `emitDesign` is what refuses to emit on them.
 let checkWidths m =
     [ for stmt in m.stmts do
           match stmt with
@@ -298,6 +306,8 @@ let rec needsClk m =
            | _ -> false)
     || m.instances |> List.exists (fun i -> needsClk i.child)
 
+/// One module's Verilog. Instances are emitted as instantiations, not inlined,
+/// so the emitted hierarchy is the elaborated one.
 let emitVerilog m =
     let isReg n =
         m.decls
@@ -529,6 +539,9 @@ let emitVerilog m =
           yield! assertBlock
           yield "endmodule" ]
 
+/// Every module in the design, children before parents, the top last. Not
+/// deduplicated — the callers do that, structurally or by name, and which of
+/// the two they want is the whole question in `checkNames`.
 let allModules m =
     let rec collect md =
         [ for i in md.instances do
@@ -556,6 +569,16 @@ let checkStreams m =
                   yield
                       $"{md.name}: stream ready '{readyNet}' driven %d{drivers} times (a stream has exactly one consumer)" ]
 
+/// The whole design as Verilog, gated on the three checks.
+///
+/// Widths, duplicate module names and stream consumers all have to hold before
+/// a single line is emitted, and a failure raises rather than returning a
+/// half-design. Each of the three catches something that is silent through
+/// elaboration and through synthesis, which is the reason emission is where
+/// they are enforced.
+///
+/// Modules are deduplicated by name, so a definition instantiated forty times
+/// is emitted once.
 let emitDesign m =
     let widthProblems =
         [ for md in allModules m |> List.distinct do

@@ -836,6 +836,9 @@ type Sim(design: ModuleDef, ?checkAsserts: bool) =
 
         settle ()
 
+    /// Set an input (or any signal) by flattened name. The combinational state is
+    /// marked stale rather than re-settled here, so poking five pins before a tick
+    /// costs one settle, not five.
     member _.Poke(name, value: uint64) =
         let i = slotFor name
 
@@ -845,6 +848,7 @@ type Sim(design: ModuleDef, ?checkAsserts: bool) =
         narrow[i] <- value &&& maskOf slotWidths[i]
         stale <- true
 
+    /// Poke a signal wider than 64 bits.
     member _.PokeWide(name, value: BigInteger) =
         let i = slotFor name
         let mask = maskB slotWidths[i]
@@ -856,6 +860,8 @@ type Sim(design: ModuleDef, ?checkAsserts: bool) =
 
         stale <- true
 
+    /// Read a signal by flattened name, settling first if anything was poked since
+    /// the last read.
     member _.Peek(name: string) =
         let i = slotFor name
 
@@ -865,6 +871,7 @@ type Sim(design: ModuleDef, ?checkAsserts: bool) =
         ensureSettled ()
         narrow[i]
 
+    /// Read a signal of any width.
     member _.PeekWide(name: string) : BigInteger =
         let i = slotFor name
         ensureSettled ()
@@ -877,6 +884,7 @@ type Sim(design: ModuleDef, ?checkAsserts: bool) =
 
         memArrays[name][index]
 
+    /// Read a word of a mem whose words are wider than 64 bits.
     member _.PeekMemWide(name: string, index: int) : BigInteger =
         if isWideMem name then wideMemArrays[name][index] else BigInteger(memArrays[name][index])
 
@@ -887,14 +895,17 @@ type Sim(design: ModuleDef, ?checkAsserts: bool) =
         let i = slotFor name
         { Slot = i; Width = slotWidths[i] }
 
+    /// Read through a resolved handle — no name lookup.
     member _.PeekAt(h: Handle) : uint64 =
         ensureSettled ()
         narrow[h.Slot]
 
+    /// Read a signal of any width through a handle.
     member _.PeekWideAt(h: Handle) : BigInteger =
         ensureSettled ()
         if h.Width > 64 then wideVals[h.Slot] else BigInteger narrow[h.Slot]
 
+    /// Poke through a handle.
     member _.PokeAt(h: Handle, value: uint64) =
         narrow[h.Slot] <- value &&& maskOf h.Width
         stale <- true
@@ -906,6 +917,7 @@ type Sim(design: ModuleDef, ?checkAsserts: bool) =
         | true, i -> Some slotWidths[i]
         | _ -> None
 
+    /// A mem's `(addrWidth, wordWidth)`, if that name is one.
     member _.TryMemShape(name: string) =
         match memShapes.TryGetValue name with
         | true, shape -> Some shape
@@ -929,6 +941,10 @@ type Sim(design: ModuleDef, ?checkAsserts: bool) =
                 ensureSettled ()
                 c () <> 0UL
 
+    /// Assert reset: every register with an initial value takes it, and every
+    /// preloaded mem reloads — reset models reconfiguration, and a block RAM's
+    /// initial contents come back with the bitstream. Mems with no initial
+    /// contents keep theirs, which is what a real BRAM does.
     member _.Reset() =
         for KeyValue (n, init) in regInits do
             let i = slotFor n
@@ -948,6 +964,12 @@ type Sim(design: ModuleDef, ?checkAsserts: bool) =
         settle ()
         stale <- false
 
+    /// One clock edge.
+    ///
+    /// Register next-values and memory write operands both evaluate against the
+    /// pre-edge state, then registers commit, then writes land. So a sync read of
+    /// an address written on the same cycle sees the *old* word — read-first,
+    /// matching the emitted always block.
     member _.Tick() =
         // Reg next-values and write operands both evaluate against the pre-edge
         // state, then regs commit, then writes land — so a sync read of an
@@ -1003,12 +1025,14 @@ type Sim(design: ModuleDef, ?checkAsserts: bool) =
     /// loop asks after every tick.
     member _.ViolationCount = violations.Count
 
+    /// The newest assertion failure, without building the whole list.
     member _.LastViolation =
         if violations.Count = 0 then
             None
         else
             Some violations[violations.Count - 1]
 
+    /// Forget every assertion failure recorded so far.
     member _.ClearViolations() = violations.Clear()
 
 /// The DDR side of an AXI4 write master at the design boundary — the Sim's
@@ -1056,6 +1080,8 @@ type SimAxiWriteSlave
         sim.Poke($"{p}_awready", 1UL)
         sim.Poke($"{p}_wready", 1UL)
 
+    /// The backing store this slave writes into. Shared with a read slave makes
+    /// the two halves of one DDR — see `SimAxiDdr`.
     member _.Memory = memory
 
     /// Everything this slave does before the clock edge: capture AW/W, pair
@@ -1112,6 +1138,7 @@ type SimAxiWriteSlave
         sim.Poke($"{p}_awready", (if awReadyNow then 1UL else 0UL))
         sim.Poke($"{p}_wready", (if wReadyNow then 1UL else 0UL))
 
+    /// Capture the channels, take one clock edge, then re-pace the readies.
     member this.Cycle() =
         this.Capture()
         sim.Tick()
@@ -1167,8 +1194,10 @@ type SimAxiReadSlave
         sim.Poke($"{p}_rvalid", 0UL)
         sim.Poke($"{p}_rresp", 0UL)
 
+    /// The backing store this slave reads from.
     member _.Memory = memory
 
+    /// Present R and capture AR, before the edge.
     member _.BeginCycle() =
         presented <- bursts.Count > 0 && (let (_, _, due) = bursts.Peek() in due <= cycleCount)
 
@@ -1206,6 +1235,7 @@ type SimAxiReadSlave
             let beats = int (sim.Peek $"{p}_arlen") + 1
             bursts.Enqueue(sim.Peek $"{p}_araddr", beats, cycleCount + drawDelay ())
 
+    /// Readies for the NEXT tick, on the same rule as the write side's.
     member _.Pace() =
         cycleCount <- cycleCount + 1
 
@@ -1223,11 +1253,13 @@ type SimAxiReadSlave
 
         sim.Poke($"{p}_arready", (if arReadyNow then 1UL else 0UL))
 
+    /// The edge, and re-pacing both sets of readies after it.
     member this.FinishCycle() =
         this.Consume()
         sim.Tick()
         this.Pace()
 
+    /// One full cycle of both channels.
     member this.Cycle() =
         this.BeginCycle()
         this.FinishCycle()
@@ -1278,6 +1310,7 @@ type SimAxiDdr
             ?jitter = (jitter |> Option.map (fun j -> j * 2 + 1))
         )
 
+    /// The backing store, shared by both halves of this DDR.
     member _.Memory = memory
 
     /// Present R, capture AW/W and AR, then one clock edge, then re-pace both
@@ -1298,6 +1331,8 @@ type SimAxiDdr
         ||| (uint32 memory[byteAddr + 2] <<< 16)
         ||| (uint32 memory[byteAddr + 3] <<< 24)
 
+    /// Write one 32-bit word into the backing store by byte address — how a
+    /// harness stages data the design is about to read.
     member _.WriteWord(byteAddr: int, value: uint32) =
         memory[byteAddr] <- byte value
         memory[byteAddr + 1] <- byte (value >>> 8)

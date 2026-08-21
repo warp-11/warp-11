@@ -11,11 +11,13 @@ type GroundType =
     | UInt of width: int
     | SInt of width: int
 
+    /// How many bits.
     member t.Width =
         match t with
         | UInt w
         | SInt w -> w
 
+    /// Whether the top bit is a sign — what `mul`, `lt` and the shifts read.
     member t.Signed =
         match t with
         | SInt _ -> true
@@ -24,6 +26,7 @@ type GroundType =
 /// The same width, the other reading. Zero hardware — this is `asUInt`/`asSInt`
 /// at the type level.
 let asUnsignedType (t: GroundType) = UInt t.Width
+/// The other direction, and the one `mul` and `lt` read.
 let asSignedType (t: GroundType) = SInt t.Width
 
 /// Which way a whole-value fold goes. `AllBits` is true only for all-ones,
@@ -33,6 +36,13 @@ type Reduction =
     | AnyBit
     | Parity
 
+/// Every value a design can compute. Width-only bit vectors with a reading
+/// attached — `GroundType` is the whole of the type system down here.
+///
+/// Meaning lives a layer up: `Number` knows about fraction bits, `Union2`
+/// knows about variants, and neither is visible to the emitter or the
+/// simulator. What the IR knows is how wide a value is and whether its top bit
+/// is a sign, which is exactly what it takes to emit correct Verilog.
 type Expr =
     | Lit of value: uint64 * ty: GroundType
     | Ref of name: string * ty: GroundType
@@ -77,10 +87,10 @@ type Expr =
     | AsUInt of value: Expr
     | AsSInt of value: Expr
 
-    // The bitwise trio only. Their result lands in `UInt` whatever the operands
-    // said — bits are bits, FIRRTL's rule — so they need nothing that has to be
-    // written after `typeOf`. The arithmetic three are augmented further down,
-    // where `agreeOnSign` exists to route them through.
+    /// The bitwise trio only. Their result lands in `UInt` whatever the operands
+    /// said — bits are bits, FIRRTL's rule — so they need nothing that has to be
+    /// written after `typeOf`. The arithmetic three are augmented further down,
+    /// where `agreeOnSign` exists to route them through.
     static member (&&&)(a: Expr, b: Expr) = And(a, b)
     static member (|||)(a: Expr, b: Expr) = Or(a, b)
     static member (^^^)(a: Expr, b: Expr) = Xor(a, b)
@@ -137,6 +147,8 @@ let rec typeOf expr =
     | Not v -> UInt (typeOf v).Width
     | MemRead (_, _, w) -> UInt w
 
+/// How many bits, whatever the reading. Widths live in the values, which is
+/// why so little of the DSL takes a width parameter.
 let width (expr: Expr) = (typeOf expr).Width
 
 /// Is this value read as signed?
@@ -145,11 +157,15 @@ let isSigned (expr: Expr) = (typeOf expr).Signed
 let internal maskOf w =
     if w >= 64 then System.UInt64.MaxValue else (1UL <<< w) - 1UL
 
+/// A constant at a stated width, read as unsigned.
 let lit value width = Lit(value, UInt width)
+/// A reference to a name at a stated width. Declaring the thing is someone
+/// else's job — this only refers to it.
 let signal name width = Ref(name, UInt width)
 
 /// The same, read as signed. The bits are identical; only the reading differs.
 let litS value width = Lit(value, SInt width)
+/// A reference read as signed.
 let signalS name width = Ref(name, SInt width)
 
 /// A bare number at a width it was not told, but can work out: the width of
@@ -190,6 +206,9 @@ type Widen =
     static member ($)(Widen, value: Expr) = fun (_: int) -> value
     static member ($)(Widen, value: uint64) = fun (w: int) -> litAt w value
 
+/// Does this expression reach a declared signal? True through `asUInt` and
+/// `asSInt`, because a reinterpretation moves no bits — which is what lets
+/// `slice` take one.
 let rec isNamed expr =
     match expr with
     | Ref _ -> true
@@ -249,7 +268,10 @@ let mux cond ifTrue ifFalse =
     let ifTrue, ifFalse = agreeOnSign ifTrue ifFalse
     Mux(cond, ifTrue, ifFalse)
 
+/// Concatenate, `hi` above `lo`, widths adding. The result is unsigned: a
+/// joined bit pattern has no sign to inherit.
 let cat hi lo = Concat(hi, lo)
+
 /// Kotlin's rule, verbatim: slice takes a declared signal, not an arbitrary
 /// expression — Verilog has no part-select of a computed value, so wrap it in a
 /// wire first. Enforced here and again at emission.
@@ -278,12 +300,14 @@ let inline lt (a: Expr) b =
 
     Lt(a, b)
 
+/// Bitwise complement, width-preserving.
 let bnot value = Not value
 
 /// Read these bits the other way. No hardware — the bits do not move, only what
 /// an operation will make of them. This is how a value that was declared one way
 /// gets used the other, and it is the only way.
 let asSInt (value: Expr) = AsSInt value
+/// And back the other way.
 let asUInt (value: Expr) = AsUInt value
 
 /// The same operators, with a bare number on one side.
@@ -540,6 +564,8 @@ type RamStyle =
     | Distributed
     | Block
 
+/// What a module declares: its ports, its state, its memories. Statements
+/// drive these names, and nothing else introduces one.
 type Decl =
     | Input of name: string * ty: GroundType
     | Output of name: string * ty: GroundType
@@ -568,6 +594,9 @@ let declOf decl =
     | Reg (n, t, _) -> Some(n, t)
     | Memory _ -> None
 
+/// What a module does. `If` is not here — a conditional is folded into its
+/// parent scope during elaboration, so by the time a design is a `ModuleDef`
+/// every target has exactly one assign and every memory one write site.
 type Stmt =
     | Assign of target: string * value: Expr
     /// One write site per mem in the final stmts — Def merges multiple write
@@ -597,16 +626,27 @@ type ClockSpec =
       resetPort: string
       resetActiveLow: bool }
 
+/// `clk` with an active-high `rst`, which is what a design gets unless it
+/// says otherwise.
 let defaultClock =
     { clockPort = "clk"
       resetPort = "rst"
       resetActiveLow = false }
 
+/// The AXI spelling. A slave wrapper's clock pair has to be named this for a
+/// block design to connect it without a rename.
 let axiClock =
     { clockPort = "s_axi_aclk"
       resetPort = "s_axi_aresetn"
       resetActiveLow = true }
 
+/// One elaborated module — the output of the builder and the input to
+/// everything else. The emitter, the simulator, the FIRRTL export and the
+/// debugger all read this and only this.
+///
+/// The last three fields are elaboration-time knowledge that the flattened
+/// statements no longer carry: they exist because the information is
+/// unrecoverable once a design is bits and names.
 type ModuleDef =
     { name: string
       decls: Decl list
@@ -629,6 +669,9 @@ type ModuleDef =
       /// signal table would otherwise show 1.
       stateMachines: (string * (uint64 * string) list) list }
 
+/// A child module and the name it stands under. Its ports become
+/// `{instName}_{port}` in the *parent's* namespace, which is why an instance
+/// name collides with an ordinary declaration.
 and Instance = { instName: string; child: ModuleDef }
 
 /// How a module names its ports. Four fields where two would do, because the

@@ -41,35 +41,72 @@ type RegKind =
     /// to its own size.
     | RwWindow of words: int
 
+/// One register in a map: what it is called, where the host finds it, and what
+/// kind of thing it is. Built by the constructors below and then held on to —
+/// the entry is the key every later access uses, which is what keeps a
+/// register's name from being spelled a second time.
 type RegEntry =
     { name: string
       offset: uint64
       kind: RegKind }
 
+/// A write-1-pulse bit — `start`, `clear`, anything the host *does* rather
+/// than sets.
 let pulseBit name offset bit =
     { name = name; offset = offset; kind = PulseBit bit }
 
+/// A host-written register that reads back what was written.
 let rwReg name offset regWidth init =
     { name = name; offset = offset; kind = RwReg(regWidth, init) }
 
+/// A hardware-driven field the host reads. Several share a word by taking
+/// different bit offsets.
 let roField name offset bitOffset fieldWidth =
     { name = name; offset = offset; kind = RoField(bitOffset, fieldWidth) }
 
+/// An interrupt-status bit: hardware sets it, the host clears it by writing a
+/// one. Every one of these joins the map's interrupt line.
 let w1cBit name offset bit =
     { name = name; offset = offset; kind = W1cBit bit }
 
+/// A constant the host can read — an identifying pattern, a version. Nothing
+/// in the design drives it.
 let roConst name offset value =
     { name = name; offset = offset; kind = RoConst value }
 
+/// A block of words the host writes and the design reads. `words` must be a
+/// power of two, and the window aligned to its own size.
 let rwWindow name offset words =
     { name = name; offset = offset; kind = RwWindow words }
 
+/// A block of words the design writes and the host reads, on the same
+/// alignment rule.
 let roWindow name offset words =
     { name = name; offset = offset; kind = RoWindow words }
 
+/// A whole register map: its aperture, and the entries in it. One definition
+/// elaborates the slave *and* emits the Rust layout, so host and fabric cannot
+/// hold different addresses for the same register.
 type RegMap =
     { apertureAddrWidth: int
       entries: RegEntry list }
+
+/// A host-writable window's read port, as the design sees it. `MemReadPort`
+/// plus the one thing that is different here: the port is shared with the
+/// host, so a design consuming the window statefully has to know whose cycle
+/// it is.
+type WindowPort =
+    { /// The word, `depth` cycles after the address was presented.
+      data: Expr
+      /// How many cycles late `data` is.
+      depth: int
+      /// Carry a signal across the read so it arrives beside `data`.
+      through: string -> Expr -> Expr
+      /// High on the cycles the host has borrowed the port. A design that
+      /// consumes the window statefully gates on this; one that only derives
+      /// combinational values from it may ignore a one-cycle glitch only the
+      /// reading host could observe.
+      hostTurn: Expr }
 
 /// The elaborated slave, handed back as typed access keyed by entry — the one
 /// name-keyed lookup lives inside (the entry IS the key), so a call site
@@ -96,7 +133,7 @@ type SlaveRegs =
       /// second call is the one-driver error, and never calling it leaves the
       /// wire undriven, which fails at emission — a window nobody reads is a
       /// bug, not a default.
-      window: RegEntry -> Expr -> {| data: Expr; depth: int; through: string -> Expr -> Expr; hostTurn: Expr |}
+      window: RegEntry -> Expr -> WindowPort
       /// The backing mem of a `RoWindow`, for the design to `memWrite` — its
       /// write port is exclusively the design's, so the raw mem is the honest
       /// interface and several writes fold as they do anywhere. Reading it
@@ -326,11 +363,7 @@ let axiLiteSlaveOf (m: RegMap) : SlaveRegs =
     // needs the held read word — and the design plugs its address in later
     // through the `window` accessor, which drives the wire declared for it.
     let windowPorts =
-        System.Collections.Generic.Dictionary<string, {| designAddr: Expr
-                                                         data: Expr
-                                                         depth: int
-                                                         through: string -> Expr -> Expr
-                                                         hostTurn: Expr |}>()
+        System.Collections.Generic.Dictionary<string, {| designAddr: Expr; port: WindowPort |}>()
 
     // Deterministic on purpose: the fold walks the map's own entry order, not
     // a dictionary's, so two elaborations of one map emit identical Verilog.
@@ -366,10 +399,11 @@ let axiLiteSlaveOf (m: RegMap) : SlaveRegs =
 
                 windowPorts[name] <-
                     {| designAddr = designAddr
-                       data = port.data
-                       depth = port.depth
-                       through = port.through
-                       hostTurn = hostTurn |}
+                       port =
+                        { data = port.data
+                          depth = port.depth
+                          through = port.through
+                          hostTurn = hostTurn } |}
 
                 mux windowHit (zeroExtend32 port.data) below
             | RoWindow _ ->
@@ -409,11 +443,7 @@ let axiLiteSlaveOf (m: RegMap) : SlaveRegs =
         fun e designAddr ->
             let p = find "a window" windowPorts e
             designAddr ==> p.designAddr
-
-            {| data = p.data
-               depth = p.depth
-               through = p.through
-               hostTurn = p.hostTurn |}
+            p.port
       irq = irqLevel }
 
 let private upperSnake (name: string) =

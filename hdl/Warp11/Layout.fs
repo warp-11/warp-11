@@ -72,6 +72,8 @@ let layoutJoin (a: Layout<'a>) (b: Layout<'b>) : Layout<'a * 'b> =
 
             a.unpack (List.truncate aCount nets), b.unpack (List.skip aCount nets) }
 
+/// One named field. The payload *is* the `Expr`, so a single-field stream
+/// carries a value rather than a one-tuple.
 let layout1 (an: string, aw: int) : Layout<Expr> =
     { fields = [ (an, aw) ]
       pack = fun x -> [ x ]
@@ -81,6 +83,7 @@ let layout1 (an: string, aw: int) : Layout<Expr> =
             | [ x ] -> x
             | _ -> failwith $"layout1 {an}: expected 1 net" }
 
+/// Two named fields, as a pair.
 let layout2 (an: string, aw: int) (bn: string, bw: int) : Layout<Expr * Expr> =
     { fields = [ (an, aw); (bn, bw) ]
       pack = fun (x, y) -> [ x; y ]
@@ -90,6 +93,7 @@ let layout2 (an: string, aw: int) (bn: string, bw: int) : Layout<Expr * Expr> =
             | [ x; y ] -> x, y
             | _ -> failwith $"layout2 {an},{bn}: expected 2 nets" }
 
+/// Three named fields, as a triple.
 let layout3 (an: string, aw: int) (bn: string, bw: int) (cn: string, cw: int) : Layout<Expr * Expr * Expr> =
     { fields = [ (an, aw); (bn, bw); (cn, cw) ]
       pack = fun (x, y, z) -> [ x; y; z ]
@@ -99,6 +103,8 @@ let layout3 (an: string, aw: int) (bn: string, bw: int) (cn: string, cw: int) : 
             | [ x; y; z ] -> x, y, z
             | _ -> failwith $"layout3 {an},{bn},{cn}: expected 3 nets" }
 
+/// Four named fields, as a quadruple. Past this, `layoutJoin` composes two
+/// layouts rather than the list growing a `layout5`.
 let layout4
     (an: string, aw: int)
     (bn: string, bw: int)
@@ -145,6 +151,9 @@ type Union2<'a, 'b> =
 
 let private packedWidth (l: Layout<_>) = l.fields |> List.sumBy snd
 
+/// A two-variant union over two layouts. One tag bit, and a data field as wide
+/// as the larger variant — the narrower one is zero-padded, so both variants
+/// occupy the same wires and a union stream is an ordinary stream.
 let union2 (v0: Layout<'a>) (v1: Layout<'b>) : Union2<'a, 'b> =
     { tagWidth = 1
       dataWidth = max (packedWidth v0) (packedWidth v1)
@@ -182,15 +191,21 @@ let transporter (l: Layout<'p>) : Transporter<'p> =
       dematerialize = packInto w l
       materialize = variantView l }
 
+/// Build a beat carrying the first variant.
 let inject0 (u: Union2<'a, 'b>) (payload: 'a) : UnionBeat =
     { tag = lit 0UL u.tagWidth
       data = packInto u.dataWidth u.variant0 payload }
 
+/// Build a beat carrying the second variant.
 let inject1 (u: Union2<'a, 'b>) (payload: 'b) : UnionBeat =
     { tag = lit 1UL u.tagWidth
       data = packInto u.dataWidth u.variant1 payload }
 
+/// Read a beat's data as the first variant. Whether it *is* one is a runtime
+/// fact the tag carries, so this is only correct under a `matchUnion` — it
+/// slices unconditionally and cannot check.
 let variant0 (u: Union2<'a, 'b>) data : 'a = variantView u.variant0 data
+/// Read a beat's data as the second variant, under the same condition.
 let variant1 (u: Union2<'a, 'b>) data : 'b = variantView u.variant1 data
 
 /// The stream layout of a union beat, so union streams ride the generic stream

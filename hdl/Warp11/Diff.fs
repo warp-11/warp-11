@@ -17,6 +17,13 @@ let private hexDigits (v: BigInteger) =
     let s = v.ToString("x").TrimStart('0')
     if s = "" then "0" else s
 
+/// A self-checking Verilog testbench for a design: seeded random stimulus, and
+/// an assertion per cycle that the emitted Verilog produces exactly the trace
+/// the Sim did.
+///
+/// This is the differential oracle's generator. What it verifies is the
+/// *toolchain* — a divergence is a simulator bug or an emitter bug, and the
+/// design is the test input.
 let diffTb (design: ModuleDef) (cycles: int) =
     let rand = System.Random(stableHash design.name)
     let sim = Sim(design)
