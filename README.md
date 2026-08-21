@@ -178,8 +178,8 @@ the IR did not invent its own semantics gets measured.
 Being clear about this is cheaper than letting you find out:
 
 - **The packages are prereleases.** `Warp11`, `Warp11.SimView` and
-  `Warp11.SimView.Desktop` are on NuGet at `0.1.0-alpha.1`, so `dotnet add
-  package` needs `--prerelease`. They are published to hold the names and to
+  `Warp11.SimView.Desktop` are on NuGet at a `0.1.0-alpha` version, so `dotnet
+  add package` needs `--prerelease`. They are published to hold the names and to
   make the debugger reachable; the repo is still the better way in while the
   API moves.
 - **The API is not stable.** It is pre-1.0 and things move.

@@ -19,8 +19,8 @@ cd warp-11/hdl
 dotnet build Warp11.sln
 ```
 
-**There is a package, and this page still clones.** `Warp11` is on NuGet at
-`0.1.0-alpha.1`:
+**There is a package, and this page still clones.** `Warp11` is on NuGet as a
+prerelease:
 
 ```sh
 dotnet add package Warp11 --prerelease

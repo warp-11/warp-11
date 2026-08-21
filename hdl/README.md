@@ -565,11 +565,15 @@ dotnet nuget push artifacts/Warp11.<version>.nupkg \
 # then Warp11.SimView, then Warp11.SimView.Desktop
 ```
 
-**After the push, update the version the docs quote.** Three files state the
-published version in prose and go stale the moment it moves — this repo's
-`README.md`, `docs/start-a-project.md`, and `hdl/Warp11.SimView/README.md`.
-They are deliberately not bumped *before* the push: until it succeeds, the old
-number is the true one.
+**No prose anywhere quotes the version, deliberately.** It would have to be
+right *before* the pack, not after the push, because the repo `README.md` is
+packed into the `Warp11` package — a README saying `alpha.1` would ship inside
+`alpha.2`. Rather than sync that by hand, the sentences say "a `0.1.0-alpha`
+version" and "a prerelease" and let `--prerelease` and nuget.org supply the
+number. `Directory.Build.props` is the only place a version is written.
+
+Keep it that way. If a doc ever needs the exact number, it is a sign the doc is
+describing the wrong thing.
 
 `--api-key` comes from a nuget.org API key; **it is not in this repo and must
 not be.** The `.snupkg` symbol packages are pushed automatically alongside each
