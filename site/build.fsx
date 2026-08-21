@@ -215,7 +215,7 @@ let template (current: Page) (body: string) =
        "the API is not stable" is exactly the thing they need before they build
        against it. It links to what that means rather than just asserting it. -->
   <a class="prerelease" href="{home up}#what-is-not-built"
-     title="The API is not stable and there is no published package yet">pre-release</a>
+     title="The API is not stable — the packages on NuGet are prereleases">pre-release</a>
   <nav class="top">
     <a href="{up}guides/start-a-project">Guides</a>
     <a href="{up}tutorial/counter">Tutorial</a>

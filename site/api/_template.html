@@ -11,6 +11,14 @@
 <body class="{{fsdocs-body-class}}">
 <header>
   <a class="brand" href="/">warp<span>11</span></a>
+  <!-- The same standing badge `build.fsx` puts on every authored page. It
+       belongs here more than there, not less: a reader who lands on a reference
+       page from a search engine is by definition looking up an API they are
+       about to build against, and this is the one place that says the API moves.
+       Absolute href because fsdocs is run with `--parameters root /`, so every
+       link it generates is absolute already. -->
+  <a class="prerelease" href="/#what-is-not-built"
+     title="The API is not stable — the packages on NuGet are prereleases">pre-release</a>
   <nav class="top">
     <a href="/guides/start-a-project">Guides</a>
     <a href="/tutorial/counter">Tutorial</a>
