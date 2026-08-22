@@ -80,7 +80,7 @@ let blinker =
 
 [<EntryPoint>]
 let main _ =
-    printfn "%s" (emitVerilog blinker)
+    printfn "%s" (emitDesign blinker)
 
     let sim = Sim blinker
     sim.Poke("enable", 1UL)
@@ -92,7 +92,17 @@ let main _ =
     0
 ```
 
-A single `open Warp11` is the whole surface: the DSL, `Sim`, and `emitVerilog`.
+A single `open Warp11` is the whole surface: the DSL, `Sim`, and `emitDesign`.
+
+**`emitDesign` is how a design becomes Verilog.** It runs three elaboration
+checks first — `checkWidths`, `checkNames`, `checkStreams` — and refuses on any
+of them, because each catches something that is silent through elaboration *and*
+through synthesis. Then it emits every module in the design, children first,
+deduplicated by name, so a component instantiated forty times is emitted once.
+
+`Blinker` is a single flat module, so there are no children to emit yet. There
+will be the moment you instantiate anything, and you will not have to remember
+to do anything differently.
 
 ```sh
 cd Blinker && dotnet run

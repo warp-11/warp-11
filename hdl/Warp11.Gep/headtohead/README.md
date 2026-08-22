@@ -24,7 +24,7 @@ and not pinned anywhere. Rerunning Warp 11 alone would leave nothing to
 compare against.
 
 Treat the Warp 11 column as a record of the **Kotlin** engine at that date, not
-a current claim. The F# engine is measured separately in `notes/BACKLOG.md`
+a current claim. The F# engine is measured separately in `notes/FINDINGS.md`
 (2026-08-11): same 3/6 solved at the head-to-head config, and 5/6 under the
 README's own criterion once the solving config and a seed distribution are
 used instead of a single fixed-budget run. I.13.4 remains unsolved by both.
