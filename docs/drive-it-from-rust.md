@@ -61,7 +61,7 @@ let main argv =
     | [| "layout"; path |] ->
         System.IO.File.WriteAllLines(path, regMapRsLines BlinkerMap.map)
         printfn $"wrote {path}"
-    | _ -> printfn "%s" (emitVerilog blinkerAxi)
+    | _ -> printfn "%s" (emitDesign blinkerAxi)
     0
 ```
 

@@ -66,7 +66,7 @@ let counter =
         r ==> count)
 ```
 
-`emitVerilog counter` produces:
+`emitDesign counter` produces:
 
 ```verilog
 module Counter (input clk, input rst, input enable, input clear, output [7:0] count);
