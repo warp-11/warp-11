@@ -243,7 +243,7 @@ let private readsOf (m: ModuleDef) =
 /// `isPublic` marks the circuit's main module. FIRRTL 4.0 removed private main
 /// modules — a circuit's entry point has to say its ports are the boundary, and
 /// firtool refuses the file otherwise.
-let emitModule (isPublic: bool) (m: ModuleDef) =
+let internal emitModule (isPublic: bool) (m: ModuleDef) =
     let indent = "  "
     let body = indent + indent
 

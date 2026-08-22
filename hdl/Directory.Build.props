@@ -12,7 +12,7 @@
          One line here cannot disagree with itself. -->
 
     <PropertyGroup>
-        <Version>0.1.0-alpha.2</Version>
+        <Version>0.1.0-alpha.3</Version>
 
         <!-- A non-exhaustive match must not compile. F#'s default is a warning
              plus MatchFailureException at runtime; for an emitter that is the

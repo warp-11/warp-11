@@ -36,7 +36,7 @@ let rec private namedRef expr =
 /// rules are context-dependent and quietly so, which is why every operand is
 /// emitted at a width this side has worked out rather than at whatever the
 /// surrounding expression would have implied.
-let rec emitAt target expr =
+let rec internal emitAt target expr =
     match expr with
     | Lit (v, t) -> $"%d{max target t.Width}'d%d{v}"
     | _ ->
@@ -146,7 +146,7 @@ let rec emitAt target expr =
             $"{{%d{target - w}'d0, {core}}}"
 
 /// Emit an expression at its own width.
-let emit expr = emitAt (width expr) expr
+let internal emit expr = emitAt (width expr) expr
 
 let private nameAndWidth decl =
     match decl with
@@ -294,7 +294,7 @@ let private splitExpr (budget: int) (fresh: unit -> string) (expr: Expr) : Expr 
 /// being right, so a claim is edge-triggered like everything else. The
 /// consequence is worth knowing: adding an assertion to a purely combinational
 /// module adds `clk`/`rst` to its boundary.
-let rec needsClk m =
+let rec internal needsClk m =
     m.decls
     |> List.exists (function
         | Reg _
@@ -308,7 +308,18 @@ let rec needsClk m =
 
 /// One module's Verilog. Instances are emitted as instantiations, not inlined,
 /// so the emitted hierarchy is the elaborated one.
-let emitVerilog m =
+///
+/// **Reach for `emitDesign`, not this.** This emits the module it is given and
+/// nothing below it, and it runs none of the elaboration checks — so on a
+/// design that instantiates anything it silently produces a top with dangling
+/// instantiations. `emitDesign` is this function mapped over the whole
+/// hierarchy, behind the checks, and is what a design should be emitted with.
+/// The one caller that wants this directly is `writeDiff`, which dedupes
+/// modules across *several* designs into one file and so cannot go design by
+/// design — and it runs `emitDesign` first anyway, for the checks. That is why
+/// this is `internal`: there is no use for it outside this assembly, and while
+/// it was public the docs taught it by mistake.
+let internal emitVerilog m =
     let isReg n =
         m.decls
         |> List.exists (function

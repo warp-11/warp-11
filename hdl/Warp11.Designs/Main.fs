@@ -2634,7 +2634,7 @@ let private mainDemo () =
               if not (line.StartsWith "module " || line.Contains "assign escape") then
                   yield line ]
 
-    printfn $"Fixed layer compiles away:    %b{minusEscape (emitVerilog escapeStep) = minusEscape (emitVerilog escapeStepFixed)}"
+    printfn $"Fixed layer compiles away:    %b{minusEscape (emitDesign escapeStep) = minusEscape (emitDesign escapeStepFixed)}"
 
     // saturate/saturateS/shl/shr against their software meanings, on the
     // boundary patterns (clamp points, sign flips) plus a spread of ordinary

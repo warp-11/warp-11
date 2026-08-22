@@ -1634,20 +1634,12 @@ let multibandCompressor8 (name: string) (crossovers: float list) (q: float) (sam
             // filterbank, arriving with the result it describes.
             let validRest = List.init (earLatency - 1) (fun i -> regBit $"v{i}")
 
-            // KNOWN DEFECT, diagnosed 2026-08-19 — see notes/SMALL_FINDINGS.md.
-            // These shift once per *ready cycle*, while the DSP above advances
-            // once per *accepted beat*. Those are the same event only while the
-            // producer never stalls, which is the only case the suite used to
-            // exercise. When they diverge the DSP result arrives under somebody
-            // else's `valid` and the output is a shifted signal.
-            //
-            // Shifting these on `advance` instead is NOT the fix: `advance`
-            // already implies a beat, so `validPipe[0]` would be a constant 1,
-            // `outValid` would stick high once the pipe filled, and the tail
-            // would never drain. Draining on `enable` is what flushes the last
-            // `latency` samples, and that is why it was written this way. The
-            // real fix is a positional pipeline the DSP shares, which is a
-            // restructure rather than a gate change.
+            // These shift on `enable`, with the data pipeline they describe:
+            // the held low-pass outputs, `x_held` and the adder tree all move
+            // on the same bit, so a bubble travels through as `valid` low and
+            // the tail drains. Only the *recurrences* — the filterbank history
+            // and the compressor envelopes — gate on `advance`, because state
+            // may move only on a real beat.
             If enable (fun () ->
                 validRest
                 |> List.iteri (fun i r -> (if i = 0 then validAt1 else validRest[i - 1]) ==> r))
