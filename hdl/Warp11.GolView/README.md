@@ -25,8 +25,10 @@ The heads: `../Warp11.GolView.Desktop/` (all buses, picked by argument) and
 ```sh
 export PATH="$HOME/.dotnet:$PATH"
 cd Warp11.GolView.Desktop
-dotnet run -c Release -- --sim                        # the idiomatic engine (the default)
-dotnet run -c Release -- --hdl                        # the RTL in the Sim
+dotnet run -c Release                                 # --hdl implied: the RTL in the Sim
+dotnet run -c Release -- --software                   # a plain F# implementation
+dotnet run -c Release -- --software-arrays            # ...and its two faster
+dotnet run -c Release -- --software-bitboard          #    siblings, the tutorial's ladder
 LD_LIBRARY_PATH=<zenohc>/lib \
 dotnet run -c Release -- tcp/192.168.1.172:7447       # the board daemon
 ```

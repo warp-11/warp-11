@@ -53,23 +53,18 @@ In simulation, with the desktop UI:
 ```sh
 cd hdl
 P="--project Warp11.GolView.Desktop"
-dotnet run -c Release $P                     # --sim implied: the idiomatic engine
-dotnet run -c Release $P -- --sim-arrays     # ...and its two faster siblings,
-dotnet run -c Release $P -- --sim-bitboard   #    the tutorial's software ladder
-dotnet run -c Release $P -- --hdl            # the elaborated RTL, in the Sim
+dotnet run -c Release $P                     # the elaborated RTL, in the Sim
+dotnet run -c Release $P -- --software       # a plain F# implementation instead
 dotnet run -c Release $P -- tcp/<host>:7447  # the board, over the gol-daemon
 ```
 
-**`--hdl` is the interesting one**, and it is what puts a **Debugger** button in
-the view. The `--sim*` modes run `Warp11.GolView/Engine.fs` — plain F# functions
-over 64 rows of bits, no design behind them, so there is nothing to attach a
-debugger to. (These are the tutorial's optimization ladder, and **not**
-`Warp11.GoL/Twin.fs`, which is the twin the *checks* diff the RTL against. Two
-software implementations, different jobs.)
+**The default runs the design**, which is why the view has a **Debugger** button
+the moment it opens. `--software` swaps in an ordinary F# function over 64 rows
+of bits — useful for comparing against, and it has no button, because there is
+no design behind it to attach one to.
 
-**One sharp edge:** any argument that is not a recognised flag is treated as a
-Zenoh endpoint, so a mistyped `--hdl` does not fail — it quietly tries to reach
-a board that is not there, and you get a view that never updates.
+(`Warp11.GolView/README.md` documents two further software variants; they are
+rungs of the tutorial's optimization ladder rather than anything you need here.)
 
 ## One session, many views
 

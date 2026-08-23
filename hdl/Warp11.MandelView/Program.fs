@@ -1,4 +1,4 @@
-/// The composition root: pick the bus, open the window. `--sim` (the default
+/// The composition root: pick the bus, open the window. `--software` (the default
 /// when no endpoint is given) renders locally with the software twin — the
 /// same `laneTwin` the fabric is judged against, so the picture is identical
 /// and only the clock differs. An endpoint argument
@@ -38,9 +38,13 @@ type App() =
         | :? IClassicDesktopStyleApplicationLifetime as desktop ->
             let bus =
                 match desktop.Args |> Option.ofObj |> Option.defaultValue [||] |> Array.tryHead with
-                | Some "--sim"
+                | Some "--software"
                 | None ->
                     new SimulatedBus.SimulatedBus(frameWidth, frameHeight, maxIter) :> IMandelBus
+                // An endpoint never starts with `--`, so anything that does
+                // is a typo rather than a board to dial.
+                | Some flag when flag.StartsWith "--" ->
+                    failwith $"unknown option {flag} — expected --software or a Zenoh endpoint"
                 | Some endpoint -> new ZenohBus.ZenohBus(endpoint) :> IMandelBus
 
             desktop.MainWindow <- MainWindow(bus)

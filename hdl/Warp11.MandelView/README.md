@@ -25,7 +25,7 @@ measurements and what would earn them back.
 
 ```sh
 export PATH="$HOME/.dotnet:$PATH"
-dotnet run -c Release -- --sim                        # local twin
+dotnet run -c Release -- --software                   # local twin (the default)
 LD_LIBRARY_PATH=<zenohc>/lib \
 dotnet run -c Release -- tcp/192.168.1.172:7448       # the board daemon
 ```
