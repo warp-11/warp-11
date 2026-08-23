@@ -17,11 +17,16 @@ this rate it gets there in the first few microseconds.*
   hardware can be tested together before either reaches silicon. The simulator
   itself is checked against Verilator on the emitted Verilog, cycle by cycle,
   across every design in the library.
-- **A step-through debugger.** Watch lists, memory windows, waveforms, and
-  breakpoints written as expressions over your own signals — attachable to a
-  design an application is already running, and extensible with your own panels,
-  because what you actually want to look at is specific to what you built. VCD
-  export when you want GTKWave's zoom, search and cursors instead.
+- **A step-through debugger, attachable to a design already running.** Watch
+  lists, memory windows, waveforms, and breakpoints written as expressions over
+  your own signals, extensible with your own panels because what you want to
+  look at is specific to what you built. The session is a first-class object
+  rather than something a window owns, so **your application and a debugger can
+  watch one running design at the same time** — set a breakpoint in the debugger
+  and your app's display stops with it. The Game of Life example does this in
+  about twenty lines and
+  [shows you how](https://warp11.org/examples/game-of-life). VCD export when you
+  want GTKWave's zoom, search and cursors instead.
 - **Board and host integration as a first-class concern.** One register-map
   definition emits the AXI slave *and* the host driver's constants, so the
   program and the fabric cannot disagree about the register map.

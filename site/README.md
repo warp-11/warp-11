@@ -15,6 +15,25 @@ dotnet fsi site/build.fsx
 python3 site/serve.py 8080
 ```
 
+**Build it from the branch you intend to deploy.** `site/apibuild` and
+`site/out` are gitignored build output, so they do *not* follow a checkout —
+they are whatever branch was current the last time each was generated. The site
+deploys from `docs/vX`, and the API reference is generated from that branch's
+library source, so regenerating fsdocs on `main` and then previewing or
+deploying `docs/vX` publishes a reference for an API the released package does
+not have. That is precisely the mismatch the docs branch exists to prevent, and
+it arrives through a stale artifact rather than through git, where nothing will
+warn you.
+
+So, on the docs branch, before deploying:
+
+```sh
+dotnet build hdl/Warp11                     # Debug: fsdocs reads that XML
+dotnet fsdocs build --input site/api --output site/apibuild \
+    --projects hdl/Warp11/Warp11.fsproj --parameters root /
+dotnet fsi site/build.fsx
+```
+
 Then open <http://127.0.0.1:8080>. `build.fsx` copies the debugger to `/try/`,
 the live Game of Life demo to `/live/gol/` and the reference to `/reference/`,
 and says which is missing rather than failing.
