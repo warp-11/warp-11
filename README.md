@@ -10,7 +10,7 @@ bitstream, so what you debug is what you deploy.
 blocks and blinkers are what a random soup settles into after that many — at
 this rate it gets there in the first few microseconds.*
 
-![Game of Life running on a KV260 at 503 million generations per second](docs/images/gol-500m.png)
+![Game of Life running on a KV260 at 503 million generations per second](https://warp11.org/images/gol-500m.png)
 
 - **Simulate the whole application, host side included.** The same driver code
   runs against the simulator and against the board, so the program and the
@@ -113,7 +113,7 @@ is a real amount, but far less than the tooling usually implies.
 
 The honest comparison against Chisel, SpinalHDL, HardCaml, Amaranth, Clash,
 Bluespec and Veryl — including where Warp 11 is behind — is in
-[HDL_COMPARISON.md](docs/HDL_COMPARISON.md).
+[HDL_COMPARISON.md](https://warp11.org/guides/comparison).
 
 ## Getting started
 
@@ -149,28 +149,28 @@ the IR did not invent its own semantics gets measured.
 
 **Getting started, in order:**
 
-- **[How it fits together](docs/architecture.md)** — the map. What elaboration
+- **[How it fits together](https://warp11.org/guides/architecture)** — the map. What elaboration
   is, what the simulator and the Verilog emitter each do with it, and where the
   Rust runtime sits. Start here if you have not used an HDL before.
-- **[Start your own project](docs/start-a-project.md)** — an empty folder to a
+- **[Start your own project](https://warp11.org/guides/start-a-project)** — an empty folder to a
   design of yours running in the step-through debugger. No FPGA required.
-- **[Drive it from Rust](docs/drive-it-from-rust.md)** — give it a register map
+- **[Drive it from Rust](https://warp11.org/guides/drive-it-from-rust)** — give it a register map
   and a host program, still running against the simulator.
 
 **Then, in any order:**
 
-- **[The tutorial](hdl/Warp11.Tutorial/doc/counter.md)** — start at Counter and
+- **[The tutorial](https://warp11.org/tutorial/counter)** — start at Counter and
   read through Sequencer, which is the first tier and enough to build something.
   Streams, the stdlib and the board-facing pages follow. It assumes you can
   program and does not assume you have written RTL.
-- **[Streams](docs/streams.md)** — the ready/valid layer, and `wormhole`, the
+- **[Streams](https://warp11.org/guides/streams)** — the ready/valid layer, and `wormhole`, the
   one call that connects anything stream-shaped.
-- **The examples** — [Mandelbrot](hdl/Warp11.Mandelbrot/README.md),
-  [GEP](hdl/Warp11.Gep/README.md) and
-  [Game of Life](hdl/Warp11.GoL/README.md), each with its own write-up.
-- **[Runtime and host drivers](runtime/README.md)** — the crates, cross-compiling
+- **The examples** — [Mandelbrot](https://warp11.org/examples/mandelbrot),
+  [GEP](https://warp11.org/examples/gep) and
+  [Game of Life](https://warp11.org/examples/game-of-life), each with its own write-up.
+- **[Runtime and host drivers](https://warp11.org/guides/runtime)** — the crates, cross-compiling
   for the board without a cross-gcc, and the first-light binaries.
-- **[Hardware workflow](docs/dev-workflow.md)** — getting a bitstream onto a
+- **[Hardware workflow](https://warp11.org/guides/dev-workflow)** — getting a bitstream onto a
   KV260 and driving it.
 
 ## What is not built

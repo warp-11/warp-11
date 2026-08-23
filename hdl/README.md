@@ -558,12 +558,27 @@ done
 unzip -p artifacts/Warp11.SimView.Desktop.<version>.nupkg \
     Warp11.SimView.Desktop.nuspec | grep '<dependency'
 
+# 4b. the README renders STANDALONE on nuget.org, with no repo behind it, so
+#     every image in it needs an absolute URL. Relative paths look right on
+#     GitHub and on warp11.org and break only here — which is how alpha.2
+#     shipped with the GoL image missing. Only the README is packed, no images.
+unzip -p artifacts/Warp11.<version>.nupkg README.md | grep -n ']('
+#     …every link and image above must be an absolute https:// URL, and one
+#     pointing at `main` rather than at a tag — a tagged URL is wrong inside
+#     the *next* package, the same trap as quoting the version in prose.
+
 # 5. push. Library first — a debugger package whose dependency is not yet
 #    indexed is installable by nobody for the minutes nuget.org takes to catch up
 dotnet nuget push artifacts/Warp11.<version>.nupkg \
     --source https://api.nuget.org/v3/index.json --api-key "$NUGET_API_KEY"
 # then Warp11.SimView, then Warp11.SimView.Desktop
 ```
+
+**Step 4b exists because nuget.org's page cannot be corrected afterwards.**
+A published version can be unlisted but never replaced, so a broken image or a
+dead link is permanent for that version. Everything in steps 4 and 4b is
+checking things that are free to fix now and impossible to fix in a minute's
+time.
 
 **No prose anywhere quotes the version, deliberately.** It would have to be
 right *before* the pack, not after the push, because the repo `README.md` is
