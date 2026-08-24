@@ -52,6 +52,7 @@
         <Compile Include="Vcd.fs"/>
         <Compile Include="Diff.fs"/>
         <Compile Include="Stdlib.fs"/>
+        <Compile Include="Windows.fs"/>
         <Compile Include="Audio.fs"/>
         <Compile Include="Wav.fs"/>
     </ItemGroup>

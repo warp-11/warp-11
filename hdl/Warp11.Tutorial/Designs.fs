@@ -765,7 +765,7 @@ let registerMap =
 let ddrMaster =
     design "DdrMaster" (fun () ->
         Stream.input "req" (layout1 ("addr", 32))
-        |> axiMasterReader 32 32 4
+        |> axiMasterReaderOn (axiReadBus 32 32) 4
         |> Stream.out "resp"
 
         // The arm gate. A master that free-runs will write to whatever its
@@ -792,7 +792,7 @@ let ddrMaster =
           valid = armed
           ready = ready
           layout = axiWriteBeatLayout 32 32 }
-        |> axiMasterWriter 32 32 4
+        |> axiMasterWriterOn (axiWriteBus 32 32) 4
 
         let written = output "words_written" 8
         index ==> written)

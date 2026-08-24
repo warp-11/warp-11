@@ -933,6 +933,176 @@ let private log2 n =
     if n <= 0 || n &&& (n - 1) <> 0 then failwith $"log2 requires a power of two, got %d{n}"
     System.Numerics.BitOperations.Log2(uint n) |> int
 
+/// A master's boundary, as a value the *design* owns.
+///
+/// The entries below used to declare `m_axi_*` themselves. Three things were
+/// wrong with that, and this type fixes all three:
+///
+/// - **A stdlib call grew its caller's port list**, by fourteen or fifteen
+///   ports, in a module whose source never wrote the word "port".
+/// - **It only worked from the design's top.** A master called inside a child
+///   declared the ports on the child, whose ports become staging wires in the
+///   parent, and the bus reached nothing. That emitted cleanly — Verilator
+///   reports it UNDRIVEN, which `run_differential.sh` suppresses — so a master
+///   one level down was a floating bus nothing in the toolchain caught.
+/// - **The name was hardcoded**, so a design got one bus. A Zynq UltraScale+
+///   part has four High Performance slave ports and two coherent ones; two
+///   masters onto different ones was inexpressible.
+///
+/// A bus is created where a design's boundary belongs, once, in the open, and
+/// handed to whatever drives it. A child cannot conjure one; it has to be
+/// given one, and giving one across a module boundary is threading a value
+/// somebody can see.
+///
+/// Widths are not carried: they are `width bus.araddr` and `width bus.rdata`,
+/// so a master sized against a bus cannot disagree with the bus it is on.
+type AxiReadBus =
+    { /// What the ports are called. `m_axi` is the conventional one.
+      prefix: string
+      araddr: Expr
+      /// Written by the burst master and tied to zero by the single-beat one,
+      /// which is why the bus does not tie it.
+      arlen: Expr
+      arvalid: Expr
+      arready: Expr
+      rdata: Expr
+      rlast: Expr
+      rvalid: Expr
+      rready: Expr
+      /// Set when a master takes the bus. The one-driver rule already refuses
+      /// two masters that both drive `arvalid`, but that is a per-*signal*
+      /// guarantee: two modules each driving half a bus pass it and produce
+      /// nonsense. A bus needs a per-*bus* check, which is `checkStreams`'
+      /// argument in another costume — a stream has one consumer, a bus has one
+      /// owner.
+      claimed: bool ref }
+
+/// The AW/W/B half. See `AxiReadBus` for why a bus is a value.
+type AxiWriteBus =
+    { prefix: string
+      awaddr: Expr
+      awvalid: Expr
+      awready: Expr
+      wdata: Expr
+      wstrb: Expr
+      wvalid: Expr
+      wready: Expr
+      bvalid: Expr
+      bready: Expr
+      claimed: bool ref }
+
+let private axiWidths (who: string) (addrWidth: int) (dataWidth: int) =
+    if dataWidth <> 32 && dataWidth <> 64 && dataWidth <> 128 then
+        failwith $"{who} dataWidth must be 32, 64 or 128, got %d{dataWidth}"
+
+    if addrWidth < 12 || addrWidth > 40 then
+        failwith $"{who} addrWidth must be 12..40, got %d{addrWidth}"
+
+let private axiOutstanding (maxOutstanding: int) =
+    if maxOutstanding < 1 || maxOutstanding > 32 then
+        failwith $"maxOutstanding must be 1..32, got %d{maxOutstanding}"
+
+    if maxOutstanding > 1 && maxOutstanding &&& (maxOutstanding - 1) <> 0 then
+        failwith $"maxOutstanding must be a power of two (or 1), got %d{maxOutstanding}"
+
+let private axiSizeEncoding (dataWidth: int) =
+    match dataWidth with
+    | 32 -> 2UL
+    | 64 -> 3UL
+    | _ -> 4UL
+
+/// Take ownership of a bus, or say who already has it. The message names the
+/// bus rather than one of its wires, which is the point.
+let private claimBus (prefix: string) (half: string) (claimed: bool ref) =
+    if claimed.Value then
+        failwith
+            $"the {half} bus '{prefix}' already has an owner — this is the second master on it. A bus has exactly one master; put an arbiter in front of it and give the arbiter the bus"
+
+    claimed.Value <- true
+
+/// Declare an AR/R boundary named `prefix`, and tie the transaction constants
+/// that never vary. `arlen` is left untied: the single-beat master zeroes it,
+/// the burst master drives it from the descriptor.
+let axiReadBusNamed (prefix: string) (addrWidth: int) (dataWidth: int) : AxiReadBus =
+    axiWidths "axiReadBus" addrWidth dataWidth
+
+    let araddr = output $"{prefix}_araddr" addrWidth
+    let arlen = output $"{prefix}_arlen" 8
+    let arsize = output $"{prefix}_arsize" 3
+    let arburst = output $"{prefix}_arburst" 2
+    let arcache = output $"{prefix}_arcache" 4
+    let arprot = output $"{prefix}_arprot" 3
+    let arvalid = outputBit $"{prefix}_arvalid"
+    let arready = inputBit $"{prefix}_arready"
+    let rdata = input $"{prefix}_rdata" dataWidth
+    input $"{prefix}_rresp" 2 |> ignore // trusted OKAY
+    let rlast = inputBit $"{prefix}_rlast"
+    let rvalid = inputBit $"{prefix}_rvalid"
+    let rready = outputBit $"{prefix}_rready"
+
+    lit (axiSizeEncoding dataWidth) 3 ==> arsize
+    lit 1UL 2 ==> arburst // INCR
+    lit 0UL 4 ==> arcache
+    lit 0UL 3 ==> arprot
+
+    { prefix = prefix
+      araddr = araddr
+      arlen = arlen
+      arvalid = arvalid
+      arready = arready
+      rdata = rdata
+      rlast = rlast
+      rvalid = rvalid
+      rready = rready
+      claimed = ref false }
+
+/// The conventional `m_axi` read boundary.
+let axiReadBus (addrWidth: int) (dataWidth: int) = axiReadBusNamed "m_axi" addrWidth dataWidth
+
+/// Declare an AW/W/B boundary named `prefix` and tie its transaction constants:
+/// one beat per burst, INCR, WLAST always, cache and prot zero.
+let axiWriteBusNamed (prefix: string) (addrWidth: int) (dataWidth: int) : AxiWriteBus =
+    axiWidths "axiWriteBus" addrWidth dataWidth
+
+    let awaddr = output $"{prefix}_awaddr" addrWidth
+    let awlen = output $"{prefix}_awlen" 8
+    let awsize = output $"{prefix}_awsize" 3
+    let awburst = output $"{prefix}_awburst" 2
+    let awcache = output $"{prefix}_awcache" 4
+    let awprot = output $"{prefix}_awprot" 3
+    let awvalid = outputBit $"{prefix}_awvalid"
+    let awready = inputBit $"{prefix}_awready"
+    let wdata = output $"{prefix}_wdata" dataWidth
+    let wstrb = output $"{prefix}_wstrb" (dataWidth / 8)
+    let wlast = outputBit $"{prefix}_wlast"
+    let wvalid = outputBit $"{prefix}_wvalid"
+    let wready = inputBit $"{prefix}_wready"
+    input $"{prefix}_bresp" 2 |> ignore // trusted OKAY
+    let bvalid = inputBit $"{prefix}_bvalid"
+    let bready = outputBit $"{prefix}_bready"
+
+    lit 0UL 8 ==> awlen // 1 beat per burst
+    lit (axiSizeEncoding dataWidth) 3 ==> awsize
+    lit 1UL 2 ==> awburst // INCR
+    lit 0UL 4 ==> awcache
+    lit 0UL 3 ==> awprot
+    lit 1UL 1 ==> wlast // every beat is last
+
+    { prefix = prefix
+      awaddr = awaddr
+      awvalid = awvalid
+      awready = awready
+      wdata = wdata
+      wstrb = wstrb
+      wvalid = wvalid
+      wready = wready
+      bvalid = bvalid
+      bready = bready
+      claimed = ref false }
+
+/// The conventional `m_axi` write boundary.
+let axiWriteBus (addrWidth: int) (dataWidth: int) = axiWriteBusNamed "m_axi" addrWidth dataWidth
+
 /// The beat an AXI write master consumes: where it goes, the data, which bytes.
 let axiWriteBeatLayout (addrWidth: int) (dataWidth: int) : Layout<Expr * Expr * Expr> =
     layout3 ("addr", addrWidth) ("data", dataWidth) ("strb", dataWidth / 8)
@@ -956,72 +1126,50 @@ type private WriterCore =
 /// at constant AWID, so one counter serves the response side. BRESP is
 /// trusted. Port of Kotlin's `axiMasterWriter`; N=8..16 is the HP-port sweet
 /// spot, N=1 degenerates to simple pending flags.
-let private axiMasterWriterCore
+let private axiMasterWriterCoreOn
     (exposeIdle: bool)
-    (addrWidth: int)
-    (dataWidth: int)
+    (bus: AxiWriteBus)
     (maxOutstanding: int)
     (beats: Stream<Expr * Expr * Expr>)
     : WriterCore =
-    if dataWidth <> 32 && dataWidth <> 64 && dataWidth <> 128 then
-        failwith $"axiMasterWriter dataWidth must be 32, 64 or 128, got %d{dataWidth}"
+    axiOutstanding maxOutstanding
+    claimBus bus.prefix "write" bus.claimed
 
-    if addrWidth < 12 || addrWidth > 40 then
-        failwith $"axiMasterWriter addrWidth must be 12..40, got %d{addrWidth}"
+    let addrWidth = width bus.awaddr
+    let dataWidth = width bus.wdata
+    let strbWidth = width bus.wstrb
 
-    if maxOutstanding < 1 || maxOutstanding > 32 then
-        failwith $"maxOutstanding must be 1..32, got %d{maxOutstanding}"
-
-    if maxOutstanding > 1 && maxOutstanding &&& (maxOutstanding - 1) <> 0 then
-        failwith $"maxOutstanding must be a power of two (or 1), got %d{maxOutstanding}"
-
-    let strbWidth = dataWidth / 8
-
-    let sizeEnc =
-        match dataWidth with
-        | 32 -> 2UL
-        | 64 -> 3UL
-        | _ -> 4UL
+    // Every internal carries the bus's name. Without it a design cannot hold
+    // two write masters at all — `aw_pending` collides with `aw_pending` even
+    // when the two buses are `m_axi_hp0` and `m_axi_hp1` — and a design wanting
+    // an ordinary wire called `idle` collides with the master.
+    let named (suffix: string) = $"{bus.prefix}_{suffix}"
 
     let inAddr, inData, inStrb = beats.payload
 
-    let awaddr = output "m_axi_awaddr" addrWidth
-    let awlen = output "m_axi_awlen" 8
-    let awsize = output "m_axi_awsize" 3
-    let awburst = output "m_axi_awburst" 2
-    let awcache = output "m_axi_awcache" 4
-    let awprot = output "m_axi_awprot" 3
-    let awvalid = outputBit "m_axi_awvalid"
-    let awready = inputBit "m_axi_awready"
-    let wdata = output "m_axi_wdata" dataWidth
-    let wstrb = output "m_axi_wstrb" strbWidth
-    let wlast = outputBit "m_axi_wlast"
-    let wvalid = outputBit "m_axi_wvalid"
-    let wready = inputBit "m_axi_wready"
-    input "m_axi_bresp" 2 |> ignore // trusted OKAY
-    let bvalid = inputBit "m_axi_bvalid"
-    let bready = outputBit "m_axi_bready"
-
-    lit 0UL 8 ==> awlen // 1 beat per burst
-    lit sizeEnc 3 ==> awsize
-    lit 1UL 2 ==> awburst // INCR
-    lit 0UL 4 ==> awcache
-    lit 0UL 3 ==> awprot
-    lit 1UL 1 ==> wlast // every beat is last
+    let awaddr = bus.awaddr
+    let awvalid = bus.awvalid
+    let awready = bus.awready
+    let wdata = bus.wdata
+    let wstrb = bus.wstrb
+    let wvalid = bus.wvalid
+    let wready = bus.wready
+    let bvalid = bus.bvalid
+    let bready = bus.bready
 
     if maxOutstanding = 1 then
         // simple pending flags — single-outstanding, single-cycle accept
-        let awPending = regBit "aw_pending"
-        let wPending = regBit "w_pending"
-        let bPending = regBit "b_pending"
-        let addrQ = reg "addr_q" addrWidth
-        let dataQ = reg "data_q" dataWidth
-        let strbQ = reg "strb_q" strbWidth
+        let awPending = regBit (named "aw_pending")
+        let wPending = regBit (named "w_pending")
+        let bPending = regBit (named "b_pending")
+        let addrQ = reg (named "addr_q") addrWidth
+        let dataQ = reg (named "data_q") dataWidth
+        let strbQ = reg (named "strb_q") strbWidth
 
-        let idle = wireBit "idle"
+        let idle = wireBit (named "idle")
         (bnot awPending &&& bnot wPending &&& bnot bPending) ==> idle
         idle ==> beats.ready
-        let accept = wireBit "accept"
+        let accept = wireBit (named "accept")
         (beats.valid &&& idle) ==> accept
 
         If accept (fun () ->
@@ -1043,7 +1191,7 @@ let private axiMasterWriterCore
         strbQ ==> wstrb
         wPending ==> wvalid
         bPending ==> bready
-        let bAck = wireBit "b_ack"
+        let bAck = wireBit (named "b_ack")
         (bPending &&& bvalid) ==> bAck
         { idle = Some idle; bAck = bAck }
     else
@@ -1052,23 +1200,23 @@ let private axiMasterWriterCore
         let n = maxOutstanding
         let log2N = log2 n
         let ptrWidth = log2N + 1
-        let addrSlots = [ for i in 0 .. n - 1 -> reg $"addr_q_%d{i}" addrWidth ]
-        let dataSlots = [ for i in 0 .. n - 1 -> reg $"data_q_%d{i}" dataWidth ]
-        let strbSlots = [ for i in 0 .. n - 1 -> reg $"strb_q_%d{i}" strbWidth ]
-        let enqPtr = reg "enq_ptr" ptrWidth
-        let awPtr = reg "aw_ptr" ptrWidth
-        let wPtr = reg "w_ptr" ptrWidth
-        let bPtr = reg "b_ptr" ptrWidth
+        let addrSlots = [ for i in 0 .. n - 1 -> reg (named $"addr_q_%d{i}") addrWidth ]
+        let dataSlots = [ for i in 0 .. n - 1 -> reg (named $"data_q_%d{i}") dataWidth ]
+        let strbSlots = [ for i in 0 .. n - 1 -> reg (named $"strb_q_%d{i}") strbWidth ]
+        let enqPtr = reg (named "enq_ptr") ptrWidth
+        let awPtr = reg (named "aw_ptr") ptrWidth
+        let wPtr = reg (named "w_ptr") ptrWidth
+        let bPtr = reg (named "b_ptr") ptrWidth
 
-        let inFlight = wire "in_flight" ptrWidth
+        let inFlight = wire (named "in_flight") ptrWidth
         enqPtr - bPtr ==> inFlight
-        let notFull = wireBit "not_full"
+        let notFull = wireBit (named "not_full")
         lt inFlight (lit (uint64 n) ptrWidth) ==> notFull
         notFull ==> beats.ready
-        let accept = wireBit "accept"
+        let accept = wireBit (named "accept")
         (beats.valid &&& notFull) ==> accept
 
-        let enqSlot = wire "enq_slot" log2N
+        let enqSlot = wire (named "enq_slot") log2N
         slice (log2N - 1) 0 enqPtr ==> enqSlot
 
         for i in 0 .. n - 1 do
@@ -1079,17 +1227,17 @@ let private axiMasterWriterCore
 
         If accept (fun () -> enqPtr + lit 1UL ptrWidth ==> enqPtr)
 
-        let awSlot = wire "aw_slot" log2N
+        let awSlot = wire (named "aw_slot") log2N
         slice (log2N - 1) 0 awPtr ==> awSlot
-        let awHasWork = wireBit "aw_has_work"
+        let awHasWork = wireBit (named "aw_has_work")
         bnot (eq awPtr enqPtr) ==> awHasWork
         awHasWork ==> awvalid
         selectIndexed awSlot addrSlots ==> awaddr
         If (awHasWork &&& awready) (fun () -> awPtr + lit 1UL ptrWidth ==> awPtr)
 
-        let wSlot = wire "w_slot" log2N
+        let wSlot = wire (named "w_slot") log2N
         slice (log2N - 1) 0 wPtr ==> wSlot
-        let wHasWork = wireBit "w_has_work"
+        let wHasWork = wireBit (named "w_has_work")
         bnot (eq wPtr enqPtr) ==> wHasWork
         wHasWork ==> wvalid
         selectIndexed wSlot dataSlots ==> wdata
@@ -1101,60 +1249,17 @@ let private axiMasterWriterCore
 
         // bready is tied high above, so a response is accepted the cycle it
         // arrives and bvalid IS the acceptance.
-        let bAck = wireBit "b_ack"
+        let bAck = wireBit (named "b_ack")
         bvalid ==> bAck
 
         { idle =
             (if exposeIdle then
-                 let idle = wireBit "writer_idle"
+                 let idle = wireBit (named "writer_idle")
                  eq enqPtr bPtr ==> idle
                  Some idle
              else
                  None)
           bAck = bAck }
-
-let private axiReadValidate (addrWidth: int) (dataWidth: int) (maxOutstanding: int) =
-    if dataWidth <> 32 && dataWidth <> 64 && dataWidth <> 128 then
-        failwith $"axiMasterReader dataWidth must be 32, 64 or 128, got %d{dataWidth}"
-
-    if addrWidth < 12 || addrWidth > 40 then
-        failwith $"axiMasterReader addrWidth must be 12..40, got %d{addrWidth}"
-
-    if maxOutstanding < 1 || maxOutstanding > 32 then
-        failwith $"maxOutstanding must be 1..32, got %d{maxOutstanding}"
-
-    if maxOutstanding > 1 && maxOutstanding &&& (maxOutstanding - 1) <> 0 then
-        failwith $"maxOutstanding must be a power of two (or 1), got %d{maxOutstanding}"
-
-/// The AR/R boundary ports plus the tied transaction constants; returns
-/// (araddr, arlen, arvalid, arready, rdata, rlast, rvalid, rready).
-let private axiReadPorts (addrWidth: int) (dataWidth: int) =
-    let sizeEnc =
-        match dataWidth with
-        | 32 -> 2UL
-        | 64 -> 3UL
-        | _ -> 4UL
-
-    let araddr = output "m_axi_araddr" addrWidth
-    let arlen = output "m_axi_arlen" 8
-    let arsize = output "m_axi_arsize" 3
-    let arburst = output "m_axi_arburst" 2
-    let arcache = output "m_axi_arcache" 4
-    let arprot = output "m_axi_arprot" 3
-    let arvalid = outputBit "m_axi_arvalid"
-    let arready = inputBit "m_axi_arready"
-    let rdata = input "m_axi_rdata" dataWidth
-    input "m_axi_rresp" 2 |> ignore // trusted OKAY
-    let rlast = inputBit "m_axi_rlast"
-    let rvalid = inputBit "m_axi_rvalid"
-    let rready = outputBit "m_axi_rready"
-
-    lit sizeEnc 3 ==> arsize
-    lit 1UL 2 ==> arburst // INCR
-    lit 0UL 4 ==> arcache
-    lit 0UL 3 ==> arprot
-
-    araddr, arlen, arvalid, arready, rdata, rlast, rvalid, rready
 
 /// AXI4 read master, elaborated inline in the current design — the symmetric
 /// counterpart to `axiMasterWriter`: consumes a ready/valid stream of byte
@@ -1167,28 +1272,36 @@ let private axiReadPorts (addrWidth: int) (dataWidth: int) =
 /// is trusted. Internal names carry an `rd_` prefix so a design can hold this
 /// reader beside the writer. Port of Kotlin's `axiMasterReader`; the
 /// ARCACHE/ARPROT attributes stay 0 until an HPC consumer needs them.
-let axiMasterReader (addrWidth: int) (dataWidth: int) (maxOutstanding: int) (requests: Stream<Expr>) : Stream<Expr> =
-    axiReadValidate addrWidth dataWidth maxOutstanding
-    let araddr, arlen, arvalid, arready, rdata, _, rvalid, rready = axiReadPorts addrWidth dataWidth
+let axiMasterReaderOn (bus: AxiReadBus) (maxOutstanding: int) (requests: Stream<Expr>) : Stream<Expr> =
+    axiOutstanding maxOutstanding
+    claimBus bus.prefix "read" bus.claimed
+    let addrWidth = width bus.araddr
+    let dataWidth = width bus.rdata
+    let araddr, arlen, arvalid, arready = bus.araddr, bus.arlen, bus.arvalid, bus.arready
+    let rdata, rvalid, rready = bus.rdata, bus.rvalid, bus.rready
+    // The `rd_` stays under the bus name: a read bus and a write bus may share
+    // a prefix (one `m_axi` with both halves), so the two masters still have to
+    // be distinguishable from each other as well as from their neighbours.
+    let named (suffix: string) = $"{bus.prefix}_{suffix}"
     lit 0UL 8 ==> arlen // 1 beat per burst
 
-    let respReady = wireBit "rd_resp_ready"
+    let respReady = wireBit (named "rd_resp_ready")
     (current ()).RegisterStreamReady respReady
 
     if maxOutstanding = 1 then
         // Lifecycle of one read: accept → arPending + rPending; ARREADY fires
         // → arPending clear; RVALID fires → data captured, respPending;
         // consumer fires → idle. req_ready requires all three clear.
-        let arPending = regBit "rd_ar_pending"
-        let rPending = regBit "rd_r_pending"
-        let respPending = regBit "rd_resp_pending"
-        let addrQ = reg "rd_addr_q" addrWidth
-        let dataQ = reg "rd_data_q" dataWidth
+        let arPending = regBit (named "rd_ar_pending")
+        let rPending = regBit (named "rd_r_pending")
+        let respPending = regBit (named "rd_resp_pending")
+        let addrQ = reg (named "rd_addr_q") addrWidth
+        let dataQ = reg (named "rd_data_q") dataWidth
 
-        let idle = wireBit "rd_idle"
+        let idle = wireBit (named "rd_idle")
         (bnot arPending &&& bnot rPending &&& bnot respPending) ==> idle
         idle ==> requests.ready
-        let accept = wireBit "rd_accept"
+        let accept = wireBit (named "rd_accept")
         (requests.valid &&& idle) ==> accept
 
         If accept (fun () ->
@@ -1221,22 +1334,22 @@ let axiMasterReader (addrWidth: int) (dataWidth: int) (maxOutstanding: int) (req
         let n = maxOutstanding
         let log2N = log2 n
         let ptrWidth = log2N + 1
-        let addrSlots = [ for i in 0 .. n - 1 -> reg $"rd_addr_q_%d{i}" addrWidth ]
-        let dataSlots = [ for i in 0 .. n - 1 -> reg $"rd_data_q_%d{i}" dataWidth ]
-        let enqPtr = reg "rd_enq_ptr" ptrWidth
-        let arPtr = reg "rd_ar_ptr" ptrWidth
-        let rPtr = reg "rd_r_ptr" ptrWidth
-        let deqPtr = reg "rd_deq_ptr" ptrWidth
+        let addrSlots = [ for i in 0 .. n - 1 -> reg (named $"rd_addr_q_%d{i}") addrWidth ]
+        let dataSlots = [ for i in 0 .. n - 1 -> reg (named $"rd_data_q_%d{i}") dataWidth ]
+        let enqPtr = reg (named "rd_enq_ptr") ptrWidth
+        let arPtr = reg (named "rd_ar_ptr") ptrWidth
+        let rPtr = reg (named "rd_r_ptr") ptrWidth
+        let deqPtr = reg (named "rd_deq_ptr") ptrWidth
 
-        let inFlight = wire "rd_in_flight" ptrWidth
+        let inFlight = wire (named "rd_in_flight") ptrWidth
         enqPtr - deqPtr ==> inFlight
-        let notFull = wireBit "rd_not_full"
+        let notFull = wireBit (named "rd_not_full")
         lt inFlight (lit (uint64 n) ptrWidth) ==> notFull
         notFull ==> requests.ready
-        let accept = wireBit "rd_accept"
+        let accept = wireBit (named "rd_accept")
         (requests.valid &&& notFull) ==> accept
 
-        let enqSlot = wire "rd_enq_slot" log2N
+        let enqSlot = wire (named "rd_enq_slot") log2N
         slice (log2N - 1) 0 enqPtr ==> enqSlot
 
         for i in 0 .. n - 1 do
@@ -1244,9 +1357,9 @@ let axiMasterReader (addrWidth: int) (dataWidth: int) (maxOutstanding: int) (req
 
         If accept (fun () -> enqPtr + lit 1UL ptrWidth ==> enqPtr)
 
-        let arSlot = wire "rd_ar_slot" log2N
+        let arSlot = wire (named "rd_ar_slot") log2N
         slice (log2N - 1) 0 arPtr ==> arSlot
-        let arHasWork = wireBit "rd_ar_has_work"
+        let arHasWork = wireBit (named "rd_ar_has_work")
         bnot (eq arPtr enqPtr) ==> arHasWork
         arHasWork ==> arvalid
         selectIndexed arSlot addrSlots ==> araddr
@@ -1254,7 +1367,7 @@ let axiMasterReader (addrWidth: int) (dataWidth: int) (maxOutstanding: int) (req
 
         // The slot was reserved when AR issued, so room always exists for R.
         lit 1UL 1 ==> rready
-        let rSlot = wire "rd_r_slot" log2N
+        let rSlot = wire (named "rd_r_slot") log2N
         slice (log2N - 1) 0 rPtr ==> rSlot
 
         for i in 0 .. n - 1 do
@@ -1262,11 +1375,11 @@ let axiMasterReader (addrWidth: int) (dataWidth: int) (maxOutstanding: int) (req
 
         If rvalid (fun () -> rPtr + lit 1UL ptrWidth ==> rPtr)
 
-        let deqSlot = wire "rd_deq_slot" log2N
+        let deqSlot = wire (named "rd_deq_slot") log2N
         slice (log2N - 1) 0 deqPtr ==> deqSlot
-        let respHasData = wireBit "rd_resp_has_data"
+        let respHasData = wireBit (named "rd_resp_has_data")
         bnot (eq rPtr deqPtr) ==> respHasData
-        let respData = wire "rd_resp_data" dataWidth
+        let respData = wire (named "rd_resp_data") dataWidth
         selectIndexed deqSlot dataSlots ==> respData
         If (respHasData &&& respReady) (fun () -> deqPtr + lit 1UL ptrWidth ==> deqPtr)
 
@@ -1274,6 +1387,7 @@ let axiMasterReader (addrWidth: int) (dataWidth: int) (maxOutstanding: int) (req
           valid = respHasData
           ready = respReady
           layout = layout1 ("data", dataWidth) }
+
 
 /// The burst-mode AXI4 read master: requests carry (addr, len) — ARLEN
 /// encoding, beats − 1, capped by `maxBurstLen` — and responses carry
@@ -1283,14 +1397,14 @@ let axiMasterReader (addrWidth: int) (dataWidth: int) (maxOutstanding: int) (req
 /// interconnect (which has its own buffering) instead of slot registers,
 /// which cannot hold a burst. A transaction retires on its RLAST beat. The
 /// caller owns AXI's rules: a burst must not cross a 4 KB boundary.
-let axiMasterReaderBurst
-    (addrWidth: int)
-    (dataWidth: int)
+let axiMasterReaderBurstOn
+    (bus: AxiReadBus)
     (maxOutstanding: int)
     (maxBurstLen: int)
     (requests: Stream<Expr * Expr>)
     : Stream<Expr * Expr> =
-    axiReadValidate addrWidth dataWidth maxOutstanding
+    axiOutstanding maxOutstanding
+    claimBus bus.prefix "read" bus.claimed
 
     if maxBurstLen < 2 || maxBurstLen > 256 then
         failwith $"maxBurstLen must be 2..256, got %d{maxBurstLen} (use axiMasterReader for single-beat)"
@@ -1298,30 +1412,34 @@ let axiMasterReaderBurst
     if maxOutstanding = 1 then
         failwith "burst mode requires a multi-outstanding ring (maxOutstanding > 1)"
 
-    let araddr, arlen, arvalid, arready, rdata, rlast, rvalid, rready = axiReadPorts addrWidth dataWidth
+    let addrWidth = width bus.araddr
+    let dataWidth = width bus.rdata
+    let araddr, arlen, arvalid, arready = bus.araddr, bus.arlen, bus.arvalid, bus.arready
+    let rdata, rlast, rvalid, rready = bus.rdata, bus.rlast, bus.rvalid, bus.rready
+    let named (suffix: string) = $"{bus.prefix}_{suffix}"
     let reqAddr, reqLen = requests.payload
 
-    let respReady = wireBit "rd_resp_ready"
+    let respReady = wireBit (named "rd_resp_ready")
     (current ()).RegisterStreamReady respReady
 
     let n = maxOutstanding
     let log2N = log2 n
     let ptrWidth = log2N + 1
-    let addrSlots = [ for i in 0 .. n - 1 -> reg $"rd_addr_q_%d{i}" addrWidth ]
-    let lenSlots = [ for i in 0 .. n - 1 -> reg $"rd_len_q_%d{i}" 8 ]
-    let enqPtr = reg "rd_enq_ptr" ptrWidth
-    let arPtr = reg "rd_ar_ptr" ptrWidth
-    let donePtr = reg "rd_done_ptr" ptrWidth // freed on the RLAST beat
+    let addrSlots = [ for i in 0 .. n - 1 -> reg (named $"rd_addr_q_%d{i}") addrWidth ]
+    let lenSlots = [ for i in 0 .. n - 1 -> reg (named $"rd_len_q_%d{i}") 8 ]
+    let enqPtr = reg (named "rd_enq_ptr") ptrWidth
+    let arPtr = reg (named "rd_ar_ptr") ptrWidth
+    let donePtr = reg (named "rd_done_ptr") ptrWidth // freed on the RLAST beat
 
-    let inFlight = wire "rd_in_flight" ptrWidth
+    let inFlight = wire (named "rd_in_flight") ptrWidth
     enqPtr - donePtr ==> inFlight
-    let notFull = wireBit "rd_not_full"
+    let notFull = wireBit (named "rd_not_full")
     lt inFlight (lit (uint64 n) ptrWidth) ==> notFull
     notFull ==> requests.ready
-    let accept = wireBit "rd_accept"
+    let accept = wireBit (named "rd_accept")
     (requests.valid &&& notFull) ==> accept
 
-    let enqSlot = wire "rd_enq_slot" log2N
+    let enqSlot = wire (named "rd_enq_slot") log2N
     slice (log2N - 1) 0 enqPtr ==> enqSlot
 
     for i in 0 .. n - 1 do
@@ -1331,9 +1449,9 @@ let axiMasterReaderBurst
 
     If accept (fun () -> enqPtr + lit 1UL ptrWidth ==> enqPtr)
 
-    let arSlot = wire "rd_ar_slot" log2N
+    let arSlot = wire (named "rd_ar_slot") log2N
     slice (log2N - 1) 0 arPtr ==> arSlot
-    let arHasWork = wireBit "rd_ar_has_work"
+    let arHasWork = wireBit (named "rd_ar_has_work")
     bnot (eq arPtr enqPtr) ==> arHasWork
     arHasWork ==> arvalid
     selectIndexed arSlot addrSlots ==> araddr
@@ -1349,12 +1467,14 @@ let axiMasterReaderBurst
       ready = respReady
       layout = layout2 ("data", dataWidth) ("last", 1) }
 
+
 /// AXI4 write master, elaborated inline — see `axiMasterWriterCore` above for
 /// the scheme. This is the common form; a caller that must know when the ring
 /// has fully drained (every B collected — the coherency gate before a
 /// slot-rotating consumer publishes a frame) uses `axiMasterWriterWithIdle`.
-let axiMasterWriter (addrWidth: int) (dataWidth: int) (maxOutstanding: int) (beats: Stream<Expr * Expr * Expr>) =
-    axiMasterWriterCore false addrWidth dataWidth maxOutstanding beats |> ignore
+let axiMasterWriterOn (bus: AxiWriteBus) (maxOutstanding: int) (beats: Stream<Expr * Expr * Expr>) =
+    axiMasterWriterCoreOn false bus maxOutstanding beats |> ignore
+
 
 /// What `axiMasterWriterTracked` hands back: the master's quiescence, and the
 /// acknowledgement that makes it trustworthy.
@@ -1371,21 +1491,17 @@ type TrackedWriter =
 /// `bAck` is the honest "this write has reached memory" event — a design that
 /// must not report a result before its payload landed counts these, rather
 /// than counting beats it merely handed to the master.
-let axiMasterWriterTracked
-    (addrWidth: int)
-    (dataWidth: int)
+let axiMasterWriterTrackedOn
+    (bus: AxiWriteBus)
     (maxOutstanding: int)
     (beats: Stream<Expr * Expr * Expr>)
     : TrackedWriter =
-    let w = axiMasterWriterCore true addrWidth dataWidth maxOutstanding beats
+    let w = axiMasterWriterCoreOn true bus maxOutstanding beats
     { idle = w.idle.Value; bAck = w.bAck }
+
 
 /// The writer plus its quiescence level: high when no write is in flight
 /// (`enq_ptr = b_ptr` on the ring; all three pendings clear at N=1).
-let axiMasterWriterWithIdle
-    (addrWidth: int)
-    (dataWidth: int)
-    (maxOutstanding: int)
-    (beats: Stream<Expr * Expr * Expr>)
-    : Expr =
-    (axiMasterWriterCore true addrWidth dataWidth maxOutstanding beats).idle.Value
+let axiMasterWriterWithIdleOn (bus: AxiWriteBus) (maxOutstanding: int) (beats: Stream<Expr * Expr * Expr>) : Expr =
+    (axiMasterWriterCoreOn true bus maxOutstanding beats).idle.Value
+

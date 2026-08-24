@@ -1667,7 +1667,7 @@ let snapshotDdr =
                 let wordAddr = cat (cat slot index) (lit 0UL 2) // (slot*4 + index) * 4 bytes
                 cat (lit 0UL 26) wordAddr, cat (lit 0UL 24) data, lit 0xFUL 4)
 
-        axiMasterWriterWithIdle 32 32 4 axiBeats ==> writerIdle)
+        axiMasterWriterWithIdleOn (axiWriteBus 32 32) 4 axiBeats ==> writerIdle)
 
 /// The audio stdlib's two datapath entries as one toolchain test input: a
 /// 4-tap FIR over the delay-line chain, and a biquad section driven at its

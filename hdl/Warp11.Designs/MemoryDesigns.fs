@@ -347,14 +347,14 @@ let deepBufferedStream =
 let axiReadMaster =
     design "AxiReadMaster" (fun () ->
         streamInput "req" (layout1 ("addr", 32))
-        |> axiMasterReader 32 32 8
+        |> axiMasterReaderOn (axiReadBus 32 32) 8
         |> streamOutput "resp")
 
 /// The single-outstanding degenerate read path — pending flags, no ring.
 let axiReadMasterSingle =
     design "AxiReadMasterSingle" (fun () ->
         streamInput "req" (layout1 ("addr", 32))
-        |> axiMasterReader 32 32 1
+        |> axiMasterReaderOn (axiReadBus 32 32) 1
         |> streamOutput "resp")
 
 /// The burst read master: (addr, len) descriptors in, (data, last) beats out,
@@ -362,7 +362,7 @@ let axiReadMasterSingle =
 let axiReadMasterBurst =
     design "AxiReadMasterBurst" (fun () ->
         streamInput "req" (layout2 ("addr", 32) ("len", 8))
-        |> axiMasterReaderBurst 32 32 4 16
+        |> axiMasterReaderBurstOn (axiReadBus 32 32) 4 16
         |> streamOutput "resp")
 
 /// The AXI master's pointer ring under the oracle: 128-bit beats, 4 slots.
@@ -373,13 +373,13 @@ let axiReadMasterBurst =
 let axiWriteMaster =
     design "AxiWriteMaster" (fun () ->
         streamInput "in" (axiWriteBeatLayout 32 128)
-        |> axiMasterWriter 32 128 4)
+        |> axiMasterWriterOn (axiWriteBus 32 128) 4)
 
 /// The single-outstanding degenerate path — pending flags, no ring.
 let axiWriteMasterSingle =
     design "AxiWriteMasterSingle" (fun () ->
         streamInput "in" (axiWriteBeatLayout 16 32)
-        |> axiMasterWriter 16 32 1)
+        |> axiMasterWriterOn (axiWriteBus 16 32) 1)
 
 // ---------------------------------------------------------------------------
 // One kernel, three storages — and the kernel does not change
@@ -460,46 +460,11 @@ let runningSumOver (count: int) (run: Expr) (source: ReadWindow) (sink: WriteWin
 
 // ---- the windows a mapping chooses between ---------------------------------
 //
-// `lutReadWindow`, `blockReadWindow` and `memWriteWindow` are in `Windows.fs`,
-// shared with the bus prototype. Only the two that reach off the chip are here,
-// because they are built on the *stdlib's* AXI masters — which declare their
-// own `m_axi_*` ports, so unlike `BusDesigns.fs`'s versions they cannot be
-// handed a named bus. That is the difference between the two files, and the
-// reason the refactor in `notes/DEVICES.md` §10b exists.
-
-/// A read window onto memory that is not on this chip: the index becomes a byte
-/// address and the master owns the rest. Four reads in flight, because a round
-/// trip over the interconnect is worth pipelining and the kernel cannot tell.
-let private ddrReadWindow (baseAddr: uint64) (words: int) : ReadWindow =
-    { words = words
-      wordWidth = 32
-      read =
-        fun requests ->
-            requests
-            |> streamMapTo (layout1 ("addr", 32)) (fun index ->
-                lit baseAddr 32 + pad 32 (cat index (lit 0UL 2)))
-            |> axiMasterReader 32 32 4 }
-
-/// The write half: one single-beat AXI write per result, at an address the
-/// window derives from the index it was given.
-let private ddrWriteWindow (baseAddr: uint64) (words: int) : WriteWindow =
-    { words = words
-      wordWidth = 32
-      write =
-        fun beats ->
-            let index, word = beats.payload
-            let beatReady = wireBit "dst_beat_ready"
-            registerStreamReady beatReady
-            beatReady ==> beats.ready
-
-            let addr = wire "dst_addr" 32
-            (lit baseAddr 32 + pad 32 (cat index (lit 0UL 2))) ==> addr
-
-            { payload = addr, word, lit 0xFUL 4
-              valid = beats.valid
-              ready = beatReady
-              layout = axiWriteBeatLayout 32 32 }
-            |> axiMasterWriter 32 32 4 }
+// All of them are `Warp11.Windows` now — `lutReadWindow`, `blockReadWindow` and
+// `memWriteWindow` for storage on this chip, `readWindowOn` and
+// `defineWriteWindows`/`createWriteWindow` for a region of a bus. This file
+// used to carry its own DDR pair; they were the library's two with a hardcoded
+// four-byte stride, and they are gone.
 
 // ---- the three mappings ----------------------------------------------------
 
@@ -549,8 +514,16 @@ let sumOverBlock =
 /// directly, which is the part of a mapping that stops being fabric at all.
 let sumOverDdr =
     design "SumOverDdr" (fun () ->
+        // Both halves of one conventional `m_axi`. They could as easily be
+        // `m_axi_hp0` and `m_axi_hp1` — two of the independent paths the part
+        // offers (§10d) — which is the thing declaring the boundary here buys
+        // and the master conjuring it could not express.
+        let run = inputBit "run"
+        let readBus = axiReadBus 32 sumWordWidth
+        let writeBus = axiWriteBus 32 sumWordWidth
+
         runningSumOver
             sumCount
-            (inputBit "run")
-            (ddrReadWindow 0x0000UL sumCount)
-            (ddrWriteWindow 0x1000UL sumCount))
+            run
+            (readWindowOn readBus 4 0x0000UL sumCount)
+            (writeWindowOn writeBus 4 "dst" 0x1000UL sumCount))

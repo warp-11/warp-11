@@ -7,7 +7,6 @@
     </PropertyGroup>
 
     <ItemGroup>
-        <Compile Include="Windows.fs"/>
         <Compile Include="MemoryDesigns.fs"/>
         <Compile Include="Designs.fs"/>
         <Compile Include="BusDesigns.fs"/>
@@ -21,7 +20,6 @@
          embedded — the source pane shows the same bytes the design was
          elaborated from. -->
     <ItemGroup>
-        <EmbeddedResource Include="Windows.fs" LogicalName="Windows.fs"/>
         <EmbeddedResource Include="MemoryDesigns.fs" LogicalName="MemoryDesigns.fs"/>
         <EmbeddedResource Include="Designs.fs" LogicalName="Designs.fs"/>
         <EmbeddedResource Include="BusDesigns.fs" LogicalName="BusDesigns.fs"/>

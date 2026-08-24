@@ -348,9 +348,8 @@ let golAxi (topName: string) (gensPerCycle: int) (gridWidth: int) (gridHeight: i
                  let armedReady = wireBit "armed_ready"
                  armedReady &&& armed ==> s.ready
 
-                 axiMasterWriterWithIdle
-                     32
-                     128
+                 axiMasterWriterWithIdleOn
+                     (axiWriteBus 32 128)
                      16
                      { s with
                          valid = s.valid &&& armed

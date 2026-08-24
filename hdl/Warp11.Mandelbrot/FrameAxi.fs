@@ -80,7 +80,7 @@ let mandelFrameAxi
         beats
         |> streamProbe "egress"
         |> streamMapTo (axiWriteBeatLayout 32 128) (fun (addr, beat) -> (fbBaseAddr + cat (lit 0UL (32 - addrWidth)) addr, beat, lit 0xFFFFUL 16))
-        |> axiMasterWriter 32 128 16)
+        |> axiMasterWriterOn (axiWriteBus 32 128) 16)
 
 /// The oracle/rehearsal config — the same architecture the scaled render
 /// proved, now behind the real register map.

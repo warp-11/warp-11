@@ -749,9 +749,8 @@ let gepClusterPool (shape: GepClusterShape) (prefix: string) (cfg: GepClusterCon
     registerStreamReady reqReady
 
     let resp =
-        axiMasterReaderBurst
-            addrWidth
-            128
+        axiMasterReaderBurstOn
+            (axiReadBus addrWidth 128)
             shape.readOutstanding
             16
             { payload = (ownReqAddr, mux singleBurst (k (gepWorkItemBeats - 1) 8) (k 3 8))
@@ -1569,9 +1568,8 @@ let gepClusterPool (shape: GepClusterShape) (prefix: string) (cfg: GepClusterCon
         emitBeatData ==> beatData
 
     let writer =
-        axiMasterWriterTracked
-            addrWidth
-            128
+        axiMasterWriterTrackedOn
+            (axiWriteBus addrWidth 128)
             shape.writeOutstanding
             { payload = (beatAddr, beatData, lit 0xFFFFUL 16)
               valid = beatValid

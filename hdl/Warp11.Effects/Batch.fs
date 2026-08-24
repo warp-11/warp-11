@@ -197,7 +197,7 @@ let audioBatchAxi =
 
         If (arMore &&& reqReady) (fun () -> arIssued + lit 1UL 32 ==> arIssued)
 
-        let beats = axiMasterReaderBurst 32 beatWidth 4 beatsPerBurst requests
+        let beats = axiMasterReaderBurstOn (axiReadBus 32 beatWidth) 4 beatsPerBurst requests
 
         // --- the DSP ---------------------------------------------------------
         let leftGains = batchMap.gains |> List.map (fun g -> slice 15 0 (regs.value g))
@@ -231,7 +231,7 @@ let audioBatchAxi =
 
         wrReady ==> outBeats.ready
 
-        let writerIdle = axiMasterWriterWithIdle 32 beatWidth 4 writeBeats
+        let writerIdle = axiMasterWriterWithIdleOn (axiWriteBus 32 beatWidth) 4 writeBeats
 
         If (outBeats.valid &&& wrReady) (fun () -> beatsWritten + lit 1UL 32 ==> beatsWritten)
 
