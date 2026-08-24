@@ -24,8 +24,14 @@ type DebugWindow(source: View.Source, panels: View.Panel list) as this =
 
     /// Open a debugger on a session someone else owns and is driving — the
     /// side-by-side case. Closing this window leaves the session running.
+    ///
+    /// It carries `Pages.verilog`, the one panel that needs nothing but the
+    /// design. `about` and `source` read a catalog and there is none here, but
+    /// what a design *emits* is knowable from the design alone — so the window
+    /// an app opens beside its own is not a poorer debugger than the standalone
+    /// one for want of anything it could have had.
     new(session: IDebugSession, title: string) =
-        DebugWindow(View.Attached(session, title), [])
+        DebugWindow(View.Attached(session, title), [ Pages.verilog ])
 
 type App(view: unit -> Avalonia.Controls.Control) =
     inherit Application()

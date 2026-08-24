@@ -11,7 +11,8 @@ module Warp11.Tutorial.Debugger
 
 open Warp11.SimView
 
-/// What the tutorial adds: the design's page, and the source that defines it.
+/// What the tutorial adds: the design's page, the source that defines it, and
+/// the Verilog it becomes.
 ///
 /// The page tab is renamed here rather than in `Pages`, which offers it to any
 /// host with a catalog: a design's prose page is "about" that design in
@@ -19,7 +20,8 @@ open Warp11.SimView
 let panels =
     [ { Pages.about Registry.catalog with
           label = "tutorial" }
-      Pages.source Registry.catalog ]
+      Pages.source Registry.catalog
+      Pages.verilog ]
 
 /// The whole tutorial window, for a desktop host or a browser one.
 let window initial =

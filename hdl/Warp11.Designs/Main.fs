@@ -44,7 +44,20 @@ let private diffDesigns () =
       loopPipeline
       treeSum
       ramTest
+      dualRead
       fillingMemory
+      priorityWrite
+      maskedWritePriority
+      romLookup
+      blockRomLookup
+      sumOverLut
+      sumOverBlock
+      sumOverDdr
+      oneOwnerOnePort
+      twoOwnersOnePort
+      twoOwnersTwoPorts
+      sumFromReadWindow
+      sumWhollyOnChip
       assertedSaturate
       cmdProcessor
       unionRoundTrip
@@ -550,7 +563,15 @@ let private inventoryNamesPeek () =
       loopPipeline
       nestedGroups
       ramTest
+      dualRead
       fillingMemory
+      priorityWrite
+      maskedWritePriority
+      romLookup
+      blockRomLookup
+      sumOverLut
+      sumOverBlock
+      sumOverDdr
       assertedSaturate
       cmdProcessor
       wideBeat
@@ -1990,6 +2011,510 @@ let private strobeSparesWideLanes () =
 
     ok && checks > 3500
 
+/// A memory's write sites fold, and **the last one in the source wins**.
+///
+/// The structural half is checked first and is the reason the rule exists: the
+/// emitted Verilog holds exactly one `store[...] <=` however many places wrote,
+/// which is what keeps a synthesiser inferring a block RAM. A design with three
+/// visible write sites that emitted three would still simulate correctly here
+/// and fail on silicon, so the count is asserted rather than assumed.
+///
+/// The behavioural half drives all three enables independently, so every
+/// combination arrives — including all three at once, the case a fold reducing
+/// from the wrong end would get exactly backwards, and the case a design that
+/// merged them by hand would have had to reason about.
+let private lastWriteSiteWins () =
+    let onlyOneWriteSite =
+        let verilog = emitDesign priorityWrite
+        let sites = verilog.Split("store[").Length - 1
+        // One in the declaration's read path and one in the always block would
+        // be two; the read is `memRead`, which emits `store[raddr]` — so the
+        // write site is the other one.
+        sites = 2
+
+    let sim = Sim priorityWrite
+    let rng = System.Random 3131
+    let model = Array.zeroCreate<uint64> 8
+
+    let mutable ok = true
+    let mutable allThree = 0
+
+    for _ in 1..4000 do
+        let addr = rng.Next 8
+        let raddr = rng.Next 8
+        let low = rng.Next 2 = 1
+        let mid = rng.Next 2 = 1
+        let high = rng.Next 2 = 1
+
+        sim.Poke("addr", uint64 addr)
+        sim.Poke("raddr", uint64 raddr)
+        sim.Poke("low_enable", (if low then 1UL else 0UL))
+        sim.Poke("mid_enable", (if mid then 1UL else 0UL))
+        sim.Poke("high_enable", (if high then 1UL else 0UL))
+
+        // The read is combinational, so it answers about the words standing
+        // before this cycle's write.
+        if sim.Peek "word" <> model[raddr] then ok <- false
+
+        // Last site first in the model, because last site wins.
+        if high then model[(addr + 2) % 8] <- 0x33UL
+        elif mid then model[(addr + 1) % 8] <- 0x22UL
+        elif low then model[addr] <- 0x11UL
+
+        if low && mid && high then allThree <- allThree + 1
+
+        sim.Tick()
+
+    // A fold from the wrong end passes every cycle where at most one enable is
+    // high, so the check is only worth anything if the overlap actually happened.
+    onlyOneWriteSite && ok && allThree > 300
+
+/// **Masks do not merge across write sites**: the priority pick happens first,
+/// and only the winner's mask applies.
+///
+/// The two writes cover opposite halves of the word, which is the arrangement
+/// that makes the wrong answer look right — merge them and both halves land,
+/// and a design filling a word from two places would appear to work. It does
+/// not: with both enables high the high write wins outright, its two lanes
+/// land, and the low two keep whatever a previous cycle left there.
+///
+/// The model states that directly rather than deriving it, so a change to the
+/// fold's direction fails here instead of quietly redefining the rule.
+let private masksDoNotMergeAcrossSites () =
+    let sim = Sim maskedWritePriority
+    let rng = System.Random 7272
+    let model = Array.zeroCreate<uint64> 8
+
+    let mutable ok = true
+    let mutable checks = 0
+    let mutable bothFired = 0
+    let mutable pending = -1L
+
+    for _ in 1..6000 do
+        let addr = rng.Next 8
+        let raddr = rng.Next 8
+        let lowData = uint64 (rng.Next()) &&& 0xFFFFFFFFUL
+        let highData = uint64 (rng.Next()) &&& 0xFFFFFFFFUL
+        let low = rng.Next 2 = 1
+        let high = rng.Next 2 = 1
+
+        sim.Poke("addr", uint64 addr)
+        sim.Poke("raddr", uint64 raddr)
+        sim.Poke("low_data", lowData)
+        sim.Poke("high_data", highData)
+        sim.Poke("low_enable", (if low then 1UL else 0UL))
+        sim.Poke("high_enable", (if high then 1UL else 0UL))
+
+        // Read-first, like every synchronous read here: the expectation is
+        // captured now and compared next cycle.
+        if pending >= 0L then
+            checks <- checks + 1
+            if sim.Peek "rdata" <> uint64 pending then ok <- false
+
+        pending <- int64 model[raddr]
+
+        // One winner, one mask. The high write is later in the source.
+        let apply data lanes =
+            let keep = List.fold (fun acc lane -> acc ||| (0xFFUL <<< (lane * 8))) 0UL lanes
+            model[addr] <- (data &&& keep) ||| (model[addr] &&& ~~~keep)
+
+        if high then apply highData [ 2; 3 ]
+        elif low then apply lowData [ 0; 1 ]
+
+        if low && high then bothFired <- bothFired + 1
+
+        sim.Tick()
+
+    ok && checks > 5000 && bothFired > 1000
+
+/// A ROM holds what it was declared with, at **every** address.
+///
+/// Walked rather than sampled, and that is the point: a table read at the wrong
+/// index still returns a plausible number, and a spot check of two entries
+/// passes against an off-by-one. Both storages are walked, because they reach
+/// the word by different routes — LUTs combinationally, a block through a read
+/// register a cycle later — and only the second can be a cycle out.
+let private romsHoldTheirContents () =
+    let squares = [| 0UL; 1UL; 4UL; 9UL; 16UL; 25UL; 36UL; 49UL |]
+
+    let primes =
+        [| 2UL; 3UL; 5UL; 7UL; 11UL; 13UL; 17UL; 19UL; 23UL; 29UL; 31UL; 37UL; 41UL; 43UL; 47UL; 53UL |]
+
+    let lutWalks =
+        let sim = Sim romLookup
+
+        squares
+        |> Array.indexed
+        |> Array.forall (fun (i, expected) ->
+            sim.Poke("index", uint64 i)
+            sim.Tick()
+            sim.Peek "square" = expected)
+
+    let blockWalks =
+        let sim = Sim blockRomLookup
+        let mutable ok = true
+
+        // A cycle behind, so the address goes in and the answer is read after
+        // the edge — the whole difference between the two designs.
+        for i in 0 .. primes.Length - 1 do
+            sim.Poke("index", uint64 i)
+            sim.Tick()
+            if sim.Peek "prime" <> primes[i] then ok <- false
+
+        ok
+
+    // And the contents reach the Verilog, which is the half a simulator cannot
+    // speak for: an initial block Vivado turns into a BRAM INIT.
+    let contentsAreEmitted =
+        let verilog = emitDesign blockRomLookup
+        verilog.Contains "primes[15] = 16'd53" && verilog.Contains "(* ram_style = \"block\" *)"
+
+    lutWalks && blockWalks && contentsAreEmitted
+
+/// **Writes fold and reads do not.** Two reads of one memory at two addresses
+/// are two ports, each answering its own address.
+///
+/// The behavioural claim is the easy half and the structural one is why this
+/// design exists: `memRead` counts nothing, so a second simultaneous read is a
+/// second copy of the array in LUTs, and the cost shows up in the utilisation
+/// report rather than as an error. Nothing here can measure LUTs, so what is
+/// asserted instead is that both reads survived to the Verilog — an emitter
+/// that folded them would produce a design that answers one address twice, and
+/// the random stimulus drives the two apart in seven cycles out of eight.
+let private readsDoNotFold () =
+    let sim = Sim dualRead
+    let rng = System.Random 4242
+    let model = Array.zeroCreate<uint64> 8
+
+    let mutable ok = true
+    let mutable apart = 0
+    let mutable pending = None
+
+    for _ in 1..4000 do
+        let waddr = rng.Next 8
+        let wdata = uint64 (rng.Next 256)
+        let wen = rng.Next 4 <> 0
+        let addrA = rng.Next 8
+        let addrB = rng.Next 8
+
+        sim.Poke("waddr", uint64 waddr)
+        sim.Poke("wdata", wdata)
+        sim.Poke("wen", (if wen then 1UL else 0UL))
+        sim.Poke("addr_a", uint64 addrA)
+        sim.Poke("addr_b", uint64 addrB)
+
+        // The LUTRAM pair answers now; the block pair answers about the
+        // addresses that were presented last cycle.
+        if sim.Peek "now_a" <> model[addrA] then ok <- false
+        if sim.Peek "now_b" <> model[addrB] then ok <- false
+
+        match pending with
+        | Some (a, b) ->
+            if sim.Peek "next_a" <> a then ok <- false
+            if sim.Peek "next_b" <> b then ok <- false
+        | None -> ()
+
+        pending <- Some(model[addrA], model[addrB])
+
+        if addrA <> addrB then apart <- apart + 1
+        if wen then model[waddr] <- wdata
+
+        sim.Tick()
+
+    ok && apart > 3000
+
+/// **The same kernel over three storages gives the same answers**, and the
+/// kernel's own logic is the same logic in all three.
+///
+/// Two claims, and the pair is the point of `notes/DEVICES.md`'s UC2.
+///
+/// The behavioural one: `sumOverLut`, `sumOverBlock` and `sumOverDdr` are the
+/// same `runningSumOver` call against a combinational array, a block behind a
+/// skid, and memory on the other side of an AXI interconnect. All three must
+/// produce the identical 64 partial sums. A kernel that had quietly assumed its
+/// read answered this cycle would agree with the first and disagree with the
+/// other two.
+///
+/// The structural one, which is the stronger: the kernel's **declarations** —
+/// which registers and wires it owns, and how wide — must be identical across
+/// all three emitted modules, and so must the address generator's update. What
+/// legitimately differs is only the wire the sum reads from, because that is
+/// the port's output and naming it is the port's job.
+///
+/// Throughput is reported rather than asserted: it differs by design, and §3 of
+/// the plan accepts exactly that — correctness ports, performance does not.
+let private oneKernelThreeStorages () =
+    let words = [ for i in 0..63 -> uint64 (i * 7 + 3) ]
+
+    let expected =
+        words
+        |> List.scan (+) 0UL
+        |> List.tail
+        |> List.map (fun v -> v &&& 0xFFFFFFFFUL)
+
+    // ---- the two on-chip mappings, driven through their fill/probe ports ----
+    let onChip (design: ModuleDef) =
+        let sim = Sim design
+        sim.Poke("run", 0UL)
+
+        words
+        |> List.iteri (fun i w ->
+            sim.Poke("fill_addr", uint64 i)
+            sim.Poke("fill_data", w)
+            sim.Poke("fill_enable", 1UL)
+            sim.Tick())
+
+        sim.Poke("fill_enable", 0UL)
+        sim.Poke("run", 1UL)
+
+        let mutable cycles = 0
+
+        while sim.Peek "req_more" = 1UL || cycles < 8 do
+            sim.Tick()
+            cycles <- cycles + 1
+
+        // Drain: the stage and the sink still hold beats after the last index
+        // is issued. Not counted — the number worth reporting is how long the
+        // read path took to walk the words, and a fixed drain would swamp it.
+        for _ in 1..64 do
+            sim.Tick()
+
+        let got =
+            [ for i in 0..63 ->
+                sim.Poke("probe_addr", uint64 i)
+                sim.Tick()
+                sim.Peek "probe_data" ]
+
+        got, cycles
+
+    let lutGot, lutCycles = onChip sumOverLut
+    let blockGot, blockCycles = onChip sumOverBlock
+
+    // ---- and the one that leaves the chip ----------------------------------
+    let ddrGot, ddrCycles =
+        let sim = Sim sumOverDdr
+        // Paced, not free. An unthrottled model answers every read the cycle
+        // it is asked, which would make the DDR mapping look exactly like the
+        // LUT one and prove nothing.
+        let ddr =
+            SimAxiDdr(sim, 8192, dataBytes = 4, arEvery = 2, rDelay = 8, awEvery = 2, bDelay = 4)
+        words |> List.iteri (fun i w -> ddr.WriteWord(i * 4, uint32 w))
+
+        sim.Poke("run", 1UL)
+        let mutable cycles = 0
+
+        while (sim.Peek "req_more" = 1UL || cycles < 8) && cycles < 50000 do
+            ddr.Cycle()
+            cycles <- cycles + 1
+
+        // A longer drain than the on-chip pair needs: reads are still in
+        // flight and every result is a separate AXI write. Not counted, as above.
+        for _ in 1..4096 do
+            ddr.Cycle()
+
+        [ for i in 0..63 -> uint64 (ddr.ReadWord(0x1000 + i * 4)) ], cycles
+
+    let agree = lutGot = expected && blockGot = expected && ddrGot = expected
+
+    // ---- the structural half ------------------------------------------------
+    //
+    // The kernel's own names, and nothing else. `req_ready` is excluded: it is
+    // driven by whichever read port is attached, which is the port's job.
+    let kernelOwned = [ "req_index"; "req_more"; "acc"; "sum_total"; "sum_ready" ]
+
+    let topOf (d: ModuleDef) =
+        let text = emitDesign d
+        let start = text.IndexOf $"module {d.name} "
+        text.Substring(start).Split('\n')
+
+    let declarations (d: ModuleDef) =
+        topOf d
+        |> Array.filter (fun l ->
+            let t = l.Trim()
+
+            (t.StartsWith "reg " || t.StartsWith "wire ")
+            && kernelOwned |> List.exists (fun n -> t.EndsWith $"{n};"))
+        |> Array.map (fun l -> l.Trim())
+        |> Array.sort
+
+    let indexUpdate (d: ModuleDef) =
+        topOf d
+        |> Array.filter (fun l -> l.Trim().StartsWith "req_index <=")
+        |> Array.map (fun l -> l.Trim())
+
+    let sameDeclarations =
+        let a = declarations sumOverLut
+        a = declarations sumOverBlock && a = declarations sumOverDdr && a.Length = 5
+
+    let sameGenerator =
+        let a = indexUpdate sumOverLut
+        // Two lines: the reset value and the update. Both must match.
+        a = indexUpdate sumOverBlock && a = indexUpdate sumOverDdr && a.Length = 2
+
+    // 64 words, so the floor is 64 cycles. LUTs and the skidded block both hit
+    // it; DDR does not, and that gap is the whole of §3's accepted caveat —
+    // a measured number belongs to a (design, mapping) pair, never a design.
+    printfn
+        $"    (identical sums; cycles to walk 64 words — LUT %d{lutCycles} · block %d{blockCycles} · DDR %d{ddrCycles})"
+
+    agree && sameDeclarations && sameGenerator
+
+/// **Two levels: a bus is transport, a window is memory by index, and a client
+/// only ever sees a window.**
+///
+/// The prototype of `notes/DEVICES.md` §10b–§10d after the split. Five claims.
+///
+/// **The client's own logic is the same logic everywhere.** Its seven
+/// declarations are byte-identical across a design with one window on a port,
+/// two windows sharing a port, two windows on two ports, and one with no bus at
+/// all. `SumWhollyOnChip` emits **zero AXI ports** and the client inside it is
+/// character for character the client inside the others.
+///
+/// **The arbiter is implied by the region count.** One region reaches the
+/// master directly, because `streamMergeTree` at a single stream returns its
+/// argument; two produce a merge. Nobody selects arbitration.
+///
+/// **A second port is sayable** — `m_axi_hp0` and `m_axi_hp1`, which a
+/// hardcoded bus name makes impossible.
+///
+/// **A bus has one owner, checked as a bus**, naming the bus rather than one of
+/// its wires. Note that reaching this now means going around the window layer
+/// to the master: `writeWindowsOn` cannot produce it, because a bus with two
+/// windows builds one master over a merge.
+///
+/// **And a window opened but never written is refused too.** `writeWindowsOn`
+/// builds its master eagerly over wires the windows fill in later, which is
+/// what lets it return a plain list; the cost is that an unused window would
+/// float, and an undriven wire is not an error here. Registering each window's
+/// valid as a stream net is what closes that.
+///
+/// **And they all compute the same sums.**
+let private busAndWindowLevels () =
+    let arbitrationIn (d: ModuleDef) =
+        (emitDesign d).Split('\n')
+        |> Array.filter (fun l -> l.Contains "mergeTakeA")
+        |> Array.length
+
+    let axiPortsIn (d: ModuleDef) =
+        System.Text.RegularExpressions.Regex.Matches(
+            (emitDesign d).Split('\n') |> Array.head,
+            "m_axi[a-z0-9_]*_(aw|ar|w|r|b)[a-z]+"
+        )
+            .Count
+
+    // What `sumClient "a"` owns, and nothing else.
+    let clientOwned =
+        [ "a_index"; "a_asking"; "a_more"; "a_out_index"; "a_writing"; "a_acc"; "a_total" ]
+
+    let clientDeclarations (d: ModuleDef) =
+        let text = emitDesign d
+        text.Substring(text.IndexOf $"module {d.name} ").Split('\n')
+        |> Array.map (fun l -> l.Trim())
+        |> Array.filter (fun t ->
+            (t.StartsWith "reg " || t.StartsWith "wire ")
+            && clientOwned |> List.exists (fun n -> t.EndsWith $"{n};"))
+        |> Array.sort
+
+    let designs = [ oneOwnerOnePort; twoOwnersOnePort; twoOwnersTwoPorts; sumWhollyOnChip ]
+
+    let sameClient =
+        let first = clientDeclarations (List.head designs)
+        first.Length = 7 && designs |> List.forall (fun d -> clientDeclarations d = first)
+
+    let noBusAtAll = axiPortsIn sumWhollyOnChip = 0 && arbitrationIn sumWhollyOnChip = 0
+    let oneRegionIsFree = arbitrationIn oneOwnerOnePort = 0 && axiPortsIn oneOwnerOnePort = 16
+    let twoRegionsArbitrate = arbitrationIn twoOwnersOnePort > 0 && axiPortsIn twoOwnersOnePort = 16
+
+    let twoPortsDoNot =
+        arbitrationIn twoOwnersTwoPorts = 0
+        && axiPortsIn twoOwnersTwoPorts = 32
+        && (emitDesign twoOwnersTwoPorts).Contains "m_axi_hp1_awvalid"
+
+    let refusesASecondOwner =
+        try
+            emitDesign (onBusWithTwoOwners ()) |> ignore
+            false
+        with ex ->
+            ex.Message.Contains "already has an owner"
+
+    // Opening a window and never writing to it would hand the merge a floating
+    // input, and an undriven wire is not an elaboration error — only a stream
+    // net is, which is why each window's valid is registered as one.
+    let refusesAnOpenWindow =
+        try
+            emitDesign (onWindowNeverWritten ()) |> ignore
+            false
+        with ex ->
+            ex.Message.Contains "b_window_valid" && ex.Message.Contains "driven 0 times"
+
+    // ---- and the sums agree, on a port or off it ----------------------------
+    let expected = [ for i in 0..15 -> uint64 ((i + 1) * (i + 2) / 2 * 3) ]
+
+    let stage (sim: Sim) (cycle: unit -> unit) (clients: string list) =
+        sim.Poke("run", 0UL)
+
+        for c in clients do
+            for i in 0..15 do
+                sim.Poke($"{c}_fill_addr", uint64 i)
+                sim.Poke($"{c}_fill_data", uint64 ((i + 1) * 3))
+                sim.Poke($"{c}_fill_enable", 1UL)
+                cycle ()
+
+            sim.Poke($"{c}_fill_enable", 0UL)
+
+        sim.Poke("run", 1UL)
+
+        for _ in 1..2000 do
+            cycle ()
+
+    let overBus (design: ModuleDef) (clients: string list) (prefixes: string list) =
+        let sim = Sim design
+
+        let slaves =
+            [ for prefix in prefixes -> SimAxiWriteSlave(sim, 4096, prefix = prefix, dataBytes = 4) ]
+
+        let cycle () =
+            for s in slaves do
+                s.Capture()
+
+            sim.Tick()
+
+            for s in slaves do
+                s.Pace()
+
+        stage sim cycle clients
+        let memory = slaves.Head.Memory
+
+        [ for i in 0..15 ->
+            uint64 memory[0x100 + i * 4]
+            ||| (uint64 memory[0x101 + i * 4] <<< 8)
+            ||| (uint64 memory[0x102 + i * 4] <<< 16)
+            ||| (uint64 memory[0x103 + i * 4] <<< 24) ]
+
+    let onChip () =
+        let sim = Sim sumWhollyOnChip
+        stage sim sim.Tick [ "a" ]
+
+        [ for i in 0..15 ->
+            sim.Poke("probe_addr", uint64 i)
+            sim.Tick()
+            sim.Peek "probe_data" ]
+
+    let sumsAgree =
+        overBus oneOwnerOnePort [ "a" ] [ "m_axi" ] = expected
+        && overBus twoOwnersOnePort [ "a"; "b" ] [ "m_axi" ] = expected
+        && overBus twoOwnersTwoPorts [ "a"; "b" ] [ "m_axi_hp0"; "m_axi_hp1" ] = expected
+        && onChip () = expected
+
+    sameClient
+    && noBusAtAll
+    && oneRegionIsFree
+    && twoRegionsArbitrate
+    && twoPortsDoNot
+    && refusesASecondOwner
+    && refusesAnOpenWindow
+    && sumsAgree
+
 /// The pipelined channel's three claims, driven by hand because `SimAxi.client`
 /// is deliberately one-at-a-time and one-at-a-time is what this channel is not.
 ///
@@ -3191,6 +3716,12 @@ let private mainDemo () =
     printfn $"pipelined channel pipelines:  %b{pipelinedChannelPipelines ()}"
     printfn $"strobe spares other lanes:    %b{strobeSparesUntouchedLanes ()}"
     printfn $"wide strobe spares lanes:     %b{strobeSparesWideLanes ()}"
+    printfn $"last write site wins:         %b{lastWriteSiteWins ()}"
+    printfn $"masks do not merge:           %b{masksDoNotMergeAcrossSites ()}"
+    printfn $"roms hold their contents:     %b{romsHoldTheirContents ()}"
+    printfn $"reads do not fold:            %b{readsDoNotFold ()}"
+    printfn $"one kernel, three storages:   %b{oneKernelThreeStorages ()}"
+    printfn $"bus and window, two levels:   %b{busAndWindowLevels ()}"
     printfn $"context rides along:          %b{contextRidesAlong ()}"
     printfn $"farm carries context:         %b{farmCarriesContext ()}"
     printfn $"ram style rule holds:         %b{ramStyleRule ()}"

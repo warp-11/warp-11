@@ -71,6 +71,18 @@ shows the bytes the design was elaborated from rather than a copy that can drift
 Add `Designs.fs` as an `EmbeddedResource` in your `.fsproj` for that to work, and
 pass `Some "Blinker"` instead of `None` to open on a particular entry.
 
+Once the designs outgrow one file, `embeddedFrom` takes a list instead — the
+files are searched in order and the first one defining the binding wins:
+
+```fsharp
+embeddedFrom (System.Reflection.Assembly.GetExecutingAssembly())
+    [ "MemoryDesigns.fs"; "Designs.fs" ]
+    [ ... ]
+```
+
+Every file in the list needs its own `EmbeddedResource` line. `embedded` is the
+one-file case of the same thing.
+
 The second argument is your panels — see below. `[]` is fine.
 
 ## Your own panels
@@ -108,6 +120,21 @@ empty third of a window is worse than no column at all.
 
 If your catalog has written pages, `Pages.both catalog` gives you the `about` and
 `source` panels ready-made.
+
+`Pages.verilog` takes no catalog. It reads the design off the session and shows
+what `emitDesign` produces — the same text that becomes the bitstream, beside
+the F# it was elaborated from:
+
+```fsharp
+Warp11.SimView.Desktop.run source (Pages.both catalog @ [ Pages.verilog ])
+```
+
+Because it needs no catalog it works on an attached debugger too. Emission is
+remembered per design, so a panel that re-renders on every snapshot pays for it
+once: GEP's cluster is 2.9 MB of Verilog and 203 ms to emit, and it runs at
+24.5k cycles/s with the whole of it on screen. A design that will not emit shows
+the elaboration error instead of throwing, which makes this the readable home
+for a `checkWidths` or `checkStreams` refusal.
 
 ## Attaching to a design already running
 

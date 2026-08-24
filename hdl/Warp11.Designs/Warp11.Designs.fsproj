@@ -7,17 +7,24 @@
     </PropertyGroup>
 
     <ItemGroup>
+        <Compile Include="Windows.fs"/>
+        <Compile Include="MemoryDesigns.fs"/>
         <Compile Include="Designs.fs"/>
+        <Compile Include="BusDesigns.fs"/>
         <Compile Include="Registry.fs"/>
         <Compile Include="Main.fs"/>
     </ItemGroup>
 
     <!-- The cookbook pages and the catalog's own text, carried inside the
          assembly: the debugger shows both, and a published wasm bundle has no
-         disk to read them off. `Designs.fs` is compiled *and* embedded — the
-         source pane shows the same bytes the design was elaborated from. -->
+         disk to read them off. The design files are compiled *and*
+         embedded — the source pane shows the same bytes the design was
+         elaborated from. -->
     <ItemGroup>
+        <EmbeddedResource Include="Windows.fs" LogicalName="Windows.fs"/>
+        <EmbeddedResource Include="MemoryDesigns.fs" LogicalName="MemoryDesigns.fs"/>
         <EmbeddedResource Include="Designs.fs" LogicalName="Designs.fs"/>
+        <EmbeddedResource Include="BusDesigns.fs" LogicalName="BusDesigns.fs"/>
         <EmbeddedResource Include="doc/*.md" LogicalName="doc/%(Filename).md"/>
     </ItemGroup>
 

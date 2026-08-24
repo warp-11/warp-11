@@ -248,72 +248,6 @@ let streamDivider =
         results.valid ==> outputBit "out_valid"
         inputBit "out_ready" ==> results.ready)
 
-/// A stream FIFO between a producer and a consumer.
-///
-/// The whole of what it buys is decoupling: a burst is absorbed, and a consumer
-/// that pauses stops the producer only once the buffer is full. First-word
-/// fall-through, so `payload` and `valid` arrive together as the contract
-/// requires.
-let bufferedStream =
-    design "BufferedStream" (fun () ->
-        let src =
-            { payload = input "in_data" 8
-              valid = inputBit "in_valid"
-              ready = outputBit "in_ready"
-              layout = layout1 ("data", 8) }
-
-        let out = streamFifo "fifo" 8 src
-
-        out.payload ==> output "out_data" 8
-        out.valid ==> outputBit "out_valid"
-        inputBit "out_ready" ==> out.ready)
-
-/// A memory read with the caller's own values carried through it.
-///
-/// The tag and the request's valid go in with the address and come back
-/// attached to the word — which is the whole claim, and the reason the port
-/// exists rather than the caller writing a register and remembering to. Nothing
-/// here names a latency; `through` delays by whatever the port's depth is.
-let carriedRead =
-    design "CarriedRead" (fun () ->
-        let waddr = input "waddr" 4
-        let wdata = input "wdata" 8
-        let wen = inputBit "wen"
-        let raddr = input "raddr" 4
-        let tag = input "tag" 8
-        let ask = inputBit "ask"
-
-        let store = blockMem "store" 4 8
-        If wen (fun () -> memWrite store waddr wdata (lit 1UL 1))
-
-        let read = memReadPort store raddr
-        read.data ==> output "data" 8
-        read.through "tag" tag ==> output "tag_out" 8
-        read.through "ask" ask ==> outputBit "answered")
-
-/// The same FIFO, deep enough that its words live in a block rather than in
-/// LUTs — and that is the only thing that is different about it.
-///
-/// The source is character for character `bufferedStream` with one number
-/// changed. Above the crossover the head becomes a synchronous read behind a
-/// two-slot skid, which is a different circuit answering to the same `Stream`:
-/// same capacity, same beat per cycle, same order. The pair exists so that
-/// claim is a measurement rather than a design note — the check runs one model
-/// against both.
-let deepBufferedStream =
-    design "DeepBufferedStream" (fun () ->
-        let src =
-            { payload = input "in_data" 8
-              valid = inputBit "in_valid"
-              ready = outputBit "in_ready"
-              layout = layout1 ("data", 8) }
-
-        let out = streamFifo "fifo" 128 src
-
-        out.payload ==> output "out_data" 8
-        out.valid ==> outputBit "out_valid"
-        inputBit "out_ready" ==> out.ready)
-
 let divideOperands = layout2 ("dividend", 8) ("divisor", 8)
 let divideResults = layout2 ("quotient", 8) ("remainder", 8)
 let divideContext = layout1 ("tag", 8)
@@ -679,50 +613,6 @@ let treeSum =
         let widen x = cat (lit 0UL 3) x
         reduceTree (+) (List.map widen inputs) ==> out)
 
-/// A 8x8 RAM with a write under On, a sync read and an async read. The oracle's
-/// random 3-bit addresses collide constantly across 50 cycles, so read-first —
-/// the semantics sim and silicon must agree on — is differentially exercised
-/// rather than asserted.
-let ramTest =
-    design "RamTest" (fun () ->
-        let waddr = input "waddr" 3
-        let wdata = input "wdata" 8
-        let wen = inputBit "wen"
-        let raddr = input "raddr" 3
-        let nextCycleOut = output "next_cycle_out" 8
-        let thisCycleOut = output "this_cycle_out" 8
-
-        let store = distributedMem "store" 3 8
-        If wen (fun () -> memWrite store waddr wdata (lit 1UL 1))
-        (memReadPort store raddr).data ==> nextCycleOut
-        memRead store raddr ==> thisCycleOut)
-
-/// A 256-word memory that fills itself: one word per cycle while `run` is high,
-/// each holding 3× its own address plus one, so a wrong word is obvious by
-/// inspection. The catalog's other memories are eight words deep, which is
-/// small enough to read at a glance and therefore no test of anything that has
-/// to *page* through a memory.
-let fillingMemory =
-    design "FillingMemory" (fun () ->
-        let run = inputBit "run"
-        let addr = output "addr" 8
-        let word = output "word" 16
-
-        let store = distributedMem "store" 8 16
-        let ptr = reg "ptr" 8
-        let wide = wire "wide" 16
-        let value = wire "value" 16
-
-        cat (lit 0UL 8) ptr ==> wide
-        wide + wide + wide + lit 1UL 16 ==> value
-
-        If run (fun () ->
-            memWrite store ptr value (lit 1UL 1)
-            ptr + lit 1UL 8 ==> ptr)
-
-        ptr ==> addr
-        (memReadPort store ptr).data ==> word)
-
 /// Claims stated in the design and checked every cycle. Both are things a
 /// saturating counter actually promises, and both can be broken on purpose —
 /// `wrap` and driving `hold` with `enable` are the fault injections the negative
@@ -1063,47 +953,6 @@ let twoWindowSlave =
             [ 0x10UL, even; 0x20UL, odd ]
         |> ignore)
 
-/// A byte-enabled memory: the write reaches only the lanes its strobe selects.
-///
-/// Four 8-bit lanes in a 32-bit word — AXI's `wstrb`, and the shape a
-/// synthesiser turns into one block RAM with four write-enables rather than
-/// read-modify-write logic. Each lane carries a different byte of `wdata` so a
-/// strobe that reached the wrong lane is visible, and the word is read back
-/// whole: what the check is really asserting is that the lanes the strobe left
-/// alone still hold what a *previous* write put there.
-let maskedWrite =
-    design "MaskedWrite" (fun () ->
-        let waddr = input "waddr" 3
-        let wdata = input "wdata" 32
-        let wstrb = input "wstrb" 4
-        let wen = inputBit "wen"
-        let raddr = input "raddr" 3
-
-        let store = blockMem "store" 3 32
-        memWriteMasked store waddr wdata wen wstrb
-
-        (memReadPort store raddr).data ==> output "rdata" 32)
-
-/// The masked write at a width no uint64 can hold: a 128-bit word in four
-/// 32-bit lanes.
-///
-/// Same contract as `maskedWrite`, and deliberately the same shape — what this
-/// design exists to exercise is the simulator's *wide* memory store (BigInteger
-/// words, BigInteger keep masks), which the 64-bit toy structurally cannot
-/// reach. It is the shape GEP's merged tables take, proven here first.
-let maskedWriteWide =
-    design "MaskedWriteWide" (fun () ->
-        let waddr = input "waddr" 3
-        let wdata = input "wdata" 128
-        let wstrb = input "wstrb" 4
-        let wen = inputBit "wen"
-        let raddr = input "raddr" 3
-
-        let store = blockMem "store" 3 128
-        memWriteMasked store waddr wdata wen wstrb
-
-        (memReadPort store raddr).data ==> output "rdata" 128)
-
 /// A read channel that waits three cycles, so the busy flag has something to do.
 ///
 /// No read source in the tree costs more than one cycle yet, so the deep path
@@ -1249,7 +1098,6 @@ let nameCollision =
 
         realMultiply (impostor a b) b ==> out)
 
-
 /// The full-scale pod's egress shape at oracle scale: a 128-bit beat assembled
 /// by shifting bytes in (the coalescer's move), sliced back out narrow, muxed
 /// and compared wide — the Sim's BigInteger path differentially exercised on
@@ -1366,7 +1214,6 @@ let private byteSplitter =
             (inValid &&& bnot isHigh) ==> lowValid
             (inValid &&& isHigh) ==> highValid
             mux isHigh highReady lowReady ==> inReady)
-
 
 /// Test case 1 of the connect-layer discussion: module A produces two separate
 /// streams, each consumed by its own chain — `Stream.stage f` registers the
@@ -1666,46 +1513,6 @@ let probedPipe =
         let starvedCount = output "starved_count" 32
         counters.blocked ==> blockedCount
         counters.starved ==> starvedCount)
-
-/// The AXI master's pointer ring under the oracle: 128-bit beats, 4 slots.
-/// The testbench's random awready/wready/bvalid stand in for the interconnect,
-/// so protocol-state equivalence is checked under adversarial slave timing —
-/// including illegal timing (spurious bvalid), where both implementations must
-/// still agree state-for-state.
-let axiWriteMaster =
-    design "AxiWriteMaster" (fun () ->
-        streamInput "in" (axiWriteBeatLayout 32 128)
-        |> axiMasterWriter 32 128 4)
-
-/// The AXI4 read master's ring path at ports: request addresses in, read data
-/// out, `m_axi_ar*`/`m_axi_r*` at the boundary. The rehearsal drives it
-/// against `SimAxiReadSlave` across the pacing matrix.
-let axiReadMaster =
-    design "AxiReadMaster" (fun () ->
-        streamInput "req" (layout1 ("addr", 32))
-        |> axiMasterReader 32 32 8
-        |> streamOutput "resp")
-
-/// The single-outstanding degenerate read path — pending flags, no ring.
-let axiReadMasterSingle =
-    design "AxiReadMasterSingle" (fun () ->
-        streamInput "req" (layout1 ("addr", 32))
-        |> axiMasterReader 32 32 1
-        |> streamOutput "resp")
-
-/// The burst read master: (addr, len) descriptors in, (data, last) beats out,
-/// streaming R passthrough — GEP's host-marshaled streaming shape.
-let axiReadMasterBurst =
-    design "AxiReadMasterBurst" (fun () ->
-        streamInput "req" (layout2 ("addr", 32) ("len", 8))
-        |> axiMasterReaderBurst 32 32 4 16
-        |> streamOutput "resp")
-
-/// The single-outstanding degenerate path — pending flags, no ring.
-let axiWriteMasterSingle =
-    design "AxiWriteMasterSingle" (fun () ->
-        streamInput "in" (axiWriteBeatLayout 16 32)
-        |> axiMasterWriter 16 32 1)
 
 /// A w1p pulse register under the oracle: each accepted write of 1 to offset 0
 /// bumps a counter read back at offset 4 — write-fire gating, bit-0 decode and

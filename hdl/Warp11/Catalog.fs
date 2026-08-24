@@ -137,11 +137,20 @@ let private remember f =
             answers[key] <- answer
             answer
 
-/// A catalog whose pages live at `doc/{binding}.md` and whose designs live in
-/// one embedded source file — the arrangement every catalog here uses.
-let embedded (assembly: System.Reflection.Assembly) (sourceFile: string) (entries: Entry list) =
-    let text = lazy (resource assembly sourceFile)
+/// A catalog whose pages live at `doc/{binding}.md` and whose designs are
+/// spread across several embedded source files — the arrangement every catalog
+/// here uses, once one of them outgrew a single file.
+///
+/// The files are searched in order and the first one defining the binding wins.
+/// Nothing enforces that a binding appears once, because F# already does: two
+/// files in one assembly cannot both bind the name a `nameof` resolved.
+let embeddedFrom (assembly: System.Reflection.Assembly) (sourceFiles: string list) (entries: Entry list) =
+    let texts = lazy [ for file in sourceFiles -> resource assembly file ]
 
     { entries = entries
       doc = remember (fun binding -> resource assembly $"doc/{binding}.md")
-      source = remember (fun binding -> text.Value |> Option.bind (fun t -> sliceFrom t binding)) }
+      source = remember (fun binding -> texts.Value |> List.tryPick (Option.bind (fun t -> sliceFrom t binding))) }
+
+/// The one-file case, which is most of them.
+let embedded (assembly: System.Reflection.Assembly) (sourceFile: string) (entries: Entry list) =
+    embeddedFrom assembly [ sourceFile ] entries

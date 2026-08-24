@@ -106,6 +106,16 @@ drivers for each accelerator. Rust rather than F# because this half *ships* onto
 boards that may have no Linux-class host, where the F# half never leaves your
 machine.
 
+On a Zynq UltraScale+ part like the KV260 those two halves are two halves of one
+chip, and Xilinx's names for them turn up throughout these docs: the **PS**
+(Processing System) is the hard ARM side — the Cortex-A53s, the DDR controller
+and the DRAM hanging off it, where Linux and the runtime run — and the **PL**
+(Programmable Logic) is the fabric your elaborated Verilog becomes. They share
+no memory. They meet only at named AXI ports: `s_axi_*` is the fabric as a
+slave, which is how the host pokes registers, and `m_axi_*` is the fabric as a
+master reaching out to the PS's DRAM, which is what "PS DDR" means wherever you
+see it.
+
 **The seam between them.** One register-map definition generates two things: the
 AXI slave that appears in the fabric, and the Rust structs the host reads it
 through (`runtime/core/src/*_layout.rs`, generated and committed). Because both

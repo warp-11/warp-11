@@ -13,7 +13,7 @@
         <PackageId>Warp11.SimView.Desktop</PackageId>
         <Description>Opens the Warp 11 step-through debugger as a desktop application: `Warp11.SimView.Desktop.debug "title" design` is the whole integration. Reference this from a desktop app; it brings Warp11.SimView and Warp11 with it.</Description>
         <PackageTags>fpga;hdl;fsharp;debugger;simulation;avalonia;waveform;vcd</PackageTags>
-        <PackageReleaseNotes>Tracks Warp11 0.1.0-alpha.2. No change to this package's own API — it is still one function. Take all three packages at the same version.</PackageReleaseNotes>
+        <PackageReleaseNotes>Tracks Warp11 0.1.0-alpha.3. Still one function, but `debug` now opens with `Pages.verilog` where it opened with no panels: a window that was two columns becomes three, and the new one shows the Verilog the design emits. Take all three packages at the same version.</PackageReleaseNotes>
     </PropertyGroup>
 
     <ItemGroup>

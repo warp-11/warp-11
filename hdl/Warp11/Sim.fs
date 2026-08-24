@@ -1270,10 +1270,17 @@ type SimAxiReadSlave
 /// results back to the same region needs in order to be observed at all — the
 /// two slaves used side by side would tick twice per cycle and each see half
 /// of memory.
+///
+/// `dataBytes` is the bus width and defaults to **16** — a KV260 HP port, which
+/// is what every caller here wanted until a toy master turned up at 32 bits. It
+/// has to match the master's `dataWidth`: the slaves stride the backing array by
+/// it, so a 16-byte slave behind a 4-byte master writes each word at four times
+/// its address and reads back zeros.
 type SimAxiDdr
     (sim: Sim,
      memBytes: int,
      ?prefix: string,
+     ?dataBytes: int,
      ?arEvery: int,
      ?rDelay: int,
      ?awEvery: int,
@@ -1282,13 +1289,14 @@ type SimAxiDdr
      ?jitter: int) =
     let memory = Array.zeroCreate<byte> memBytes
     let p = defaultArg prefix "m_axi"
+    let bytes = defaultArg dataBytes 16
 
     let rd =
         SimAxiReadSlave(
             sim,
             memBytes,
             prefix = p,
-            dataBytes = 16,
+            dataBytes = bytes,
             arEvery = defaultArg arEvery 1,
             rDelay = defaultArg rDelay 0,
             memory = memory,
@@ -1300,7 +1308,7 @@ type SimAxiDdr
             sim,
             memBytes,
             prefix = p,
-            dataBytes = 16,
+            dataBytes = bytes,
             awEvery = defaultArg awEvery 1,
             wEvery = defaultArg wEvery 1,
             bDelay = defaultArg bDelay 0,

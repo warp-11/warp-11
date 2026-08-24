@@ -23,6 +23,11 @@ let run (source: View.Source) (panels: View.Panel list) =
 /// Open a debugger on a design this process owns, with no catalog behind it —
 /// what a project reaches for when it has one design in hand and wants to watch
 /// it run. `Warp11.Gep` and `Warp11.Mandelbrot` both call this.
+///
+/// No catalog means no `about` and no `source`: both slice text out of a
+/// catalog's embedded source file, and a design reached this way is not in one.
+/// `Pages.verilog` is the exception and so it is here — it reads the design off
+/// the session, and what a design emits is knowable from the design alone.
 let debug (title: string) (design: ModuleDef) =
     let session = new DebugSession(design) :> IDebugSession
-    run (View.Attached(session, title)) []
+    run (View.Attached(session, title)) [ Pages.verilog ]

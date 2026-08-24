@@ -12,11 +12,13 @@ module Warp11.Designs.Registry
 
 open Warp11.Catalog
 open Warp11.Designs.Catalog
+open Warp11.Designs.MemoryCatalog
+open Warp11.Designs.BusCatalog
 
 let catalog =
-    embedded
+    embeddedFrom
         (System.Reflection.Assembly.GetExecutingAssembly())
-        "Designs.fs"
+        [ "MemoryDesigns.fs"; "BusDesigns.fs"; "Designs.fs" ]
         [ entry "Counter" (nameof onCounter) (fun () -> onCounter)
           entry "Counter (explicit builder)" (nameof counterMutable) (fun () -> counterMutable)
           entry "Comparator" (nameof comparator8) (fun () -> comparator8)
@@ -51,7 +53,20 @@ let catalog =
           entry "Bit shapes" (nameof bitShapes) (fun () -> bitShapes)
           entry "Adder tree (8 inputs)" (nameof treeSum) (fun () -> treeSum)
           entry "RAM, sync and async read" (nameof ramTest) (fun () -> ramTest)
+          entry "Two read ports" (nameof dualRead) (fun () -> dualRead)
           entry "Filling memory (256 words)" (nameof fillingMemory) (fun () -> fillingMemory)
+          entry "Priority write (three sites)" (nameof priorityWrite) (fun () -> priorityWrite)
+          entry "Masked write (two sites)" (nameof maskedWritePriority) (fun () -> maskedWritePriority)
+          entry "ROM lookup (LUTs)" (nameof romLookup) (fun () -> romLookup)
+          entry "ROM lookup (block RAM)" (nameof blockRomLookup) (fun () -> blockRomLookup)
+          entry "Running sum over LUTs" (nameof sumOverLut) (fun () -> sumOverLut)
+          entry "Running sum over block RAM" (nameof sumOverBlock) (fun () -> sumOverBlock)
+          entry "Running sum over DDR" (nameof sumOverDdr) (fun () -> sumOverDdr)
+          entry "Bus: one owner, one port" (nameof oneOwnerOnePort) (fun () -> oneOwnerOnePort)
+          entry "Bus: two owners, one port" (nameof twoOwnersOnePort) (fun () -> twoOwnersOnePort)
+          entry "Bus: two owners, two ports" (nameof twoOwnersTwoPorts) (fun () -> twoOwnersTwoPorts)
+          entry "Bus: sum from a read window" (nameof sumFromReadWindow) (fun () -> sumFromReadWindow)
+          entry "Window: wholly on chip" (nameof sumWhollyOnChip) (fun () -> sumWhollyOnChip)
           entry "Command processor (union + mem)" (nameof cmdProcessor) (fun () -> cmdProcessor)
           entry "Stream pipe" (nameof streamPipe) (fun () -> streamPipe)
           entry "Fork and join" (nameof forkJoin) (fun () -> forkJoin)
