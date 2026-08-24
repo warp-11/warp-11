@@ -57,6 +57,7 @@ let private diffDesigns () =
       twoOwnersOnePort
       twoOwnersTwoPorts
       sumFromReadWindow
+      sumReportsDone
       sumWhollyOnChip
       assertedSaturate
       cmdProcessor
@@ -2404,7 +2405,14 @@ let private busAndWindowLevels () =
 
     // What `sumClient "a"` owns, and nothing else.
     let clientOwned =
-        [ "a_index"; "a_asking"; "a_more"; "a_out_index"; "a_writing"; "a_acc"; "a_total" ]
+        [ "a_index"
+          "a_asking"
+          "a_more"
+          "a_out_index"
+          "a_writing"
+          "a_acc"
+          "a_total"
+          "a_all_accepted" ]
 
     let clientDeclarations (d: ModuleDef) =
         let text = emitDesign d
@@ -2419,7 +2427,7 @@ let private busAndWindowLevels () =
 
     let sameClient =
         let first = clientDeclarations (List.head designs)
-        first.Length = 7 && designs |> List.forall (fun d -> clientDeclarations d = first)
+        first.Length = 8 && designs |> List.forall (fun d -> clientDeclarations d = first)
 
     let noBusAtAll = axiPortsIn sumWhollyOnChip = 0 && arbitrationIn sumWhollyOnChip = 0
     let oneRegionIsFree = arbitrationIn oneOwnerOnePort = 0 && axiPortsIn oneOwnerOnePort = 16
@@ -2514,6 +2522,102 @@ let private busAndWindowLevels () =
     && refusesASecondOwner
     && refusesAnOpenWindow
     && sumsAgree
+
+/// **A window's `idle` is what makes a client's "done" mean "in memory".**
+///
+/// The property, stated so that only the right implementation can pass: at the
+/// cycle a client first raises its completion signal, every word it was asked
+/// to write must already be readable in the memory model — with no flush, no
+/// settling loop and no drain the check performs on the client's behalf.
+///
+/// A golden vector cannot say this. The sums are the same either way, and they
+/// are the same however long you wait; what distinguishes a correct completion
+/// signal from a hopeful one is *when* it may be believed. So the check reads
+/// the model at exactly one cycle and reports what was there.
+///
+/// **Both answers are measured**, which is what keeps the check honest. The
+/// client brings out `handed_over` — the last word accepted, the signal a
+/// design writes when it has nothing better — alongside `done`. Over a paced
+/// port the first is wrong and the second is right; the check asserts both
+/// halves, so an `idle` that had quietly become a constant one would fail here
+/// rather than pass twice.
+///
+/// The pacing is the whole reason it bites: an always-ready slave pairs AW and
+/// W the cycle they are offered, so the ring never holds anything and the wrong
+/// answer looks exactly like the right one. `awEvery = 8` is a port that makes
+/// a master wait, which is what a shared HP port does.
+let private doneMeansLanded () =
+    let expected = [ for i in 0..15 -> uint64 ((i + 1) * (i + 2) / 2 * 3) ]
+
+    /// Run until `watch` rises, then read the model *that cycle* — the point of
+    /// the check is the instant, so nothing is allowed to happen after it.
+    let landedWhen (watch: string) =
+        let sim = Sim sumReportsDone
+        let ddr = SimAxiWriteSlave(sim, 4096, dataBytes = 4, awEvery = 8, bDelay = 6)
+        sim.Poke("run", 0UL)
+
+        for i in 0..15 do
+            sim.Poke("a_fill_addr", uint64 i)
+            sim.Poke("a_fill_data", uint64 ((i + 1) * 3))
+            sim.Poke("a_fill_enable", 1UL)
+            ddr.Cycle()
+
+        sim.Poke("a_fill_enable", 0UL)
+        sim.Poke("run", 1UL)
+        let mutable cycles = 0
+
+        while sim.Peek watch <> 1UL && cycles < 5000 do
+            ddr.Cycle()
+            cycles <- cycles + 1
+
+        let memory = ddr.Memory
+
+        let words =
+            [ for i in 0..15 ->
+                uint64 memory[0x100 + i * 4]
+                ||| (uint64 memory[0x101 + i * 4] <<< 8)
+                ||| (uint64 memory[0x102 + i * 4] <<< 16)
+                ||| (uint64 memory[0x103 + i * 4] <<< 24) ]
+
+        cycles < 5000, List.length (List.filter id (List.map2 (=) words expected))
+
+    let doneRose, landedAtDone = landedWhen "a_done"
+    let handedRose, landedAtHandedOver = landedWhen "a_handed_over"
+
+    // Held to the same standard on chip, where `idle` is the constant one and
+    // the `&&&` folds away: the sink is an array, so the two signals are the
+    // same signal and both are right.
+    let onChipAgrees =
+        let sim = Sim sumWhollyOnChip
+        sim.Poke("run", 0UL)
+
+        for i in 0..15 do
+            sim.Poke("a_fill_addr", uint64 i)
+            sim.Poke("a_fill_data", uint64 ((i + 1) * 3))
+            sim.Poke("a_fill_enable", 1UL)
+            sim.Tick()
+
+        sim.Poke("a_fill_enable", 0UL)
+        sim.Poke("run", 1UL)
+        let mutable cycles = 0
+
+        while sim.Peek "a_done" <> 1UL && cycles < 5000 do
+            sim.Tick()
+            cycles <- cycles + 1
+
+        let got =
+            [ for i in 0..15 ->
+                sim.Poke("probe_addr", uint64 i)
+                sim.Tick()
+                sim.Peek "probe_data" ]
+
+        cycles < 5000 && got = expected
+
+    doneRose
+    && handedRose
+    && landedAtDone = 16
+    && landedAtHandedOver < 16
+    && onChipAgrees
 
 /// The pipelined channel's three claims, driven by hand because `SimAxi.client`
 /// is deliberately one-at-a-time and one-at-a-time is what this channel is not.
@@ -3722,6 +3826,7 @@ let private mainDemo () =
     printfn $"reads do not fold:            %b{readsDoNotFold ()}"
     printfn $"one kernel, three storages:   %b{oneKernelThreeStorages ()}"
     printfn $"bus and window, two levels:   %b{busAndWindowLevels ()}"
+    printfn $"done means landed:            %b{doneMeansLanded ()}"
     printfn $"context rides along:          %b{contextRidesAlong ()}"
     printfn $"farm carries context:         %b{farmCarriesContext ()}"
     printfn $"ram style rule holds:         %b{ramStyleRule ()}"

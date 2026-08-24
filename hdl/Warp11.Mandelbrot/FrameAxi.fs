@@ -63,6 +63,23 @@ let mandelFrameAxi
             | [ p ], [ cx; cy; dx; dy; fb ] -> p, cx, cy, dx, dy, fb
             | _ -> failwith "unexpected slave register shape"
 
+        // The framebuffer as a window. The design hands over beat indices and
+        // the pixels in them; where index zero lives, how far apart beats are
+        // and which lanes a write covers are the window's business — which is
+        // why `fbBaseAddr` reaches it as a parameter and appears nowhere below.
+        //
+        // The index is the beat's byte offset with its low four bits dropped,
+        // because a 128-bit beat is sixteen bytes and the window shifts them
+        // straight back. Free in hardware, and it keeps the offset arithmetic
+        // out of the design. Indices need not be sequential: beats leave the
+        // lanes in arbitration order and carry their own coordinates.
+        //
+        // Opened here rather than beside the write below because `frame.idle`
+        // is what the done register is gated on, and that is stated before the
+        // pipeline exists.
+        let frame =
+            writeWindowOn (axiWriteBus 32 128) 16 "fb" fbBaseAddr (1 <<< (addrWidth - 4))
+
         let piped =
             frameCmdStream startPulse cxOrigin cyOrigin dx dy
             |> mandelFramePipeline width height maxIter fracBits nThreads numLanes
@@ -72,15 +89,35 @@ let mandelFrameAxi
 
         busy ==> busyW
 
+        // `frameDone` is the last beat *leaving the gatherer* — one stage
+        // upstream of the master, so it fires with up to sixteen writes still
+        // in flight, roughly 256 bytes of the frame's tail not yet in DDR. The
+        // host-visible done is that event held until the framebuffer says every
+        // word landed (`notes/DEVICES.md` §10f).
+        //
+        // It has never manifested: polling this register is an AXI-Lite read
+        // through the PS against a drain of a few hundred nanoseconds, a race
+        // that always loses. A race that always loses is still a race.
+        let allGathered = regBit "all_gathered"
+
+        If startPulse (fun () -> lit 0UL 1 ==> allGathered)
+        Else (fun () -> If frameDone (fun () -> lit 1UL 1 ==> allGathered))
+
         If startPulse (fun () -> lit 0UL 1 ==> doneSticky)
-        Else (fun () -> If frameDone (fun () -> lit 1UL 1 ==> doneSticky))
+        Else (fun () -> If (allGathered &&& frame.idle) (fun () -> lit 1UL 1 ==> doneSticky))
+
+        // `cycles` stays on `busy` — the compute time, which is the number the
+        // frame budget is written in. The drain is a handful of cycles on top
+        // and belongs to whoever measures egress, not to this register.
         If startPulse (fun () -> lit 0UL 32 ==> cycles)
         Else (fun () -> If busy (fun () -> cycles + lit 1UL 32 ==> cycles))
 
         beats
         |> streamProbe "egress"
-        |> streamMapTo (axiWriteBeatLayout 32 128) (fun (addr, beat) -> (fbBaseAddr + cat (lit 0UL (32 - addrWidth)) addr, beat, lit 0xFFFFUL 16))
-        |> axiMasterWriterOn (axiWriteBus 32 128) 16)
+        |> streamMapTo
+            (layout2 ("index", addrWidth - 4) ("word", 128))
+            (fun (addr, beat) -> slice (addrWidth - 1) 4 addr, beat)
+        |> frame.write)
 
 /// The oracle/rehearsal config — the same architecture the scaled render
 /// proved, now behind the real register map.

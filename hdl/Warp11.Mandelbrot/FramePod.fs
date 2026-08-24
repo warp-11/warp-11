@@ -257,6 +257,15 @@ let mandelFrameDdr =
         let dy = input "dy" 32
         let fbBaseAddr = input "fbBaseAddr" 32
 
+        let addrWidth = lanePodAddrWidth 64 48
+
+        // The framebuffer as a window, as in `FrameAxi`. The index is the
+        // beat's byte offset with its low four bits dropped — a 128-bit beat is
+        // sixteen bytes and the window shifts them straight back — so where the
+        // buffer starts and how far apart beats are stay the window's business.
+        let frame =
+            writeWindowOn (axiWriteBus 32 128) 16 "fb" fbBaseAddr (1 <<< (addrWidth - 4))
+
         let piped =
             frameCmdStream start cxOrigin cyOrigin dx dy
             |> mandelFramePipeline 64 48 48 28 8 4
@@ -266,11 +275,22 @@ let mandelFrameDdr =
 
         let busyOut = outputBit "busy"
         busy ==> busyOut
-        let doneOut = outputBit "frameDone"
-        frameDone ==> doneOut
 
-        let addrWidth = lanePodAddrWidth 64 48
+        // The same completion as `FrameAxi`'s, because this design is that one
+        // minus the control slave — a `frameDone` meaning something weaker here
+        // would make the rehearsal rehearse the wrong thing. It is a level, not
+        // the gatherer's pulse: sticky from the last beat gathered, cleared on
+        // `start`, and held low until the framebuffer says every word landed.
+        let allGathered = regBit "all_gathered"
+
+        If start (fun () -> lit 0UL 1 ==> allGathered)
+        Else (fun () -> If frameDone (fun () -> lit 1UL 1 ==> allGathered))
+
+        let doneOut = outputBit "frameDone"
+        (allGathered &&& frame.idle) ==> doneOut
 
         streamProbe "egress" beats
-        |> streamMapTo (axiWriteBeatLayout 32 128) (fun (addr, beat) -> (fbBaseAddr + cat (lit 0UL (32 - addrWidth)) addr, beat, lit 0xFFFFUL 16))
-        |> axiMasterWriterOn (axiWriteBus 32 128) 16)
+        |> streamMapTo
+            (layout2 ("index", addrWidth - 4) ("word", 128))
+            (fun (addr, beat) -> slice (addrWidth - 1) 4 addr, beat)
+        |> frame.write)

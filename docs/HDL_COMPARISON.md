@@ -554,6 +554,47 @@ Warp 11 doesn't ship higher-level fabrics (TileLink, Wishbone, etc.) or an AXI4 
 
 The **generated seam** is the piece with the least prior art among the embedded HDLs: the register map is written once, and both the RTL and the host's constants are outputs of it, so offsets and bit positions provably cannot drift. LiteX is the closest analogue in the wider field — it generates CSR maps and host-side access from the SoC description — and is more general, being a whole SoC framework. The difference is which direction the artifact flows: here a single design-level declaration produces both sides, and the generated file is committed, so a review sees the seam move.
 
+### Memory windows, and what "done" means
+
+| HDL | The abstraction a client writes against |
+|---|---|
+| Chisel | `Decoupled` channels; diplomacy negotiates parameters between nodes. An AXI library hands the client the five channels, write response included |
+| SpinalHDL | `Axi4WriteOnly`/`Axi4Shared` and `Stream`, with the `B` channel present on the bundle; `BusSlaveFactory` builds the slave side from a description |
+| HardCaml | `hardcaml_axi` channel records |
+| Amaranth | `amaranth-soc` CSR/Wishbone, where `ack` is the transaction's own completion |
+| Warp 11 | A `ReadWindow`/`WriteWindow`: `words` of `wordWidth`, addressed **by index**, with `idle` saying every word accepted has reached memory. No bus, no base address, no stride — a client takes windows and scalars and cannot tell what is behind them |
+
+Every entry above gives a design the write-response channel, so a completion
+signal is always *reachable*. The question this section is about is a different
+one: **what does the client have to know in order to build it.**
+
+Against the channels, the answer is the transport — the client counts `B`
+beats, or watches a ring's pointers, which means it knows there is a ring. That
+is fine while the storage is settled, and it is what Warp 11's own designs did:
+three of them solved it, in three different vocabularies, and two more got it
+wrong in the same way (a done signal taken from a beat counter one stage
+upstream of the master, which asserts with writes still in flight).
+
+A window states it once instead. `idle` is a field on the type, so the client
+line is
+
+```fsharp
+(allAccepted &&& sink.idle) ==> outputBit $"{name}_done"
+```
+
+and that line does not change when the sink does. Against an array on this chip
+`idle` is the constant one and the term folds away in the emitted Verilog;
+against a region of an AXI port it is the master's quiescence and waits for the
+write responses. The same source, correct in both, with nothing in it naming
+either.
+
+What the type deliberately does **not** carry is a per-word acknowledgement.
+Several windows may share one master, and a write response says only that *a*
+write landed — attributing it would need an owner tag through the master's ring,
+and no design here both shares a write bus and wants per-item granularity. A
+design that does reaches past the window to `axiMasterWriterTracked` and owns
+its bus outright, which is the honest way to spend the extra hardware.
+
 ### Formal verification
 
 | HDL | Support |

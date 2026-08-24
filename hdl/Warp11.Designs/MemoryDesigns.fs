@@ -134,8 +134,7 @@ let fillingMemory =
 /// emitted Verilog holds exactly one `store[...] <=` however many places wrote.
 /// That is what makes Vivado's "two write sites kill block-RAM inference"
 /// gotcha a property of the DSL here rather than a discipline everyone has to
-/// remember — the Kotlin cluster missed it in five places and merged each by
-/// hand.
+/// remember.
 ///
 /// **The last site in the source wins.** All three enables are ports, so the
 /// oracle drives every combination including all three at once, which is the
@@ -525,5 +524,5 @@ let sumOverDdr =
         runningSumOver
             sumCount
             run
-            (readWindowOn readBus 4 0x0000UL sumCount)
-            (writeWindowOn writeBus 4 "dst" 0x1000UL sumCount))
+            (readWindowOn readBus 4 (lit 0x0000UL 32) sumCount)
+            (writeWindowOn writeBus 4 "dst" (lit 0x1000UL 32) sumCount))

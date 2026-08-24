@@ -51,6 +51,14 @@ open Warp11
 /// no base — so the same client runs against LUTs, against a block, or against
 /// a region of a port on the far side of the chip, and cannot tell.
 ///
+/// It also raises `{name}_done` when its results are **in memory** — not when
+/// it handed the last one over. That is one `&&&` against `sink.idle`, and it
+/// is the same line in every mapping: against an array `idle` is the constant
+/// one and the term folds away, against a region of a port it waits for the
+/// write responses to come back. A client that had counted its own writes
+/// instead would be right on chip and wrong over a bus, and nothing about the
+/// emitted Verilog would say which (`notes/DEVICES.md` §10f).
+///
 /// `name` prefixes every signal it owns, which is what lets a design hold two.
 let sumClient (name: string) (count: int) (run: Expr) (source: ReadWindow) (sink: WriteWindow) =
     if count > source.words then
@@ -103,6 +111,17 @@ let sumClient (name: string) (count: int) (run: Expr) (source: ReadWindow) (sink
           ready = writing
           layout = layout2 ("index", indexWidth) ("word", wordWidth) }
 
+    // `outIndex` reaching `count` says the last word was *accepted*; `idle`
+    // says it landed. Both, or the answer is a promise rather than a fact.
+    //
+    // `handed_over` is the wrong answer, brought out as a port on purpose: a
+    // check that only ever watched the right one could not tell whether the
+    // `idle` term was doing anything.
+    let allAccepted = wireBit $"{name}_all_accepted"
+    eq outIndex (lit (uint64 count) indexWidth) ==> allAccepted
+    allAccepted ==> outputBit $"{name}_handed_over"
+    (allAccepted &&& sink.idle) ==> outputBit $"{name}_done"
+
 // ---------------------------------------------------------------------------
 // Three topologies. The client is the same line in all of them.
 // ---------------------------------------------------------------------------
@@ -135,7 +154,7 @@ let oneOwnerOnePort =
         let run = inputBit "run"
 
         let wa =
-            writeWindowOn bus 1 "a" 0x100UL busCount
+            writeWindowOn bus 1 "a" (lit 0x100UL 32) busCount
 
         sumClient "a" busCount run (sourceFor "a") wa)
 
@@ -148,8 +167,8 @@ let twoOwnersOnePort =
 
         let wa, wb =
             defineWriteWindows bus 1 (fun windows ->
-                createWriteWindow windows "a" 0x100UL busCount,
-                createWriteWindow windows "b" 0x200UL busCount)
+                createWriteWindow windows "a" (lit 0x100UL 32) busCount,
+                createWriteWindow windows "b" (lit 0x200UL 32) busCount)
 
         sumClient "a" busCount run (sourceFor "a") wa
         sumClient "b" busCount run (sourceFor "b") wb)
@@ -164,13 +183,31 @@ let twoOwnersTwoPorts =
         let run = inputBit "run"
 
         let wa =
-            writeWindowOn busA 1 "a" 0x100UL busCount
+            writeWindowOn busA 1 "a" (lit 0x100UL 32) busCount
 
         let wb =
-            writeWindowOn busB 1 "b" 0x100UL busCount
+            writeWindowOn busB 1 "b" (lit 0x100UL 32) busCount
 
         sumClient "a" busCount run (sourceFor "a") wa
         sumClient "b" busCount run (sourceFor "b") wb)
+
+/// **A window eight writes deep, so "handed over" and "in memory" come apart.**
+///
+/// The same `sumClient` line again; what differs is `maxOutstanding`. At one
+/// outstanding write the client cannot hand over a second word until the first
+/// has been acknowledged, so the two answers are never more than a few cycles
+/// apart and a check watching them proves little. At eight, the last word is
+/// accepted with up to seven still in flight — which is the situation a real
+/// accelerator is always in, and the one `idle` exists for.
+let sumReportsDone =
+    design "SumReportsDone" (fun () ->
+        let bus = axiWriteBusNamed "m_axi" 32 busWordWidth
+        let run = inputBit "run"
+
+        let wa =
+            writeWindowOn bus 8 "a" (lit 0x100UL 32) busCount
+
+        sumClient "a" busCount run (sourceFor "a") wa)
 
 /// Entirely on chip: the same client with an array for a sink instead of a
 /// window onto a port. No bus in the design at all, and the client is the same
@@ -215,8 +252,8 @@ let onWindowNeverWritten () =
 
         let wa, _unused =
             defineWriteWindows bus 1 (fun windows ->
-                createWriteWindow windows "a" 0x100UL busCount,
-                createWriteWindow windows "b" 0x200UL busCount)
+                createWriteWindow windows "a" (lit 0x100UL 32) busCount,
+                createWriteWindow windows "b" (lit 0x200UL 32) busCount)
 
         sumClient "a" busCount run (sourceFor "a") wa)
 
@@ -229,6 +266,6 @@ let sumFromReadWindow =
         let run = inputBit "run"
 
         let wa =
-            writeWindowOn writeBus 1 "a" 0x1000UL busCount
+            writeWindowOn writeBus 1 "a" (lit 0x1000UL 32) busCount
 
-        sumClient "a" busCount run (readWindowOn readBus 1 0x0UL busCount) wa)
+        sumClient "a" busCount run (readWindowOn readBus 1 (lit 0x0UL 32) busCount) wa)

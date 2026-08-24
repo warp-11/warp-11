@@ -21,7 +21,11 @@ let frameMaxIter = 48
 let renderFrame (outPath: string) =
     let sim = Sim(mandelFrameDdr)
     let fbBase = 0x100 // off zero, so the rebase onto fbBaseAddr is proven
-    let ddr = SimAxiWriteSlave(sim, fbBase + frameWidth * frameHeight)
+    // Paced, not always-ready. A slave that pairs AW and W the cycle they are
+    // offered never leaves anything in the master's ring, which would make the
+    // completion signal below look correct whether or not it is.
+    let ddr =
+        SimAxiWriteSlave(sim, fbBase + frameWidth * frameHeight, awEvery = 3, bDelay = 6)
     let toQ (v: float) = uint64 (int64 (v * 268435456.0)) &&& 0xFFFFFFFFUL
     let stepQ = toQ (3.0 / 64.0)
     let cx0 = toQ (-2.25)
@@ -45,11 +49,14 @@ let renderFrame (outPath: string) =
     if sim.Peek "frameDone" <> 1UL then
         failwith "MandelFrameDdr did not reach frameDone within 200000 cycles"
 
-    // frameDone means the last beat EXITED the pod; the master's ring may
-    // still hold writes — flush them into the model.
-    for _ in 1..100 do
-        ddr.Cycle()
-
+    // No flush here, and its absence is the check. `frameDone` used to mean the
+    // last beat had EXITED the pod, so this loop span 100 cycles to let the
+    // master's ring empty into the model before anything was compared — the
+    // host doing by hand what the design should have said. It now means every
+    // word is in memory (`WriteWindow.idle`, `notes/DEVICES.md` §10f), so the
+    // comparison below happens on the cycle the signal rises. Put the loop
+    // back and this proves nothing; take the `idle` term out of the design and
+    // the pixels disagree.
     let expected r c =
         let cx = (cx0 + uint64 c * stepQ) &&& 0xFFFFFFFFUL
         let cy = (cy0 + uint64 r * stepQ) &&& 0xFFFFFFFFUL
@@ -104,7 +111,11 @@ let renderFrame (outPath: string) =
 let runFrameAxiWith (jitter: int option) (outPath: string) =
     let sim = Sim(mandelFrameAxiScaled)
     let fbBase = 0x100
-    let ddr = SimAxiWriteSlave(sim, fbBase + frameWidth * frameHeight, ?jitter = jitter)
+    // Paced for the same reason as `renderFrame`'s: an always-ready slave never
+    // leaves a write in the ring, so it cannot tell a correct done from a
+    // hopeful one. `jitter`, where the caller supplies it, takes over AW and W.
+    let ddr =
+        SimAxiWriteSlave(sim, fbBase + frameWidth * frameHeight, awEvery = 3, bDelay = 6, ?jitter = jitter)
     let cycle () = ddr.Cycle()
     let axi = SimAxi.clientWith sim cycle
     let read32, write32 = axi.read32, axi.write32
@@ -139,9 +150,9 @@ let runFrameAxiWith (jitter: int option) (outPath: string) =
     if read32 frameDoneOffset <> 1UL then
         failwith "frameDone never rose"
 
-    for _ in 1..100 do
-        cycle () // flush the master's outstanding writes
-
+    // No flush, as in `renderFrame`: the done register is gated on the
+    // framebuffer window's `idle`, so reading it as 1 is the statement that
+    // every word is in DDR.
     let lastFrameCycles = read32 frameCyclesOffset
     let busyNow = read32 frameBusyOffset
 

@@ -66,6 +66,7 @@ let catalog =
           entry "Bus: two owners, one port" (nameof twoOwnersOnePort) (fun () -> twoOwnersOnePort)
           entry "Bus: two owners, two ports" (nameof twoOwnersTwoPorts) (fun () -> twoOwnersTwoPorts)
           entry "Bus: sum from a read window" (nameof sumFromReadWindow) (fun () -> sumFromReadWindow)
+          entry "Window: done means landed" (nameof sumReportsDone) (fun () -> sumReportsDone)
           entry "Window: wholly on chip" (nameof sumWhollyOnChip) (fun () -> sumWhollyOnChip)
           entry "Command processor (union + mem)" (nameof cmdProcessor) (fun () -> cmdProcessor)
           entry "Stream pipe" (nameof streamPipe) (fun () -> streamPipe)

@@ -48,11 +48,34 @@ type ReadWindow =
       read: Stream<Expr> -> Stream<Expr> }
 
 /// Write `words` words of `wordWidth` bits, by index.
+///
+/// **`idle` is what makes the type usable, not a convenience on it.** A design
+/// that writes a result and then tells a host it is done must not say so while
+/// the last words are still in flight, and a window that returned `unit` gave
+/// its client nothing to gate on — so converting a design to windows used to
+/// *cost* it the ability to be correct here (`notes/DEVICES.md` §10f).
 type WriteWindow =
     { words: int
       wordWidth: int
       /// `(index, word)` in. Where index zero lives is the window's business.
-      write: Stream<Expr * Expr> -> unit }
+      write: Stream<Expr * Expr> -> unit
+      /// High when every word this window has accepted has reached memory.
+      ///
+      /// The only honest completion source: a signal taken from anywhere
+      /// upstream of the storage — the beat count leaving a gatherer, say —
+      /// asserts with writes still outstanding. How far "reached memory" is
+      /// varies enormously (the same cycle for an array on this chip, a full
+      /// AXI write response from DDR), which is exactly why it belongs to the
+      /// window rather than to the client.
+      ///
+      /// **There is no per-word acknowledgement here**, deliberately. Several
+      /// windows may share one master, and its write responses carry nothing
+      /// saying which window a retiring write came from — attributing them
+      /// would mean an owner tag through the master's ring, and nothing in this
+      /// tree both shares a write bus and wants per-item granularity. A design
+      /// that does (GEP advances a ring pointer per landed write) uses
+      /// `axiMasterWriterTrackedOn` and owns its bus outright.
+      idle: Expr }
 
 /// How wide an index over `words` entries has to be. The count itself must be
 /// *representable*, not merely reachable — `lit 16UL 4` is out of range, so a
@@ -80,9 +103,15 @@ let lutReadWindow (m: Mem) : ReadWindow =
 
 /// An array as a write window: always ready, and the index *is* the address,
 /// because for an array that is what an index is.
+///
+/// `idle` is the constant one. A write to an array on this chip has landed by
+/// the end of the cycle it was accepted in, so there is never anything in
+/// flight — the same client line that gates a host-visible done on `idle`
+/// against DDR compiles to nothing at all here.
 let memWriteWindow (m: Mem) : WriteWindow =
     { words = 1 <<< m.addrWidth
       wordWidth = m.memWidth
+      idle = lit 1UL 1
       write =
         fun beats ->
             let index, word = beats.payload
@@ -167,9 +196,21 @@ let private strideOf (dataWidth: int) =
 type WriteWindows =
     private
         { onBus: AxiWriteBus
-          opened: ResizeArray<Stream<Expr * Expr * Expr>> }
+          opened: ResizeArray<Stream<Expr * Expr * Expr>>
+          /// The master's quiescence, declared before the body runs so a window
+          /// can hand it to a client, driven after the master exists. Every
+          /// window on the bus gets this same signal: shared, it reads as
+          /// "nothing from *anyone* here is in flight", which is stronger than
+          /// a window needs but never wrong.
+          busIdle: Expr }
 
 /// Open a window on `baseAddr`, `words` entries long, indexed from zero.
+///
+/// **`baseAddr` is an `Expr`, not a constant.** On a board where the host owns
+/// the buffer — udmabuf hands out an address at run time — the base arrives in
+/// a register the host wrote, and a window that could only take a literal could
+/// not describe the ordinary case. A design with a fixed region passes
+/// `lit 0x1000UL 32`.
 ///
 /// The beat wires are declared now and filled in by the window's `write` later,
 /// which is what lets the master be built before any client exists. A window
@@ -184,7 +225,7 @@ type WriteWindows =
 /// That wording is `checkStreams`', not this function's, which is why the
 /// signal is named for the window: the name is the only part of that sentence
 /// able to say which window was left open.
-let createWriteWindow (windows: WriteWindows) (name: string) (baseAddr: uint64) (words: int) : WriteWindow =
+let createWriteWindow (windows: WriteWindows) (name: string) (baseAddr: Expr) (words: int) : WriteWindow =
     let bus = windows.onBus
     let wordWidth = width bus.wdata
     let addrWidth = width bus.awaddr
@@ -205,11 +246,12 @@ let createWriteWindow (windows: WriteWindows) (name: string) (baseAddr: uint64) 
 
     { words = words
       wordWidth = wordWidth
+      idle = windows.busIdle
       write =
         fun beats ->
             let index, word = beats.payload
             ready ==> beats.ready
-            (lit baseAddr addrWidth + pad addrWidth (cat index (lit 0UL shift))) ==> addr
+            (baseAddr + pad addrWidth (cat index (lit 0UL shift))) ==> addr
             word ==> data
             beats.valid ==> valid }
 
@@ -223,9 +265,9 @@ let createWriteWindow (windows: WriteWindows) (name: string) (baseAddr: uint64) 
 ///
 /// ```fsharp
 /// let wa, wb =
-///     defineWriteWindows bus (fun windows ->
-///         createWriteWindow windows "a" 0x100UL 16,
-///         createWriteWindow windows "b" 0x200UL 16)
+///     defineWriteWindows bus 4 (fun windows ->
+///         createWriteWindow windows "a" (lit 0x100UL 32) 16,
+///         createWriteWindow windows "b" (lit 0x200UL 32) 16)
 /// ```
 ///
 /// **The arbiter is here, and it is implied by how many windows the body
@@ -238,14 +280,25 @@ let createWriteWindow (windows: WriteWindows) (name: string) (baseAddr: uint64) 
 /// the last window exists, and "open the windows, then remember to finish the
 /// bus" is a step somebody forgets.
 let defineWriteWindows (bus: AxiWriteBus) (maxOutstanding: int) (body: WriteWindows -> 'r) : 'r =
-    let windows = { onBus = bus; opened = ResizeArray() }
+    // Declared first and driven last: a window has to hand its client an `idle`
+    // while it is being opened, and the master that knows the answer cannot be
+    // built until the body has finished opening windows.
+    let busIdle = wireBit $"{bus.prefix}_windows_idle"
+
+    let windows =
+        { onBus = bus
+          opened = ResizeArray()
+          busIdle = busIdle }
+
     let result = body windows
 
     if windows.opened.Count = 0 then
         failwith
             $"defineWriteWindows '{bus.prefix}': the body opened no windows, so the bus has no master and nothing reaches memory"
 
-    axiMasterWriterOn bus maxOutstanding (streamMergeTree (List.ofSeq windows.opened))
+    axiMasterWriterWithIdleOn bus maxOutstanding (streamMergeTree (List.ofSeq windows.opened))
+    ==> busIdle
+
     result
 
 /// One window on a bus of its own — which is almost every use.
@@ -259,7 +312,7 @@ let writeWindowOn
     (bus: AxiWriteBus)
     (maxOutstanding: int)
     (name: string)
-    (baseAddr: uint64)
+    (baseAddr: Expr)
     (words: int)
     : WriteWindow =
     defineWriteWindows bus maxOutstanding (fun windows -> createWriteWindow windows name baseAddr words)
@@ -269,7 +322,7 @@ let writeWindowOn
 /// One window per read bus for now: sharing a read port means routing responses
 /// back to whoever asked, and the demux for that lives inside `warpFu` and
 /// nowhere public — `notes/DEVICES.md` §10b, missing piece 2.
-let readWindowOn (bus: AxiReadBus) (maxOutstanding: int) (baseAddr: uint64) (words: int) : ReadWindow =
+let readWindowOn (bus: AxiReadBus) (maxOutstanding: int) (baseAddr: Expr) (words: int) : ReadWindow =
     let addrWidth = width bus.araddr
     let _, shift = strideOf (width bus.rdata)
 
@@ -279,5 +332,5 @@ let readWindowOn (bus: AxiReadBus) (maxOutstanding: int) (baseAddr: uint64) (wor
         fun requests ->
             requests
             |> streamMapTo (layout1 ("addr", addrWidth)) (fun index ->
-                lit baseAddr addrWidth + pad addrWidth (cat index (lit 0UL shift)))
+                baseAddr + pad addrWidth (cat index (lit 0UL shift)))
             |> axiMasterReaderOn bus maxOutstanding }
