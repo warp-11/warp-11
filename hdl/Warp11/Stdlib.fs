@@ -192,9 +192,9 @@ let xoshiro128pp name =
             let s3a = wire "s3a" 32
             (s[3] ^^^ s[1]) ==> s3a
 
-            IfWith io.load (fun () -> List.iter2 (==>) io.sIn s)
-
-            |> ElseWith (fun () ->
+            ifElse [
+                (io.load, fun () -> List.iter2 (==>) io.sIn s)
+            ] (fun () ->
                 If io.step (fun () ->
                     (s[0] ^^^ s3a) ==> s[0]
                     (s[1] ^^^ s2a) ==> s[1]
@@ -1171,15 +1171,15 @@ let private axiMasterWriterCoreOn
         let accept = wireBit (named "accept")
         (beats.valid &&& idle) ==> accept
 
-        IfWith accept (fun () ->
-            inAddr ==> addrQ
-            inData ==> dataQ
-            inStrb ==> strbQ
-            lit 1UL 1 ==> awPending
-            lit 1UL 1 ==> wPending
-            lit 1UL 1 ==> bPending)
-
-        |> ElseWith (fun () ->
+        ifElse [
+            (accept, fun () ->
+                inAddr ==> addrQ
+                inData ==> dataQ
+                inStrb ==> strbQ
+                lit 1UL 1 ==> awPending
+                lit 1UL 1 ==> wPending
+                lit 1UL 1 ==> bPending)
+        ] (fun () ->
             If (awPending &&& awready) (fun () -> lit 0UL 1 ==> awPending)
             If (wPending &&& wready) (fun () -> lit 0UL 1 ==> wPending)
             If (bPending &&& bvalid) (fun () -> lit 0UL 1 ==> bPending))
@@ -1303,13 +1303,13 @@ let axiMasterReaderOn (bus: AxiReadBus) (maxOutstanding: int) (requests: Stream<
         let accept = wireBit (named "rd_accept")
         (requests.valid &&& idle) ==> accept
 
-        IfWith accept (fun () ->
-            requests.payload ==> addrQ
-            lit 1UL 1 ==> arPending
-            lit 1UL 1 ==> rPending
-            lit 0UL 1 ==> respPending)
-
-        |> ElseWith (fun () ->
+        ifElse [
+            (accept, fun () ->
+                requests.payload ==> addrQ
+                lit 1UL 1 ==> arPending
+                lit 1UL 1 ==> rPending
+                lit 0UL 1 ==> respPending)
+        ] (fun () ->
             If (arPending &&& arready) (fun () -> lit 0UL 1 ==> arPending)
 
             If (rPending &&& rvalid) (fun () ->

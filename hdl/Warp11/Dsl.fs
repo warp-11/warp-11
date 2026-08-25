@@ -795,14 +795,6 @@ let If cond (body: unit -> unit) = (current ()).If(cond, body) |> ignore
 /// else-less, and this then fails.
 let Else (body: unit -> unit) = (current ()).Else(body)
 
-/// Open a conditional scope and return a `Branch` — the only way to reach
-/// `ElseWith`. Pipe it: `IfWith cond body |> ElseWith body`. A statement
-/// between `IfWith` and `ElseWith` is a compile-time error.
-let IfWith cond (body: unit -> unit) : Branch = (current ()).If(cond, body)
-
-/// Must immediately pipe from the `Branch` that `IfWith` returned.
-let ElseWith (body: unit -> unit) (branch: Branch) = branch.Else(body)
-
 /// Chain of If/Else-If/Else. Each `(condition, body)` pair is tried in order;
 /// the first match wins (a mux tree prioritized last-to-first, matching
 /// Verilog's semantics). The trailing function is the unconditional else.
@@ -813,7 +805,7 @@ let ElseWith (body: unit -> unit) (branch: Branch) = branch.Else(body)
 let ifElse (branches: (Expr * (unit -> unit)) list) (elseBody: unit -> unit) =
     (List.foldBack
         (fun (cond, body) acc ->
-            fun () -> IfWith cond body |> ElseWith acc)
+            fun () -> (current ()).If(cond, body) |> (fun (b: Branch) -> b.Else(acc)))
         branches
         elseBody) ()
 

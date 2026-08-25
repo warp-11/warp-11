@@ -306,8 +306,9 @@ let axiLiteSlaveOf (m: RegMap) : SlaveRegs =
             let setWire = wireBit $"{e.name}_set"
             let r = regBit e.name
             // Set beats a same-cycle host clear — a hardware event is never lost.
-            IfWith setWire (fun () -> lit 1UL 1 ==> r)
-            |> ElseWith (fun () -> If (writeHit e &&& slice b b wdata) (fun () -> lit 0UL 1 ==> r))
+            ifElse [
+                (setWire, fun () -> lit 1UL 1 ==> r)
+            ] (fun () -> If (writeHit e &&& slice b b wdata) (fun () -> lit 0UL 1 ==> r))
             w1cState[e.name] <- r
             w1cSets[e.name] <- setWire
         | RoConst _ -> ()
