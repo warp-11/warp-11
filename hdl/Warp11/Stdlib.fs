@@ -192,9 +192,9 @@ let xoshiro128pp name =
             let s3a = wire "s3a" 32
             (s[3] ^^^ s[1]) ==> s3a
 
-            If io.load (fun () -> List.iter2 (==>) io.sIn s)
+            IfWith io.load (fun () -> List.iter2 (==>) io.sIn s)
 
-            Else (fun () ->
+            |> ElseWith (fun () ->
                 If io.step (fun () ->
                     (s[0] ^^^ s3a) ==> s[0]
                     (s[1] ^^^ s2a) ==> s[1]
@@ -404,7 +404,6 @@ let counter (name: string) (n: int) (enable: Expr) : WrapCounter =
 /// again would buy an adder and an off-by-one. The two names differ so the two
 /// meanings cannot be confused at a call site.
 ///
-/// Chisel has no equivalent; `Counter` is compile-time-`n` only.
 let counterTo (name: string) (last: Expr) (enable: Expr) : WrapCounter =
     let w = width last
     let count = reg name w
@@ -1172,7 +1171,7 @@ let private axiMasterWriterCoreOn
         let accept = wireBit (named "accept")
         (beats.valid &&& idle) ==> accept
 
-        If accept (fun () ->
+        IfWith accept (fun () ->
             inAddr ==> addrQ
             inData ==> dataQ
             inStrb ==> strbQ
@@ -1180,7 +1179,7 @@ let private axiMasterWriterCoreOn
             lit 1UL 1 ==> wPending
             lit 1UL 1 ==> bPending)
 
-        Else (fun () ->
+        |> ElseWith (fun () ->
             If (awPending &&& awready) (fun () -> lit 0UL 1 ==> awPending)
             If (wPending &&& wready) (fun () -> lit 0UL 1 ==> wPending)
             If (bPending &&& bvalid) (fun () -> lit 0UL 1 ==> bPending))
@@ -1304,13 +1303,13 @@ let axiMasterReaderOn (bus: AxiReadBus) (maxOutstanding: int) (requests: Stream<
         let accept = wireBit (named "rd_accept")
         (requests.valid &&& idle) ==> accept
 
-        If accept (fun () ->
+        IfWith accept (fun () ->
             requests.payload ==> addrQ
             lit 1UL 1 ==> arPending
             lit 1UL 1 ==> rPending
             lit 0UL 1 ==> respPending)
 
-        Else (fun () ->
+        |> ElseWith (fun () ->
             If (arPending &&& arready) (fun () -> lit 0UL 1 ==> arPending)
 
             If (rPending &&& rvalid) (fun () ->

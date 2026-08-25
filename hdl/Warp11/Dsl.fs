@@ -7,7 +7,7 @@ module Warp11.Dsl
 /// Last-connect-wins is the *merge* mechanism (an If branch folds into its parent
 /// by re-Setting the target), not a user-facing affordance — `Assign` rejects a
 /// second `==>` at one level, so it is unreachable from a design body.
-type private Scope() =
+type internal Scope() =
     let values = System.Collections.Generic.Dictionary<string, Expr>()
     let order = ResizeArray<string>()
 
@@ -32,6 +32,98 @@ type StateMachineRecord =
       states: (uint64 * string) list
       reached: System.Collections.Generic.HashSet<uint64> }
 
+/// Unique-name generation for library-internal signals: fork readies, merge
+/// state — the combinator, not the user, owns these names. Extracted from
+/// Builder so the naming policy lives in one type.
+type internal NameCounter() =
+    let counts = System.Collections.Generic.Dictionary<string, int>()
+
+    member _.Next(childName: string) =
+        let stem =
+            string (System.Char.ToLowerInvariant childName[0]) + childName[1..]
+
+        let n =
+            match counts.TryGetValue stem with
+            | true, c -> c + 1
+            | _ -> 1
+
+        counts[stem] <- n
+        $"{stem}_{n}"
+
+/// Signal declarations: ports, wires, registers, and the type/kind tables that
+/// the rest of elaboration reads. One declaration per name, enforced here.
+/// Instance staging wires come through `DeclareAs` directly.
+type internal DeclCollector(moduleName: string) =
+    let decls = ResizeArray<Decl>()
+    let declTypes = System.Collections.Generic.Dictionary<string, GroundType>()
+    let declKinds = System.Collections.Generic.Dictionary<string, string>()
+    let regNames = System.Collections.Generic.HashSet<string>()
+
+    member _.Decls = decls
+    member _.DeclTypes = declTypes
+    member _.RegNames = regNames
+
+    member _.DeclareAs(decl, n, (t: GroundType), kind) =
+        requireNotVerilogKeyword n kind
+
+        match declKinds.TryGetValue n with
+        | true, prior -> failwith $"'{n}' is declared twice in '{moduleName}' — {prior}, then {kind}"
+        | _ -> ()
+
+        decls.Add decl
+        declTypes[n] <- t
+        declKinds[n] <- kind
+
+        (match decl with
+         | Reg _ -> regNames.Add n |> ignore
+         | _ -> ())
+
+        Ref(n, t)
+
+    member this.Declare(decl, n, (t: GroundType)) =
+        this.DeclareAs(
+            decl,
+            n,
+            t,
+            match decl with
+            | Input _ -> "an input port"
+            | Output _ -> "an output port"
+            | Wire _ -> "a wire"
+            | Reg _ -> "a reg"
+            | Memory _ -> "a mem"
+        )
+
+    member this.Input(n, t: GroundType) = this.Declare(Input(n, t), n, t)
+    member this.Output(n, t: GroundType) = this.Declare(Output(n, t), n, t)
+    member this.Wire(n, t: GroundType) = this.Declare(Wire(n, t), n, t)
+    member this.Reg(n, t: GroundType, init: uint64) = this.Declare(Reg(n, t, Some init), n, t)
+    member this.RegNoReset(n, t: GroundType) = this.Declare(Reg(n, t, None), n, t)
+    member this.Input(n, w: int) = this.Input(n, UInt w)
+    member this.Output(n, w: int) = this.Output(n, UInt w)
+    member this.Wire(n, w: int) = this.Wire(n, UInt w)
+    member this.Reg(n, w: int, init) = this.Reg(n, UInt w, init)
+
+/// State-machine records collected during elaboration: the debugger decodes
+/// registers by name where this has recorded them, and finalisation checks
+/// unreachable states.
+type internal MachineTracker() =
+    let machines = ResizeArray<StateMachineRecord>()
+    member _.Machines = machines
+    member _.Register(record: StateMachineRecord) = machines.Add record
+
+/// Stream-ready nets and stall probes, recorded so `checkStreams` and
+/// `streamReport` can find them at emission.
+type internal StreamTracker() =
+    let streamReadies = ResizeArray<string>()
+    let probes = ResizeArray<string>()
+    member _.Readies = streamReadies
+    member _.Probes = probes
+    member _.RegisterReady(ready: Expr) =
+        match ready with
+        | Ref (n, _) -> streamReadies.Add n
+        | _ -> failwith "a stream's ready must be a declared net"
+    member _.RegisterProbe(name: string) = probes.Add name
+
 /// The module under construction — the ambient thing every declaration and
 /// every `==>` reaches without being passed one.
 ///
@@ -42,12 +134,11 @@ type StateMachineRecord =
 type Builder(name: string, ?clockSpec: ClockSpec) =
     do requireNotVerilogKeyword name "a module"
     let clock = defaultArg clockSpec defaultClock
-    let decls = ResizeArray<Decl>()
+    let names = NameCounter()
+    let declColl = DeclCollector(name)
+    let streams = StreamTracker()
+    let machines = MachineTracker()
     let instances = ResizeArray<Instance>()
-    let streamReadies = ResizeArray<string>()
-    let probes = ResizeArray<string>()
-    let machines = ResizeArray<StateMachineRecord>()
-    let nameCounts = System.Collections.Generic.Dictionary<string, int>()
     // Raw write calls, each with its enable already ANDed with the If conditions
     // active at the call. Def merges them into one write site per mem.
     let memWrites = ResizeArray<string * Expr * Expr * Expr * Expr option>()
@@ -64,92 +155,46 @@ type Builder(name: string, ?clockSpec: ClockSpec) =
     let baseScope = Scope()
     let scopes = System.Collections.Generic.Stack<Scope>()
     let assignCounts = System.Collections.Generic.Dictionary<string, int>()
-    let declTypes = System.Collections.Generic.Dictionary<string, GroundType>()
-    // How each name was declared, kept for the duplicate-declaration message:
-    // what the first one was is the half that says how the collision happened.
-    let declKinds = System.Collections.Generic.Dictionary<string, string>()
-    let regNames = System.Collections.Generic.HashSet<string>()
-    // A completed If whose Else may still arrive. Flushed (merged with no
-    // else branch) by the next statement at the same level.
-    let mutable pendingIf: (Expr * Scope) option = None
+    // Stack of pending If-branches — one per nesting level. A new If pushes,
+    // an Else or flush pops the top. Nesting is structural: an inner If
+    // cannot reach the outer one's entry.
+    let activeBranches = System.Collections.Generic.Stack<Branch>()
 
-    member private _.NextName(childName: string) =
-        let stem =
-            string (System.Char.ToLowerInvariant childName[0]) + childName[1..]
-
-        let n =
-            match nameCounts.TryGetValue stem with
-            | true, c -> c + 1
-            | _ -> 1
-
-        nameCounts[stem] <- n
-        $"{stem}_{n}"
+    member private _.NextName(childName: string) = names.Next(childName)
 
     /// A fresh unique name for library-internal signals (fork readies, merge
     /// state) — the combinator, not the user, owns these names.
-    member this.FreshName(stem: string) = this.NextName stem
+    member this.FreshName(stem: string) = names.Next(stem)
 
-    /// One declaration per name. An instance's staging wires are named
-    /// `{instance}_{port}` in the PARENT's namespace, so they share it with
-    /// ordinary declarations — `Stream.out "b_low"` beside an instance named `b`
-    /// is the measured case. A duplicate emitted a port redeclared as a wire and
-    /// self-assigned (`assign b_low_data = b_low_data`), which elaboration, lint
-    /// and synthesis all accepted.
-    member private _.DeclareAs(decl, n, (t: GroundType), kind) =
-        requireNotVerilogKeyword n kind
+    member private this.DeclareAs(decl, n, (t: GroundType), kind) = declColl.DeclareAs(decl, n, t, kind)
 
-        match declKinds.TryGetValue n with
-        | true, prior -> failwith $"'{n}' is declared twice in '{name}' — {prior}, then {kind}"
-        | _ -> ()
-
-        decls.Add decl
-        declTypes[n] <- t
-        declKinds[n] <- kind
-
-        (match decl with
-         | Reg _ -> regNames.Add n |> ignore
-         | _ -> ())
-
-        Ref(n, t)
-
-    member private this.Declare(decl, n, (t: GroundType)) =
-        this.DeclareAs(
-            decl,
-            n,
-            t,
-            match decl with
-            | Input _ -> "an input port"
-            | Output _ -> "an output port"
-            | Wire _ -> "a wire"
-            | Reg _ -> "a reg"
-            | Memory _ -> "a mem"
-        )
+    member private this.Declare(decl, n, (t: GroundType)) = declColl.Declare(decl, n, t)
 
     /// Declare an input port.
-    member this.Input(n, t: GroundType) = this.Declare(Input(n, t), n, t)
+    member this.Input(n, t: GroundType) = declColl.Input(n, t)
     /// Declare an output port.
-    member this.Output(n, t: GroundType) = this.Declare(Output(n, t), n, t)
+    member this.Output(n, t: GroundType) = declColl.Output(n, t)
     /// Declare a wire.
-    member this.Wire(n, t: GroundType) = this.Declare(Wire(n, t), n, t)
+    member this.Wire(n, t: GroundType) = declColl.Wire(n, t)
     /// Declare a register and the value it takes under reset.
-    member this.Reg(n, t: GroundType, init: uint64) = this.Declare(Reg(n, t, Some init), n, t)
+    member this.Reg(n, t: GroundType, init: uint64) = declColl.Reg(n, t, init)
 
     /// A register with no reset: it holds its value while reset is asserted.
     /// Not the default, and should not be — a state machine that survives reset
     /// is a bug. This is for the data path, where the reset net buys nothing and
     /// costs fanout, routing and SRL inference.
-    member this.RegNoReset(n, t: GroundType) = this.Declare(Reg(n, t, None), n, t)
+    member this.RegNoReset(n, t: GroundType) = declColl.RegNoReset(n, t)
 
     // A bare width still means unsigned, so every existing declaration — and the
     // `moduleDef` API's `m.Input("a", 8)` — reads exactly as it did.
     /// An input port at a bare width, which still means unsigned.
-    member this.Input(n, w: int) = this.Input(n, UInt w)
+    member this.Input(n, w: int) = declColl.Input(n, w)
     /// An output port at a bare width.
-    member this.Output(n, w: int) = this.Output(n, UInt w)
+    member this.Output(n, w: int) = declColl.Output(n, w)
     /// A wire at a bare width.
-    member this.Wire(n, w: int) = this.Wire(n, UInt w)
+    member this.Wire(n, w: int) = declColl.Wire(n, w)
     /// A register at a bare width.
-    member this.Reg(n, w: int, init) = this.Reg(n, UInt w, init)
+    member this.Reg(n, w: int, init) = declColl.Reg(n, w, init)
 
     /// The value `t` would currently read as: innermost If scope first, then base.
     member private _.CurrentValue t =
@@ -167,7 +212,7 @@ type Builder(name: string, ?clockSpec: ClockSpec) =
     member private this.PriorOrHold t =
         match this.CurrentValue t with
         | Some v -> v
-        | None when regNames.Contains t -> Ref(t, declTypes[t])
+        | None when declColl.RegNames.Contains t -> Ref(t, declColl.DeclTypes[t])
         | None ->
             failwith
                 $"'{t}' is assigned inside If without an unconditional default — a reg holds its value there; a wire has nothing to hold"
@@ -178,20 +223,31 @@ type Builder(name: string, ?clockSpec: ClockSpec) =
         else
             baseScope.Set(t, v)
 
-    /// The statement after an If has arrived, so that If is else-less: merge its
-    /// branch as Mux(cond, branch value, fall-through).
+    /// An else-less branch arrived — merge its assignments into the parent.
+    member internal this.FlushBranch(cond: Expr, thenScope: Scope) =
+        for t, v in thenScope.Items do
+            this.Set(t, Mux(cond, v, this.PriorOrHold t))
+
+    /// The statement after an If has arrived: pop the top of the branch stack
+    /// and seal it as else-less. Nested branches stay — only the top pops.
     member private this.FlushPending() =
-        match pendingIf with
-        | None -> ()
-        | Some (cond, thenScope) ->
-            pendingIf <- None
+        if activeBranches.Count > 0 then
+            let br = activeBranches.Pop()
+            br.FlushInternal()
 
-            for t, v in thenScope.Items do
-                this.Set(t, Mux(cond, v, this.PriorOrHold t))
+    /// Pop and verify the top branch is this one. Used by `Branch.Else` and
+    /// its kin to detect when a statement has stolen the branch.
+    member internal this.PopBranch(expected: Branch) =
+        if activeBranches.Count = 0 || not (obj.ReferenceEquals(activeBranches.Peek(), expected)) then
+            failwith "else on a branch already sealed by a statement — else must immediately follow its if"
 
-    /// Open a conditional scope. The branch's assignments are collected and folded
-    /// into the parent as muxes when the block ends, so a register with no
-    /// unconditional default holds its value and a wire without one is an error.
+        activeBranches.Pop() |> ignore
+
+    /// Open a conditional scope. Pushes a new frame onto the branch stack so
+    /// the next `Else` or statement knows which branch to close. Both the
+    /// compat `If` and the typed `IfWith` use the same path — the difference
+    /// is only whether the caller pipes the returned `Branch` into `ElseWith`
+    /// or drops it for the ambient stack to handle.
     member this.If(cond, thenBody: unit -> unit) =
         this.FlushPending()
 
@@ -205,39 +261,46 @@ type Builder(name: string, ?clockSpec: ClockSpec) =
         this.FlushPending() // an inner If left dangling merges inside this branch
         conds.Pop() |> ignore
         scopes.Pop() |> ignore
-        pendingIf <- Some(cond, scope)
+        let branch = Branch(this, cond, scope)
+        activeBranches.Push branch
+        branch
+
+    /// The other branch, internalised: Branch.Else calls this after verifying it
+    /// owns the active branch. Runs the else body in a scope over inverted
+    /// condition, then merges both branches at once — PriorOrHold still sees the
+    /// value from before the whole If block.
+    member internal this.FinishIfElse(cond: Expr, thenScope: Scope, elseBody: unit -> unit) =
+        let elseScope = Scope()
+        scopes.Push elseScope
+        conds.Push(Not cond)
+        elseBody ()
+        this.FlushPending()
+        conds.Pop() |> ignore
+        scopes.Pop() |> ignore
+
+        let elseOnly =
+            [ for t, v in elseScope.Items do
+                  if (thenScope.TryGet t).IsNone then yield t, v ]
+
+        for t, thenV in thenScope.Items do
+            let elseV =
+                match elseScope.TryGet t with
+                | Some v -> v
+                | None -> this.PriorOrHold t
+
+            this.Set(t, Mux(cond, thenV, elseV))
+
+        for t, elseV in elseOnly do
+            this.Set(t, Mux(cond, this.PriorOrHold t, elseV))
 
     /// The other branch of the `If` immediately preceding. Anything in between
     /// seals that `If` as else-less and this then fails.
     member this.Else(elseBody: unit -> unit) =
-        match pendingIf with
-        | None -> failwith "Else must immediately follow its If"
-        | Some (cond, thenScope) ->
-            pendingIf <- None
-            let elseScope = Scope()
-            scopes.Push elseScope
-            conds.Push(Not cond)
-            elseBody ()
-            this.FlushPending()
-            conds.Pop() |> ignore
-            scopes.Pop() |> ignore
-
-            // Merge both branches at once — the pending merge never ran, so
-            // PriorOrHold still sees the value from before the whole If block.
-            let elseOnly =
-                [ for t, v in elseScope.Items do
-                      if (thenScope.TryGet t).IsNone then yield t, v ]
-
-            for t, thenV in thenScope.Items do
-                let elseV =
-                    match elseScope.TryGet t with
-                    | Some v -> v
-                    | None -> this.PriorOrHold t
-
-                this.Set(t, Mux(cond, thenV, elseV))
-
-            for t, elseV in elseOnly do
-                this.Set(t, Mux(cond, this.PriorOrHold t, elseV))
+        if activeBranches.Count = 0 then
+            failwith "Else must immediately follow its If"
+        else
+            let br = activeBranches.Pop()
+            br.ConsumeElse(elseBody)
 
     /// One unconditional driver per signal, and one per If branch — a second `==>`
     /// at the same scope would silently discard the first (the Scope below is
@@ -271,17 +334,14 @@ type Builder(name: string, ?clockSpec: ClockSpec) =
 
     /// Record a stream's ready net so `checkStreams` can judge at emission whether
     /// it ended up with exactly one consumer.
-    member _.RegisterStreamReady(ready) =
-        match ready with
-        | Ref (n, _) -> streamReadies.Add n
-        | _ -> failwith "a stream's ready must be a declared net"
+    member _.RegisterStreamReady(ready) = streams.RegisterReady(ready)
 
     /// Record a stall probe, so `streamReport` can find its counters later.
-    member _.RegisterProbe(name: string) = probes.Add name
+    member _.RegisterProbe(name: string) = streams.RegisterProbe(name)
 
     /// Record a state machine, so the debugger can show a state register by name
     /// rather than as the number it is.
-    member _.RegisterStateMachine(record: StateMachineRecord) = machines.Add record
+    member _.RegisterStateMachine(record: StateMachineRecord) = machines.Register(record)
 
     /// Declare a memory of 2^addrWidth words. `style` decides what it becomes on
     /// silicon, and with it which reads are legal — the combinational read is only
@@ -379,7 +439,7 @@ type Builder(name: string, ?clockSpec: ClockSpec) =
         // A state nothing transitions to is dead logic, and the hand-encoded
         // form cannot notice: `sFoo` is a number, and an unused number reads
         // exactly like a used one.
-        for machine in machines do
+        for machine in machines.Machines do
             let unreachable =
                 [ for code, stateName in machine.states do
                       if not (machine.reached.Contains code) then yield stateName ]
@@ -448,7 +508,7 @@ type Builder(name: string, ?clockSpec: ClockSpec) =
                           Some(asWire $"{memName}_wmask" k)) ]
 
         { name = name
-          decls = List.ofSeq decls @ [ for d, _ in laneWires -> d ]
+          decls = List.ofSeq declColl.Decls @ [ for d, _ in laneWires -> d ]
           stmts =
             [ for t, v in baseScope.Items -> Assign(t, v) ]
             @ [ for _, a in laneWires -> a ]
@@ -457,13 +517,13 @@ type Builder(name: string, ?clockSpec: ClockSpec) =
           instances = List.ofSeq instances
           clock = clock
           streamReadies =
-            [ for n in streamReadies ->
+            [ for n in streams.Readies ->
                   n,
                   (match assignCounts.TryGetValue n with
                    | true, c -> c
                    | _ -> 0) ]
-          probes = List.ofSeq probes
-          stateMachines = [ for machine in machines -> machine.stateReg, machine.states ] }
+          probes = List.ofSeq streams.Probes
+          stateMachines = [ for machine in machines.Machines -> machine.stateReg, machine.states ] }
 
 /// A module definition together with the two things that make it callable: how
 /// to view its ports as a typed value, and how to wire an instance up as a
@@ -473,6 +533,31 @@ and TypedModule<'io, 'fn> =
     { def: ModuleDef
       io: Ports -> 'io
       apply: Builder -> 'io -> 'fn }
+
+/// Returned by `Builder.If`. The only way to call `Else` — dropping this
+/// without calling `.Else` is the else-less case, exactly as before, but a
+/// statement between `If` and `Else` is now a compile-time error rather than
+/// silently sealing the branch before `Else` can reach it.
+and Branch internal (builder: Builder, condition: Expr, thenScope: Scope) =
+    let mutable consumed = false
+
+    member internal this.FlushInternal() =
+        if not consumed then
+            consumed <- true
+            builder.FlushBranch(condition, thenScope)
+
+    member internal this.ConsumeElse(elseBody: unit -> unit) =
+        consumed <- true
+        builder.FinishIfElse(condition, thenScope, elseBody)
+
+    member this.Else(elseBody: unit -> unit) =
+        if consumed then
+            failwith
+                "else on a branch already sealed by a statement — else must immediately follow its if"
+
+        consumed <- true
+        builder.PopBranch(this)
+        builder.FinishIfElse(condition, thenScope, elseBody)
 
 /// The module currently being elaborated. A stack, so a design may define another
 /// inside itself. This is the price of `mul8 a b` being a plain call: the builder
@@ -698,11 +783,39 @@ let assertThat cond message = (current ()).AssertThat(cond, message)
 /// Inside it a reg with no unconditional default holds its value; a wire there
 /// is an error. The scope underneath is last-connect-wins — that is how a
 /// branch merges into its parent — while a second `==>` at one level is not.
-let If cond (body: unit -> unit) = (current ()).If(cond, body)
+/// Open a conditional scope. The returned `Branch` is the type-safe way to
+/// reach `Else`; dropping it is the else-less case, handled by the next
+/// statement sealing the active branch.
+/// Open a conditional scope. The value it drops is the `Branch` that would let
+/// you type-safely pipe into `Else`. The ambient active branch still records the
+/// pending state so `Else` can reach it — the compat path.
+let If cond (body: unit -> unit) = (current ()).If(cond, body) |> ignore
 
 /// Must immediately follow its `If` — any intervening statement seals that If as
-/// else-less, and this then fails at elaboration.
+/// else-less, and this then fails.
 let Else (body: unit -> unit) = (current ()).Else(body)
+
+/// Open a conditional scope and return a `Branch` — the only way to reach
+/// `ElseWith`. Pipe it: `IfWith cond body |> ElseWith body`. A statement
+/// between `IfWith` and `ElseWith` is a compile-time error.
+let IfWith cond (body: unit -> unit) : Branch = (current ()).If(cond, body)
+
+/// Must immediately pipe from the `Branch` that `IfWith` returned.
+let ElseWith (body: unit -> unit) (branch: Branch) = branch.Else(body)
+
+/// Chain of If/Else-If/Else. Each `(condition, body)` pair is tried in order;
+/// the first match wins (a mux tree prioritized last-to-first, matching
+/// Verilog's semantics). The trailing function is the unconditional else.
+///
+/// Turns a deeply nested `If ... Else (If ... Else (If ...))` into a flat
+/// list. The conditions are purely combinable (no mixed-scope logic), so
+/// `ifElse` both flattens and type-checks in one place.
+let ifElse (branches: (Expr * (unit -> unit)) list) (elseBody: unit -> unit) =
+    (List.foldBack
+        (fun (cond, body) acc ->
+            fun () -> IfWith cond body |> ElseWith acc)
+        branches
+        elseBody) ()
 
 /// Register a stream's ready net from a producer elaborated outside the
 /// library assembly — the same checkStreams bookkeeping the stdlib's own

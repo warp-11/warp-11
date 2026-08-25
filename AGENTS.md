@@ -47,7 +47,7 @@ dotnet run --project Warp11.Mandelbrot -- hardware <repo-root>
 ```
 Writes `hardware/build/*.v` + committed Rust seam in `runtime/core/src/`.
 
-## The differential oracle — CRITICAL
+## The differential oracle
 
 **Ask before every run, and say why.** Never start it unprompted. It costs ~11 min
 (no firtool) or ~22 min (`FIRTOOL_LEG=1`) and verifies the toolchain, not the design.

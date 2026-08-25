@@ -1083,24 +1083,28 @@ let i2sRx (name: string) =
             lrclk.changed ==> lrclkEdge
 
             If io.sclkTick (fun () ->
-                If lrclkEdge (fun () ->
-                    // The tick on which LRCLK turns carries no data — the I2S
-                    // one-cycle delay.
-                    lit 0UL 6 ==> bitCount)
-
-                Else (fun () ->
+                ifElse [
+                    (lrclkEdge, fun () ->
+                        // The tick on which LRCLK turns carries no data — the I2S
+                        // one-cycle delay.
+                        lit 0UL 6 ==> bitCount)
+                ] (fun () ->
                     bitCount + lit 1UL 6 ==> bitCount
 
-                    If (lt bitCount (lit (uint64 sampleWidth) 6)) (fun () ->
-                        shifted ==> shift
+                    ifElse [
+                        (lt bitCount (lit (uint64 sampleWidth) 6), fun () ->
+                            shifted ==> shift
 
-                        If (eq bitCount (lit (uint64 (sampleWidth - 1)) 6)) (fun () ->
-                            If (eq io.lrclk (lit 0UL 1)) (fun () -> shifted ==> leftHold)
-
-                            Else (fun () ->
-                                leftHold ==> leftReg
-                                shifted ==> rightReg
-                                lit 1UL 1 ==> validReg))))))
+                            ifElse [
+                                (eq bitCount (lit (uint64 (sampleWidth - 1)) 6), fun () ->
+                                    ifElse [
+                                        (eq io.lrclk (lit 0UL 1), fun () -> shifted ==> leftHold)
+                                    ] (fun () ->
+                                        leftHold ==> leftReg
+                                        shifted ==> rightReg
+                                        lit 1UL 1 ==> validReg))
+                            ] (fun () -> ()))
+                    ] (fun () -> ()))))
 
 /// The I2S transmitter's ports, mirroring the receiver's.
 type I2sTxPorts =

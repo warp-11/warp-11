@@ -5,8 +5,8 @@ module Warp11.Streams
 /// variant's fields unpacked from the shared data bits — the conditions and the
 /// slicing both managed, so a handler reads like a DU match arm.
 let matchUnion (u: Union2<'a, 'b>) (beat: UnionBeat) (handle0: 'a -> unit) (handle1: 'b -> unit) =
-    If (eq beat.tag (lit 0UL u.tagWidth)) (fun () -> handle0 (variant0 u beat.data))
-    Else (fun () -> handle1 (variant1 u beat.data))
+    IfWith (eq beat.tag (lit 0UL u.tagWidth)) (fun () -> handle0 (variant0 u beat.data))
+    |> ElseWith (fun () -> handle1 (variant1 u beat.data))
 
 /// Broadcast fan-out: every consumer sees every beat, and a beat fires only when
 /// every consumer is ready — the source's ready is the AND of theirs. The 1→N
@@ -618,20 +618,20 @@ let snapshotSource (name: string) (rows: Expr list) : Stream<Expr * Expr * Expr>
     let isLast = wireBit $"{name}_last"
     eq index (lit (uint64 (depth - 1)) addrWidth) ==> isLast
 
-    If (bnot copying) (fun () ->
+    IfWith (bnot copying) (fun () ->
         for r, s in List.zip rows shadows do
             r ==> s
 
         lit 1UL 1 ==> copying
         lit 0UL addrWidth ==> index)
 
-    Else (fun () ->
+    |> ElseWith (fun () ->
         If ready (fun () ->
-            If isLast (fun () ->
+            IfWith isLast (fun () ->
                 lit 0UL 1 ==> copying
                 lit 0UL addrWidth ==> index)
 
-            Else (fun () -> index + lit 1UL addrWidth ==> index)))
+            |> ElseWith (fun () -> index + lit 1UL addrWidth ==> index)))
 
     let data = wire $"{name}_data" rowWidth
 
@@ -698,8 +698,8 @@ let streamConflate3
     let publish = wireBit $"{name}_publish"
     (draining &&& writerIdle) ==> publish
 
-    If lastAccepted (fun () -> lit 1UL 1 ==> draining)
-    Else (fun () -> If publish (fun () -> lit 0UL 1 ==> draining))
+    IfWith lastAccepted (fun () -> lit 1UL 1 ==> draining)
+    |> ElseWith (fun () -> If publish (fun () -> lit 0UL 1 ==> draining))
 
     let doneValid = wireBit $"{name}_done_valid"
     bnot (eq doneIdx none) ==> doneValid
@@ -734,30 +734,30 @@ let streamConflate3
 
     If publish (fun () -> freeSlot ==> writeIdx)
 
-    If (canCapture &&& publish) (fun () -> writeIdx ==> doneIdx)
+    IfWith (canCapture &&& publish) (fun () -> writeIdx ==> doneIdx)
 
-    Else (fun () ->
-        If (canCapture ||| serviceQueued) (fun () -> none ==> doneIdx)
+    |> ElseWith (fun () ->
+        IfWith (canCapture ||| serviceQueued) (fun () -> none ==> doneIdx)
 
-        Else (fun () -> If publish (fun () -> writeIdx ==> doneIdx)))
+        |> ElseWith (fun () -> If publish (fun () -> writeIdx ==> doneIdx)))
 
-    If (canCapture ||| serviceQueued) (fun () -> doneIdx ==> readIdx)
-    Else (fun () -> If hostRelease (fun () -> none ==> readIdx))
+    IfWith (canCapture ||| serviceQueued) (fun () -> doneIdx ==> readIdx)
+    |> ElseWith (fun () -> If hostRelease (fun () -> none ==> readIdx))
 
-    If mustQueue (fun () -> lit 1UL 1 ==> captureQueued)
+    IfWith mustQueue (fun () -> lit 1UL 1 ==> captureQueued)
 
-    Else (fun () ->
+    |> ElseWith (fun () ->
         If (serviceQueued ||| canCapture ||| hostRelease) (fun () -> lit 0UL 1 ==> captureQueued))
 
-    If (canCapture ||| serviceQueued) (fun () -> lit 1UL 1 ==> irqReg)
-    Else (fun () -> lit 0UL 1 ==> irqReg)
+    IfWith (canCapture ||| serviceQueued) (fun () -> lit 1UL 1 ==> irqReg)
+    |> ElseWith (fun () -> lit 0UL 1 ==> irqReg)
 
     let blocked = wireBit $"{name}_blocked"
     (hostCapture &&& readValid) ==> blocked
 
-    If hostRelease (fun () -> lit 0UL 8 ==> overrun)
+    IfWith hostRelease (fun () -> lit 0UL 8 ==> overrun)
 
-    Else (fun () ->
+    |> ElseWith (fun () ->
         If (blocked &&& bnot (eq overrun (lit 255UL 8))) (fun () -> overrun + lit 1UL 8 ==> overrun))
 
     { payload = (writeIdx, index, data)
