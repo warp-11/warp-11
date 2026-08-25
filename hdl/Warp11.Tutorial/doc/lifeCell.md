@@ -7,7 +7,7 @@ is called a *stencil*.
 
 ## What to look at
 
-The nine inputs `g00`–`g22` are a 3×3 grid. Set them all to 1.
+The nine inputs `g_0_0`–`g_2_2` are a 3×3 grid. Set them all to 1.
 
 - `live` reads **8** — the center's eight neighbors, itself excluded.
 - `next` reads **0**: eight neighbors is overcrowding, and the cell dies.
@@ -15,7 +15,7 @@ The nine inputs `g00`–`g22` are a 3×3 grid. Set them all to 1.
 - `corner_zero`, `corner_wrap` and `corner_clamp` read **3, 8 and 8**. Same
   cell, same grid, three answers.
 
-Now clear everything and set only `g22`. The corner at (0,0) is nowhere near
+Now clear everything and set only `g_2_2`. The corner at (0,0) is nowhere near
 it — but `corner_wrap` reads 1, because under wrap the far corner *is* its
 diagonal neighbor.
 
@@ -62,7 +62,7 @@ strange.
   processing, where you want a border pixel to behave like its neighbors rather
   than like darkness.
 
-Clamp has a trap worth seeing once. Clear the grid and set **only `g00`**, the
+Clamp has a trap worth seeing once. Clear the grid and set **only `g_0_0`**, the
 corner itself. Then `corner_clamp` reads **3**.
 
 The corner's three off-grid neighbors — up-left, up, and left — all clamp back
@@ -85,10 +85,10 @@ call. See [**Adder tree**](adderTree.md).
 
 ## Try this
 
-- Set the top row (`g00`, `g01`, `g02`) and clear everything else. `live` reads
+- Set the top row (`g_0_0`, `g_0_1`, `g_0_2`) and clear everything else. `live` reads
   3 and `next` reads 1 — a birth. This is the blinker, one third of it.
-- Set `g11` and two of its neighbors: `next` stays 1, the survival rule.
-- Set only `g11`: `live` reads 0 and the cell dies of loneliness.
+- Set `g_1_1` and two of its neighbors: `next` stays 1, the survival rule.
+- Set only `g_1_1`: `live` reads 0 and the cell dies of loneliness.
 - In the source, change the center count's edge policy to `Edge.Wrap` and see
   that nothing changes — the center of a 3×3 grid has no off-grid neighbors, so
   every policy agrees there. The policies only ever differ at a border.

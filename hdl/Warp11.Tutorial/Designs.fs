@@ -686,7 +686,7 @@ let firFilter =
 /// compare, apply a rule — is the design's business, not the library's.
 let lifeCell =
     design "LifeCell" (fun () ->
-        let grid = [ for y in 0..2 -> [ for x in 0..2 -> inputBit $"g{y}{x}" ] ]
+        let grid = inputArray "g" 3 3
 
         let count name stencil edge y x =
             let out = output name 4

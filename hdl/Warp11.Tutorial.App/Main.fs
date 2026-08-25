@@ -535,7 +535,7 @@ let private pagesTellTheTruth () =
     // The three edge policies, each on a grid that only it reads as non-empty.
     let edgePoliciesDiffer =
         let sim = Sim lifeCell
-        let poke cell = for y in 0..2 do for x in 0..2 do sim.Poke($"g{y}{x}", cell y x)
+        let poke cell = for y in 0..2 do for x in 0..2 do sim.Poke($"g_{y}_{x}", cell y x)
 
         poke (fun _ _ -> 1UL)
         // A full grid: eight live neighbors, so the center dies of crowding.

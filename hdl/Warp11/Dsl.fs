@@ -639,6 +639,17 @@ let wireBit name = declareWire name (UInt 1)
 /// A one-bit register, resetting to zero.
 let regBit name = declareReg name (UInt 1) 0UL
 
+/// A 2D grid of one-bit input ports. `inputArray "g" 3 3` declares nine ports
+/// named `g_0_0` through `g_2_2` and returns them as `Expr list list` indexed
+/// `grid[y][x]`. The emitted Verilog is flat `input g_0_0; input g_0_1; ...` —
+/// this is sugar at the F# level, not a Verilog packed array.
+let inputArray name rows cols =
+    [ for y in 0 .. rows - 1 -> [ for x in 0 .. cols - 1 -> inputBit $"{name}_{y}_{x}" ] ]
+/// A 2D grid of one-bit output ports. Same shape as `inputArray` for the
+/// output direction.
+let outputArray name rows cols =
+    [ for y in 0 .. rows - 1 -> [ for x in 0 .. cols - 1 -> outputBit $"{name}_{y}_{x}" ] ]
+
 /// A register that holds its value through reset. Same shape as `reg` without
 /// the initial value, because there is no reset for it to take.
 ///
