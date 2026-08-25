@@ -80,7 +80,6 @@ let pages =
       page "Tutorial" "DDR master" "tutorial/ddr-master" "hdl/Warp11.Tutorial/doc/ddrMaster.md"
 
       page "Examples" "Mandelbrot" "examples/mandelbrot" "hdl/Warp11.Mandelbrot/README.md"
-      page "Examples" "GEP" "examples/gep" "hdl/Warp11.Gep/README.md"
       page "Examples" "Game of Life" "examples/game-of-life" "hdl/Warp11.GoL/README.md"
       page "Examples" "Audio" "examples/audio" "hdl/Warp11.Effects/README.md"
       page "Examples" "The tutorial project" "examples/tutorial" "hdl/Warp11.Tutorial/README.md"

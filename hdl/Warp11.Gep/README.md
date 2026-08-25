@@ -1,10 +1,12 @@
 # GEP
 
+> **Work in progress.** 
+
 Gene Expression Programming — a genetic-programming engine — with the whole
 generation loop in fabric. Population in DDR, evaluation and breeding on the
 FPGA, **0.85 µs per offspring**, bit-exact against a software twin.
 
-*Status: on silicon. The largest example here by a wide margin.*
+*Status: on silicon, still under active development. The largest example here by a wide margin.*
 
 ## What it does
 

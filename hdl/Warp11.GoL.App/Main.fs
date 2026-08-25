@@ -11,9 +11,7 @@ open Warp11.GoL.Wrapper
 let private diffDesigns () =
     [ golHarness 8 8
       golLiveHarness 8 8
-      golHarnessUnrolled 2 8 8
-      golAxiScaled
-      golAxiScaledX2 ]
+      golAxiScaled ]
 
 /// Drive the harness and the twin through the same generations and demand
 /// row-for-row, population-for-population equality every cycle. An unrolled
@@ -76,9 +74,6 @@ let private demoChecks () =
 
     let gliderOk = runAgainstTwin (Sim(golHarness 8 8)) 8 8 1 glider 16
     printfn $"glider vs twin (16 gens):     %b{gliderOk}"
-
-    let gliderX2Ok = runAgainstTwin (Sim(golHarnessUnrolled 2 8 8)) 8 8 2 glider 16
-    printfn $"glider vs twin, 2 gens/tick:  %b{gliderX2Ok}"
 
     // Random soups: dense chaos exercises every birth/survive/die case at
     // every border. Deterministic seed, three soups, 30 generations each.
@@ -446,7 +441,7 @@ let private writeHardware (repoRoot: string) =
           "" ]
         @ regMapRsLines m.map
         @ [ ""
-            $"pub const GENS_PER_CYCLE: usize = %d{golGensPerCycle};"
+            $"pub const GENS_PER_CYCLE: usize = 1;"
             $"pub const GRID_WIDTH: usize = %d{gridWidth};"
             $"pub const GRID_HEIGHT: usize = %d{gridHeight};"
             $"pub const ROWS_PER_BEAT: usize = %d{128 / gridWidth};"
@@ -483,9 +478,8 @@ let main argv =
         |> fun ok ->
             printfn $"axi rehearsal under random memory timing (6 seeds): %b{ok}"
             if ok then 0 else 1
-    | [| "axi-x2" |] -> axiRehearsalAt golAxiScaledX2 2 16 16 1 1 0 None
     | [| "axi-full"; awEvery; wEvery; bDelay |] ->
-        axiRehearsalAt golAxiFull.Value golGensPerCycle 64 64 (int awEvery) (int wEvery) (int bDelay) None
+        axiRehearsalAt golAxiFull.Value 1 64 64 (int awEvery) (int wEvery) (int bDelay) None
     | [| "axi-full" |] ->
         // The pacing matrix: always-ready, then each channel throttled
         // against the other, then both with a lagging B — the skews a real
@@ -493,19 +487,11 @@ let main argv =
         [ 1, 1, 0; 2, 1, 0; 1, 2, 0; 3, 1, 6; 1, 3, 6 ]
         |> List.map (fun (awEvery, wEvery, bDelay) ->
             printfn $"--- pacing aw/%d{awEvery} w/%d{wEvery} b+%d{bDelay} ---"
-            axiRehearsalAt golAxiFull.Value golGensPerCycle 64 64 awEvery wEvery bDelay None)
+            axiRehearsalAt golAxiFull.Value 1 64 64 awEvery wEvery bDelay None)
         |> List.max
     | [| "hardware"; repoRoot |] -> writeHardware repoRoot
     | [| "emit"; gridWidth; gridHeight; path |] ->
         System.IO.File.WriteAllText(path, emitDesign (golHarness (int gridWidth) (int gridHeight)) + "\n")
-        printfn $"wrote {path}"
-        0
-    | [| "emit-probe"; gensPerCycle; gridWidth; gridHeight; path |] ->
-        System.IO.File.WriteAllText(
-            path,
-            emitDesign (golProbe (int gensPerCycle) (int gridWidth) (int gridHeight)) + "\n"
-        )
-
         printfn $"wrote {path}"
         0
     | _ -> demoChecks ()

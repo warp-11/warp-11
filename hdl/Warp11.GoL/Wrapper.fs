@@ -132,12 +132,7 @@ let golMap (gridWidth: int) (gridHeight: int) : GolMap =
 let golBeatCount (gridWidth: int) (gridHeight: int) = gridWidth * gridHeight / 128
 let golSlotShift (gridWidth: int) (gridHeight: int) = indexBits (golBeatCount gridWidth gridHeight) + 4
 
-/// `gensPerCycle` unrolls the grid (the act-5 lever): every fire of the
-/// pacing FSM advances that many generations, so `tickCount` counts fires
-/// while the `generation` register keeps counting true generations. The
-/// interval still paces fires — a host asking for N generations/second
-/// divides by gensPerCycle (the seam carries the constant).
-let golAxi (topName: string) (gensPerCycle: int) (gridWidth: int) (gridHeight: int) =
+let golAxi (topName: string) (gridWidth: int) (gridHeight: int) =
     if 128 % gridWidth <> 0 then
         failwith $"golAxi: 128 %% gridWidth must be 0, got %d{gridWidth}"
 
@@ -230,7 +225,7 @@ let golAxi (topName: string) (gensPerCycle: int) (gridWidth: int) (gridHeight: i
 
         If resetPulseQ (fun () -> lit 0UL 32 ==> generationReg)
         Else (fun () ->
-            If firePulse (fun () -> generationReg + lit (uint64 gensPerCycle) 32 ==> generationReg))
+            If firePulse (fun () -> generationReg + lit 1UL 32 ==> generationReg))
 
         // ---- the load prefetch: the host fills the window (one/two 32-bit
         // words per row, low word first), pulses `load`, and the FSM walks the
@@ -310,7 +305,7 @@ let golAxi (topName: string) (gensPerCycle: int) (gridWidth: int) (gridHeight: i
         firePulse ==> coreTick
 
         let rows, _ =
-            gameOfLifeGridUnrolled gensPerCycle gridWidth gridHeight coreLoad coreTick loadRows
+            gameOfLifeGrid gridWidth gridHeight coreLoad coreTick loadRows
 
         // ---- the snapshot path: rows paired into 128-bit beats, conflated
         // across three DDR slots, written by the master whose drained level
@@ -397,18 +392,7 @@ let golAxi (topName: string) (gensPerCycle: int) (gridWidth: int) (gridHeight: i
 
 /// The rehearsal config: every mechanism live at a size the Sim walks in
 /// seconds — 16×16 packs 8 rows per beat, 2 beats per frame.
-let golAxiScaled = golAxi "GolAxiScaled" 1 16 16
-
-/// The scaled config unrolled — the differential's coverage of the k > 1
-/// wrapper path (generation-by-k accounting, the composed grid in the
-/// snapshot stream).
-let golAxiScaledX2 = golAxi "GolAxiScaledX2" 2 16 16
-
-/// Generations per clock in the silicon config: measured OOC, k=3 closes
-/// the 6 ns budget at 4.877 ns with 47k grid LUTs (40%) — k=4 does not
-/// (7.464 ns, 98k LUTs). The seam carries this so drivers convert between
-/// generations and fires.
-let golGensPerCycle = 3
+let golAxiScaled = golAxi "GolAxiScaled" 16 16
 
 /// The silicon config. Lazy, so only the seam emit pays the elaboration.
-let golAxiFull = lazy (golAxi "GolAxi" golGensPerCycle 64 64)
+let golAxiFull = lazy (golAxi "GolAxi" 64 64)

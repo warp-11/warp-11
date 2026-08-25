@@ -170,8 +170,7 @@ the IR did not invent its own semantics gets measured.
   program and does not assume you have written RTL.
 - **[Streams](https://warp11.org/guides/streams)** — the ready/valid layer, and `wormhole`, the
   one call that connects anything stream-shaped.
-- **The examples** — [Mandelbrot](https://warp11.org/examples/mandelbrot),
-  [GEP](https://warp11.org/examples/gep) and
+- **The examples** — [Mandelbrot](https://warp11.org/examples/mandelbrot) and
   [Game of Life](https://warp11.org/examples/game-of-life), each with its own write-up.
 - **[Runtime and host drivers](https://warp11.org/guides/runtime)** — the crates, cross-compiling
   for the board without a cross-gcc, and the first-light binaries.

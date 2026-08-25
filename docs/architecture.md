@@ -174,5 +174,5 @@ happy with output our simulator also considered correct.
 - [**Hardware workflow**](dev-workflow.md) — synthesis, the board, and the hardware-only gotchas.
 - [**Comparison to other HDLs**](HDL_COMPARISON.md) — how this relates to Chisel, SpinalHDL,
   Amaranth, Clash and the rest, feature by feature.
-- The example write-ups — Mandelbrot, Game of Life, GEP — for what a whole
+- The example write-ups — Mandelbrot, Game of Life — for what a whole
   project looks like, fabric and host together.
