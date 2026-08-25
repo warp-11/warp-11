@@ -3,34 +3,34 @@ module Warp11.Sim
 
 open System.Numerics
 
-let rec private refs expr =
-    match expr with
-    | Lit _ -> []
-    | Ref (n, _) -> [ n ]
-    | Add (a, b)
-    | Sub (a, b)
-    | Mul (a, b)
-    | Concat (a, b)
-    | Eq (a, b)
-    | Lt (a, b)
-    | And (a, b)
-    | Or (a, b)
-    | Xor (a, b) -> refs a @ refs b
-    | Mux (c, t, f) -> refs c @ refs t @ refs f
-    | Slice (s, _, _) -> refs s
-    | AsUInt v
-    | AsSInt v -> refs v
-    | Not v -> refs v
-    | Shr (s, _) -> refs s
-    | Pad (s, _) -> refs s
-    | Reduce (_, v) -> refs v
-    | Div (a, b)
-    | Rem (a, b) -> refs a @ refs b
-    | DynamicShl (v, n)
-    | DynamicShr (v, n) -> refs v @ refs n
-    // The array itself is a source, like a reg: only the address creates a
-    // combinational dependency.
-    | MemRead (_, a, _) -> refs a
+let private refsFolder: ExprFolder<string list> = {
+    fLit = fun _ -> []
+    fRef = fun (n, _) -> [ n ]
+    fAdd = fun (a, b) -> a @ b
+    fSub = fun (a, b) -> a @ b
+    fMul = fun (a, b) -> a @ b
+    fMux = fun (c, t, f) -> c @ t @ f
+    fConcat = fun (a, b) -> a @ b
+    fSlice = fun (s, _, _) -> s
+    fEq = fun (a, b) -> a @ b
+    fLt = fun (a, b) -> a @ b
+    fAnd = fun (a, b) -> a @ b
+    fOr = fun (a, b) -> a @ b
+    fXor = fun (a, b) -> a @ b
+    fNot = fun v -> v
+    fShr = fun (s, _) -> s
+    fPad = fun (s, _) -> s
+    fDynamicShl = fun (v, n) -> v @ n
+    fDynamicShr = fun (v, n) -> v @ n
+    fReduce = fun (_, v) -> v
+    fDiv = fun (a, b) -> a @ b
+    fRem = fun (a, b) -> a @ b
+    fMemRead = fun (_, a, _) -> a
+    fAsUInt = fun v -> v
+    fAsSInt = fun v -> v
+}
+
+let rec private refs expr = foldExpr refsFolder expr
 
 /// True when evaluating the expression touches a value wider than 64 bits —
 /// the test that routes an assignment onto the BigInteger path. Checked at

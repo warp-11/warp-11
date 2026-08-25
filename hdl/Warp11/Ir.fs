@@ -95,57 +95,143 @@ type Expr =
     static member (|||)(a: Expr, b: Expr) = Or(a, b)
     static member (^^^)(a: Expr, b: Expr) = Xor(a, b)
 
+/// One handler per `Expr` variant — the contract a consumer fulfills to walk
+/// an expression tree. Adding a variant to `Expr` adds a field here, and the
+/// compiler then guides every consumer by demanding every field.
+type ExprFolder<'a> = {
+    fLit: uint64 * GroundType -> 'a
+    fRef: string * GroundType -> 'a
+    fAdd: 'a * 'a -> 'a
+    fSub: 'a * 'a -> 'a
+    fMul: 'a * 'a -> 'a
+    fMux: 'a * 'a * 'a -> 'a
+    fConcat: 'a * 'a -> 'a
+    fSlice: 'a * int * int -> 'a
+    fEq: 'a * 'a -> 'a
+    fLt: 'a * 'a -> 'a
+    fAnd: 'a * 'a -> 'a
+    fOr: 'a * 'a -> 'a
+    fXor: 'a * 'a -> 'a
+    fNot: 'a -> 'a
+    fShr: 'a * int -> 'a
+    fPad: 'a * int -> 'a
+    fDynamicShl: 'a * 'a -> 'a
+    fDynamicShr: 'a * 'a -> 'a
+    fReduce: Reduction * 'a -> 'a
+    fDiv: 'a * 'a -> 'a
+    fRem: 'a * 'a -> 'a
+    fMemRead: string * 'a * int -> 'a
+    fAsUInt: 'a -> 'a
+    fAsSInt: 'a -> 'a
+}
+
+let rec foldExpr (f: ExprFolder<'a>) (e: Expr) : 'a =
+    let r = foldExpr f
+    match e with
+    | Lit(v, t) -> f.fLit(v, t)
+    | Ref(n, t) -> f.fRef(n, t)
+    | Add(a, b) -> f.fAdd(r a, r b)
+    | Sub(a, b) -> f.fSub(r a, r b)
+    | Mul(a, b) -> f.fMul(r a, r b)
+    | Mux(c, t, fls) -> f.fMux(r c, r t, r fls)
+    | Concat(hi, lo) -> f.fConcat(r hi, r lo)
+    | Slice(s, hi, lo) -> f.fSlice(r s, hi, lo)
+    | Eq(lhs, rhs) -> f.fEq(r lhs, r rhs)
+    | Lt(lhs, rhs) -> f.fLt(r lhs, r rhs)
+    | And(lhs, rhs) -> f.fAnd(r lhs, r rhs)
+    | Or(lhs, rhs) -> f.fOr(r lhs, r rhs)
+    | Xor(lhs, rhs) -> f.fXor(r lhs, r rhs)
+    | Not(v) -> f.fNot(r v)
+    | Shr(s, n) -> f.fShr(r s, n)
+    | Pad(s, w) -> f.fPad(r s, w)
+    | DynamicShl(v, n) -> f.fDynamicShl(r v, r n)
+    | DynamicShr(v, n) -> f.fDynamicShr(r v, r n)
+    | Reduce(kind, v) -> f.fReduce(kind, r v)
+    | Div(a, b) -> f.fDiv(r a, r b)
+    | Rem(a, b) -> f.fRem(r a, r b)
+    | MemRead(m, a, w) -> f.fMemRead(m, r a, w)
+    | AsUInt(v) -> f.fAsUInt(r v)
+    | AsSInt(v) -> f.fAsSInt(r v)
+
+/// An `ExprFolder` that reconstructs each variant identically. Override the
+/// variants a consumer cares about — the rest pass through unchanged.
+let identityFolder: ExprFolder<Expr> = {
+    fLit = Lit
+    fRef = Ref
+    fAdd = Add
+    fSub = Sub
+    fMul = Mul
+    fMux = Mux
+    fConcat = Concat
+    fSlice = Slice
+    fEq = Eq
+    fLt = Lt
+    fAnd = And
+    fOr = Or
+    fXor = Xor
+    fNot = Not
+    fShr = Shr
+    fPad = Pad
+    fDynamicShl = DynamicShl
+    fDynamicShr = DynamicShr
+    fReduce = Reduce
+    fDiv = Div
+    fRem = Rem
+    fMemRead = MemRead
+    fAsUInt = AsUInt
+    fAsSInt = AsSInt
+}
+
 /// What an expression *is*. Arithmetic keeps its operands' reading; bit
 /// manipulation lands in `UInt`, because bits are bits and a slice has no sign
 /// until someone says so. Both rules are FIRRTL's.
-let rec typeOf expr =
-    match expr with
-    | Lit (_, t)
-    | Ref (_, t) -> t
-    | Add (a, b)
-    | Sub (a, b) ->
-        let w = max (typeOf a).Width (typeOf b).Width
-        if (typeOf a).Signed then SInt w else UInt w
-    | Mul (a, b) ->
-        let w = (typeOf a).Width + (typeOf b).Width
-        if (typeOf a).Signed then SInt w else UInt w
-    | Mux (_, t, _) -> typeOf t
-    | Shr (s, n) ->
-        let t = typeOf s
-        let w = max (t.Width - n) 1
-        if t.Signed then SInt w else UInt w
-    | Pad (s, w) ->
-        let t = typeOf s
-        let w' = max t.Width w
-        if t.Signed then SInt w' else UInt w'
-    | DynamicShl (v, n) ->
-        let t = typeOf v
-        let w = t.Width + (1 <<< (typeOf n).Width) - 1
-        if t.Signed then SInt w else UInt w
-    | DynamicShr (v, _) -> typeOf v
-    | Reduce _ -> UInt 1
+let private typeOfFolder: ExprFolder<GroundType> = {
+    fLit = fun (_, t) -> t
+    fRef = fun (_, t) -> t
+    fAdd = fun (a, b) ->
+        let w = max a.Width b.Width
+        if a.Signed then SInt w else UInt w
+    fSub = fun (a, b) ->
+        let w = max a.Width b.Width
+        if a.Signed then SInt w else UInt w
+    fMul = fun (a, b) ->
+        let w = a.Width + b.Width
+        if a.Signed then SInt w else UInt w
+    fMux = fun (_, t, _) -> t
+    fConcat = fun (hi, lo) -> UInt(hi.Width + lo.Width)
+    fSlice = fun (_, hi, lo) -> UInt(hi - lo + 1)
+    fEq = fun _ -> UInt 1
+    fLt = fun _ -> UInt 1
+    fAnd = fun (a, b) -> UInt(max a.Width b.Width)
+    fOr = fun (a, b) -> UInt(max a.Width b.Width)
+    fXor = fun (a, b) -> UInt(max a.Width b.Width)
+    fNot = fun v -> UInt v.Width
     // FIRRTL's widths, checked against firtool rather than remembered. A
     // quotient cannot exceed its dividend, and a remainder cannot reach its
     // divisor — except that a *signed* quotient gains a bit, because
     // MIN / -1 overflows: -128 / -1 is +128, which needs nine.
-    | Div (a, _) ->
-        let t = typeOf a
-        if t.Signed then SInt(t.Width + 1) else UInt t.Width
-    | Rem (a, b) ->
-        let t = typeOf a
-        let w = min t.Width (typeOf b).Width
-        if t.Signed then SInt w else UInt w
-    | AsUInt v -> asUnsignedType (typeOf v)
-    | AsSInt v -> asSignedType (typeOf v)
-    | Concat (hi, lo) -> UInt((typeOf hi).Width + (typeOf lo).Width)
-    | Slice (_, hi, lo) -> UInt(hi - lo + 1)
-    | Eq _
-    | Lt _ -> UInt 1
-    | And (a, b)
-    | Or (a, b)
-    | Xor (a, b) -> UInt(max (typeOf a).Width (typeOf b).Width)
-    | Not v -> UInt (typeOf v).Width
-    | MemRead (_, _, w) -> UInt w
+    fDiv = fun (a, _) ->
+        if a.Signed then SInt(a.Width + 1) else UInt a.Width
+    fRem = fun (a, b) ->
+        let w = min a.Width b.Width
+        if a.Signed then SInt w else UInt w
+    fShr = fun (s, n) ->
+        let w = max (s.Width - n) 1
+        if s.Signed then SInt w else UInt w
+    fPad = fun (s, w) ->
+        let w' = max s.Width w
+        if s.Signed then SInt w' else UInt w'
+    fDynamicShl = fun (v, n) ->
+        let w = v.Width + (1 <<< n.Width) - 1
+        if v.Signed then SInt w else UInt w
+    fDynamicShr = fun (v, _) -> v
+    fReduce = fun _ -> UInt 1
+    fMemRead = fun (_, _, w) -> UInt w
+    fAsUInt = asUnsignedType
+    fAsSInt = asSignedType
+}
+
+let typeOf expr = foldExpr typeOfFolder expr
 
 /// How many bits, whatever the reading. Widths live in the values, which is
 /// why so little of the DSL takes a width parameter.

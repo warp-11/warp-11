@@ -5,34 +5,12 @@ module Warp11.Flatten
 // Simulation. Flatten the hierarchy, then evaluate the flat design directly —
 // warp11's sim architecture in miniature, with none of its performance work.
 
-let rec private renameRefs prefix expr =
-    let r = renameRefs prefix
-
-    match expr with
-    | Lit _ -> expr
-    | Ref (n, t) -> Ref($"{prefix}_{n}", t)
-    | Add (a, b) -> Add(r a, r b)
-    | Sub (a, b) -> Sub(r a, r b)
-    | Mul (a, b) -> Mul(r a, r b)
-    | Mux (c, t, f) -> Mux(r c, r t, r f)
-    | Concat (hi, lo) -> Concat(r hi, r lo)
-    | Slice (s, hi, lo) -> Slice(r s, hi, lo)
-    | Eq (a, b) -> Eq(r a, r b)
-    | Lt (a, b) -> Lt(r a, r b)
-    | AsUInt v -> AsUInt(r v)
-    | AsSInt v -> AsSInt(r v)
-    | And (a, b) -> And(r a, r b)
-    | Or (a, b) -> Or(r a, r b)
-    | Xor (a, b) -> Xor(r a, r b)
-    | Not v -> Not(r v)
-    | Shr (s, n) -> Shr(r s, n)
-    | Pad (s, w) -> Pad(r s, w)
-    | Reduce (kind, v) -> Reduce(kind, r v)
-    | Div (a, b) -> Div(r a, r b)
-    | Rem (a, b) -> Rem(r a, r b)
-    | DynamicShl (v, n) -> DynamicShl(r v, r n)
-    | DynamicShr (v, n) -> DynamicShr(r v, r n)
-    | MemRead (m, a, w) -> MemRead($"{prefix}_{m}", r a, w)
+let private renameRefs prefix expr =
+    foldExpr
+        { identityFolder with
+            fRef = fun (n, t) -> Ref($"{prefix}_{n}", t)
+            fMemRead = fun (m, a, w) -> MemRead($"{prefix}_{m}", a, w) }
+        expr
 
 /// Inline every instance, prefixing child-internal names with the instance name.
 /// For the simulator only. The parent's `instName_port` wires already exist
