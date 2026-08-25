@@ -127,6 +127,9 @@ let golMap (gridWidth: int) (gridHeight: int) : GolMap =
               fbBaseAddr
               loadRow ] } }
 
+type private Pacing = Idle | Running
+type private Prefetch = PIdle | PWalking
+
 /// Beats per snapshot frame and the DDR slot shift: a slot is the frame
 /// rounded to its own power-of-two stride, so slot addressing is a shift.
 let golBeatCount (gridWidth: int) (gridHeight: int) = gridWidth * gridHeight / 128
@@ -157,11 +160,12 @@ let golAxi (topName: string) (gridWidth: int) (gridHeight: int) =
         let intervalCycles = regs.value m.intervalCycles
         let fbBaseAddr = regs.value m.fbBaseAddr
 
-        // ---- the pacing FSM: Kotlin's burst/interval logic, line for line.
+        // ---- the pacing FSM: a burst/interval controller.
         // tickCount = 0 means continuous (until stop); intervalCycles paces
         // generations inside a burst; stop wins over everything.
+        let pacer = machine "pacing" [ Pacing.Idle; Pacing.Running ]
+
         let tickRemaining = reg "tick_remaining" 32
-        let busyReg = regBit "busy_reg"
         let continuousReg = regBit "continuous_reg"
         let intervalCount = reg "interval_count" 32
         let generationReg = reg "generation_reg" 32
@@ -171,49 +175,56 @@ let golAxi (topName: string) (gridWidth: int) (gridHeight: int) =
         mux (eq intervalCycles (lit 0UL 32)) (lit 0UL 32) (intervalCycles - lit 1UL 32) ==> intervalSeed
 
         let startBurst = wireBit "start_burst"
-        (tickPulse &&& bnot busyReg &&& bnot stopPulse) ==> startBurst
+        (tickPulse &&& pacer.Is Pacing.Idle &&& bnot stopPulse) ==> startBurst
         let intervalLast = wireBit "interval_last"
         eq intervalCount (lit 0UL 32) ==> intervalLast
         let firePulse = wireBit "fire_pulse"
-        (busyReg &&& intervalLast &&& bnot stopPulse) ==> firePulse
+        (pacer.Is Pacing.Running &&& intervalLast &&& bnot stopPulse) ==> firePulse
 
-        If stopPulse (fun () ->
-            lit 0UL 1 ==> busyReg
-            lit 0UL 1 ==> continuousReg
-            lit 0UL 32 ==> tickRemaining
-            lit 0UL 32 ==> intervalCount
-            busyReg ==> burstDoneQ)
-
-        Else (fun () ->
-            If startBurst (fun () ->
-                lit 1UL 1 ==> busyReg
-                eq tickCount (lit 0UL 32) ==> continuousReg
-                tickCount ==> tickRemaining
-                intervalSeed ==> intervalCount
+        pacer.If Pacing.Idle (fun () ->
+            If stopPulse (fun () ->
+                lit 0UL 1 ==> continuousReg
+                lit 0UL 32 ==> tickRemaining
+                lit 0UL 32 ==> intervalCount
                 lit 0UL 1 ==> burstDoneQ)
 
             Else (fun () ->
-                If busyReg (fun () ->
-                    If firePulse (fun () ->
-                        intervalSeed ==> intervalCount
-
-                        If continuousReg (fun () -> lit 0UL 1 ==> burstDoneQ)
-
-                        Else (fun () ->
-                            If (eq tickRemaining (lit 1UL 32)) (fun () ->
-                                lit 0UL 32 ==> tickRemaining
-                                lit 0UL 1 ==> busyReg
-                                lit 1UL 1 ==> burstDoneQ)
-
-                            Else (fun () ->
-                                tickRemaining - lit 1UL 32 ==> tickRemaining
-                                lit 0UL 1 ==> burstDoneQ)))
-
-                    Else (fun () ->
-                        intervalCount - lit 1UL 32 ==> intervalCount
-                        lit 0UL 1 ==> burstDoneQ))
+                If startBurst (fun () ->
+                    eq tickCount (lit 0UL 32) ==> continuousReg
+                    tickCount ==> tickRemaining
+                    intervalSeed ==> intervalCount
+                    lit 0UL 1 ==> burstDoneQ
+                    pacer.Goto Pacing.Running)
 
                 Else (fun () -> lit 0UL 1 ==> burstDoneQ)))
+
+        pacer.If Pacing.Running (fun () ->
+            If stopPulse (fun () ->
+                lit 1UL 1 ==> burstDoneQ
+                lit 0UL 1 ==> continuousReg
+                lit 0UL 32 ==> tickRemaining
+                lit 0UL 32 ==> intervalCount
+                pacer.Goto Pacing.Idle)
+
+            Else (fun () ->
+                If intervalLast (fun () ->
+                    intervalSeed ==> intervalCount
+
+                    If continuousReg (fun () -> lit 0UL 1 ==> burstDoneQ)
+
+                    Else (fun () ->
+                        If (eq tickRemaining (lit 1UL 32)) (fun () ->
+                            lit 0UL 32 ==> tickRemaining
+                            lit 1UL 1 ==> burstDoneQ
+                            pacer.Goto Pacing.Idle)
+
+                        Else (fun () ->
+                            tickRemaining - lit 1UL 32 ==> tickRemaining
+                            lit 0UL 1 ==> burstDoneQ)))
+
+                Else (fun () ->
+                    intervalCount - lit 1UL 32 ==> intervalCount
+                    lit 0UL 1 ==> burstDoneQ)))
 
         // The reset pulse decodes combinationally off the AXI write channel
         // and fans out to every cell enable — registered here so the fanout
@@ -231,9 +242,10 @@ let golAxi (topName: string) (gridWidth: int) (gridHeight: int) =
         // words per row, low word first), pulses `load`, and the FSM walks the
         // window's sync read port into per-row staging registers, then hands
         // the whole surface to the core in one loadEnable pulse.
+        let prefetcher = machine "prefetch" [ Prefetch.PIdle; Prefetch.PWalking ]
+
         let prefetchTotal = m.windowWords
         let prefetchAddrWidth = indexBits prefetchTotal
-        let prefetching = regBit "prefetching"
         let prefetchAddr = reg "prefetch_addr" prefetchAddrWidth
         let loadToCore = regBit "load_to_core"
 
@@ -245,7 +257,7 @@ let golAxi (topName: string) (gridWidth: int) (gridHeight: int) =
         let read = regs.window m.loadRow prefetchAddr
         let readData = read.data
         let dataIndex = read.through "prefetch_addr" prefetchAddr
-        let dataValid = read.through "prefetching" (prefetching &&& bnot read.hostTurn)
+        let dataValid = read.through "prefetch_state" (prefetcher.Is Prefetch.PWalking &&& bnot read.hostTurn)
 
         let staging =
             [ for y in 0 .. gridHeight - 1 ->
@@ -262,14 +274,15 @@ let golAxi (topName: string) (gridWidth: int) (gridHeight: int) =
         let lastFetch = wireBit "last_fetch"
         (dataValid &&& eq dataIndex (lit (uint64 (prefetchTotal - 1)) prefetchAddrWidth)) ==> lastFetch
 
-        If loadPulse (fun () ->
-            lit 1UL 1 ==> prefetching
-            lit 0UL prefetchAddrWidth ==> prefetchAddr)
+        prefetcher.If Prefetch.PIdle (fun () ->
+            If loadPulse (fun () ->
+                lit 0UL prefetchAddrWidth ==> prefetchAddr
+                prefetcher.Goto Prefetch.PWalking))
 
-        Else (fun () ->
-            If (prefetching &&& bnot read.hostTurn) (fun () ->
+        prefetcher.If Prefetch.PWalking (fun () ->
+            If (bnot read.hostTurn) (fun () ->
                 If (eq prefetchAddr (lit (uint64 (prefetchTotal - 1)) prefetchAddrWidth)) (fun () ->
-                    lit 0UL 1 ==> prefetching)
+                    prefetcher.Goto Prefetch.PIdle)
 
                 Else (fun () -> prefetchAddr + lit 1UL prefetchAddrWidth ==> prefetchAddr)))
 
@@ -378,7 +391,7 @@ let golAxi (topName: string) (gridWidth: int) (gridHeight: int) =
         reduceTree (+) [ for c in rowCounts -> cat (lit 0UL (populationWidth - rowCountWidth)) c ]
         ==> populationReg
 
-        regs.drive m.busy busyReg
+        regs.drive m.busy (pacer.Is Pacing.Running)
         regs.drive m.population populationReg
         regs.drive m.generation generationReg
         regs.drive m.snapReady snapStatus.ready
