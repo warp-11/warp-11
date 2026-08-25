@@ -1,4 +1,4 @@
-# Sequencer (state machine)
+# FSM
 
 Six named states, walking `Idle → Fetch → Decode → Execute → Writeback` four
 times and stopping at `Done`. This is how hardware does control flow, and it is

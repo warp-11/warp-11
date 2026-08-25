@@ -93,4 +93,4 @@ signatures cannot be merged.
 
 - [**Counter**](counter.md) — the same register written out by hand, and the holding rule.
 - [**Edge detect**](edges.md) — a wrap is an edge somebody already computed.
-- [**Sequencer**](sequencer.md) — the other way to structure "do this, then that".
+- [**FSM**](fsm.md) — the other way to structure "do this, then that".

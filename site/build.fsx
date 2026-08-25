@@ -53,7 +53,7 @@ let pages =
       page "Tutorial" "RAM" "tutorial/ram" "hdl/Warp11.Tutorial/doc/ram.md"
       page "Tutorial" "ROM" "tutorial/rom" "hdl/Warp11.Tutorial/doc/romTable.md"
       page "Tutorial" "Assertions" "tutorial/assertions" "hdl/Warp11.Tutorial/doc/assertions.md"
-      page "Tutorial" "Sequencer" "tutorial/sequencer" "hdl/Warp11.Tutorial/doc/sequencer.md"
+      page "Tutorial" "FSM" "tutorial/fsm" "hdl/Warp11.Tutorial/doc/fsm.md"
       page "Tutorial" "Delay chain" "tutorial/delay-chain" "hdl/Warp11.Tutorial/doc/delayAlign.md"
       page "Tutorial" "Edge detect" "tutorial/edge-detect" "hdl/Warp11.Tutorial/doc/edges.md"
       page "Tutorial" "LFSR" "tutorial/lfsr" "hdl/Warp11.Tutorial/doc/noise.md"

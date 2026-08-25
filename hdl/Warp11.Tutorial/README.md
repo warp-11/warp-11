@@ -40,7 +40,7 @@ substrates real accelerators are built from.
 - **ROM** — contents fixed at elaboration, so the bitstream arrives loaded.
 - **Assertions** — a claim a design makes about itself, checked every cycle in
   simulation and compiled out of the silicon.
-- **Sequencer** — one state per cycle, and waiting as the absence of a
+- **FSM** — one state per cycle, and waiting as the absence of a
   transition.
 
 ### The combinators

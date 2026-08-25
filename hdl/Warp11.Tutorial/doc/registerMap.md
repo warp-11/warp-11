@@ -105,4 +105,4 @@ offset by four, and this is the answer to it.
   than waiting to be poked.
 - [**Stall probes**](streamProbes.md) — the counters that most often end up wired to a status
   offset.
-- [**Sequencer**](sequencer.md) — the state machine a control register usually starts.
+- [**FSM**](fsm.md) — the state machine a control register usually starts.

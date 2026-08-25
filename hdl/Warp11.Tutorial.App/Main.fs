@@ -228,9 +228,9 @@ let private pagesTellTheTruth () =
             sim.Poke("index", i)
             sim.Peek "recovered" = i)
 
-    // Sequencer: stall holds Execute, and a full run retires four passes.
+    // FSM: stall holds Execute, and a full run retires four passes.
     let stallHolds =
-        let sim = Sim sequencer
+        let sim = Sim fsm
         sim.Poke("stall", 1UL)
         sim.Poke("start", 1UL)
         sim.Tick()

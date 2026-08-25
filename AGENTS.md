@@ -72,6 +72,7 @@ cd runtime && cargo test --workspace
 
 - **Compile order in `Warp11.fsproj` matters.** `Stdlib.fs` is near the END — it sees everything above and nothing above can see it. `RegMap.fs` cannot call stdlib; the AXI-Lite channel they share lives in `AxiLite.fs` ahead of both.
 - **One driver per signal per level.** A second `==>` is an elaboration error.
+- **Use FSM's .** A second `==>` is an elaboration error.
 - **One declaration per name.** Instance staging wires (`{instance}_{port}`) live in the parent's namespace.
 - **`checkWidths` / `checkNames` / `checkStreams` all gate `emitDesign`.**
 - **Call-site invariance.** Whether a stdlib entry is inline logic or a module is invisible at every use site.
@@ -86,11 +87,13 @@ cd runtime && cargo test --workspace
 
 ## Documentation map (read the right one)
 
-| to do this | read this |
-|---|---|
-| start, run F# side | `hdl/README.md` |
-| living work list | `notes/BACKLOG.md` |
-| stdlib feature decisions | `docs/HDL_COMPARISON.md` |
-| stream/wormhole API | `notes/STREAM_API.md` |
-| FIRRTL alignment | `notes/FIRRTL_ALIGNMENT.md` |
-| deploy loop | `docs/dev-workflow.md`, `hardware/board/README.md` |
+| to do this                | read this                                          |
+|---------------------------|----------------------------------------------------|
+| start, run F# side        | `hdl/README.md`                                    |
+| build and run the website | `site/README.md`                                   |
+| tutorial app              | `hdl/Warp11.Tutorial/README.md`                                   |
+| living work list          | `notes/BACKLOG.md`                                 |
+| stdlib feature decisions  | `docs/HDL_COMPARISON.md`                           |
+| stream/wormhole API       | `notes/STREAM_API.md`                              |
+| FIRRTL alignment          | `notes/FIRRTL_ALIGNMENT.md`                        |
+| deploy loop               | `docs/dev-workflow.md`, `hardware/board/README.md` |

@@ -214,8 +214,8 @@ type private Stage =
 
 /// Six named states walking a four-pass loop. `stall` holds `Execute` by taking
 /// no transition at all, which is what waiting is in hardware.
-let sequencer =
-    design "Sequencer" (fun () ->
+let fsm =
+    design "FSM" (fun () ->
         let start = inputBit "start"
         let stall = inputBit "stall"
         let busy = outputBit "busy"

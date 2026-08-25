@@ -179,5 +179,5 @@ signal you can use.
   what "last connect wins" means underneath.
 - [**Comparator**](comparator.md) — the same design with the register taken away, so nothing
   has a before or an after.
-- [**Sequencer**](sequencer.md) — the holding rule again, doing real work: a state machine
+- [**FSM**](fsm.md) — the holding rule again, doing real work: a state machine
   waits by taking no transition.

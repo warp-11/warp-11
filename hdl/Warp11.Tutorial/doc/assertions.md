@@ -101,7 +101,7 @@ The interesting experiments all involve breaking it on purpose.
 
 ## See also
 
-- [**Sequencer**](sequencer.md) — a bigger state machine, where `machine` checks a related
+- [**FSM**](fsm.md) — a bigger state machine, where `machine` checks a related
   property at elaboration: that every state has a way in.
 - [**ROM**](romTable.md) — the padding addresses nobody should ask for, which is exactly what
   an assertion is for.

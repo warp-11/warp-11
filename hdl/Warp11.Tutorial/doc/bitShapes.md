@@ -105,4 +105,4 @@ build structure. [**Adder tree**](adderTree.md) is the same idea taken further.
 - [**Priority mux**](priorityMux.md) — the priority chain that one-hot exists to avoid.
 - [**Signed operations**](signedOps.md) — the other way to read a bit vector, and why the
   reading lives on the operation.
-- [**Sequencer**](sequencer.md) — `stage.Is` is a one-hot signal by another name.
+- [**FSM**](fsm.md) — `stage.Is` is a one-hot signal by another name.

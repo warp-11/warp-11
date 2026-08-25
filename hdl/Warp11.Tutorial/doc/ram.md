@@ -158,5 +158,5 @@ Try it: `waddr = 5, wdata = 0x11, wen = 1, raddr = 5`, then step and watch
   already filled.
 - [**Counter**](counter.md) — the register that `memReadPort` has on its output, met on its
   own.
-- [**Sequencer**](sequencer.md) — what drives a memory once the accesses have to happen in an
+- [**FSM**](fsm.md) — what drives a memory once the accesses have to happen in an
   order.

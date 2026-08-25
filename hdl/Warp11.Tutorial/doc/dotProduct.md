@@ -49,7 +49,7 @@ free and running the same code twice costs time. In hardware, instantiating
 twice costs **area** and buys you **parallelism** — the two multiplies happen
 simultaneously. Sharing one multiplier between two operations is possible, but
 it is a design you build on purpose, with a register and a sequencer to take
-turns (see [**Sequencer**](sequencer.md)), and you build it when you have run out of room, not
+turns (see [**FSM**](fsm.md)), and you build it when you have run out of room, not
 by default.
 
 This trade — area against time — is most of what hardware design *is*, and it

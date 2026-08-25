@@ -3,7 +3,7 @@
 ///
 /// Order is the curriculum. `Counter` first because it is the smallest thing
 /// with a register in it; `Comparator` second because it takes the register
-/// away again and leaves combinational logic on its own; `Sequencer` last
+/// away again and leaves combinational logic on its own; `FSM` last
 /// because everything before it is a piece of what it is made of.
 module Warp11.Tutorial.Registry
 
@@ -28,7 +28,7 @@ let catalog =
           entry "RAM" (nameof ram) (fun () -> ram)
           entry "ROM" (nameof romTable) (fun () -> romTable)
           entry "Assertions" (nameof assertions) (fun () -> assertions) |> watching [ "r" ]
-          entry "Sequencer" (nameof sequencer) (fun () -> sequencer)
+          entry "FSM" (nameof fsm) (fun () -> fsm)
 
           // Tier 1 — the combinators.
           entry "Delay chain" (nameof delayAlign) (fun () -> delayAlign)
