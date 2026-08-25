@@ -1,6 +1,6 @@
 /// The living checks. `dotnet run` = self-checks (the compiler diffed against
 /// the tree evaluator, breeding invariants, an engine smoke solve);
-/// `dotnet run -- golden <file>` = verify the Kotlin-exported vectors.
+/// `dotnet run -- golden <file>` = verify the exported vectors.
 module Warp11.Gep.Main
 
 open Warp11

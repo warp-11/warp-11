@@ -348,7 +348,7 @@ let private compressorRegulatesOutput () : bool =
 
 /// The receiver against a hand-built ideal I2S frame — one transition tick
 /// carrying no data, then 24 bits MSB-first, then padding — which is how the
-/// Kotlin side verifies it, and the only way to judge rx without also judging
+/// the twin verifies it, and the only way to judge rx without also judging
 /// tx. A real codec supplies exactly this frame, so it is the spec, not a
 /// convenience.
 let private i2sRxDecodes () : bool =
@@ -431,7 +431,7 @@ let private i2sTxEmits () : bool =
 /// `input << 1`.
 ///
 /// So the two framers are each right against the codec and off by one against
-/// each other. Nothing in the Kotlin suite could have found this: it drives rx
+/// each other. Nothing in the original suite could have found this: it drives rx
 /// and tx separately against hand-built frames and never closes the loop, and
 /// on real hardware the codec — not the other framer — defines the timing,
 /// which is why the MEMS front end worked. A fabric loopback would need the

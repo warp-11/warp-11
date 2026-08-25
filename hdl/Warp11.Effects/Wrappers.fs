@@ -19,7 +19,7 @@ let private sampleMaxSigned = (1UL <<< (sampleWidth - 1)) - 1UL
 // ---------------------------------------------------------------------------
 // The register maps. One value per entry, so the wrapper and the generated
 // Rust name each register exactly once and cannot drift apart. Offsets mirror
-// the Kotlin slaves so a host reading either stack finds the same words.
+// the original slaves so a host reading either stack finds the same words.
 
 type ToneMap =
     { enable: RegEntry

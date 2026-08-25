@@ -4,8 +4,8 @@
 /// cumulative sums, no division — which is what makes it the selection scheme
 /// worth putting in hardware.
 ///
-/// Unlike the Kotlin engine (which drives a separate software operator set on
-/// kotlin.Random), this engine draws *everything* from one GepRng stream and
+/// Unlike the original engine (which drove a separate software operator set),
+/// this engine draws *everything* from one GepRng stream and
 /// breeds through hwBreedOffspring — one pairing entry, one offspring, exactly
 /// the fabric's model. There is a single operator implementation to keep
 /// correct, and an engine trajectory is reproducible from one 64-bit seed.

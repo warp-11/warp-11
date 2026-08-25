@@ -226,9 +226,7 @@ let hwBreedOffspring (parentA: Chromosome) (parentB: Chromosome) (config: GepCon
 
 /// A random chromosome over the same GepRng stream the breeding gates use —
 /// head symbols from functions+terminals, tail from terminals, constants
-/// uniform in [−rangeFx, +rangeFx]. (The Kotlin side generates initial
-/// populations from kotlin.Random; the F# oracle draws everything from the
-/// one hardware-mirrorable stream instead.)
+/// uniform in [−rangeFx, +rangeFx].
 let hwRandomChromosome (config: GepConfig) (rangeFx: int) (rng: GepRng) : Chromosome =
     let symbols = Array.zeroCreate config.chromosomeLength
 

@@ -22,7 +22,7 @@ type Src =
     | Const
     | Result
 
-/// The packed encoding's tag — Src as its Kotlin enum ordinal.
+/// The packed encoding's tag — Src as its original enum ordinal.
 let srcOrdinal (src: Src) : int =
     match src with
     | Var -> 0

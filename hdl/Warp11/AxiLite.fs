@@ -438,7 +438,7 @@ let axiLiteSlaveFull
               r ]
 
     // w1p: a write of 1 to bit 0 pulses the wire for exactly the accept cycle;
-    // reads at the offset return 0 (nothing joins the read mux). Kotlin's
+    // reads at the offset return 0 (nothing joins the read mux).
     // w1pBit — how `start` reaches the frame pod.
     let pulseRefs =
         [ for name, off in pulseRegs ->

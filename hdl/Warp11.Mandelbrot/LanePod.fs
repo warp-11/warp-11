@@ -1,4 +1,4 @@
-/// One lane-pod — Kotlin's `mandelLanePod`, ported: a barrel lane + its fused
+/// One lane-pod — `mandelLanePod`, ported: a barrel lane + its fused
 /// raster coord-gen + a row coalescer. Pulls one **row-run** at a time from
 /// the `run` stream (`dx | cxOrigin | cy | rowBase` — the frame-constant view
 /// params ride the dispatch payload, no broadcast), feeds the lane

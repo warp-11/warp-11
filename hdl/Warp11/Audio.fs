@@ -25,7 +25,7 @@ let sampleLayout: Layout<Expr * Expr> =
 
 /// The packed form, for the places that genuinely need one flat bus — an AXI
 /// register, a memory word, a payload crossing as a single wire. Left occupies
-/// the high bits, matching the Kotlin encoding byte for byte so a host that
+/// the high bits, matching the original encoding byte for byte so a host that
 /// reads either stack's registers sees the same layout.
 let packSample (left: Expr) (right: Expr) : Expr = cat left right
 
@@ -755,9 +755,9 @@ let presetHighPass = 2
 let private coeffLimit = 1 <<< firCoeffFrac
 let private clampCoeff v = max -coeffLimit (min (coeffLimit - 1) v)
 
-/// Kotlin's `roundToInt` breaks ties toward positive infinity; .NET's
+/// Java's `roundToInt` breaks ties toward positive infinity; .NET's
 /// `Math.Round` is banker's rounding, which would silently disagree by an LSB
-/// on exactly-half coefficients. `floor(x + 0.5)` reproduces Kotlin's rule, so
+/// on exactly-half coefficients. `floor(x + 0.5)` reproduces the same rule, so
 /// the two stacks design bit-identical banks.
 let private roundHalfUp (x: float) = int (floor (x + 0.5))
 
@@ -1273,7 +1273,7 @@ let rbjDesign (shape: EqType) (fc: float) (q: float) (gainDb: float) (fs: float)
 
 /// Quantise a real to a two's-complement bit pattern with `fracBits`
 /// fractional bits. Truncation toward zero rather than rounding, matching the
-/// Kotlin original so both stacks quantise a coefficient to the same bits.
+/// original implementation so both stacks quantise a coefficient to the same bits.
 let quantiseQ (fracBits: int) (totalBits: int) (value: float) : uint64 =
     let scaled = int64 (value * float (1L <<< fracBits))
     let maxValue = (1L <<< (totalBits - 1)) - 1L

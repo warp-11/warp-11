@@ -1,7 +1,7 @@
-/// The problems the Kotlin engine was judged on, ported. These are what the
+/// The problems the original engine was judged on, ported. These are what the
 /// search is *for* — every rung below them (the ALU, the lane, the cluster)
 /// exists to run these faster, and porting them is what lets the F# stack be
-/// compared with the Kotlin one on results rather than on cycle counts.
+/// compared with the original on results rather than on cycle counts.
 ///
 /// Two families, and they answer different questions. Symbolic regression asks
 /// whether the search finds a known formula; classification asks whether the
@@ -18,9 +18,9 @@ open Warp11.Gep.Fitness
 open Warp11.Gep.Engine
 
 /// A uniform draw in [0, 1) off the same xoshiro stream the rest of the engine
-/// uses. Kotlin sampled with `kotlin.random`, so the drawn CASES differ between
-/// the two ports — these are benchmarks, not bit-exact oracles, and the
-/// comparison lives at the level of solved-or-not and R^2.
+/// uses. The drawn CASES differ between the two ports — these are benchmarks,
+/// not bit-exact oracles, and the comparison lives at the level of
+/// solved-or-not and R^2.
 let private nextUnit (rng: GepRng) =
     float (uint32 (rng.NextWord())) / 4294967296.0
 
@@ -168,7 +168,7 @@ let reportClassification (name: string) (target: float[] -> float) =
 /// does not: the two ports disagree on that cell while agreeing on the other
 /// three, purely because their samplers differ. So run every cell over several
 /// seeds and report the spread. This is the one place the F# port improves on
-/// the Kotlin original rather than mirroring it.
+/// the original rather than mirroring it.
 let reportClassificationSeeds (seeds: int64 list) (name: string) (target: float[] -> float) =
     let cases = classificationCases target
     let positives = cases.targets |> Array.filter (fun t -> t > 0) |> Array.length

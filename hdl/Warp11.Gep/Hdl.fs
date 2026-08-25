@@ -45,7 +45,7 @@ let gepDivLatency = gepDivArmLatency + 2
 /// cycle. `aPat`/`bPat` are 32-bit Q16.16 bit-pattern signals, already
 /// registered by the host.
 ///
-/// The Kotlin arm's SInt/UInt reinterprets vanish here — the IR is
+/// The SInt/UInt reinterprets vanish here — the IR is
 /// width-only, signedness lives in the operations (slices as
 /// narrowing arithmetic shifts). Stage map (see GepDivRecip.kt for the full
 /// derivation): 1–2 magnitude/sign/guard + normalize (m at bit 31, n = clz),
@@ -704,7 +704,7 @@ type GepParentLoadBus =
 /// port); IS and RIS share the capture/shift/insert states via a return
 /// flag.
 ///
-/// v1 restrictions, matching the deployed Kotlin config: `geneCount = 1`
+/// v1 restrictions, matching the deployed config: `geneCount = 1`
 /// (gene transposition elides exactly like the spec's no-draw skip; "which
 /// gene" draws consume their word and resolve to gene 0) and `headLen >= 2`.
 /// The operator engine's 39 states, in encoding order. `Insertion` is GEP's IS

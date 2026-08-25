@@ -1,4 +1,4 @@
-/// The multi-lane WarpCPU-shaped frame renderer — Kotlin's `mandelFramePod`,
+/// The multi-lane WarpCPU-shaped frame renderer — `mandelFramePod`,
 /// ported and DECOMPOSED (2026-08-04, the STREAM_API refactor): a command
 /// beat enters the frame processor, which mints one row-run per row; the
 /// runs farm across `numLanes` lane pods (clustered dispatch, clustered
@@ -8,7 +8,7 @@
 /// land. The dispatcher is coarse (one hand-out per row) and self-balancing;
 /// view bounds are runtime inputs latched from the command; the
 /// frame-constant `cxOrigin`/`dx` ride the run payload through the
-/// registered tree instead of a die-spanning broadcast (Kotlin's fragile
+/// registered tree instead of a die-spanning broadcast (the fragile
 /// +0.020 ns path at 104 lanes).
 module Warp11.Mandelbrot.FramePod
 

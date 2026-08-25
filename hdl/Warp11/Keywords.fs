@@ -10,7 +10,7 @@ module Warp11.Keywords
 /// wide-Sim work — both cost a debugging session this check now refuses at the
 /// declaration). Both language versions are included: warp11 emits `.v`, but
 /// Verilator and Vivado parse the newer keywords too. Matching is exact and
-/// case-sensitive, Verilog's own rule. Port of Kotlin's `VerilogKeywords.kt`.
+/// case-sensitive, Verilog's own rule. Port of `VerilogKeywords.kt`.
 let verilogKeywords: Set<string> =
     Set.ofList
         [ // --- Verilog-2005 ---

@@ -1,4 +1,4 @@
-/// The full-scale pod's iteration cone — Kotlin's `MandelStep`, ported stage
+/// The full-scale pod's iteration cone — `MandelStep`, ported stage
 /// for stage. One pipelined Mandelbrot step: the fused `z² + c` cone sliced
 /// into `mandelStepLatency` registered stages so the three signed 32×32
 /// multiplies stand between registers and the tools retime them onto the

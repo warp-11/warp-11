@@ -1,4 +1,4 @@
-/// Q16.16 fixed point held in an int32 — the F# oracle of the Kotlin
+/// Q16.16 fixed point held in an int32 — the F# oracle of the original
 /// `Fixed.kt`, golden-vector-checked against it.
 ///
 /// Every operation saturates rather than wrapping or throwing: GEP needs total
@@ -15,7 +15,7 @@ let internal fxSat (v: int64) : int =
     elif v < int64 System.Int32.MinValue then System.Int32.MinValue
     else int v
 
-/// Rounds half up (floor(x + 0.5)), matching Kotlin's Math.round — .NET's
+/// Rounds half up (floor(x + 0.5)), matching Java's Math.round — .NET's
 /// Math.Round is banker's rounding and would diverge on exact halves.
 let fx (value: float) : int = fxSat (int64 (floor (value * float fxOne + 0.5)))
 

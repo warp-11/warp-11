@@ -205,7 +205,7 @@ let xoshiro128pp name =
 /// returns (anyValid, one Expr per field for the lowest-index valid entry) as
 /// log-depth mux trees — semantically a linear priority fold at depth
 /// log2 n instead of n−1. `fields` is indexed [field][entry]. Graduated from
-/// the Kotlin GEP rig, where the linear fold was the failing timing path at
+/// the original GEP rig, where the linear fold was the failing timing path at
 /// 64 engines; the record router is its first F# user.
 let priorityPick (valids: Expr list) (fields: Expr list list) : Expr * Expr list =
     let rec range lo hi =
@@ -680,7 +680,7 @@ let divider (name: string) (width: int) (requests: Stream<Expr * Expr>) : Stream
 /// output width, so no caller has to reason about saturation here.
 ///
 /// The delay line is N−1 applications of `delayOf`, and the products sum
-/// through `reduceTree` rather than the linear chain the Kotlin original used:
+/// through `reduceTree` rather than the linear chain the original used:
 /// an N-tap linear sum is N adder delays deep, which is exactly the shape that
 /// passes a cycle-accurate sim and then misses timing on silicon (CLAUDE.md's
 /// first hardware gotcha). Same arithmetic — integer addition is associative —
@@ -1124,7 +1124,7 @@ type private WriterCore =
 /// AW/W/B pointer ring (per-slot REGS, not a mem: a mem read port would add a
 /// cycle and break the combinational AW/W presents); AXI guarantees in-order B
 /// at constant AWID, so one counter serves the response side. BRESP is
-/// trusted. Port of Kotlin's `axiMasterWriter`; N=8..16 is the HP-port sweet
+/// trusted. Port of `axiMasterWriter`; N=8..16 is the HP-port sweet
 /// spot, N=1 degenerates to simple pending flags.
 let private axiMasterWriterCoreOn
     (exposeIdle: bool)
@@ -1270,7 +1270,7 @@ let private axiMasterWriterCoreOn
 /// read port would add a cycle on the resp drain). AXI4 guarantees in-order R
 /// at constant ARID, so pointer comparison replaces per-slot validity. RRESP
 /// is trusted. Internal names carry an `rd_` prefix so a design can hold this
-/// reader beside the writer. Port of Kotlin's `axiMasterReader`; the
+/// reader beside the writer. Port of `axiMasterReader`; the
 /// ARCACHE/ARPROT attributes stay 0 until an HPC consumer needs them.
 let axiMasterReaderOn (bus: AxiReadBus) (maxOutstanding: int) (requests: Stream<Expr>) : Stream<Expr> =
     axiOutstanding maxOutstanding

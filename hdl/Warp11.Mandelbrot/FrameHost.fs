@@ -232,9 +232,9 @@ let frameserve () =
         out.Flush()
         line <- System.Console.In.ReadLine()
 
-/// `dotnet run -- cyclesweep`: the scaling-axes sweep, mirroring the Kotlin
+/// `dotnet run -- cyclesweep`: the scaling-axes sweep, mirroring the original
 /// CycleGapProbeTest — used to localize the full-scale cycle finding (F#
-/// 728,898 vs Kotlin 548,809 at 104 lanes, yet cycle-parity at 64×48/4).
+/// 728,898 vs original 548,809 at 104 lanes, yet cycle-parity at 64×48/4).
 let cycleSweep () =
     let toQ (v: float) = uint64 (int64 (v * 268435456.0)) &&& 0xFFFFFFFFUL
 
@@ -304,7 +304,7 @@ let cycleSweep () =
 /// `dotnet run -- lanescale`: the full-lane-count probe — 26/52/104 lanes on
 /// a 64×208 frame (2 rows per lane even at 104), charting the both-clustered
 /// residual at the real cluster counts, with wall-clock per run so the same
-/// numbers place the F# Sim against the Kotlin sim (the perf qualifier).
+/// numbers place the F# Sim against the original sim (the perf qualifier).
 let laneScale (configs: (int * int * int * int) list) =
     let toQ (v: float) = uint64 (int64 (v * 268435456.0)) &&& 0xFFFFFFFFUL
 

@@ -1,5 +1,5 @@
-/// One barrel (thread-interleaved) Mandelbrot lane — Kotlin's
-/// `MandelBarrelLane`, ported. A single pipelined `mandelStep` cone kept full
+/// One barrel (thread-interleaved) Mandelbrot lane — `MandelBarrelLane`,
+/// ported. A single pipelined `mandelStep` cone kept full
 /// by round-robining `nThreads` independent pixel-threads through it, so the
 /// deep multiply pipeline never bubbles on the `z ← z² + c` recurrence —
 /// latency traded for clock, the WarpCPU barrel move.
@@ -12,7 +12,7 @@
 ///
 /// Per-thread state (`cx cy addr zx zy iter`) lives in async-read mems —
 /// LUTRAM-shaped by construction (a combinational read cannot infer BRAM), the
-/// register-file move that freed Kotlin's LUT/FF budget. `active`/`pend` stay
+        /// register-file move that freed the LUT/FF budget. `active`/`pend` stay
 /// per-slot 1-bit regs: read as a full array by the emit priority mux, not
 /// register-file-shaped. Refill happens AT ISSUE: an INACTIVE slot at its turn
 /// pulls the next pixel and issues it as iteration 0 the same cycle, so the

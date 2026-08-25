@@ -4,8 +4,8 @@
 /// and the wrapper below wires the pool to it entry by entry. Nothing spells a
 /// register name twice, so the fabric and the driver cannot disagree.
 ///
-/// Offsets mirror Kotlin's `GepClusterLayout` so the two implementations stay
-/// comparable register for register. One deliberate divergence: Kotlin keeps
+/// Offsets mirror the original `GepClusterLayout` so the two implementations stay
+/// comparable register for register. One deliberate divergence: the original keeps
 /// `parent_hits`/`parent_misses` wired to zero because a resident parent store
 /// used to live there. The F# pool never had one — the streaming redesign
 /// deleted the need — so those registers are absent rather than lying.
@@ -324,7 +324,7 @@ let gepClusterAxi (topName: string) (shape: GepClusterShape) =
 let clusterAxiWalk =
     gepClusterAxi "GepClusterAxiWalk" (clusterShape 1 false)
 
-/// The silicon shape — Kotlin's measured pick, ported: 4 breeders x 8
+/// The silicon shape — the measured pick, ported: 4 breeders x 8
 /// DIV-resident 16-thread lanes, the warped dispatcher at two fillers, and the
 /// host-marshaled streaming loop (inline parents + the op-list emitter). That
 /// shape is balanced and it FITS: 95,266 LUT / 81.3% at synth on the KV260,

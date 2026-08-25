@@ -1,5 +1,5 @@
 /// The full-scale accelerator behind its AXI boundary: the frame pod, the
-/// control slave (register map mirroring Kotlin's `MandelbrotRegs`), the
+/// control slave (register map mirroring the original `MandelbrotRegs`), the
 /// frame-cycle counter, and the 128-bit AXI master into PS DDR. The same
 /// elaboration serves the scaled oracle config and the 104-lane silicon
 /// config — only the parameters differ.
@@ -10,7 +10,7 @@ open Warp11.Mandelbrot.LanePod
 open Warp11.Mandelbrot.FramePod
 
 /// The register map, one definition consumed twice: the slave elaboration
-/// below and the generated Rust layout (the seam). Offsets mirror the Kotlin
+/// below and the generated Rust layout (the seam). Offsets mirror the original
 /// map; 0x000 reads as the ID and writes as the start pulse (a pulse register
 /// never joins the read mux, so both live at one word).
 let internal frameIdMagic = 0xF5B0D002UL // "F# pod v2" — the frame successor to the mini pod's ...001

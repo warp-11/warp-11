@@ -1,8 +1,7 @@
-/// Golden-vector verification against the Kotlin GEP engine.
+/// Golden-vector verification against the original GEP engine.
 ///
-/// The vector file is written by the Kotlin exporter
-/// (`:examples:gep:runGoldenVectors`) and carries *data, not seeds of
-/// kotlin.Random*: parents, genes and inputs appear as recorded integers, so
+/// The vector file is written by the original exporter
+/// (`:examples:gep:runGoldenVectors`) and carries *data*: parents, genes and inputs appear as recorded integers, so
 /// the only stream ever replayed is GepRng's — the portable, normative one.
 ///
 /// Format: line-oriented, whitespace-separated decimal integers. Each section
@@ -94,7 +93,7 @@ let verify (path: string) : VerifyReport =
             check $"rng {seed} creep" (Array.init deltas.Length (fun _ -> rng.CreepDeltaFx sigmaFx) = deltas)
             expectEnd "rng"
         | "thresholds" ->
-            // The 12 threshold words Kotlin derives from the default params —
+            // The 12 threshold words the original derives from the default params —
             // exercises thresholdOf and fx against GepBreedThresholds.from.
             let values = reader.Next() |> fun t -> ints t 1
             let d = thresholdsFrom defaultGepParams defaultConstantRange

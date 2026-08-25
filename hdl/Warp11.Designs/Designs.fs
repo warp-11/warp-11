@@ -826,7 +826,7 @@ let escapeStep =
         let zx2 = wire "zx2" (SInt 16)
         let zy2 = wire "zy2" (SInt 16)
         // xy, not cross: `cross` is an SV reserved word, and the spike has no
-        // keyword check at elaboration (Kotlin grew one for exactly this).
+        // keyword check at elaboration (the prior implementation had one for exactly this).
         let xy = wire "xy" (SInt 16)
         mul zx zx ==> zx2
         mul zy zy ==> zy2
@@ -1798,7 +1798,7 @@ let i2sLoopback =
 
 /// The I2S framers exposed bare, for the isolation checks: each driven by a
 /// hand-built ideal frame rather than by the clock generator, which is how the
-/// Kotlin side verifies them and the only way to test one without the other.
+/// the twin verifies them and the only way to test one without the other.
 let i2sRxStage =
     design "I2sRxStage" (fun () ->
         let sclkTick = inputBit "sclkTick"

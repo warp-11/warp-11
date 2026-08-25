@@ -1,4 +1,4 @@
-/// Row coalescer — Kotlin's `MandelRowCoalescer`, ported: the hardware
+/// Row coalescer — `MandelRowCoalescer`, ported: the hardware
 /// `buffer(16)` that turns per-pixel egress into aligned 16-pixel 128-bit
 /// beats, the 16× lever off the HP-port single-beat write ceiling.
 ///

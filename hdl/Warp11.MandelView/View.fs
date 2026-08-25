@@ -3,7 +3,7 @@
 /// fabric time and round trip. The view knows only IMandelBus; which world
 /// is behind it is Program.fs's business.
 ///
-/// Deliberately a fixed view, matching what the Kotlin app shipped. Pan and
+/// Deliberately a fixed view, matching what the original app shipped. Pan and
 /// zoom were built and measured here first (2026-08-13) and then removed:
 /// they worked, but `MAX_ITER` is fixed at 256 in the elaborated pod, so a
 /// few wheel notches toward the boundary is all it takes for every pixel to
@@ -64,7 +64,7 @@ let private hsvToArgb (hue: float) (s: float) (v: float) =
     let channel value = int ((value + m) * 255.0 + 0.5)
     0xFF000000 ||| (channel r <<< 16) ||| (channel g <<< 8) ||| channel b
 
-/// 256 entries, the Kotlin app's palette: hue cycling five times across the
+/// 256 entries, the original app's palette: hue cycling five times across the
 /// escape range so deep bands stay distinguishable, and the interior — the
 /// pixels that never escaped — black.
 let private palette =

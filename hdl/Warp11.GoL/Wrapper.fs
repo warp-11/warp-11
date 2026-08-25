@@ -1,6 +1,6 @@
 /// The GoL accelerator behind its AXI boundary: the declarative register map
 /// (the first design on `RegMap.fs`), the burst/interval pacing FSM ported
-/// from Kotlin's `GoLAxiWrapper`, the load-window prefetch, and the conflate
+/// the `GoLAxiWrapper`, the load-window prefetch, and the conflate
 /// snapshot path into PS DDR through the 128-bit write master. One
 /// parameterized elaboration serves the scaled rehearsal config and the
 /// 64×64 silicon config.
@@ -26,7 +26,7 @@ let private indexBits (n: int) =
     w
 
 /// The register map, one value per entry so the wrapper and the seam name
-/// each register exactly once. Offsets mirror Kotlin's GoLRegs where the
+/// each register exactly once. Offsets mirror the original GoLRegs where the
 /// feature survives; the snapshot windows are gone (the frame lives in DDR)
 /// and `fbBaseAddr`/`snapSlot` are new — the DDR-side handshake.
 type GolMap =

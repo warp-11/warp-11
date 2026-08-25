@@ -272,7 +272,7 @@ let mux cond ifTrue ifFalse =
 /// joined bit pattern has no sign to inherit.
 let cat hi lo = Concat(hi, lo)
 
-/// Kotlin's rule, verbatim: slice takes a declared signal, not an arbitrary
+/// The rule, verbatim: slice takes a declared signal, not an arbitrary
 /// expression — Verilog has no part-select of a computed value, so wrap it in a
 /// wire first. Enforced here and again at emission.
 /// A signal read the other way is still that signal, so `asSInt w` slices — the

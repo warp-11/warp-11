@@ -60,7 +60,7 @@ let gepWorkItemBeats = 12
 /// 16-bit halves per word starting at word 3, so rate `i` is word `3 + i/2`'s
 /// `i % 2` half. A stored rate is the HIGH half of the breeder's 32-bit
 /// threshold — the host quantizes to 16 bits and its software oracle must draw
-/// against the same quantized values. Kotlin's `GepRate.Crossover` is this
+/// against the same quantized values. The original `GepRate.Crossover` is this
 /// list's `constReplace`: both spell "cr", and it is constant replacement, not
 /// recombination.
 let private rateCount = 9

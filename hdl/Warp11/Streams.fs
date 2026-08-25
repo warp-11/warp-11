@@ -10,7 +10,7 @@ let matchUnion (u: Union2<'a, 'b>) (beat: UnionBeat) (handle0: 'a -> unit) (hand
 
 /// Broadcast fan-out: every consumer sees every beat, and a beat fires only when
 /// every consumer is ready — the source's ready is the AND of theirs. The 1→N
-/// modes beyond this: streamBalance below; CONFLATE stays parked, as in Kotlin.
+/// modes beyond this: streamBalance below; CONFLATE stays parked.
 let streamBroadcast (n: int) (s: Stream<'p>) : Stream<'p> list =
     let b = current ()
     let readies = [ for _ in 1..n -> wireBit (b.FreshName "fork_ready") ]
@@ -484,7 +484,7 @@ let streamBalance (n: int) (s: Stream<'p>) : Stream<'p> list =
               valid = s.valid &&& chosen[i]
               ready = readies[i] } ]
 
-/// Widest fan the clustered helpers leave flat — Kotlin's `FAN_FLAT_MAX`,
+/// Widest fan the clustered helpers leave flat — the original `FAN_FLAT_MAX`,
 /// set from measurement, not taste: a flat 64-way merge clocked ~182 MHz on
 /// the KV260, so a 16-way chain sits comfortably inside a 6 ns period. The
 /// deeper reason to stay flat as long as timing allows: a cluster's register
@@ -496,7 +496,7 @@ let fanFlatMax = 16
 
 /// Clustered dispatch above [fanFlatMax]: a top dispatch over ~√N registered
 /// cluster nodes, a flat sub-dispatch per cluster — so no single net drives
-/// all N consumers (Kotlin's ~106 MHz run-broadcast wall). Kotlin's exact
+/// all N consumers (the ~106 MHz run-broadcast wall). The exact
 /// grouping: perNode = ⌈√n⌉ children per node, ⌈n/perNode⌉ nodes, sizes
 /// differing by at most one, largest first. Returns exactly `n` streams,
 /// cluster-major; the topology is the call's decision, by n — the caller
@@ -519,7 +519,7 @@ let streamBalanceClustered (n: int) (s: Stream<'p>) : Stream<'p> list =
 
 /// The merge half of the clustered pair: flat (a bare tree) up to
 /// [fanFlatMax], then per-cluster trees with a register stage per node and a
-/// top tree — no single chain collects all N lanes (Kotlin's ~182 MHz
+/// top tree — no single chain collects all N lanes (the ~182 MHz
 /// merge-chain wall). Same grouping as the dispatch side; a single stream
 /// passes through direct.
 let streamMergeClustered (streams: Stream<'p> list) : Stream<'p> =
@@ -658,7 +658,7 @@ type Conflate3Status =
 /// slot is published as DONE and the writer rotates to a free one. CAPTURE
 /// grants the host the freshest DONE slot; RELEASE returns it. A capture with
 /// no DONE frame yet queues and is granted the moment one completes (the
-/// Kotlin port dropped a same-cycle race here: a capture arriving in the
+    /// The original port dropped a same-cycle race here: a capture arriving in the
 /// publish cycle itself queued nowhere and was lost — this one queues it).
 let streamConflate3
     (name: string)

@@ -179,7 +179,7 @@ let defaultRunParams =
       encoding = Plain
       earlyStopEvery = 0 }
 
-/// The configuration the Kotlin README records for the Coulomb solve: a small
+/// The configuration the original README records for the Coulomb solve: a small
 /// population over few cases, restarted. Restart-sensitivity is the point —
 /// about half of seeds find it — so a single run proves nothing either way.
 let coulombRunParams =
@@ -250,7 +250,7 @@ let runProblem (p: GroundTruth) (params: RunParams) =
 let runSeeds (p: GroundTruth) (params: RunParams) (seeds: int64 list) =
     let results = [ for s in seeds -> runProblem p { params with seed = s } ]
     // Three bars, and conflating them is how a benchmark claim goes wrong.
-    // 0.999 is SRBench's accuracy criterion. 0.9999 is the Kotlin README's
+    // 0.999 is SRBench's accuracy criterion. 0.9999 is the original README's
     // OPERATIONAL one — the hardware early-stops there and the row is then
     // recorded as solved. 1.0-to-7-decimals is stricter than anything either
     // project used, and is reported because the difference is real: a run can
