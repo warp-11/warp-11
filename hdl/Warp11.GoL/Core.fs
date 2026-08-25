@@ -121,19 +121,3 @@ let golLiveHarness (gridWidth: int) (gridHeight: int) =
 
         let generation = output "generation" 32
         genCount ==> generation)
-
-/// The grid alone at ports, no population — kept for OOC timing measurement.
-let golProbe (gridWidth: int) (gridHeight: int) =
-    design "GolProbe" (fun () ->
-        let loadEnable = inputBit "load_enable"
-        let tickEnable = inputBit "tick_enable"
-
-        let loadRows =
-            [ for y in 0 .. gridHeight - 1 -> input $"load_row_%d{y}" gridWidth ]
-
-        let rows, _ =
-            gameOfLifeGrid gridWidth gridHeight loadEnable tickEnable loadRows
-
-        for y, row in List.indexed rows do
-            let rowOut = output $"row_%d{y}" gridWidth
-            row ==> rowOut)
