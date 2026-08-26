@@ -7,7 +7,7 @@ module Warp11.Streams
 let matchUnion (u: Union2<'a, 'b>) (beat: UnionBeat) (handle0: 'a -> unit) (handle1: 'b -> unit) =
     ifElse [
         (eq beat.tag (lit 0UL u.tagWidth), fun () -> handle0 (variant0 u beat.data))
-    ] (fun () -> handle1 (variant1 u beat.data))
+        (otherwise, fun () -> handle1 (variant1 u beat.data)) ]
 
 /// Broadcast fan-out: every consumer sees every beat, and a beat fires only when
 /// every consumer is ready — the source's ready is the AND of theirs. The 1→N
@@ -626,13 +626,13 @@ let snapshotSource (name: string) (rows: Expr list) : Stream<Expr * Expr * Expr>
 
             lit 1UL 1 ==> copying
             lit 0UL addrWidth ==> index)
-    ] (fun () ->
+        (otherwise, fun () ->
         If ready (fun () ->
             ifElse [
                 (isLast, fun () ->
                     lit 0UL 1 ==> copying
                     lit 0UL addrWidth ==> index)
-            ] (fun () -> index + lit 1UL addrWidth ==> index)))
+                (otherwise, fun () -> index + lit 1UL addrWidth ==> index) ])) ]
 
     let data = wire $"{name}_data" rowWidth
 
@@ -701,7 +701,7 @@ let streamConflate3
 
     ifElse [
         (lastAccepted, fun () -> lit 1UL 1 ==> draining)
-    ] (fun () -> If publish (fun () -> lit 0UL 1 ==> draining))
+        (otherwise, fun () -> If publish (fun () -> lit 0UL 1 ==> draining)) ]
 
     let doneValid = wireBit $"{name}_done_valid"
     bnot (eq doneIdx none) ==> doneValid
@@ -739,28 +739,28 @@ let streamConflate3
     ifElse [
         (canCapture &&& publish, fun () -> writeIdx ==> doneIdx)
         (canCapture ||| serviceQueued, fun () -> none ==> doneIdx)
-    ] (fun () -> If publish (fun () -> writeIdx ==> doneIdx))
+        (otherwise, fun () -> If publish (fun () -> writeIdx ==> doneIdx)) ]
 
     ifElse [
         (canCapture ||| serviceQueued, fun () -> doneIdx ==> readIdx)
-    ] (fun () -> If hostRelease (fun () -> none ==> readIdx))
+        (otherwise, fun () -> If hostRelease (fun () -> none ==> readIdx)) ]
 
     ifElse [
         (mustQueue, fun () -> lit 1UL 1 ==> captureQueued)
-    ] (fun () ->
-        If (serviceQueued ||| canCapture ||| hostRelease) (fun () -> lit 0UL 1 ==> captureQueued))
+        (otherwise, fun () ->
+        If (serviceQueued ||| canCapture ||| hostRelease) (fun () -> lit 0UL 1 ==> captureQueued)) ]
 
     ifElse [
         (canCapture ||| serviceQueued, fun () -> lit 1UL 1 ==> irqReg)
-    ] (fun () -> lit 0UL 1 ==> irqReg)
+        (otherwise, fun () -> lit 0UL 1 ==> irqReg) ]
 
     let blocked = wireBit $"{name}_blocked"
     (hostCapture &&& readValid) ==> blocked
 
     ifElse [
         (hostRelease, fun () -> lit 0UL 8 ==> overrun)
-    ] (fun () ->
-        If (blocked &&& bnot (eq overrun (lit 255UL 8))) (fun () -> overrun + lit 1UL 8 ==> overrun))
+        (otherwise, fun () ->
+        If (blocked &&& bnot (eq overrun (lit 255UL 8))) (fun () -> overrun + lit 1UL 8 ==> overrun)) ]
 
     { payload = (writeIdx, index, data)
       valid = (frames.valid &&& flowing)

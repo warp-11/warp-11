@@ -88,11 +88,11 @@ let mandelFrameProcessor (width: int) (height: int) =
                     cdy ==> dyReg
                     ccx ==> cxReg
                     cdx ==> dxReg)
-            ] (fun () ->
+                (otherwise, fun () ->
                 If runXfer (fun () ->
                     rowReg + lit 1UL rowCountWidth ==> rowReg
                     addr0Cur + lit (uint64 widthPadded) addrWidth ==> addr0Cur
-                    cyCur + dyReg ==> cyCur)))
+                    cyCur + dyReg ==> cyCur)) ])
 
 /// The frame gatherer — completion lives where the results land: the beat
 /// stream passes through untouched while the counter tracks beats EXITING
@@ -156,10 +156,10 @@ let mandelFrameGatherer (width: int) (height: int) =
                     lit 1UL 1 ==> busyReg
                     lit 0UL beatCountWidth ==> writtenCount
                     lit 0UL 1 ==> frameDoneReg)
-            ] (fun () ->
+                (otherwise, fun () ->
                 lastWrite ==> frameDoneReg
                 If xfer (fun () -> writtenCount + lit 1UL beatCountWidth ==> writtenCount)
-                If lastWrite (fun () -> lit 0UL 1 ==> busyReg)))
+                If lastWrite (fun () -> lit 0UL 1 ==> busyReg)) ])
 
 /// A command stream from start/view ports — the boundary-side source every
 /// harness and the AXI wrapper share: one beat per start pulse, the view as
@@ -285,7 +285,7 @@ let mandelFrameDdr =
 
         ifElse [
             (start, fun () -> lit 0UL 1 ==> allGathered)
-        ] (fun () -> If frameDone (fun () -> lit 1UL 1 ==> allGathered))
+            (otherwise, fun () -> If frameDone (fun () -> lit 1UL 1 ==> allGathered)) ]
 
         let doneOut = outputBit "frameDone"
         (allGathered &&& frame.idle) ==> doneOut

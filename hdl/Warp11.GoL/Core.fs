@@ -57,7 +57,7 @@ let gameOfLifeGrid (gridWidth: int) (gridHeight: int) (loadEnable: Expr) (tickEn
 
             ifElse [
                 (loadEnable, fun () -> slice x x loadRow ==> cell)
-            ] (fun () -> If tickEnable (fun () -> nextCell cells y x ==> cell))
+                (otherwise, fun () -> If tickEnable (fun () -> nextCell cells y x ==> cell)) ]
 
     let packedRows =
         [ for row in cells ->
@@ -118,7 +118,7 @@ let golLiveHarness (gridWidth: int) (gridHeight: int) =
         let genCount = reg "gen_count" 32
         ifElse [
             (loadEnable, fun () -> lit 0UL 32 ==> genCount)
-        ] (fun () -> If tickEnable (fun () -> genCount + lit 1UL 32 ==> genCount))
+            (otherwise, fun () -> If tickEnable (fun () -> genCount + lit 1UL 32 ==> genCount)) ]
 
         let generation = output "generation" 32
         genCount ==> generation)

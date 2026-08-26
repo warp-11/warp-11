@@ -782,19 +782,69 @@ let assertThat cond message = (current ()).AssertThat(cond, message)
 /// pending state so `Else` can reach it — the compat path.
 let If cond (body: unit -> unit) = (current ()).If(cond, body) |> ignore
 
-/// Chain of If/Else-If/Else. Each `(condition, body)` pair is tried in order;
-/// the first match wins (a mux tree prioritized last-to-first, matching
-/// Verilog's semantics). The trailing function is the unconditional else.
+/// The condition of a ladder's last arm: always true, so the arm runs when
+/// nothing above it matched. This is what a default arm actually is — a
+/// condition, not a separate limb of the syntax — which is why it lives in the
+/// list with the rest rather than dangling off the end. Elixir's `true ->`
+/// clause, Chisel's `.otherwise`, Verilog's `default:`.
 ///
-/// Turns a deeply nested `If ... Else (If ... Else (If ...))` into a flat
-/// list. The conditions are purely combinable (no mixed-scope logic), so
-/// `ifElse` both flattens and type-checks in one place.
-let ifElse (branches: (Expr * (unit -> unit)) list) (elseBody: unit -> unit) =
-    (List.foldBack
-        (fun (cond, body) acc ->
-            fun () -> (current ()).If(cond, body) |> (fun (b: Branch) -> b.Else(acc)))
-        branches
-        elseBody) ()
+/// `ifElse` strips it at elaboration and never emits it, so a ladder with an
+/// `otherwise` emits exactly what the hand-nested `If`/`Else` emits — the
+/// alternative would be a mux on a constant selector, which nothing in this
+/// emitter folds away.
+///
+/// Legal only as the last arm: an arm below one that always matches can never
+/// run, and that is an elaboration error rather than dead silicon.
+let otherwise = lit 1UL 1
+
+/// Chain of if / else-if / else, and the only conditional that takes more than
+/// one arm. Each `(condition, body)` pair is tried in order and **the first
+/// match wins**; the trailing arm may be `otherwise`, which makes it the else.
+///
+/// Conditions may overlap, and when they do the order is the whole meaning: an
+/// arm below a matching one never runs, however true it is. `Warp11.Designs`'
+/// `IfElseLadder` is the toy that walks it, and "ifElse ladders, four claims"
+/// is the check that would fail if this fold ever resolved the other way.
+///
+/// **Leaving `otherwise` off is the else-less ladder** — when nothing matches,
+/// nothing is driven, so a reg holds and a wire needs the usual unconditional
+/// default above. That case used to need an empty function passed as a second
+/// argument; folding the else into the list is what retired it, and is why
+/// there is one argument here rather than two.
+///
+/// Flattens the *source* — a nested `If ... Else (If ... Else (If ...))`
+/// becomes a list. It does not flatten the emitted logic: the fold builds that
+/// same nested `Mux`, first arm outermost, and the emission is byte-identical
+/// to the hand-nested form. A `case`-like primitive over one discriminant is
+/// what would collapse the tree itself.
+let ifElse (arms: (Expr * (unit -> unit)) list) =
+    let isOtherwise =
+        function
+        | Lit (1UL, UInt 1) -> true
+        | _ -> false
+
+    match List.rev arms with
+    | [] -> failwith "ifElse needs at least one arm — an empty ladder drives nothing"
+    | (lastCond, lastBody) :: aboveRev ->
+        for cond, _ in aboveRev do
+            if isOtherwise cond then
+                failwith
+                    "ifElse: `otherwise` is only legal as the last arm — an arm below one that always matches can never run"
+
+        // A trailing `otherwise` is the else body, spent here rather than
+        // emitted: `If` on a constant selector would leave a mux behind.
+        let guarded, elseBody =
+            if isOtherwise lastCond then
+                List.rev aboveRev, lastBody
+            else
+                arms, (fun () -> ())
+
+        (List.foldBack
+            (fun (cond, body) acc ->
+                fun () -> (current ()).If(cond, body) |> (fun (b: Branch) -> b.Else(acc)))
+            guarded
+            elseBody)
+            ()
 
 /// Register a stream's ready net from a producer elaborated outside the
 /// library assembly — the same checkStreams bookkeeping the stdlib's own

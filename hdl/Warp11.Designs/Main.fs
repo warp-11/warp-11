@@ -33,6 +33,7 @@ let private diffDesigns () =
       coordPipe
       onCounter
       onPriority
+      ifElseLadder
       sequencer
       lfsrSource
       oneHotScan
@@ -1269,6 +1270,145 @@ let private flattenRefusesNameCollisions () =
 
     refused && accepted
 
+/// What `ifElse` is for, in four claims.
+///
+/// The first is the one no golden vector can defend. `IfElseLadder`'s
+/// conditions nest rather than partition — every x below 4 satisfies all three
+/// — so a ladder folded the other way round emits a mux tree that reads
+/// perfectly well and is wrong for every input under 16. Disjoint conditions
+/// could not tell the two apart. So the ordering is walked over the whole input
+/// domain rather than sampled.
+///
+/// The rest are the contract around it: a target the winning arm skips holds
+/// what it had, the ladder emits what the hand-nested form emits character for
+/// character, and the two degenerate ladders mean what the shapes they replace
+/// mean.
+let private ifElseLadders () =
+    // 1. First match wins, and 2. a target the winning arm does not drive falls
+    //    through. Both come off the same walk because both are properties of
+    //    the same fold: `held` is driven by arms one and three, so band two and
+    //    the else arm are the cases that have to fall back to the unconditional
+    //    default rather than to the arm above them.
+    let walked =
+        let sim = Sim ifElseLadder
+
+        [ for x in 0UL..255UL do
+              sim.Poke("x", x)
+              sim.Tick()
+
+              let band, held =
+                  if x < 4UL then 1UL, 11UL
+                  elif x < 8UL then 2UL, 0UL
+                  elif x < 16UL then 3UL, 33UL
+                  else 4UL, 0UL
+
+              yield sim.Peek "band" = band && sim.Peek "held" = held ]
+        |> List.forall id
+
+    // 3. The ladder *is* the nested form rather than a second implementation of
+    //    it. Same module name, so a difference in the emitted text is a
+    //    difference in the logic. This is what made rewriting 108 call sites as
+    //    `ifElse` a safe edit; keeping it as a check is what keeps it safe as
+    //    the fold changes underneath.
+    let handNested =
+        moduleDef "IfElseLadder" (fun m ->
+            let x = input "x" 8
+            let band = output "band" 8
+            let held = output "held" 8
+
+            lit 0UL 8 ==> band
+            lit 0UL 8 ==> held
+
+            let innermost () =
+                m
+                    .If(
+                        lt x (lit 16UL 8),
+                        fun () ->
+                            lit 3UL 8 ==> band
+                            lit 33UL 8 ==> held
+                    )
+                    .Else(fun () -> lit 4UL 8 ==> band)
+
+            let middle () =
+                m.If(lt x (lit 8UL 8), fun () -> lit 2UL 8 ==> band).Else(innermost)
+
+            m
+                .If(
+                    lt x (lit 4UL 8),
+                    fun () ->
+                        lit 1UL 8 ==> band
+                        lit 11UL 8 ==> held
+                )
+                .Else(middle))
+
+    let sameVerilog = emitDesign ifElseLadder = emitDesign handNested
+
+    // 4. The ladder's edges. `otherwise` is a condition rather than a limb of
+    //    the syntax, so the shapes around it are what a fold gets wrong: an
+    //    absent else, an else that is the only arm, an empty ladder, and an
+    //    `otherwise` that something was written below.
+    let refuses body =
+        try
+            design "Refused" body |> ignore
+            false
+        with _ ->
+            true
+
+    // No `otherwise` is the else-less ladder — and it emits what an else-less
+    // `If` emits, which is what retired the empty function this used to need.
+    let elseLess =
+        let viaLadder =
+            design "Degenerate" (fun () ->
+                let c = inputBit "c"
+                let out = output "out" 8
+                lit 0UL 8 ==> out
+                ifElse [ (c, fun () -> lit 5UL 8 ==> out) ])
+
+        let written =
+            design "Degenerate" (fun () ->
+                let c = inputBit "c"
+                let out = output "out" 8
+                lit 0UL 8 ==> out
+                If c (fun () -> lit 5UL 8 ==> out))
+
+        emitDesign viaLadder = emitDesign written
+
+    // An `otherwise` alone is its body, run where the ladder stood — no mux on
+    // a constant selector, which is what emitting the arm would have left.
+    let otherwiseOnly =
+        let viaLadder =
+            design "Degenerate" (fun () ->
+                let out = output "out" 8
+                ifElse [ (otherwise, fun () -> lit 7UL 8 ==> out) ])
+
+        let written =
+            design "Degenerate" (fun () ->
+                let out = output "out" 8
+                lit 7UL 8 ==> out)
+
+        emitDesign viaLadder = emitDesign written
+
+    // An empty ladder drives nothing, which is a bug rather than an identity.
+    let refusesEmpty = refuses (fun () -> ifElse [])
+
+    // And an arm below `otherwise` can never run, so it is refused rather than
+    // elaborated into silicon nothing reaches.
+    let refusesUnreachableArm =
+        refuses (fun () ->
+            let c = inputBit "c"
+            let out = output "out" 8
+            lit 0UL 8 ==> out
+
+            ifElse [ (otherwise, fun () -> lit 1UL 8 ==> out)
+                     (c, fun () -> lit 2UL 8 ==> out) ])
+
+    walked
+    && sameVerilog
+    && elseLess
+    && otherwiseOnly
+    && refusesEmpty
+    && refusesUnreachableArm
+
 /// States for the two negative checks below. A machine's states are ordinary
 /// values, which is what lets `Never` be refused twice over: once for having no
 /// way in, once for not belonging to the machine at all.
@@ -1321,7 +1461,7 @@ let private stateMachines () =
 
                 ifElse [
                     (eq count (lit 3UL 8), fun () -> lit sDone 3 ==> stage)
-                ] (fun () -> lit sFetch 3 ==> stage)))
+                    (otherwise, fun () -> lit sFetch 3 ==> stage) ]))
 
     let sameVerilog = emitDesign sequencer = emitDesign handEncoded
 
@@ -3837,6 +3977,7 @@ let private mainDemo () =
     printfn $"debug session windows a mem:  %b{debugSessionShowsMemory ()}"
     printfn $"trace records every cycle:    %b{tracesEveryCycle ()}"
     printfn $"assertions hold and can fail: %b{assertionsHold ()}"
+    printfn $"ifElse ladders, four claims:  %b{ifElseLadders ()}"
     printfn $"state machines, four claims:  %b{stateMachines ()}"
     printfn $"utility primitives:           %b{utilityPrimitives ()}"
     printfn $"flatten refuses collisions:   %b{flattenRefusesNameCollisions ()}"

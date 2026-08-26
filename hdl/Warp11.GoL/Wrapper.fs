@@ -186,13 +186,13 @@ let golAxi (topName: string) (gridWidth: int) (gridHeight: int) =
                 lit 0UL 1 ==> continuousReg
                 lit 0UL 32 ==> tickRemaining
                 lit 0UL 32 ==> intervalCount
-                lit 0UL 1 ==> burstDoneQ)] (fun () ->
+                lit 0UL 1 ==> burstDoneQ); (otherwise, fun () ->
                 ifElse [(startBurst, fun () ->
                     eq tickCount (lit 0UL 32) ==> continuousReg
                     tickCount ==> tickRemaining
                     intervalSeed ==> intervalCount
                     lit 0UL 1 ==> burstDoneQ
-                    pacer.Goto Pacing.Running)] (fun () -> lit 0UL 1 ==> burstDoneQ)))
+                    pacer.Goto Pacing.Running); (otherwise, fun () -> lit 0UL 1 ==> burstDoneQ) ]) ])
 
         pacer.If Pacing.Running (fun () ->
             ifElse [(stopPulse, fun () ->
@@ -200,19 +200,19 @@ let golAxi (topName: string) (gridWidth: int) (gridHeight: int) =
                 lit 0UL 1 ==> continuousReg
                 lit 0UL 32 ==> tickRemaining
                 lit 0UL 32 ==> intervalCount
-                pacer.Goto Pacing.Idle)] (fun () ->
+                pacer.Goto Pacing.Idle); (otherwise, fun () ->
                 ifElse [(intervalLast, fun () ->
                     intervalSeed ==> intervalCount
 
-                    ifElse [(continuousReg, fun () -> lit 0UL 1 ==> burstDoneQ)] (fun () ->
+                    ifElse [(continuousReg, fun () -> lit 0UL 1 ==> burstDoneQ); (otherwise, fun () ->
                         ifElse [(eq tickRemaining (lit 1UL 32), fun () ->
                             lit 0UL 32 ==> tickRemaining
                             lit 1UL 1 ==> burstDoneQ
-                            pacer.Goto Pacing.Idle)] (fun () ->
+                            pacer.Goto Pacing.Idle); (otherwise, fun () ->
                             tickRemaining - lit 1UL 32 ==> tickRemaining
-                            lit 0UL 1 ==> burstDoneQ)))] (fun () ->
+                            lit 0UL 1 ==> burstDoneQ) ]) ]); (otherwise, fun () ->
                     intervalCount - lit 1UL 32 ==> intervalCount
-                    lit 0UL 1 ==> burstDoneQ)))
+                    lit 0UL 1 ==> burstDoneQ) ]) ])
 
         // The reset pulse decodes combinationally off the AXI write channel
         // and fans out to every cell enable — registered here so the fanout
@@ -222,8 +222,8 @@ let golAxi (topName: string) (gridWidth: int) (gridHeight: int) =
         let resetPulseQ = regBit "reset_pulse_q"
         resetPulse ==> resetPulseQ
 
-        ifElse [(resetPulseQ, fun () -> lit 0UL 32 ==> generationReg)] (fun () ->
-            If firePulse (fun () -> generationReg + lit 1UL 32 ==> generationReg))
+        ifElse [(resetPulseQ, fun () -> lit 0UL 32 ==> generationReg); (otherwise, fun () ->
+            If firePulse (fun () -> generationReg + lit 1UL 32 ==> generationReg)) ]
 
         // ---- the load prefetch: the host fills the window (one/two 32-bit
         // words per row, low word first), pulses `load`, and the FSM walks the
@@ -269,7 +269,7 @@ let golAxi (topName: string) (gridWidth: int) (gridHeight: int) =
         prefetcher.If Prefetch.PWalking (fun () ->
             If (bnot read.hostTurn) (fun () ->
                 ifElse [(eq prefetchAddr (lit (uint64 (prefetchTotal - 1)) prefetchAddrWidth), fun () ->
-                    prefetcher.Goto Prefetch.PIdle)] (fun () -> prefetchAddr + lit 1UL prefetchAddrWidth ==> prefetchAddr)))
+                    prefetcher.Goto Prefetch.PIdle); (otherwise, fun () -> prefetchAddr + lit 1UL prefetchAddrWidth ==> prefetchAddr) ]))
 
         lastFetch ==> loadToCore
 

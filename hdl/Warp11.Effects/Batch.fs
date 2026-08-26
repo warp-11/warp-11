@@ -247,7 +247,7 @@ let audioBatchAxi =
                 lit 1UL 1 ==> running
                 lit 0UL 32 ==> arIssued
                 lit 0UL 32 ==> beatsWritten)
-        ] (fun () -> If finished (fun () -> lit 0UL 1 ==> running))
+            (otherwise, fun () -> If finished (fun () -> lit 0UL 1 ==> running)) ]
 
         regs.drive batchMap.busy running
         regs.setBit batchMap.doneIrq finished

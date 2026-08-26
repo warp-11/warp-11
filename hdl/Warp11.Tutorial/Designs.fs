@@ -30,7 +30,7 @@ let counter =
 
         ifElse [
             (clear, fun () -> 0UL ==> r)
-        ] (fun () -> If enable (fun () -> r + 1UL ==> r))
+            (otherwise, fun () -> If enable (fun () -> r + 1UL ==> r)) ]
 
         r ==> count)
 
@@ -246,7 +246,7 @@ let fsm =
 
             ifElse [
                 (eq count (lit 3UL 8), fun () -> stage.Goto Done)
-            ] (fun () -> stage.Goto Fetch)))
+                (otherwise, fun () -> stage.Goto Fetch) ]))
 
 /// A Q format is one line: a total width, a count of fraction bits, and a
 /// measure binding the two so the type system can carry it. Q5.3 is the same
@@ -306,7 +306,7 @@ let assertions =
         If step (fun () ->
             ifElse [
                 (eq r (lit 4UL 3), fun () -> lit 0UL 3 ==> r)
-            ] (fun () -> r + lit 1UL 3 ==> r))
+                (otherwise, fun () -> r + lit 1UL 3 ==> r) ])
 
         assertThat (bnot (lt (lit 4UL 3) r)) "phase left its range"
 

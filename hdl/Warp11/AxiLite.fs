@@ -291,7 +291,7 @@ let axiLiteChannelPipelined (addrWidth: int) (answersAfter: int) (maxOutstanding
 
     ifElse [
         (accept &&& bnot responded, fun () -> inFlight + lit 1UL countWidth ==> inFlight)
-    ] (fun () -> If (responded &&& bnot accept) (fun () -> inFlight - lit 1UL countWidth ==> inFlight))
+        (otherwise, fun () -> If (responded &&& bnot accept) (fun () -> inFlight - lit 1UL countWidth ==> inFlight)) ]
 
     let word = wire "read_word" wordWidth
     slice (addrWidth - 1) 2 io.araddr ==> word

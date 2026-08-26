@@ -194,12 +194,12 @@ let xoshiro128pp name =
 
             ifElse [
                 (io.load, fun () -> List.iter2 (==>) io.sIn s)
-            ] (fun () ->
+                (otherwise, fun () ->
                 If io.step (fun () ->
                     (s[0] ^^^ s3a) ==> s[0]
                     (s[1] ^^^ s2a) ==> s[1]
                     (s2a ^^^ t) ==> s[2]
-                    cat (slice 20 0 s3a) (slice 31 21 s3a) ==> s[3])))
+                    cat (slice 20 0 s3a) (slice 31 21 s3a) ==> s[3])) ])
 
 /// Balanced lowest-index-first priority pick over parallel field lists:
 /// returns (anyValid, one Expr per field for the lowest-index valid entry) as
@@ -384,7 +384,7 @@ let counter (name: string) (n: int) (enable: Expr) : WrapCounter =
     let atLast = eq count last
 
     let step () =
-        ifElse [(atLast, fun () -> lit 0UL w ==> count)] (fun () -> count + lit 1UL w ==> count)
+        ifElse [(atLast, fun () -> lit 0UL w ==> count); (otherwise, fun () -> count + lit 1UL w ==> count) ]
 
     if alwaysEnabled enable then
         step ()
@@ -409,7 +409,7 @@ let counterTo (name: string) (last: Expr) (enable: Expr) : WrapCounter =
     let atLast = eq count last
 
     let step () =
-        ifElse [(atLast, fun () -> lit 0UL w ==> count)] (fun () -> count + lit 1UL w ==> count)
+        ifElse [(atLast, fun () -> lit 0UL w ==> count); (otherwise, fun () -> count + lit 1UL w ==> count) ]
 
     if alwaysEnabled enable then
         step ()
@@ -1177,10 +1177,10 @@ let private axiMasterWriterCoreOn
                 lit 1UL 1 ==> awPending
                 lit 1UL 1 ==> wPending
                 lit 1UL 1 ==> bPending)
-        ] (fun () ->
+            (otherwise, fun () ->
             If (awPending &&& awready) (fun () -> lit 0UL 1 ==> awPending)
             If (wPending &&& wready) (fun () -> lit 0UL 1 ==> wPending)
-            If (bPending &&& bvalid) (fun () -> lit 0UL 1 ==> bPending))
+            If (bPending &&& bvalid) (fun () -> lit 0UL 1 ==> bPending)) ]
 
         addrQ ==> awaddr
         awPending ==> awvalid
@@ -1307,7 +1307,7 @@ let axiMasterReaderOn (bus: AxiReadBus) (maxOutstanding: int) (requests: Stream<
                 lit 1UL 1 ==> arPending
                 lit 1UL 1 ==> rPending
                 lit 0UL 1 ==> respPending)
-        ] (fun () ->
+            (otherwise, fun () ->
             If (arPending &&& arready) (fun () -> lit 0UL 1 ==> arPending)
 
             If (rPending &&& rvalid) (fun () ->
@@ -1315,7 +1315,7 @@ let axiMasterReaderOn (bus: AxiReadBus) (maxOutstanding: int) (requests: Stream<
                 lit 0UL 1 ==> rPending
                 lit 1UL 1 ==> respPending)
 
-            If (respPending &&& respReady) (fun () -> lit 0UL 1 ==> respPending))
+            If (respPending &&& respReady) (fun () -> lit 0UL 1 ==> respPending)) ]
 
         addrQ ==> araddr
         arPending ==> arvalid

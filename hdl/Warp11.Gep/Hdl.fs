@@ -583,13 +583,13 @@ let gepKarvaCompiler (prefix: string) (start: Expr) (symData: Expr) =
     // past the last position of level 0 — the header.
     let advanceEmit (continueState: Karva) =
         ifElse [(eq posP1 emitEnd, fun () ->
-            ifElse [(eq emitLv (lit 0UL 6), fun () -> st.Goto Karva.Header)] (fun () ->
+            ifElse [(eq emitLv (lit 0UL 6), fun () -> st.Goto Karva.Header); (otherwise, fun () ->
                 memRead starts lvM1 ==> emitPos
                 memRead starts emitLv ==> emitEnd
                 lvM1 ==> emitLv
-                st.Goto continueState))] (fun () ->
+                st.Goto continueState) ]); (otherwise, fun () ->
             posP1 ==> emitPos
-            st.Goto continueState)
+            st.Goto continueState) ]
 
     let initOnStart () =
         If start (fun () ->
@@ -615,17 +615,17 @@ let gepKarvaCompiler (prefix: string) (start: Expr) (symData: Expr) =
                 // Level boundary: everything allocated so far is the next level.
                 memWrite starts (level + lit 1UL 6) levelEnd (lit 1UL 1)
                 level + lit 1UL 6 ==> level
-                alloc ==> levelEnd)] (fun () ->
+                alloc ==> levelEnd); (otherwise, fun () ->
                 memWrite childBase pos alloc (lit 1UL 1)
                 alloc + cat (lit 0UL 4) arity ==> alloc
-                pos + lit 1UL 6 ==> pos))
+                pos + lit 1UL 6 ==> pos) ])
 
     st.If Karva.EmitSelf (fun () ->
-        ifElse [(isTermB, fun () -> advanceEmit Karva.EmitSelf)] (fun () ->
+        ifElse [(isTermB, fun () -> advanceEmit Karva.EmitSelf); (otherwise, fun () ->
             symData ==> opReg
             memRead childBase emitPos ==> cb
             mux (eq arity (lit 2UL 2)) (lit 1UL 1) (lit 0UL 1) ==> a2
-            st.Goto Karva.EmitOperandA))
+            st.Goto Karva.EmitOperandA) ])
 
     st.If Karva.EmitOperandA (fun () ->
         enc ==> aReg
@@ -932,13 +932,13 @@ let gepOperatorEngine
 
         ifElse [(eq i (lit (uint64 (geneLen - 1)) 6), fun () ->
             st.Goto Operator.OnePointGate
-            lit 0UL 6 ==> i)] (fun () -> i + lit 1UL 6 ==> i))
+            lit 0UL 6 ==> i); (otherwise, fun () -> i + lit 1UL 6 ==> i) ])
 
     // Recombination gates + shared pairwise sweep.
     st.If Operator.OnePointGate (fun () ->
         ifElse [(hitB, fun () ->
             lit (uint64 geneLen) 21 ==> bndReg
-            st.Goto Operator.OnePointCut)] (fun () -> st.Goto Operator.TwoPointGate))
+            st.Goto Operator.OnePointCut); (otherwise, fun () -> st.Goto Operator.TwoPointGate) ])
 
     st.If Operator.OnePointCut (fun () ->
         bnd6 ==> fromR
@@ -950,7 +950,7 @@ let gepOperatorEngine
     st.If Operator.TwoPointGate (fun () ->
         ifElse [(hitB, fun () ->
             lit (uint64 geneLen) 21 ==> bndReg
-            st.Goto Operator.TwoPointFirstCut)] (fun () -> st.Goto Operator.GeneRecombineGate))
+            st.Goto Operator.TwoPointFirstCut); (otherwise, fun () -> st.Goto Operator.GeneRecombineGate) ])
 
     st.If Operator.TwoPointFirstCut (fun () ->
         bnd6 ==> cutA
@@ -968,9 +968,9 @@ let gepOperatorEngine
     st.If Operator.GeneRecombineGate (fun () ->
         ifElse [(hitB, fun () ->
             lit 1UL 21 ==> bndReg
-            st.Goto Operator.GeneRecombineGene)] (fun () ->
+            st.Goto Operator.GeneRecombineGene); (otherwise, fun () ->
             st.Goto Operator.MutationGate
-            lit 0UL 6 ==> i))
+            lit 0UL 6 ==> i) ])
 
     st.If Operator.GeneRecombineGene (fun () ->
         // gene = bounded(1) = 0 consumed; whole-gene crossover of gene 0.
@@ -983,10 +983,10 @@ let gepOperatorEngine
     st.If Operator.RecombineSweep (fun () ->
         ifElse [(eq i endR, fun () ->
             st.Goto Operator.RecombineConstants
-            lit 0UL 6 ==> k)] (fun () ->
+            lit 0UL 6 ==> k); (otherwise, fun () ->
             memWrite symC i (memRead symS i) (lit 1UL 1)
             memWrite symS i (memRead symC i) (lit 1UL 1)
-            i + lit 1UL 6 ==> i))
+            i + lit 1UL 6 ==> i) ])
 
     st.If Operator.RecombineConstants (fun () ->
         let whole = eq fromR (lit 0UL 6) &&& eq endR (lit (uint64 geneLen) 6)
@@ -997,10 +997,10 @@ let gepOperatorEngine
         ifElse [(whole &&& bnot (eq k (lit (uint64 constCount) 6)), fun () ->
             memWrite constC k (memRead constS k) (lit 1UL 1)
             memWrite constS k (memRead constC k) (lit 1UL 1)
-            k + lit 1UL 6 ==> k)] (fun () ->
+            k + lit 1UL 6 ==> k); (otherwise, fun () ->
             exitSt ==> st.Value
             lit 0UL 6 ==> i
-            lit 0UL 6 ==> k))
+            lit 0UL 6 ==> k) ])
 
     // Mutation.
     st.If Operator.MutationGate (fun () ->
@@ -1010,7 +1010,7 @@ let gepOperatorEngine
                 mux (lt i (lit (uint64 headLen) 6)) (lit (uint64 symCount) 21) (lit (uint64 terminalSet.Length) 21)
                 ==> bndReg
 
-                st.Goto Operator.MutationSymbol)] (fun () -> i + lit 1UL 6 ==> i))
+                st.Goto Operator.MutationSymbol); (otherwise, fun () -> i + lit 1UL 6 ==> i) ])
 
     st.If Operator.MutationSymbol (fun () ->
         memWrite symC i (mux (lt i (lit (uint64 headLen) 6)) headSym tailSym) (lit 1UL 1)
@@ -1026,7 +1026,7 @@ let gepOperatorEngine
             st.Goto Operator.CreepGate
             lit 0UL 6 ==> k); (hitB, fun () ->
                 spanW ==> bndReg
-                st.Goto Operator.ConstantReplaceDraw)] (fun () -> k + lit 1UL 6 ==> k))
+                st.Goto Operator.ConstantReplaceDraw); (otherwise, fun () -> k + lit 1UL 6 ==> k) ])
 
     st.If Operator.ConstantReplaceDraw (fun () ->
         memWrite constC k (cat (lit 0UL 11) bnd21 - rates.rangeFx) (lit 1UL 1)
@@ -1042,12 +1042,12 @@ let gepOperatorEngine
         ifElse [(eq k (lit (uint64 constCount) 6), fun () -> st.Goto Operator.InversionGate); (hitB, fun () ->
             lit 0UL 36 ==> sum
             lit 0UL 6 ==> i
-            st.Goto Operator.CreepAccumulate)] (fun () -> k + lit 1UL 6 ==> k))
+            st.Goto Operator.CreepAccumulate); (otherwise, fun () -> k + lit 1UL 6 ==> k) ])
 
     st.If Operator.CreepAccumulate (fun () ->
         sum + cat (lit 0UL 4) word ==> sum
 
-        ifElse [(eq i (lit 11UL 6), fun () -> st.Goto Operator.CreepApply)] (fun () -> i + lit 1UL 6 ==> i))
+        ifElse [(eq i (lit 11UL 6), fun () -> st.Goto Operator.CreepApply); (otherwise, fun () -> i + lit 1UL 6 ==> i) ])
 
     let centU = wire $"{prefix}_centU" 37
     cat (lit 0UL 1) sum - lit (6UL <<< 32) 37 ==> centU
@@ -1078,7 +1078,7 @@ let gepOperatorEngine
     st.If Operator.InversionGate (fun () ->
         ifElse [(hitB, fun () ->
             lit 1UL 21 ==> bndReg
-            st.Goto Operator.InversionGene)] (fun () -> st.Goto Operator.InsertionGate))
+            st.Goto Operator.InversionGene); (otherwise, fun () -> st.Goto Operator.InsertionGate) ])
 
     st.If Operator.InversionGene (fun () ->
         // gene draw consumed (gene 0)
@@ -1106,13 +1106,13 @@ let gepOperatorEngine
         ifElse [(lt (lo + lit 2UL 6) hi, fun () ->
             lo + lit 1UL 6 ==> lo
             hi - lit 1UL 6 ==> hi
-            st.Goto Operator.InversionSwapRead)] (fun () -> st.Goto Operator.InsertionGate))
+            st.Goto Operator.InversionSwapRead); (otherwise, fun () -> st.Goto Operator.InsertionGate) ])
 
     // IS transposition.
     st.If Operator.InsertionGate (fun () ->
         ifElse [(hitB, fun () ->
             lit (uint64 (min maxTransposon (headLen - 1))) 21 ==> bndReg
-            st.Goto Operator.InsertionLength)] (fun () -> st.Goto Operator.RootInsertionGate))
+            st.Goto Operator.InsertionLength); (otherwise, fun () -> st.Goto Operator.RootInsertionGate) ])
 
     st.If Operator.InsertionLength (fun () ->
         bnd6 + lit 1UL 6 ==> lenR
@@ -1146,14 +1146,14 @@ let gepOperatorEngine
 
         ifElse [(eq (i + lit 1UL 6) lenR, fun () ->
             lit (uint64 (headLen - 1)) 6 ==> i
-            st.Goto Operator.TransposonShift)] (fun () -> i + lit 1UL 6 ==> i))
+            st.Goto Operator.TransposonShift); (otherwise, fun () -> i + lit 1UL 6 ==> i) ])
 
     st.If Operator.TransposonShift (fun () ->
         ifElse [(lt i (tgtR + lenR), fun () ->
             lit 0UL 6 ==> i
-            st.Goto Operator.TransposonInsert)] (fun () ->
+            st.Goto Operator.TransposonInsert); (otherwise, fun () ->
             memWrite symC i (memRead symC (i - lenR)) (lit 1UL 1)
-            i - lit 1UL 6 ==> i))
+            i - lit 1UL 6 ==> i) ])
 
     let runSel = wire $"{prefix}_runSel" 8
 
@@ -1168,13 +1168,13 @@ let gepOperatorEngine
         memWrite symC (tgtR + i) runSel (lit 1UL 1)
 
         ifElse [(eq (i + lit 1UL 6) lenR, fun () ->
-            mux risRet (st.Code Operator.Done) (st.Code Operator.RootInsertionGate) ==> st.Value)] (fun () -> i + lit 1UL 6 ==> i))
+            mux risRet (st.Code Operator.Done) (st.Code Operator.RootInsertionGate) ==> st.Value); (otherwise, fun () -> i + lit 1UL 6 ==> i) ])
 
     // RIS transposition (root insertion; geneCount=1 ⇒ gene transposition elides).
     st.If Operator.RootInsertionGate (fun () ->
         ifElse [(hitB, fun () ->
             lit 1UL 21 ==> bndReg
-            st.Goto Operator.RootInsertionGene)] (fun () -> st.Goto Operator.Done))
+            st.Goto Operator.RootInsertionGene); (otherwise, fun () -> st.Goto Operator.Done) ])
 
     st.If Operator.RootInsertionGene (fun () ->
         // gene draw consumed
@@ -1192,11 +1192,11 @@ let gepOperatorEngine
     lit (uint64 headLen) 6 - sA ==> dHead
 
     st.If Operator.RootInsertionScan (fun () ->
-        ifElse [(eq sA (lit (uint64 headLen) 6), fun () -> st.Goto Operator.Done); (scanTerm, fun () -> sA + lit 1UL 6 ==> sA)] (fun () ->
+        ifElse [(eq sA (lit (uint64 headLen) 6), fun () -> st.Goto Operator.Done); (scanTerm, fun () -> sA + lit 1UL 6 ==> sA); (otherwise, fun () ->
             cat (lit 0UL 15) (mux (lt dHead (lit (uint64 maxTransposon) 6)) dHead (lit (uint64 maxTransposon) 6))
             ==> bndReg
 
-            st.Goto Operator.RootInsertionLength))
+            st.Goto Operator.RootInsertionLength) ])
 
     st.If Operator.RootInsertionLength (fun () ->
         bnd6 + lit 1UL 6 ==> lenR
@@ -1597,10 +1597,10 @@ let gepUnitEngine
         ifElse [(bnot fillBank, fun () ->
             lit 1UL 1 ==> bankValid0
             fill.unitId ==> unitId0
-            lit 1UL 1 ==> fillBank)] (fun () ->
+            lit 1UL 1 ==> fillBank); (otherwise, fun () ->
             lit 1UL 1 ==> bankValid1
             fill.unitId ==> unitId1
-            lit 0UL 1 ==> fillBank))
+            lit 0UL 1 ==> fillBank) ])
 
     let canFill = wireBit $"{prefix}_canFill"
     bnot (mux fillBank bankValid1 bankValid0) ==> canFill
@@ -1746,16 +1746,16 @@ let gepUnitEngine
             lit 0UL 4 ==> drainCtr))
 
     If isCfg (fun () ->
-        ifElse [(eq cfgStep (lit (uint64 cfgSteps) cfgStepW), fun () -> st.Goto Wave.Issue)] (fun () -> cfgStep + lit 1UL cfgStepW ==> cfgStep))
+        ifElse [(eq cfgStep (lit (uint64 cfgSteps) cfgStepW), fun () -> st.Goto Wave.Issue); (otherwise, fun () -> cfgStep + lit 1UL cfgStepW ==> cfgStep) ])
 
     // A finished program either advances to the next block of cases or, with
     // none left, drains.
     If pc.wrap (fun () ->
         ifElse [(lt (waveBase + lit (uint64 nThreads) caseCountW) nCases, fun () ->
-            waveBase + lit (uint64 nThreads) caseCountW ==> waveBase)] (fun () ->
+            waveBase + lit (uint64 nThreads) caseCountW ==> waveBase); (otherwise, fun () ->
             st.Goto Wave.Drain
             lit 0UL 4 ==> drainCtr
-            lit 0UL caseCountW ==> waveBase))
+            lit 0UL caseCountW ==> waveBase) ])
 
     // A wave that offloaded holds at its wrap — pc has already advanced —
     // until every result has come back. Placed after the ISSUE block so it
@@ -1782,7 +1782,7 @@ let gepUnitEngine
             fitAcc ==> resFit
             unitSel ==> resUnit
             individual.count ==> resM
-            st.Goto Wave.Emit)] (fun () -> drainCtr + lit 1UL 4 ==> drainCtr))
+            st.Goto Wave.Emit); (otherwise, fun () -> drainCtr + lit 1UL 4 ==> drainCtr) ])
 
     st.If Wave.Emit (fun () ->
         If respReady (fun () ->
@@ -1791,14 +1791,14 @@ let gepUnitEngine
             ifElse [(individual.wrap, fun () ->
                 ifElse [(bnot runBank, fun () ->
                     lit 0UL 1 ==> bankValid0
-                    lit 1UL 1 ==> runBank)] (fun () ->
+                    lit 1UL 1 ==> runBank); (otherwise, fun () ->
                     lit 0UL 1 ==> bankValid1
-                    lit 0UL 1 ==> runBank)
+                    lit 0UL 1 ==> runBank) ]
 
-                st.Goto Wave.Idle)] (fun () ->
+                st.Goto Wave.Idle); (otherwise, fun () ->
                 iBaseLine + lit (uint64 linesPerIndiv) indivLineW ==> iBaseLine
                 lit 0UL cfgStepW ==> cfgStep
-                st.Goto Wave.Configure)))
+                st.Goto Wave.Configure) ]))
 
     // ---- Datapath: SCHED presents case + program addresses; SOURCE decodes
     // and sources operands against the arrived data ----
@@ -1934,7 +1934,7 @@ let gepUnitEngine
 
     // One untagged accumulator: the inter-individual drain guarantees every
     // writeback for individual m lands before the latch cycle.
-    ifElse [(latchFitB, fun () -> lit 0UL 64 ==> fitAcc); (wFit, fun () -> fitAcc + sq ==> fitAcc)] (fun () -> ())
+    ifElse [(latchFitB, fun () -> lit 0UL 64 ==> fitAcc); (wFit, fun () -> fitAcc + sq ==> fitAcc)]
 
     // ---- The socket's two halves: the issue FIFO drains under ready/valid,
     // and tagged results land in the results memory on cycles the ALU path is

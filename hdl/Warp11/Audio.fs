@@ -1088,7 +1088,7 @@ let i2sRx (name: string) =
                         // The tick on which LRCLK turns carries no data — the I2S
                         // one-cycle delay.
                         lit 0UL 6 ==> bitCount)
-                ] (fun () ->
+                    (otherwise, fun () ->
                     bitCount + lit 1UL 6 ==> bitCount
 
                     ifElse [
@@ -1099,12 +1099,12 @@ let i2sRx (name: string) =
                                 (eq bitCount (lit (uint64 (sampleWidth - 1)) 6), fun () ->
                                     ifElse [
                                         (eq io.lrclk (lit 0UL 1), fun () -> shifted ==> leftHold)
-                                    ] (fun () ->
+                                        (otherwise, fun () ->
                                         leftHold ==> leftReg
                                         shifted ==> rightReg
-                                        lit 1UL 1 ==> validReg))
-                            ] (fun () -> ()))
-                    ] (fun () -> ()))))
+                                        lit 1UL 1 ==> validReg) ])
+                            ])
+                    ]) ]))
 
 /// The I2S transmitter's ports, mirroring the receiver's.
 type I2sTxPorts =
@@ -1177,15 +1177,15 @@ let i2sTx (name: string) =
                             pendingLeft ==> leftShift
                             pendingRight ==> rightShift
                             lit 0UL 1 ==> pendingValid))
-                ] (fun () ->
+                    (otherwise, fun () ->
                     bitCount + lit 1UL 6 ==> bitCount
 
                     If (lt bitCount (lit (uint64 sampleWidth) 6)) (fun () ->
                         ifElse [
                             (eq io.lrclk (lit 0UL 1), fun () ->
                                 cat (slice (sampleWidth - 2) 0 leftShift) (lit 0UL 1) ==> leftShift)
-                        ] (fun () ->
-                            cat (slice (sampleWidth - 2) 0 rightShift) (lit 0UL 1) ==> rightShift)))))
+                            (otherwise, fun () ->
+                            cat (slice (sampleWidth - 2) 0 rightShift) (lit 0UL 1) ==> rightShift) ])) ]))
 
 // ---------------------------------------------------------------------------
 // Multiband compression. Generic DSP: an 8-band crossover feeding a compressor
