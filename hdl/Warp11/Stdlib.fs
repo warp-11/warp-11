@@ -473,6 +473,38 @@ type Machine<'s when 's: equality> =
     /// What this state does: `If (m.Is state)`, named for what it is.
     member m.If (state: 's) (body: unit -> unit) = If (m.Is state) body
 
+    /// Every state's behaviour in one ladder rather than one `If` per state.
+    ///
+    /// **This is the form to reach for**, and the difference is not cosmetic. A
+    /// block of sibling `If`s merges last-connect-wins, so each one's
+    /// fall-through arm is the whole expression built so far — and a state that
+    /// transitions *conditionally* names that fall-through twice, once in the
+    /// inner `If` and once in the outer. `Expr` is a tree with no sharing, so
+    /// the doubling compounds: **2^n comparators for n states, measured**,
+    /// against this form's n. Sixteen states is 65,535 comparators and 2.8 MB of
+    /// Verilog one way, sixteen comparators and a kilobyte the other. That
+    /// growth is what once put a 740 KB expression on one line and hid every
+    /// design containing it from the differential (`Verilog.fs`, `splitBudget`).
+    ///
+    /// The arms are disjoint by construction — the register holds exactly one
+    /// code — so first-match-wins and last-connect-wins agree. That is what
+    /// makes converting a block of `If`s safe, and why this can be sugar over
+    /// `ifElse` rather than a node the IR and FIRRTL would both have to learn.
+    ///
+    /// A state with no arm does nothing, exactly as a state with no `If` does
+    /// nothing today: its registers hold. Naming one state twice is an error,
+    /// since only the first arm could ever run.
+    member m.Switch(arms: ('s * (unit -> unit)) list) =
+        if List.isEmpty arms then
+            failwith $"Switch on '{m.record.stateReg}' needs at least one arm"
+
+        for state, n in arms |> List.map fst |> List.countBy id do
+            if n > 1 then
+                failwith
+                    $"Switch on '{m.record.stateReg}': %A{state} has %d{n} arms — one state, one arm, since only the first could run"
+
+        ifElse [ for state, body in arms -> (m.Is state, body) ]
+
     /// Claim the register only ever holds a code some state was given. Worth
     /// planting where a transition is computed rather than named — that is the
     /// one way a state register reaches a value nobody wrote down.
@@ -624,15 +656,6 @@ let divider (name: string) (width: int) (requests: Stream<Expr * Expr>) : Stream
     let outReady = wireBit $"{name}_out_ready"
     (state.Is "Idle") ==> requests.ready
 
-    state.If "Idle" (fun () ->
-        If requests.valid (fun () ->
-            lit 0UL (width + 1) ==> rem
-            lit 0UL width ==> quotient
-            requestDividend ==> dividend
-            requestDivisor ==> divisor
-            lit (uint64 steps) countWidth ==> remaining
-            state.Goto "Busy"))
-
     // One restoring step: shift the next dividend bit into the remainder, try
     // the subtraction, and keep it if it did not go negative.
     let shifted = wire $"{name}_shifted" (width + 1)
@@ -654,7 +677,18 @@ let divider (name: string) (width: int) (requests: Stream<Expr * Expr>) : Stream
     let shiftIn (value: Expr) (bit: Expr) =
         if width = 1 then bit else cat (slice (width - 2) 0 value) bit
 
-    state.If "Busy" (fun () ->
+
+    state.Switch
+        [ "Idle", (fun () ->
+        If requests.valid (fun () ->
+            lit 0UL (width + 1) ==> rem
+            lit 0UL width ==> quotient
+            requestDividend ==> dividend
+            requestDivisor ==> divisor
+            lit (uint64 steps) countWidth ==> remaining
+            state.Goto "Busy"))
+
+          "Busy", (fun () ->
         nextRem ==> rem
         shiftIn quotient fits ==> quotient
         shiftIn dividend (lit 0UL 1) ==> dividend
@@ -662,7 +696,7 @@ let divider (name: string) (width: int) (requests: Stream<Expr * Expr>) : Stream
 
         If (eq remaining (lit 1UL countWidth)) (fun () -> state.Goto "Done"))
 
-    state.If "Done" (fun () -> If outReady (fun () -> state.Goto "Idle"))
+          "Done", (fun () -> If outReady (fun () -> state.Goto "Idle")) ]
 
     (current ()).RegisterStreamReady outReady
 

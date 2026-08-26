@@ -181,7 +181,8 @@ let golAxi (topName: string) (gridWidth: int) (gridHeight: int) =
         let firePulse = wireBit "fire_pulse"
         (pacer.Is Pacing.Running &&& intervalLast &&& bnot stopPulse) ==> firePulse
 
-        pacer.If Pacing.Idle (fun () ->
+        pacer.Switch [
+          Pacing.Idle, (fun () ->
             ifElse [(stopPulse, fun () ->
                 lit 0UL 1 ==> continuousReg
                 lit 0UL 32 ==> tickRemaining
@@ -194,7 +195,7 @@ let golAxi (topName: string) (gridWidth: int) (gridHeight: int) =
                     lit 0UL 1 ==> burstDoneQ
                     pacer.Goto Pacing.Running); (otherwise, fun () -> lit 0UL 1 ==> burstDoneQ) ]) ])
 
-        pacer.If Pacing.Running (fun () ->
+          Pacing.Running, (fun () ->
             ifElse [(stopPulse, fun () ->
                 lit 1UL 1 ==> burstDoneQ
                 lit 0UL 1 ==> continuousReg
@@ -212,7 +213,7 @@ let golAxi (topName: string) (gridWidth: int) (gridHeight: int) =
                             tickRemaining - lit 1UL 32 ==> tickRemaining
                             lit 0UL 1 ==> burstDoneQ) ]) ]); (otherwise, fun () ->
                     intervalCount - lit 1UL 32 ==> intervalCount
-                    lit 0UL 1 ==> burstDoneQ) ]) ])
+                    lit 0UL 1 ==> burstDoneQ) ]) ]) ]
 
         // The reset pulse decodes combinationally off the AXI write channel
         // and fans out to every cell enable — registered here so the fanout
@@ -261,15 +262,16 @@ let golAxi (topName: string) (gridWidth: int) (gridHeight: int) =
         let lastFetch = wireBit "last_fetch"
         (dataValid &&& eq dataIndex (lit (uint64 (prefetchTotal - 1)) prefetchAddrWidth)) ==> lastFetch
 
-        prefetcher.If Prefetch.PIdle (fun () ->
+        prefetcher.Switch [
+          Prefetch.PIdle, (fun () ->
             If loadPulse (fun () ->
                 lit 0UL prefetchAddrWidth ==> prefetchAddr
                 prefetcher.Goto Prefetch.PWalking))
 
-        prefetcher.If Prefetch.PWalking (fun () ->
+          Prefetch.PWalking, (fun () ->
             If (bnot read.hostTurn) (fun () ->
                 ifElse [(eq prefetchAddr (lit (uint64 (prefetchTotal - 1)) prefetchAddrWidth), fun () ->
-                    prefetcher.Goto Prefetch.PIdle); (otherwise, fun () -> prefetchAddr + lit 1UL prefetchAddrWidth ==> prefetchAddr) ]))
+                    prefetcher.Goto Prefetch.PIdle); (otherwise, fun () -> prefetchAddr + lit 1UL prefetchAddrWidth ==> prefetchAddr) ])) ]
 
         lastFetch ==> loadToCore
 

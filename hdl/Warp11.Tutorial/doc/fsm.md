@@ -49,32 +49,39 @@ encodings, and builds the decode logic. The states go in as **values from your
 own F# type** — not integers you have to keep straight yourself.
 
 ```fsharp
-stage.If Fetch (fun () -> stage.Goto Decode)
-stage.If Decode (fun () -> stage.Goto Execute)
+stage.Switch [
+    Fetch,  fun () -> stage.Goto Decode
+    Decode, fun () -> stage.Goto Execute
+]
 ```
 
-`stage.If S` means *while in state S*, and `stage.Goto T` means *next cycle, be
+`stage.Switch` takes one arm per state, and `stage.Goto T` means *next cycle, be
 in T*. Written this way the transition table is the source, in the order you
 would draw it.
 
 ```fsharp
-stage.If Execute (fun () -> If (bnot stall) (fun () -> stage.Goto Writeback))
+Execute, fun () -> If (bnot stall) (fun () -> stage.Goto Writeback)
 ```
 
 A conditional transition: leave `Execute` only when `stall` is low. Note there
 is no `else` — with no `Goto` taken, the state register has nothing driving it,
 so it **holds**, exactly as in [**Counter**](counter.md). Waiting is the absence of a
-transition.
+transition. A state with no arm at all holds the same way.
 
 ```fsharp
-stage.If Writeback (fun () ->
+Writeback, fun () ->
     count + lit 1UL 8 ==> count
-    If (eq count (lit 3UL 8)) (fun () -> stage.Goto Done)
-    Else (fun () -> stage.Goto Fetch))
+
+    ifElse [
+        (eq count (lit 3UL 8), fun () -> stage.Goto Done)
+        (otherwise,            fun () -> stage.Goto Fetch)
+    ]
 ```
 
 A state that both does work and branches. `count` increments here and nowhere
-else, so it counts completed passes.
+else, so it counts completed passes. `ifElse` is the general if / else-if / else
+chain: arms are tried in order, first match wins, and the last arm may be
+`otherwise` — the else.
 
 ```fsharp
 bnot (stage.Is Idle ||| stage.Is Done) ==> busy
@@ -92,6 +99,12 @@ The emitted Verilog is identical to writing `lit 4 3 ==> stage` and
 elaboration*:
 
 - The debugger can print `Writeback` instead of `4`.
+- **The arms cost one comparator each.** The register holds exactly one code, so
+  `Switch` can fold them into a single ladder that names each state's test once.
+  Written as separate `If` blocks the fall-through of each one is the whole
+  expression built so far, and a state that transitions conditionally names it
+  twice — which compounds to 2^n comparators for n states. At sixteen states
+  that is 65,535 against sixteen.
 - Finalize checks that **every state has a way in**. A state you declared and
   never `Goto`'d is dead logic and almost always a typo — and it is exactly the
   kind of mistake that survives a test suite, because the tests also never reach

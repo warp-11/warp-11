@@ -29,8 +29,10 @@ To see one fire you have to break the design, which is the "try this" below.
 
 ```fsharp
 If step (fun () ->
-    If (eq r (lit 4UL 3)) (fun () -> lit 0UL 3 ==> r)
-    Else (fun () -> r + lit 1UL 3 ==> r))
+    ifElse [
+        (eq r (lit 4UL 3), fun () -> lit 0UL 3 ==> r)
+        (otherwise,        fun () -> r + lit 1UL 3 ==> r)
+    ])
 
 assertThat (bnot (lt (lit 4UL 3) r)) "phase left its range"
 ```

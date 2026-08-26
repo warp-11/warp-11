@@ -34,6 +34,7 @@ let private diffDesigns () =
       onCounter
       onPriority
       ifElseLadder
+      switchRing
       sequencer
       lfsrSource
       oneHotScan
@@ -1270,6 +1271,121 @@ let private flattenRefusesNameCollisions () =
 
     refused && accepted
 
+/// What `Machine.Switch` is for, in three claims.
+///
+/// The one that matters is arithmetic rather than behavioural, which is unusual
+/// for a check here: `Switch` and a block of sibling `st.If` compute the same
+/// function, and the difference is how much silicon they ask for. Sibling `If`s
+/// merge last-connect-wins, so each one's fall-through arm is the whole
+/// expression built so far; a state that transitions conditionally names that
+/// fall-through twice, once in the inner `If` and once in the outer, and with no
+/// sharing in `Expr` the doubling compounds to **2^n comparators for n states**.
+/// So the claim is a count, not a waveform — a behavioural test passes either
+/// way, which is exactly why this went unnoticed until something hit 740 KB on
+/// one line.
+let private switchIsLinear () =
+    // The same six-state machine as `switchRing`, written the way every machine
+    // in this tree is written today. Same module name, so the two are
+    // comparable line for line.
+    let handWritten =
+        design "SwitchRing" (fun () ->
+            let go = inputBit "go"
+            let halt = inputBit "halt"
+            let phase = output "phase" 3
+            let ticks = output "ticks" 8
+
+            let st = machine "stage" [ Load; Warm; Run; Drain; Flush; Park ]
+            let count = reg "count" 8
+
+            st.Value ==> phase
+            count ==> ticks
+
+            st.If Load (fun () -> If go (fun () -> st.Goto Warm))
+            st.If Warm (fun () -> st.Goto Run)
+
+            st.If Run (fun () ->
+                count + lit 1UL 8 ==> count
+                If halt (fun () -> st.Goto Drain))
+
+            st.If Drain (fun () -> If (eq count (lit 4UL 8)) (fun () -> st.Goto Flush))
+            st.If Flush (fun () -> st.Goto Park)
+
+            st.If Park (fun () ->
+                If go (fun () ->
+                    lit 0UL 8 ==> count
+                    st.Goto Load)))
+
+    // 1. Both forms compute the same machine, over every combination of the two
+    //    inputs for long enough to go round the ring several times. This is the
+    //    claim that passes either way — it is here to establish that what
+    //    follows is a cost difference and not a behavioural one.
+    let sameBehaviour =
+        let a, b = Sim switchRing, Sim handWritten
+
+        [ for cycle in 0..199 do
+              let go = uint64 ((cycle / 3) % 2)
+              let halt = uint64 ((cycle / 7) % 2)
+
+              for sim in [ a; b ] do
+                  sim.Poke("go", go)
+                  sim.Poke("halt", halt)
+                  sim.Tick()
+
+              yield a.Peek "phase" = b.Peek "phase" && a.Peek "ticks" = b.Peek "ticks" ]
+        |> List.forall id
+
+    // 2. And the cost is not the same, in a way one size cannot show. A ring of
+    //    the first n phases, every arm transitioning conditionally — the shape
+    //    that makes the forms diverge — built both ways at three sizes, because
+    //    the claim is about growth.
+    let ring n useSwitch =
+        design "Ring" (fun () ->
+            let states = List.take n allPhases
+            let go = inputBit "go"
+            let st = machine "stage" states
+            let out = output "out" (width st.Value)
+            st.Value ==> out
+            let arm i = fun () -> If go (fun () -> st.Goto states[(i + 1) % n])
+
+            if useSwitch then
+                st.Switch [ for i in 0 .. n - 1 -> states[i], arm i ]
+            else
+                for i in 0 .. n - 1 do
+                    st.If states[i] (arm i))
+
+    let comparators d =
+        System.Text.RegularExpressions.Regex.Matches(emitDesign d, "stage == ").Count
+
+    // One comparator per arm out of `Switch`, at every size: the ladder names
+    // each state's test once and shares one fall-through.
+    let linear = [ 4; 6; 8 ] |> List.forall (fun n -> comparators (ring n true) = n)
+
+    // Exactly 2^n - 1 out of the sibling form, because each `If`'s fall-through
+    // is the whole expression so far and the nested `If` inside the arm names it
+    // a second time. Eight states is 255 comparators against eight.
+    let siblingFormIsExponential =
+        [ 4; 6; 8 ] |> List.forall (fun n -> comparators (ring n false) = (1 <<< n) - 1)
+
+    // 3. A state named twice is refused — only the first arm could ever run, so
+    //    the second is silicon nothing reaches.
+    let refusesDuplicateArm =
+        try
+            design "Dup" (fun () ->
+                let out = output "phase" 3
+                let st = machine "stage" [ Load; Warm ]
+                st.Value ==> out
+
+                st.Switch
+                    [ Load, fun () -> st.Goto Warm
+                      Load, fun () -> st.Goto Load ])
+            |> ignore
+
+            false
+        with e ->
+            e.Message.Contains "one state, one arm"
+
+    sameBehaviour && linear && siblingFormIsExponential && refusesDuplicateArm
+
 /// What `ifElse` is for, in four claims.
 ///
 /// The first is the one no golden vector can defend. `IfElseLadder`'s
@@ -1450,18 +1566,19 @@ let private stateMachines () =
                     lit 0UL 8 ==> count
                     lit sFetch 3 ==> stage)
 
-            If (inState sIdle) begin'
-            If (inState sDone) begin'
-            If (inState sFetch) (fun () -> lit sDecode 3 ==> stage)
-            If (inState sDecode) (fun () -> lit sExecute 3 ==> stage)
-            If (inState sExecute) (fun () -> If (bnot stall) (fun () -> lit sWriteback 3 ==> stage))
+            ifElse
+                [ (inState sIdle, begin')
+                  (inState sDone, begin')
+                  (inState sFetch, fun () -> lit sDecode 3 ==> stage)
+                  (inState sDecode, fun () -> lit sExecute 3 ==> stage)
+                  (inState sExecute, fun () -> If (bnot stall) (fun () -> lit sWriteback 3 ==> stage))
+                  (inState sWriteback,
+                   fun () ->
+                       count + lit 1UL 8 ==> count
 
-            If (inState sWriteback) (fun () ->
-                count + lit 1UL 8 ==> count
-
-                ifElse [
-                    (eq count (lit 3UL 8), fun () -> lit sDone 3 ==> stage)
-                    (otherwise, fun () -> lit sFetch 3 ==> stage) ]))
+                       ifElse [
+                           (eq count (lit 3UL 8), fun () -> lit sDone 3 ==> stage)
+                           (otherwise, fun () -> lit sFetch 3 ==> stage) ]) ])
 
     let sameVerilog = emitDesign sequencer = emitDesign handEncoded
 
@@ -3978,6 +4095,7 @@ let private mainDemo () =
     printfn $"trace records every cycle:    %b{tracesEveryCycle ()}"
     printfn $"assertions hold and can fail: %b{assertionsHold ()}"
     printfn $"ifElse ladders, four claims:  %b{ifElseLadders ()}"
+    printfn $"Switch is linear, not 2^n:   %b{switchIsLinear ()}"
     printfn $"state machines, four claims:  %b{stateMachines ()}"
     printfn $"utility primitives:           %b{utilityPrimitives ()}"
     printfn $"flatten refuses collisions:   %b{flattenRefusesNameCollisions ()}"

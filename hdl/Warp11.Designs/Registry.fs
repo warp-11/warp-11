@@ -44,6 +44,7 @@ let catalog =
           entry "Farmed divide" (nameof farmedDivide) (fun () -> farmedDivide)
           entry "Priority mux" (nameof onPriority) (fun () -> onPriority)
           entry "Priority ladder (ifElse)" (nameof ifElseLadder) (fun () -> ifElseLadder)
+          entry "State ladder (Switch)" (nameof switchRing) (fun () -> switchRing)
           entry "Sequencer (state machine)" (nameof sequencer) (fun () -> sequencer)
           entry "LFSR source" (nameof lfsrSource) (fun () -> lfsrSource)
           entry "Priority scan (one-hot)" (nameof oneHotScan) (fun () -> oneHotScan)

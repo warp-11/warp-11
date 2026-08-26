@@ -235,18 +235,19 @@ let fsm =
                 lit 0UL 8 ==> count
                 stage.Goto Fetch)
 
-        stage.If Idle begin'
-        stage.If Done begin'
-        stage.If Fetch (fun () -> stage.Goto Decode)
-        stage.If Decode (fun () -> stage.Goto Execute)
-        stage.If Execute (fun () -> If (bnot stall) (fun () -> stage.Goto Writeback))
+        stage.Switch
+            [ Idle, begin'
+              Done, begin'
+              Fetch, fun () -> stage.Goto Decode
+              Decode, fun () -> stage.Goto Execute
+              Execute, fun () -> If (bnot stall) (fun () -> stage.Goto Writeback)
+              Writeback,
+              fun () ->
+                  count + lit 1UL 8 ==> count
 
-        stage.If Writeback (fun () ->
-            count + lit 1UL 8 ==> count
-
-            ifElse [
-                (eq count (lit 3UL 8), fun () -> stage.Goto Done)
-                (otherwise, fun () -> stage.Goto Fetch) ]))
+                  ifElse [
+                      (eq count (lit 3UL 8), fun () -> stage.Goto Done)
+                      (otherwise, fun () -> stage.Goto Fetch) ] ])
 
 /// A Q format is one line: a total width, a count of fraction bits, and a
 /// measure binding the two so the type system can carry it. Q5.3 is the same

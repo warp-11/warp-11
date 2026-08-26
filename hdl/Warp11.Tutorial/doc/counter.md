@@ -105,14 +105,17 @@ them, and it costs nothing on the chip — the emitted Verilog is `assign count 
 r;`, and synthesis collapses the alias.
 
 ```fsharp
-If clear (fun () -> 0UL ==> r)
-Else (fun () -> If enable (fun () -> r + 1UL ==> r))
+ifElse [
+    (clear,     fun () -> 0UL ==> r)
+    (otherwise, fun () -> If enable (fun () -> r + 1UL ==> r))
+]
 ```
 
-`If` and `Else` are Warp 11's, spelled with a capital because `if` and `else`
-are F# keywords and cannot be borrowed. **That capital is the tell**: where you
-see one in a design, the thing being built is hardware rather than a branch your
-program takes. Read these two as statements in order: *if clear, zero it;
+`If` is Warp 11's, spelled with a capital because `if` is an F# keyword and
+cannot be borrowed. **That capital is the tell**: where you see one in a design,
+the thing being built is hardware rather than a branch your program takes.
+`ifElse` is the chain form — arms tried in order, first match wins, and a last
+arm of `otherwise` is the else. Read this one as: *if clear, zero it;
 otherwise, if enable, add one.* Nesting is ordinary code — the body of an `If` is
 a lambda, so anything you can write in F# you can write inside one.
 

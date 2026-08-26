@@ -168,10 +168,14 @@ let mandelRowCoalescer (widthPadded: int) (addrWidth: int) =
             beatReg ==> outBeat
 
             // ---- consumer FSM ----
-            ifElse [(cIdle, fun () -> If startDrain (fun () -> drain.Goto Assemble)); (otherwise, fun () ->
-                ifElse [(cAsm, fun () -> If asmDone (fun () -> drain.Goto Emit)); (otherwise, fun () ->
-                    If emitAccept (fun () ->
-                        ifElse [(lastBeat, fun () -> drain.Goto Idle); (otherwise, fun () -> drain.Goto Assemble) ])) ]) ]
+            drain.Switch
+                [ Idle, (fun () -> If startDrain (fun () -> drain.Goto Assemble))
+                  Assemble, (fun () -> If asmDone (fun () -> drain.Goto Emit))
+                  Emit,
+                  (fun () ->
+                      If emitAccept (fun () ->
+                          ifElse [ (lastBeat, fun () -> drain.Goto Idle)
+                                   (otherwise, fun () -> drain.Goto Assemble) ])) ]
 
             // beatIndex: reset entering a drain, advance between beats
             ifElse [(cIdle, fun () -> If startDrain (fun () -> lit 0UL beatIndexWidth ==> beatIndex)); (otherwise, fun () -> If (emitAccept &&& bnot lastBeat) (fun () -> beatIndex + lit 1UL beatIndexWidth ==> beatIndex)) ]

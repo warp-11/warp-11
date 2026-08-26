@@ -78,19 +78,28 @@ A **register** in that position is fine, because it has somewhere to fall back
 to — its own current value. That is the rule from [**Counter**](counter.md), seen from the
 other side: a reg with no default holds; a wire with no default is an error.
 
-## `Else`
+## `ifElse`
 
-There is a companion to `If`:
+There is a chain form alongside `If`:
 
 ```fsharp
-If clear (fun () -> ...)
-Else (fun () -> ...)
+ifElse [
+    (clear,     fun () -> ...)
+    (enable,    fun () -> ...)
+    (otherwise, fun () -> ...)
+]
 ```
 
-`Else` attaches to the `If` immediately before it, giving you if/else
-rather than a stack of independent overrides. Use `If`/`Else` when the
-cases are exclusive and a bare stack of `If`s when you mean a priority list.
-[**Counter**](counter.md) uses the first form; this design uses the second.
+Arms are tried in order and **the first match wins**; a last arm of `otherwise`
+is the else, and leaving it off means nothing happens when no arm matches. Reach
+for `ifElse` when the cases belong together, and a bare stack of `If`s when each
+is an independent override of a default. [**Counter**](counter.md) uses the
+first form; this design uses the second.
+
+The two are not interchangeable in cost. A stack of `If`s merges
+last-connect-wins, so each one's fall-through arm is the whole expression built
+so far — write a chain that way and the emitted logic grows far faster than the
+source does. `ifElse` names each condition once.
 
 ## Try this
 
