@@ -108,8 +108,7 @@ let mandelRowCoalescer (widthPadded: int) (addrWidth: int) =
             If (firstPix &&& fillSel) (fun () -> rowBasePort ==> fillBase1)
 
             If accept (fun () ->
-                If fillLast (fun () -> lit 0UL fillCountWidth ==> fillCount)
-                Else (fun () -> fillCount + lit 1UL fillCountWidth ==> fillCount))
+            ifElse [(fillLast, fun () -> lit 0UL fillCountWidth ==> fillCount)] (fun () -> fillCount + lit 1UL fillCountWidth ==> fillCount))
 
             If fillLast (fun () -> bnot fillSel ==> fillSel) // hand off to the other buffer
 
@@ -129,10 +128,8 @@ let mandelRowCoalescer (widthPadded: int) (addrWidth: int) =
 
             // full flags: set by the producer, cleared by the consumer — per
             // buffer mutually exclusive, so each is single-writer.
-            If (fillLast &&& bnot fillSel) (fun () -> lit 1UL 1 ==> full0)
-            Else (fun () -> If (drainDone &&& bnot drainSel) (fun () -> lit 0UL 1 ==> full0))
-            If (fillLast &&& fillSel) (fun () -> lit 1UL 1 ==> full1)
-            Else (fun () -> If (drainDone &&& drainSel) (fun () -> lit 0UL 1 ==> full1))
+            ifElse [(fillLast &&& bnot fillSel, fun () -> lit 1UL 1 ==> full0)] (fun () -> If (drainDone &&& bnot drainSel) (fun () -> lit 0UL 1 ==> full0))
+            ifElse [(fillLast &&& fillSel, fun () -> lit 1UL 1 ==> full1)] (fun () -> If (drainDone &&& drainSel) (fun () -> lit 0UL 1 ==> full1))
             If drainDone (fun () -> bnot drainSel ==> drainSel)
 
             // byte offset of the current beat within the row (beatIndex*16),
@@ -171,26 +168,17 @@ let mandelRowCoalescer (widthPadded: int) (addrWidth: int) =
             beatReg ==> outBeat
 
             // ---- consumer FSM ----
-            If cIdle (fun () -> If startDrain (fun () -> drain.Goto Assemble))
-
-            Else (fun () ->
-                If cAsm (fun () -> If asmDone (fun () -> drain.Goto Emit))
-
-                Else (fun () ->
+            ifElse [(cIdle, fun () -> If startDrain (fun () -> drain.Goto Assemble))] (fun () ->
+                ifElse [(cAsm, fun () -> If asmDone (fun () -> drain.Goto Emit))] (fun () ->
                     If emitAccept (fun () ->
-                        If lastBeat (fun () -> drain.Goto Idle)
-                        Else (fun () -> drain.Goto Assemble))))
+                        ifElse [(lastBeat, fun () -> drain.Goto Idle)] (fun () -> drain.Goto Assemble))))
 
             // beatIndex: reset entering a drain, advance between beats
-            If cIdle (fun () -> If startDrain (fun () -> lit 0UL beatIndexWidth ==> beatIndex))
-            Else (fun () -> If (emitAccept &&& bnot lastBeat) (fun () -> beatIndex + lit 1UL beatIndexWidth ==> beatIndex))
+            ifElse [(cIdle, fun () -> If startDrain (fun () -> lit 0UL beatIndexWidth ==> beatIndex))] (fun () -> If (emitAccept &&& bnot lastBeat) (fun () -> beatIndex + lit 1UL beatIndexWidth ==> beatIndex))
 
             // asmCount: count 0..16 during ASM, 0 otherwise
-            If cAsm (fun () ->
-                If asmDone (fun () -> lit 0UL 5 ==> asmCount)
-                Else (fun () -> asmCount + lit 1UL 5 ==> asmCount))
-
-            Else (fun () -> lit 0UL 5 ==> asmCount)
+            ifElse [(cAsm, fun () ->
+                ifElse [(asmDone, fun () -> lit 0UL 5 ==> asmCount)] (fun () -> asmCount + lit 1UL 5 ==> asmCount))] (fun () -> lit 0UL 5 ==> asmCount)
 
             // beatReg: shift in the byte that arrived this cycle (the read
             // issued last cycle); asmCount=0's read is still in flight.

@@ -182,47 +182,35 @@ let golAxi (topName: string) (gridWidth: int) (gridHeight: int) =
         (pacer.Is Pacing.Running &&& intervalLast &&& bnot stopPulse) ==> firePulse
 
         pacer.If Pacing.Idle (fun () ->
-            If stopPulse (fun () ->
+            ifElse [(stopPulse, fun () ->
                 lit 0UL 1 ==> continuousReg
                 lit 0UL 32 ==> tickRemaining
                 lit 0UL 32 ==> intervalCount
-                lit 0UL 1 ==> burstDoneQ)
-
-            Else (fun () ->
-                If startBurst (fun () ->
+                lit 0UL 1 ==> burstDoneQ)] (fun () ->
+                ifElse [(startBurst, fun () ->
                     eq tickCount (lit 0UL 32) ==> continuousReg
                     tickCount ==> tickRemaining
                     intervalSeed ==> intervalCount
                     lit 0UL 1 ==> burstDoneQ
-                    pacer.Goto Pacing.Running)
-
-                Else (fun () -> lit 0UL 1 ==> burstDoneQ)))
+                    pacer.Goto Pacing.Running)] (fun () -> lit 0UL 1 ==> burstDoneQ)))
 
         pacer.If Pacing.Running (fun () ->
-            If stopPulse (fun () ->
+            ifElse [(stopPulse, fun () ->
                 lit 1UL 1 ==> burstDoneQ
                 lit 0UL 1 ==> continuousReg
                 lit 0UL 32 ==> tickRemaining
                 lit 0UL 32 ==> intervalCount
-                pacer.Goto Pacing.Idle)
-
-            Else (fun () ->
-                If intervalLast (fun () ->
+                pacer.Goto Pacing.Idle)] (fun () ->
+                ifElse [(intervalLast, fun () ->
                     intervalSeed ==> intervalCount
 
-                    If continuousReg (fun () -> lit 0UL 1 ==> burstDoneQ)
-
-                    Else (fun () ->
-                        If (eq tickRemaining (lit 1UL 32)) (fun () ->
+                    ifElse [(continuousReg, fun () -> lit 0UL 1 ==> burstDoneQ)] (fun () ->
+                        ifElse [(eq tickRemaining (lit 1UL 32), fun () ->
                             lit 0UL 32 ==> tickRemaining
                             lit 1UL 1 ==> burstDoneQ
-                            pacer.Goto Pacing.Idle)
-
-                        Else (fun () ->
+                            pacer.Goto Pacing.Idle)] (fun () ->
                             tickRemaining - lit 1UL 32 ==> tickRemaining
-                            lit 0UL 1 ==> burstDoneQ)))
-
-                Else (fun () ->
+                            lit 0UL 1 ==> burstDoneQ)))] (fun () ->
                     intervalCount - lit 1UL 32 ==> intervalCount
                     lit 0UL 1 ==> burstDoneQ)))
 
@@ -234,8 +222,7 @@ let golAxi (topName: string) (gridWidth: int) (gridHeight: int) =
         let resetPulseQ = regBit "reset_pulse_q"
         resetPulse ==> resetPulseQ
 
-        If resetPulseQ (fun () -> lit 0UL 32 ==> generationReg)
-        Else (fun () ->
+        ifElse [(resetPulseQ, fun () -> lit 0UL 32 ==> generationReg)] (fun () ->
             If firePulse (fun () -> generationReg + lit 1UL 32 ==> generationReg))
 
         // ---- the load prefetch: the host fills the window (one/two 32-bit
@@ -281,10 +268,8 @@ let golAxi (topName: string) (gridWidth: int) (gridHeight: int) =
 
         prefetcher.If Prefetch.PWalking (fun () ->
             If (bnot read.hostTurn) (fun () ->
-                If (eq prefetchAddr (lit (uint64 (prefetchTotal - 1)) prefetchAddrWidth)) (fun () ->
-                    prefetcher.Goto Prefetch.PIdle)
-
-                Else (fun () -> prefetchAddr + lit 1UL prefetchAddrWidth ==> prefetchAddr)))
+                ifElse [(eq prefetchAddr (lit (uint64 (prefetchTotal - 1)) prefetchAddrWidth), fun () ->
+                    prefetcher.Goto Prefetch.PIdle)] (fun () -> prefetchAddr + lit 1UL prefetchAddrWidth ==> prefetchAddr)))
 
         lastFetch ==> loadToCore
 

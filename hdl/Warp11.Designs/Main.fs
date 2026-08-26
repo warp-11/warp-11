@@ -1319,8 +1319,9 @@ let private stateMachines () =
             If (inState sWriteback) (fun () ->
                 count + lit 1UL 8 ==> count
 
-                If (eq count (lit 3UL 8)) (fun () -> lit sDone 3 ==> stage)
-                Else (fun () -> lit sFetch 3 ==> stage)))
+                ifElse [
+                    (eq count (lit 3UL 8), fun () -> lit sDone 3 ==> stage)
+                ] (fun () -> lit sFetch 3 ==> stage)))
 
     let sameVerilog = emitDesign sequencer = emitDesign handEncoded
 

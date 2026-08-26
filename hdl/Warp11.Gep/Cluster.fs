@@ -429,22 +429,18 @@ let gepClusterPool (shape: GepClusterShape) (prefix: string) (cfg: GepClusterCon
             mux seedZero (lit 1UL 32) selSeed[0] ==> selSeed0G
 
             If (selSt.Is Selection.Generate) (fun () ->
-                If shortEntry (fun () ->
+                ifElse [shortEntry, fun () ->
                     If (eq selK (k 0 4)) (fun () ->
-                        If aPhase (fun () ->
+                        ifElse [aPhase, fun () ->
                             eliteIdx ==> selPA
-                            eliteIdx ==> selPB)
-
-                        Else (fun () ->
+                            eliteIdx ==> selPB] (fun () ->
                             aIdx ==> selPA
                             aIdx ==> selPB))
 
                     for i in 0..3 do
                         If (eq selK (k i 4)) (fun () -> selWord ==> selSeed[i])
 
-                    If (le selK (k 3 4)) (fun () -> selK + lit 1UL 4 ==> selK))
-
-                Else (fun () ->
+                    If (le selK (k 3 4)) (fun () -> selK + lit 1UL 4 ==> selK)] (fun () ->
                     If (eq selK (k 0 4)) (fun () ->
                         selDrawIdx ==> drawA
                         k 1 4 ==> selK)
@@ -507,8 +503,7 @@ let gepClusterPool (shape: GepClusterShape) (prefix: string) (cfg: GepClusterCon
                 entWrP + lit 1UL entAddrW ==> entWrP
                 k 0 4 ==> selK
 
-                If (eq aIdx (ac.autoPop - lit 1UL 16)) (fun () -> selSt.Goto Selection.Barrier)
-                Else (fun () -> aIdx + lit 1UL 16 ==> aIdx))
+                ifElse [eq aIdx (ac.autoPop - lit 1UL 16), fun () -> selSt.Goto Selection.Barrier] (fun () -> aIdx + lit 1UL 16 ==> aIdx))
 
             // Push and pop may coincide; start overrides both.
             (entCnt + zext 3 entPush - zext 3 entPop) ==> entCnt
@@ -1208,7 +1203,7 @@ let gepClusterPool (shape: GepClusterShape) (prefix: string) (cfg: GepClusterCon
 
         for f in 0 .. nFillers - 1 do
             If (eq grantId (k f fW)) (fun () ->
-                If (eq beatCtr[f] lastBeat) (fun () ->
+                ifElse [eq beatCtr[f] lastBeat, fun () ->
                     k 0 4 ==> beatCtr[f]
                     zero1 ==> reqSent[f]
                     zero1 ==> busyOwnerValid
@@ -1217,11 +1212,9 @@ let gepClusterPool (shape: GepClusterShape) (prefix: string) (cfg: GepClusterCon
                     If (inD f Filler.Entry) (fun () ->
                         // Single burst: both parents are already staged, so go
                         // straight to serializing. Otherwise fetch parent A.
-                        If singleBurst (fun () ->
+                        ifElse [singleBurst, fun () ->
                             dstate[f].Goto Filler.SerializeA
-                            k 0 6 ==> serCtr[f])
-
-                        Else (fun () -> dstate[f].Goto Filler.ParentA))
+                            k 0 6 ==> serCtr[f]] (fun () -> dstate[f].Goto Filler.ParentA))
 
                     If (inD f Filler.ParentA) (fun () ->
                         dstate[f].Goto Filler.SerializeA
@@ -1229,29 +1222,22 @@ let gepClusterPool (shape: GepClusterShape) (prefix: string) (cfg: GepClusterCon
 
                     If (inD f Filler.ParentB) (fun () ->
                         dstate[f].Goto Filler.SerializeB
-                        k 0 6 ==> serCtr[f]))
-
-                Else (fun () -> beatCtr[f] + lit 1UL 4 ==> beatCtr[f])))
+                        k 0 6 ==> serCtr[f])] (fun () -> beatCtr[f] + lit 1UL 4 ==> beatCtr[f])))
 
     for f in 0 .. nFillers - 1 do
         If serializing[f] (fun () ->
             fillBusyCyc + lit 1UL 32 ==> fillBusyCyc
 
-            If (eq serCtr[f] (k (geneLen + constCount - 1) 6)) (fun () ->
+            ifElse [eq serCtr[f] (k (geneLen + constCount - 1) 6), fun () ->
                 k 0 6 ==> serCtr[f]
                 // Single burst: parent B is already staged, so serialize it
                 // straight away. Otherwise Filler.SerializeA -> Filler.ParentB starts its fetch.
-                If (inD f Filler.SerializeA) (fun () ->
-                    If singleBurst (fun () -> dstate[f].Goto Filler.SerializeB)
-
-                    Else (fun () ->
+                ifElse [inD f Filler.SerializeA, fun () ->
+                    ifElse [singleBurst, fun () -> dstate[f].Goto Filler.SerializeB] (fun () ->
                         dstate[f].Goto Filler.ParentB
                         k 0 4 ==> beatCtr[f]
-                        zero1 ==> reqSent[f]))
-
-                Else (fun () -> dstate[f].Goto Filler.StartBreeder))
-
-            Else (fun () -> serCtr[f] + lit 1UL 6 ==> serCtr[f]))
+                        zero1 ==> reqSent[f])] (fun () -> dstate[f].Goto Filler.StartBreeder)] (fun () ->
+                serCtr[f] + lit 1UL 6 ==> serCtr[f]))
 
         If (inD f Filler.StartBreeder) (fun () ->
             dstate[f].Goto Filler.Pick
@@ -1299,12 +1285,10 @@ let gepClusterPool (shape: GepClusterShape) (prefix: string) (cfg: GepClusterCon
                 wbSkip ==> skipS[s]
                 If wbSkip (fun () -> one1 ==> slotValid[s]))
 
-        If wbSkip (fun () ->
+        ifElse [wbSkip, fun () ->
             // Evaluate-only: nothing to stage, so release the breeder now.
             for b in 0 .. nBreeders - 1 do
-                If (eq wbPickB (k b bW)) (fun () -> brSt[b].Goto Occupancy.Free))
-
-        Else (fun () ->
+                If (eq wbPickB (k b bW)) (fun () -> brSt[b].Goto Occupancy.Free)] (fun () ->
             wbPickB ==> pSel
             wbSlot ==> pSlot
             k 0 6 ==> wbK
@@ -1334,7 +1318,7 @@ let gepClusterPool (shape: GepClusterShape) (prefix: string) (cfg: GepClusterCon
     (pstate &&& eq wbK (k (geneLen + constCount - 1) 6)) ==> packDone
 
     If pstate (fun () ->
-        If (lt wbK (k geneLen 6)) (fun () ->
+        ifElse [lt wbK (k geneLen 6), fun () ->
             packWord ==> wordAcc
 
             If (eq (slice 1 0 wbK) (k 3 2)) (fun () -> memWrite stgMem (cat pSlot packIdx) packWord one1)
@@ -1344,20 +1328,17 @@ let gepClusterPool (shape: GepClusterShape) (prefix: string) (cfg: GepClusterCon
                     memWrite stgMem (cat pSlot (k lastSymWord 4)) (zext 32 childSym) one1
                 else
                     // Three leftover symbols: [s2 s1 s0 x] realigns to [0 s2 s1 s0].
-                    memWrite stgMem (cat pSlot (k lastSymWord 4)) (zext 32 (slice 31 8 packWord)) one1))
+                    memWrite stgMem (cat pSlot (k lastSymWord 4)) (zext 32 (slice 31 8 packWord)) one1)] (fun () ->
+            memWrite stgMem (cat pSlot wbConstWr) childConst one1)
 
-        Else (fun () -> memWrite stgMem (cat pSlot wbConstWr) childConst one1)
-
-        If packDone (fun () ->
+        ifElse [packDone, fun () ->
             lit pIdle 1 ==> pstate
 
             for s in 0 .. nSlots - 1 do
                 If (eq pSlot (k s slotW)) (fun () -> one1 ==> slotValid[s])
 
             for b in 0 .. nBreeders - 1 do
-                If (eq pSel (k b bW)) (fun () -> brSt[b].Goto Occupancy.Free))
-
-        Else (fun () -> wbK + lit 1UL 6 ==> wbK))
+                If (eq pSel (k b bW)) (fun () -> brSt[b].Goto Occupancy.Free)] (fun () -> wbK + lit 1UL 6 ==> wbK))
 
     for b in 0 .. nBreeders - 1 do
         ((packPickFire &&& wbSkip &&& eq wbPickB (k b bW))
@@ -1539,12 +1520,10 @@ let gepClusterPool (shape: GepClusterShape) (prefix: string) (cfg: GepClusterCon
                 k 0 2 ==> olBeat)
 
             If olFire (fun () ->
-                If (eq olBeat (k 3 2)) (fun () ->
+                ifElse [eq olBeat (k 3 2), fun () ->
                     lit olIdle 1 ==> olState
                     a.olEmitted.Value + lit 1UL 32 ==> a.olEmitted.Value
-                    a.entRdP + lit 1UL entAddrW ==> a.entRdP) // pop the FIFO
-
-                Else (fun () -> olBeat + lit 1UL 2 ==> olBeat))
+                    a.entRdP + lit 1UL entAddrW ==> a.entRdP] (fun () -> olBeat + lit 1UL 2 ==> olBeat)) // pop the FIFO
 
             Some
                 {| active = olActive
@@ -1577,8 +1556,7 @@ let gepClusterPool (shape: GepClusterShape) (prefix: string) (cfg: GepClusterCon
               layout = axiWriteBeatLayout addrWidth 128 }
 
     If (estate.Is Emitter.Genome &&& wrFire) (fun () ->
-        If (eq wbBeat (k 3 2)) (fun () -> estate.Goto Emitter.Ring)
-        Else (fun () -> wbBeat + lit 1UL 2 ==> wbBeat))
+        ifElse [eq wbBeat (k 3 2), fun () -> estate.Goto Emitter.Ring] (fun () -> wbBeat + lit 1UL 2 ==> wbBeat))
 
     If (estate.Is Emitter.Ring &&& wrFire) (fun () ->
         estate.Goto Emitter.Idle
@@ -1642,18 +1620,14 @@ let gepClusterPool (shape: GepClusterShape) (prefix: string) (cfg: GepClusterCon
             a.roundTarget + zext 32 a.cfg.autoPop ==> a.roundTarget
             a.readBank ==> a.writeBank
 
-            If (bnot a.aPhase) (fun () ->
+            ifElse [bnot a.aPhase, fun () ->
                 one1 ==> a.aPhase
                 lit 1UL 32 ==> a.aRound
                 lit 0UL 16 ==> a.aIdx
-                a.selSt.Goto Selection.Generate)
-
-            Else (fun () ->
+                a.selSt.Goto Selection.Generate] (fun () ->
                 bnot a.aBaseFlag ==> a.aBaseFlag
 
-                If (eq a.aRound a.cfg.autoGens) (fun () -> a.selSt.Goto Selection.Done)
-
-                Else (fun () ->
+                ifElse [eq a.aRound a.cfg.autoGens, fun () -> a.selSt.Goto Selection.Done] (fun () ->
                     a.aRound + lit 1UL 32 ==> a.aRound
                     lit 0UL 16 ==> a.aIdx
                     a.selSt.Goto Selection.Generate)))

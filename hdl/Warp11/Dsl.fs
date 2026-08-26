@@ -293,15 +293,6 @@ type Builder(name: string, ?clockSpec: ClockSpec) =
         for t, elseV in elseOnly do
             this.Set(t, Mux(cond, this.PriorOrHold t, elseV))
 
-    /// The other branch of the `If` immediately preceding. Anything in between
-    /// seals that `If` as else-less and this then fails.
-    member this.Else(elseBody: unit -> unit) =
-        if activeBranches.Count = 0 then
-            failwith "Else must immediately follow its If"
-        else
-            let br = activeBranches.Pop()
-            br.ConsumeElse(elseBody)
-
     /// One unconditional driver per signal, and one per If branch — a second `==>`
     /// at the same scope would silently discard the first (the Scope below is
     /// last-connect-wins, because that is how an If branch merges). Conditional
@@ -790,10 +781,6 @@ let assertThat cond message = (current ()).AssertThat(cond, message)
 /// you type-safely pipe into `Else`. The ambient active branch still records the
 /// pending state so `Else` can reach it — the compat path.
 let If cond (body: unit -> unit) = (current ()).If(cond, body) |> ignore
-
-/// Must immediately follow its `If` — any intervening statement seals that If as
-/// else-less, and this then fails.
-let Else (body: unit -> unit) = (current ()).Else(body)
 
 /// Chain of If/Else-If/Else. Each `(condition, body)` pair is tried in order;
 /// the first match wins (a mux tree prioritized last-to-first, matching

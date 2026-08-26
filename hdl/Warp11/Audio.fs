@@ -1169,22 +1169,22 @@ let i2sTx (name: string) =
             lrclk.changed ==> lrclkEdge
 
             If io.sclkTick (fun () ->
-                If lrclkEdge (fun () ->
-                    lit 0UL 6 ==> bitCount
+                ifElse [
+                    (lrclkEdge, fun () ->
+                        lit 0UL 6 ==> bitCount
 
-                    If (eq io.lrclk (lit 0UL 1) &&& pendingValid) (fun () ->
-                        pendingLeft ==> leftShift
-                        pendingRight ==> rightShift
-                        lit 0UL 1 ==> pendingValid))
-
-                Else (fun () ->
+                        If (eq io.lrclk (lit 0UL 1) &&& pendingValid) (fun () ->
+                            pendingLeft ==> leftShift
+                            pendingRight ==> rightShift
+                            lit 0UL 1 ==> pendingValid))
+                ] (fun () ->
                     bitCount + lit 1UL 6 ==> bitCount
 
                     If (lt bitCount (lit (uint64 sampleWidth) 6)) (fun () ->
-                        If (eq io.lrclk (lit 0UL 1)) (fun () ->
-                            cat (slice (sampleWidth - 2) 0 leftShift) (lit 0UL 1) ==> leftShift)
-
-                        Else (fun () ->
+                        ifElse [
+                            (eq io.lrclk (lit 0UL 1), fun () ->
+                                cat (slice (sampleWidth - 2) 0 leftShift) (lit 0UL 1) ==> leftShift)
+                        ] (fun () ->
                             cat (slice (sampleWidth - 2) 0 rightShift) (lit 0UL 1) ==> rightShift)))))
 
 // ---------------------------------------------------------------------------

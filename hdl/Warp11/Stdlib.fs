@@ -384,8 +384,7 @@ let counter (name: string) (n: int) (enable: Expr) : WrapCounter =
     let atLast = eq count last
 
     let step () =
-        If atLast (fun () -> lit 0UL w ==> count)
-        Else (fun () -> count + lit 1UL w ==> count)
+        ifElse [(atLast, fun () -> lit 0UL w ==> count)] (fun () -> count + lit 1UL w ==> count)
 
     if alwaysEnabled enable then
         step ()
@@ -410,8 +409,7 @@ let counterTo (name: string) (last: Expr) (enable: Expr) : WrapCounter =
     let atLast = eq count last
 
     let step () =
-        If atLast (fun () -> lit 0UL w ==> count)
-        Else (fun () -> count + lit 1UL w ==> count)
+        ifElse [(atLast, fun () -> lit 0UL w ==> count)] (fun () -> count + lit 1UL w ==> count)
 
     if alwaysEnabled enable then
         step ()

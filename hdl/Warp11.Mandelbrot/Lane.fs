@@ -157,10 +157,12 @@ let mandelBarrelLane (maxIter: int) (fracBits: int) (nThreads: int) (addrWidth: 
                 let writebackDoneT = eq writebackTurn (lit (uint64 t) threadWidth) &&& writebackDone
                 let emitAccept = emitSel[t] &&& resReady
 
-                If writebackDoneT (fun () -> lit 0UL 1 ==> active[t])
-                Else (fun () -> If issueLoad (fun () -> lit 1UL 1 ==> active[t]))
-                If writebackDoneT (fun () -> lit 1UL 1 ==> pend[t])
-                Else (fun () -> If emitAccept (fun () -> lit 0UL 1 ==> pend[t]))
+                ifElse [
+                    (writebackDoneT, fun () -> lit 0UL 1 ==> active[t])
+                ] (fun () -> If issueLoad (fun () -> lit 1UL 1 ==> active[t]))
+                ifElse [
+                    (writebackDoneT, fun () -> lit 1UL 1 ==> pend[t])
+                ] (fun () -> If emitAccept (fun () -> lit 0UL 1 ==> pend[t]))
 
             // ---- register-file writes (each mem one write site) ----
             memWrite cxMem turn pxCx pull

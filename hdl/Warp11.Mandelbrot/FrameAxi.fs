@@ -100,17 +100,20 @@ let mandelFrameAxi
         // that always loses. A race that always loses is still a race.
         let allGathered = regBit "all_gathered"
 
-        If startPulse (fun () -> lit 0UL 1 ==> allGathered)
-        Else (fun () -> If frameDone (fun () -> lit 1UL 1 ==> allGathered))
+        ifElse [
+            (startPulse, fun () -> lit 0UL 1 ==> allGathered)
+        ] (fun () -> If frameDone (fun () -> lit 1UL 1 ==> allGathered))
 
-        If startPulse (fun () -> lit 0UL 1 ==> doneSticky)
-        Else (fun () -> If (allGathered &&& frame.idle) (fun () -> lit 1UL 1 ==> doneSticky))
+        ifElse [
+            (startPulse, fun () -> lit 0UL 1 ==> doneSticky)
+        ] (fun () -> If (allGathered &&& frame.idle) (fun () -> lit 1UL 1 ==> doneSticky))
 
         // `cycles` stays on `busy` — the compute time, which is the number the
         // frame budget is written in. The drain is a handful of cycles on top
         // and belongs to whoever measures egress, not to this register.
-        If startPulse (fun () -> lit 0UL 32 ==> cycles)
-        Else (fun () -> If busy (fun () -> cycles + lit 1UL 32 ==> cycles))
+        ifElse [
+            (startPulse, fun () -> lit 0UL 32 ==> cycles)
+        ] (fun () -> If busy (fun () -> cycles + lit 1UL 32 ==> cycles))
 
         beats
         |> streamProbe "egress"

@@ -28,8 +28,9 @@ let counter =
         let count = output "count" 64
         let r = reg "r" 64
 
-        If clear (fun () -> 0UL ==> r)
-        Else (fun () -> If enable (fun () -> r + 1UL ==> r))
+        ifElse [
+            (clear, fun () -> 0UL ==> r)
+        ] (fun () -> If enable (fun () -> r + 1UL ==> r))
 
         r ==> count)
 
@@ -243,8 +244,9 @@ let fsm =
         stage.If Writeback (fun () ->
             count + lit 1UL 8 ==> count
 
-            If (eq count (lit 3UL 8)) (fun () -> stage.Goto Done)
-            Else (fun () -> stage.Goto Fetch)))
+            ifElse [
+                (eq count (lit 3UL 8), fun () -> stage.Goto Done)
+            ] (fun () -> stage.Goto Fetch)))
 
 /// A Q format is one line: a total width, a count of fraction bits, and a
 /// measure binding the two so the type system can carry it. Q5.3 is the same
@@ -302,8 +304,9 @@ let assertions =
         let r = reg "r" 3
 
         If step (fun () ->
-            If (eq r (lit 4UL 3)) (fun () -> lit 0UL 3 ==> r)
-            Else (fun () -> r + lit 1UL 3 ==> r))
+            ifElse [
+                (eq r (lit 4UL 3), fun () -> lit 0UL 3 ==> r)
+            ] (fun () -> r + lit 1UL 3 ==> r))
 
         assertThat (bnot (lt (lit 4UL 3) r)) "phase left its range"
 

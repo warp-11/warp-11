@@ -113,14 +113,18 @@ let mandelCoordGen (width: int) (height: int) =
             (pxXfer &&& eq col colM1) ==> lastFed
 
             // ---- the FSM (each reg a single assignment) ----
-            If runXfer (fun () -> lit 1UL 1 ==> busy)
-            Else (fun () -> If lastFed (fun () -> lit 0UL 1 ==> busy))
-            If lastFed (fun () -> lit 1UL 1 ==> gathering)
-            Else (fun () -> If rowGatheredPort (fun () -> lit 0UL 1 ==> gathering))
-            If runXfer (fun () -> lit 0UL colWidth ==> col)
-            Else (fun () -> If (pxXfer &&& bnot (eq col colM1)) (fun () -> col + lit 1UL colWidth ==> col))
-            If runXfer (fun () -> runCx ==> cxCur)
-            Else (fun () -> If (pxXfer &&& bnot (eq col colM1)) (fun () -> cxCur + dxReg ==> cxCur))
+            ifElse [
+                (runXfer, fun () -> lit 1UL 1 ==> busy)
+            ] (fun () -> If lastFed (fun () -> lit 0UL 1 ==> busy))
+            ifElse [
+                (lastFed, fun () -> lit 1UL 1 ==> gathering)
+            ] (fun () -> If rowGatheredPort (fun () -> lit 0UL 1 ==> gathering))
+            ifElse [
+                (runXfer, fun () -> lit 0UL colWidth ==> col)
+            ] (fun () -> If (pxXfer &&& bnot (eq col colM1)) (fun () -> col + lit 1UL colWidth ==> col))
+            ifElse [
+                (runXfer, fun () -> runCx ==> cxCur)
+            ] (fun () -> If (pxXfer &&& bnot (eq col colM1)) (fun () -> cxCur + dxReg ==> cxCur))
             If runXfer (fun () -> runDx ==> dxReg)
             If runXfer (fun () -> runCy ==> cyCur)
             If runXfer (fun () -> runAddr0 ==> rowBase))

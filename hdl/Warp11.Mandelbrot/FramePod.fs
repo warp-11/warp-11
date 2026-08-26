@@ -79,16 +79,16 @@ let mandelFrameProcessor (width: int) (height: int) =
             let runXfer = wireBit "run_xfer"
             (startedReg &&& moreRows &&& runReady) ==> runXfer
 
-            If cvalid (fun () ->
-                lit 1UL 1 ==> startedReg
-                lit 0UL rowCountWidth ==> rowReg
-                lit 0UL addrWidth ==> addr0Cur
-                ccy ==> cyCur
-                cdy ==> dyReg
-                ccx ==> cxReg
-                cdx ==> dxReg)
-
-            Else (fun () ->
+            ifElse [
+                (cvalid, fun () ->
+                    lit 1UL 1 ==> startedReg
+                    lit 0UL rowCountWidth ==> rowReg
+                    lit 0UL addrWidth ==> addr0Cur
+                    ccy ==> cyCur
+                    cdy ==> dyReg
+                    ccx ==> cxReg
+                    cdx ==> dxReg)
+            ] (fun () ->
                 If runXfer (fun () ->
                     rowReg + lit 1UL rowCountWidth ==> rowReg
                     addr0Cur + lit (uint64 widthPadded) addrWidth ==> addr0Cur
@@ -151,12 +151,12 @@ let mandelFrameGatherer (width: int) (height: int) =
             busyReg ==> pbusy
             frameDoneReg ==> pdone
 
-            If pstart (fun () ->
-                lit 1UL 1 ==> busyReg
-                lit 0UL beatCountWidth ==> writtenCount
-                lit 0UL 1 ==> frameDoneReg)
-
-            Else (fun () ->
+            ifElse [
+                (pstart, fun () ->
+                    lit 1UL 1 ==> busyReg
+                    lit 0UL beatCountWidth ==> writtenCount
+                    lit 0UL 1 ==> frameDoneReg)
+            ] (fun () ->
                 lastWrite ==> frameDoneReg
                 If xfer (fun () -> writtenCount + lit 1UL beatCountWidth ==> writtenCount)
                 If lastWrite (fun () -> lit 0UL 1 ==> busyReg)))
@@ -283,8 +283,9 @@ let mandelFrameDdr =
         // `start`, and held low until the framebuffer says every word landed.
         let allGathered = regBit "all_gathered"
 
-        If start (fun () -> lit 0UL 1 ==> allGathered)
-        Else (fun () -> If frameDone (fun () -> lit 1UL 1 ==> allGathered))
+        ifElse [
+            (start, fun () -> lit 0UL 1 ==> allGathered)
+        ] (fun () -> If frameDone (fun () -> lit 1UL 1 ==> allGathered))
 
         let doneOut = outputBit "frameDone"
         (allGathered &&& frame.idle) ==> doneOut
