@@ -3,34 +3,6 @@ module Warp11.Sim
 
 open System.Numerics
 
-let private refsFolder: ExprFolder<string list> = {
-    fLit = fun _ -> []
-    fRef = fun (n, _) -> [ n ]
-    fAdd = fun (a, b) -> a @ b
-    fSub = fun (a, b) -> a @ b
-    fMul = fun (a, b) -> a @ b
-    fMux = fun (c, t, f) -> c @ t @ f
-    fConcat = fun (a, b) -> a @ b
-    fSlice = fun (s, _, _) -> s
-    fEq = fun (a, b) -> a @ b
-    fLt = fun (a, b) -> a @ b
-    fAnd = fun (a, b) -> a @ b
-    fOr = fun (a, b) -> a @ b
-    fXor = fun (a, b) -> a @ b
-    fNot = fun v -> v
-    fShr = fun (s, _) -> s
-    fPad = fun (s, _) -> s
-    fDynamicShl = fun (v, n) -> v @ n
-    fDynamicShr = fun (v, n) -> v @ n
-    fReduce = fun (_, v) -> v
-    fDiv = fun (a, b) -> a @ b
-    fRem = fun (a, b) -> a @ b
-    fMemRead = fun (_, a, _) -> a
-    fAsUInt = fun v -> v
-    fAsSInt = fun v -> v
-}
-
-let rec private refs expr = foldExpr refsFolder expr
 
 /// True when evaluating the expression touches a value wider than 64 bits —
 /// the test that routes an assignment onto the BigInteger path. Checked at

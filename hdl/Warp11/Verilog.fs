@@ -580,6 +580,114 @@ let checkStreams m =
                   yield
                       $"{md.name}: stream ready '{readyNet}' driven %d{drivers} times (a stream has exactly one consumer)" ]
 
+/// A combinational cycle — `a ==> b; b ==> a`. It emits as perfectly legal
+/// Verilog, and what it settles to on silicon is then decided by propagation
+/// delay rather than by the design.
+///
+/// The Sim has refused this since it first needed a topological order to compile
+/// against. This is the same walk moved to the gate, because until now the
+/// *hardware* path would happily emit what the simulator would not run — and a
+/// design headed for a bitstream need never construct a Sim.
+///
+/// Registers and inputs are sources, so a counter reading itself is not a cycle.
+/// A cycle closing through a combinational memory read is not caught, exactly as
+/// it is not caught in the Sim: `refs` contributes a `MemRead`'s address and not
+/// its memory. One walk, one blind spot, both sides agreeing.
+///
+/// **Deliberate combinational feedback is not what this takes away.** A ring
+/// oscillator or a cross-coupled latch would not survive the toolchain anyway:
+/// FIRRTL requires a combinationally acyclic circuit, so the firtool leg rejects
+/// it, and synthesis trims an odd inverter ring unless it is marked. Those want
+/// a named primitive carrying its own `DONT_TOUCH` — the `distributedMem` /
+/// `blockMem` pattern, where the thing you meant is spelled out and survives to
+/// silicon — rather than a hole in this check.
+let checkCombinationalLoops m =
+    let isReg =
+        let regs =
+            System.Collections.Generic.HashSet<string>(
+                [ for d in m.decls do
+                      match d with
+                      | Reg (n, _, _) -> yield n
+                      | _ -> () ]
+            )
+
+        regs.Contains
+
+    let byTarget =
+        dict [ for stmt in m.stmts do
+                   match stmt with
+                   | Assign (t, v) when not (isReg t) -> yield t, v
+                   | _ -> () ]
+
+    let state = System.Collections.Generic.Dictionary<string, bool>()
+    let problems = ResizeArray<string>()
+
+    let rec visit t (path: string list) =
+        match state.TryGetValue t with
+        | true, false ->
+            let cycle = t :: List.takeWhile ((<>) t) path |> List.rev
+            let trail = String.concat " -> " (cycle @ [ t ])
+
+            problems.Add
+                $"{m.name}: combinational loop through {trail} — a value cannot be its own input; if you meant an oscillator or a latch, that is a named primitive, not a loop"
+        | true, true -> ()
+        | _ ->
+            state[t] <- false
+
+            for d in refs byTarget[t] do
+                if byTarget.ContainsKey d then visit d (t :: path)
+
+            state[t] <- true
+
+    for t in byTarget.Keys do
+        if not (state.ContainsKey t) then visit t []
+
+    List.ofSeq problems
+
+/// An output port nothing ever drives. It emits as a port with no `assign`,
+/// which is a floating net on the boundary — always a mistake, and one that
+/// survives every check the design itself can make because the *parent* is where
+/// it goes wrong.
+///
+/// The partial case — driven only inside an `If`, with no unconditional default
+/// — is already refused at elaboration by the rule that a wire has nothing to
+/// hold. This is the case that rule cannot see: not driven at all.
+///
+/// Unconnected instance *inputs* need no check. An instantiation applies the
+/// child's own function, so every input port is a parameter F# already demands.
+let checkDrivenOutputs m =
+    let driven =
+        System.Collections.Generic.HashSet<string>(
+            [ for stmt in m.stmts do
+                  match stmt with
+                  | Assign (t, _) -> yield t
+                  | _ -> () ]
+        )
+
+    [ for d in m.decls do
+          match d with
+          | Output (n, _) when not (driven.Contains n) ->
+              yield $"{m.name}: output '{n}' is never driven — it would emit as a floating port"
+          | _ -> () ]
+
+/// A write to a memory that was declared with contents. `distributedRom` and
+/// `blockRom` are the only way to get initial contents, so contents mean a ROM,
+/// and a write to one passes elaboration today and diverges only in simulation.
+let checkRomWrites m =
+    let roms =
+        System.Collections.Generic.HashSet<string>(
+            [ for d in m.decls do
+                  match d with
+                  | Memory (n, _, _, Some _, _) -> yield n
+                  | _ -> () ]
+        )
+
+    [ for stmt in m.stmts do
+          match stmt with
+          | MemWrite (mem, _, _, _, _) when roms.Contains mem ->
+              yield $"{m.name}: '{mem}' is a rom — it has initial contents and cannot be written"
+          | _ -> () ]
+
 /// The whole design as Verilog, gated on the three checks.
 ///
 /// Widths, duplicate module names and stream consumers all have to hold before
@@ -591,11 +699,14 @@ let checkStreams m =
 /// Modules are deduplicated by name, so a definition instantiated forty times
 /// is emitted once.
 let emitDesign m =
-    let widthProblems =
+    let perModule =
         [ for md in allModules m |> List.distinct do
-              yield! checkWidths md ]
+              yield! checkWidths md
+              yield! checkCombinationalLoops md
+              yield! checkDrivenOutputs md
+              yield! checkRomWrites md ]
 
-    match widthProblems @ checkNames m @ checkStreams m with
+    match perModule @ checkNames m @ checkStreams m with
     | [] -> ()
     | problems -> failwith (String.concat "; " problems)
 

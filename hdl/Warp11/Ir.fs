@@ -233,6 +233,44 @@ let private typeOfFolder: ExprFolder<GroundType> = {
 
 let typeOf expr = foldExpr typeOfFolder expr
 
+/// Every name an expression reads — the dependency edges out of one assignment,
+/// in order and with duplicates. Shared rather than written twice: the emitter
+/// gates combinational cycles on this walk and the simulator orders its compiled
+/// assigns by it, and the two agreeing about what an expression depends on is
+/// the point.
+///
+/// A `MemRead` contributes its *address* and not the memory, so a cycle that
+/// closes through a combinational memory read is invisible here — to both
+/// callers equally.
+let private refsFolder: ExprFolder<string list> = {
+    fLit = fun _ -> []
+    fRef = fun (n, _) -> [ n ]
+    fAdd = fun (a, b) -> a @ b
+    fSub = fun (a, b) -> a @ b
+    fMul = fun (a, b) -> a @ b
+    fMux = fun (c, t, f) -> c @ t @ f
+    fConcat = fun (a, b) -> a @ b
+    fSlice = fun (s, _, _) -> s
+    fEq = fun (a, b) -> a @ b
+    fLt = fun (a, b) -> a @ b
+    fAnd = fun (a, b) -> a @ b
+    fOr = fun (a, b) -> a @ b
+    fXor = fun (a, b) -> a @ b
+    fNot = fun v -> v
+    fShr = fun (s, _) -> s
+    fPad = fun (s, _) -> s
+    fDynamicShl = fun (v, n) -> v @ n
+    fDynamicShr = fun (v, n) -> v @ n
+    fReduce = fun (_, v) -> v
+    fDiv = fun (a, b) -> a @ b
+    fRem = fun (a, b) -> a @ b
+    fMemRead = fun (_, a, _) -> a
+    fAsUInt = fun v -> v
+    fAsSInt = fun v -> v
+}
+
+let refs expr = foldExpr refsFolder expr
+
 /// How many bits, whatever the reading. Widths live in the values, which is
 /// why so little of the DSL takes a width parameter.
 let width (expr: Expr) = (typeOf expr).Width

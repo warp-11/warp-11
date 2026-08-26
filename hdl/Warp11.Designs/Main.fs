@@ -1271,6 +1271,95 @@ let private flattenRefusesNameCollisions () =
 
     refused && accepted
 
+/// The elaboration gate, in three pairs.
+///
+/// Each of these emits as perfectly legal Verilog and is almost always a bug, so
+/// each was found by a tool much later than here — or on a board. What makes
+/// them worth a check rather than a lint is the second half of each pair: the
+/// legitimate thing that looks the same from a distance, and that a gate written
+/// slightly too wide would take away. A register reading itself is not a loop, a
+/// conditionally-driven output is not an undriven one, and a memory with no
+/// initial contents is not a rom.
+let private elaborationGate () =
+    let refused (contains: string) body =
+        try
+            emitDesign (design "Gate" body) |> ignore
+            false
+        with e ->
+            e.Message.Contains contains
+
+    let accepted body =
+        try
+            emitDesign (design "Gate" body) |> ignore
+            true
+        with _ ->
+            false
+
+    // 1. A value cannot be its own input. The Sim has refused this since it
+    //    first needed a topological order; the gate refuses it now too, so a
+    //    design headed straight for a bitstream cannot ship what the simulator
+    //    would not run.
+    let loopRefused =
+        refused "combinational loop" (fun () ->
+            let osc = wireBit "osc"
+            let out = outputBit "out"
+            bnot osc ==> osc
+            osc ==> out)
+
+    //    ...but a register reading itself is every counter in the tree, and a
+    //    plain combinational chain is every design.
+    let feedbackAccepted =
+        accepted (fun () ->
+            let out = output "out" 8
+            let r = reg "r" 8
+            let mid = wire "mid" 8
+            r + lit 1UL 8 ==> r
+            r ==> mid
+            mid ==> out)
+
+    // 2. An output nothing drives emits as a floating port.
+    let undrivenRefused =
+        refused "never driven" (fun () ->
+            let a = input "a" 8
+            output "dangling" 8 |> ignore
+            let b = output "b" 8
+            a ==> b)
+
+    //    ...while one driven under a condition over a default is the ordinary
+    //    idiom, and must stay ordinary.
+    let conditionalDriveAccepted =
+        accepted (fun () ->
+            let c = inputBit "c"
+            let a = input "a" 8
+            let b = output "b" 8
+            lit 0UL 8 ==> b
+            If c (fun () -> a ==> b))
+
+    // 3. Initial contents mean a rom, and a rom cannot be written.
+    let romWriteRefused =
+        refused "is a rom" (fun () ->
+            let addr = input "addr" 2
+            let out = output "out" 8
+            let lut = blockRom "lut" 8 [| 1UL; 2UL; 3UL; 4UL |]
+            memWrite lut addr (lit 9UL 8) (lit 1UL 1)
+            (memReadPort lut addr).data ==> out)
+
+    //    ...and the same write to a memory that declared no contents is fine.
+    let memWriteAccepted =
+        accepted (fun () ->
+            let addr = input "addr" 2
+            let out = output "out" 8
+            let lut = blockMem "lut" 2 8
+            memWrite lut addr (lit 9UL 8) (lit 1UL 1)
+            (memReadPort lut addr).data ==> out)
+
+    loopRefused
+    && feedbackAccepted
+    && undrivenRefused
+    && conditionalDriveAccepted
+    && romWriteRefused
+    && memWriteAccepted
+
 /// What `Machine.Switch` is for, in three claims.
 ///
 /// The one that matters is arithmetic rather than behavioural, which is unusual
@@ -4096,6 +4185,7 @@ let private mainDemo () =
     printfn $"assertions hold and can fail: %b{assertionsHold ()}"
     printfn $"ifElse ladders, four claims:  %b{ifElseLadders ()}"
     printfn $"Switch is linear, not 2^n:   %b{switchIsLinear ()}"
+    printfn $"gate refuses silent bugs:    %b{elaborationGate ()}"
     printfn $"state machines, four claims:  %b{stateMachines ()}"
     printfn $"utility primitives:           %b{utilityPrimitives ()}"
     printfn $"flatten refuses collisions:   %b{flattenRefusesNameCollisions ()}"
