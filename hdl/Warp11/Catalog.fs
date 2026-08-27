@@ -67,6 +67,22 @@ let watching signals entry = { entry with watch = signals }
 /// must be an input.
 let poking pokes entry = { entry with pokes = pokes }
 
+/// A catalog of designs, and nothing else behind them.
+///
+/// This is the ordinary case, not a diminished one: `doc` and `source` exist so
+/// a debugger can offer those panes without knowing where the text lives, and
+/// `None` is a complete answer to both — `Pages.about` and `Pages.source`
+/// already say so on screen rather than breaking. A project that never writes a
+/// page is not missing anything it needed.
+///
+/// The alternative, `embedded`, needs an `<EmbeddedResource>` in the fsproj for
+/// the pages and for the source text. That is right for a teaching set and pure
+/// ceremony for someone who only wants the picker, the pokes and the watches.
+let designs (entries: Entry list) : Catalog =
+    { entries = entries
+      doc = (fun _ -> None)
+      source = fun _ -> None }
+
 // ---- reading prose and source out of an assembly ------------------------
 //
 // Out of the assembly rather than off disk, because a published wasm bundle has

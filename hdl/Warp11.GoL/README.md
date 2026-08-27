@@ -1,17 +1,24 @@
 # Game of Life
 
 A 64×64 Conway grid that updates **the entire board in one clock cycle**,
-streamed to a desktop UI over a triple-buffered snapshot path.
+streamed to a desktop UI over a triple-buffered snapshot path. At 166.67 MHz
+that is **167 million generations per second**.
 
 *Status: on silicon. The smallest of the three accelerators and the best one to
 read first.*
 
-*`Warp11.GolView` driving the fabric flat out: 503 million generations per
-second, 2 billion generations into a random soup. What is left on screen is
-the ash — blocks, blinkers and beehives — which at this rate it reaches within
-the first few microseconds.*
+*`Warp11.GolView` driving the fabric flat out, 2 billion generations into a
+random soup. What is left on screen is the ash — blocks, blinkers and beehives
+— which at this rate it reaches within the first few microseconds.*
 
-![The Game of Life live view running off a KV260 at 503 million generations per second](../../docs/images/gol-500m.png)
+*The readout reads 503M generations/s because the screenshot is of the **k=3
+combinational unroll**, which has since been removed. The design now advances
+one generation per 166.67 MHz cycle: **167 million generations per second**.
+Why it went is in `notes/STREAMING_ARCH.md` — chaining rule copies between clock
+edges buys throughput until the clock or the LUTs run out, and it caps the grid
+at the same time.*
+
+![The Game of Life live view running off a KV260, 2 billion generations into a random soup](../../docs/images/gol-500m.png)
 
 ## Why it is worth reading
 

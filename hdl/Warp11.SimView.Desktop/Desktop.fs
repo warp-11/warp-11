@@ -9,6 +9,7 @@ module Warp11.SimView.Desktop
 
 open Avalonia
 open Warp11
+open Warp11.Catalog
 open Warp11.Debug
 open Warp11.SimView
 
@@ -31,3 +32,19 @@ let run (source: View.Source) (panels: View.Panel list) =
 let debug (title: string) (design: ModuleDef) =
     let session = new DebugSession(design) :> IDebugSession
     run (View.Attached(session, title)) [ Pages.verilog ]
+
+/// Open a debugger on a catalog this process owns — the call a project makes
+/// once it has designs of its own.
+///
+/// **The difference from `debug` is not just the picker.** A catalog-opened
+/// design gets its ports watched on open, its entry's `watching` signals added
+/// on top of those, and its entry's `poking` inputs applied — so the first Step
+/// a newcomer presses moves something. `debug` attaches to a bare session,
+/// which has none of that: an empty watch list and every input at zero, where a
+/// design gated on an `enable` looks broken rather than idle.
+///
+/// Panels are `verilog` alone, as `debug`'s are. A catalog carrying real prose
+/// wants `Pages.about` and `Pages.source` beside it, and that is a panel list
+/// rather than a default — `Warp11.Tutorial.Debugger` is the worked example.
+let debugCatalog (catalog: Catalog) =
+    run (View.FromCatalog(catalog, None)) [ Pages.verilog ]

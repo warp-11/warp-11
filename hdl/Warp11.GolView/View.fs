@@ -58,7 +58,7 @@ let private minDecade = 0.0
 let private maxDecade = 9.0
 
 /// The top of the track is *unpaced*, not a billion a second. The fabric does
-/// 500M generations/s and the software twin nothing like it, so asking for a
+/// 167M generations/s and the software twin nothing like it, so asking for a
 /// billion is asking for as fast as it goes — which the bus already spells
 /// `Run 0`.
 let private isFlatOut decade = decade >= maxDecade

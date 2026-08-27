@@ -202,8 +202,7 @@ type Source =
 
 /// The catalog an attached debugger reads for prose and source: none, since
 /// its design came from somewhere the picker cannot see.
-let private noCatalog =
-    { entries = []; doc = (fun _ -> None); source = fun _ -> None }
+let private noCatalog = designs []
 
 /// What a host-supplied panel is handed. Everything the debugger knows that a
 /// panel might reasonably want, and nothing about how the debugger draws.

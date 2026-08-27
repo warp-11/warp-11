@@ -185,6 +185,18 @@ let heroHtml =
 let dedupeHero (html: string) =
     html.Replace("<h1 id=\"warp-11\">Warp 11</h1>\n", "")
 
+/// The search modal, identical on every page and on the reference pages next
+/// door — `site/api/_template.html` carries a copy, because fsdocs renders those
+/// and this script never sees them. `search.js` finds it by `dialog.search`.
+let searchDialog =
+    """<dialog class="search">
+  <input type="search" placeholder="Search warp11" aria-label="Search warp11" autocomplete="off" spellcheck="false">
+  <div class="results">
+    <ul></ul>
+    <p class="empty">Type to search the guides, the tutorial and the API.</p>
+  </div>
+</dialog>"""
+
 let template (current: Page) (body: string) =
     let up = upTo current.slug
     // The hero leads with what warp11 is *for*; the tab and the search result
@@ -199,7 +211,7 @@ let template (current: Page) (body: string) =
     let script = if isFront then "<script src=\"hero.js\" defer></script>\n" else ""
 
     $"""<!doctype html>
-<html lang="en">
+<html lang="en" data-root="{home up}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -221,8 +233,10 @@ let template (current: Page) (body: string) =
     <a href="{up}examples/mandelbrot">Examples</a>
     <a href="{up}reference/">Reference</a>
     <a href="https://github.com/warp-11/warp-11">GitHub</a>
+    <button type="button" id="search-btn" aria-label="Search" title="Search (/)">search</button>
   </nav>
 </header>
+{searchDialog}
 {hero}<div class="shell">
   <main>
 {body}
@@ -232,6 +246,7 @@ let template (current: Page) (body: string) =
   </aside>
 </div>
 <footer>warp11 — an F# HDL that runs on real FPGAs. Pre-release.</footer>
+<script type="module" src="{up}search.js"></script>
 </body>
 </html>
 """
@@ -532,7 +547,7 @@ start.</p>"""
 if Directory.Exists out then Directory.Delete(out, true)
 Directory.CreateDirectory out |> ignore
 
-for asset in [ "style.css"; "hero.js" ] do
+for asset in [ "style.css"; "hero.js"; "search.js"; "fuse.mjs" ] do
     File.Copy(Path.Combine(__SOURCE_DIRECTORY__, asset), Path.Combine(out, asset))
 
 /// `_headers` — the caching rules, emitted rather than committed because
@@ -582,12 +597,88 @@ let writeHeaders () =
 
     File.WriteAllText(Path.Combine(out, "_headers"), String.concat "\n" text)
 
+/// The search index: fsdocs' generated `index.json` — one entry per reference
+/// page — merged with an entry per authored page, written to the site root
+/// where `search.js` fetches it.
+///
+/// **Merged rather than replaced.** fsdocs indexes only what fsdocs rendered,
+/// so its index knows every type in the library and nothing about the guides
+/// or the tutorial. A search box that finds `streamFifo`'s signature but not
+/// the Streams guide is the wrong half of the site.
+///
+/// The `.html` is dropped from fsdocs' URIs for the same reason `copyReference`
+/// drops it from its links: the rest of the site has extensionless URLs, and a
+/// result that lands on one costing a redirect looks like a different site.
+let writeSearchIndex (rendered: Page list) =
+    let escape (text: string) =
+        System.Text.Json.JsonSerializer.Serialize text
+
+    // Markdown to something worth matching on: no fences, no link syntax, no
+    // markup. Cheap and approximate on purpose — this is a search corpus, not
+    // a rendering.
+    let plainText (markdown: string) =
+        let noCode = Regex.Replace(markdown, "```[\\s\\S]*?```", " ")
+        let noLinks = Regex.Replace(noCode, "\\[([^\\]]*)\\]\\([^)]*\\)", "$1")
+        let noMarkup = Regex.Replace(noLinks, "[#*`_>|]", " ")
+        Regex.Replace(noMarkup, "\\s+", " ").Trim()
+
+    let headingsOf (markdown: string) =
+        [ for m in Regex.Matches(markdown, "(?m)^#{1,4}\\s+(.+)$") -> m.Groups[1].Value.Trim() ]
+        |> String.concat " "
+
+    let authored =
+        rendered
+        |> List.filter (fun p -> File.Exists p.source)
+        |> List.map (fun p ->
+            let markdown = File.ReadAllText p.source
+            let uri = if p.slug = "index" then "/" else "/" + href p.slug
+
+            $"""{{"uri":{escape uri},"title":{escape p.title},"section":{escape p.section},"headings":{escape (headingsOf markdown)},"content":{escape (plainText markdown)}}}""")
+
+    let reference =
+        let generated = Path.Combine(root, referencePath, "index.json")
+
+        if not (File.Exists generated) then
+            []
+        else
+            // fsdocs' own entries, taken as JSON objects and re-emitted with the
+            // extension stripped and a section added. Parsed rather than regexed
+            // because the `content` field is prose and will contain anything.
+            use document = System.Text.Json.JsonDocument.Parse(File.ReadAllText generated)
+
+            [ for element in document.RootElement.EnumerateArray() do
+                  let field name =
+                      match element.TryGetProperty(name: string) with
+                      | true, value when value.ValueKind = System.Text.Json.JsonValueKind.String ->
+                          value.GetString()
+                      // `headings` is an array in fsdocs' index and a string in
+                      // ours; flattened here so one Fuse key covers both.
+                      | true, value when value.ValueKind = System.Text.Json.JsonValueKind.Array ->
+                          [ for item in value.EnumerateArray() ->
+                                if item.ValueKind = System.Text.Json.JsonValueKind.String then
+                                    item.GetString()
+                                else
+                                    item.ToString() ]
+                          |> String.concat " "
+                      | _ -> ""
+
+                  // Anchored too: most reference entries are members, and their
+                  // uri is `page.html#member`.
+                  let uri = Regex.Replace(field "uri", "\\.html(?=#|$)", "")
+
+                  $"""{{"uri":{escape uri},"title":{escape (field "title")},"section":{escape "Reference"},"headings":{escape (field "headings")},"content":{escape (field "content")}}}""" ]
+
+    let all = authored @ reference
+    File.WriteAllText(Path.Combine(out, "index.json"), "[" + String.concat "," all + "]")
+    List.length all
+
 let written = pages |> List.choose render
 let images = copyImages ()
 let debugger = copyDebugger ()
 let liveGol = copyLiveGol ()
 let reference = copyReference ()
 if not reference then referencePlaceholder ()
+let indexed = writeSearchIndex pages
 writeHeaders ()
 
 printfn
@@ -598,3 +689,5 @@ printfn
     (if liveGol then " + the live GoL" else "")
     (if reference then " + the API reference" else "")
     out
+
+printfn "search index: %d entries" indexed

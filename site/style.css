@@ -520,3 +520,84 @@ aside li.nav-header {
 }
 
 aside li.nav-item { list-style: none; }
+
+/* ---- search ----
+   The button sits in the top nav and is styled to read as one of its links
+   rather than as a control; the modal is a plain <dialog>, so Escape and the
+   backdrop close it without any of that being written down.
+
+   `search.js` finds these by `#search-btn` and `dialog.search`. The same markup
+   is emitted twice — by `build.fsx` for the authored pages and by
+   `site/api/_template.html` for the reference — so it has to look identical on
+   both, which is the whole reason it is styled here rather than in either. */
+
+#search-btn {
+    background: none;
+    border: 0;
+    padding: 0;
+    font: inherit;
+    font-size: 0.94rem;
+    color: var(--muted);
+    cursor: pointer;
+}
+
+#search-btn:hover { color: var(--accent); }
+
+dialog.search {
+    width: min(46rem, 92vw);
+    max-height: 70vh;
+    margin: 10vh auto auto;
+    padding: 0;
+    border: 1px solid var(--rule);
+    border-radius: 10px;
+    background: var(--bg);
+    color: var(--text);
+    box-shadow: 0 18px 50px rgba(0, 0, 0, 0.28);
+    overflow: hidden;
+}
+
+dialog.search::backdrop { background: rgba(0, 0, 0, 0.42); }
+
+dialog.search input[type="search"] {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 0.95rem 1.1rem;
+    border: 0;
+    border-bottom: 1px solid var(--rule);
+    background: var(--bg);
+    color: var(--text);
+    font: inherit;
+    font-size: 1.02rem;
+}
+
+dialog.search input[type="search"]:focus { outline: none; }
+
+dialog.search .results { max-height: calc(70vh - 3.6rem); overflow-y: auto; }
+dialog.search ul { list-style: none; margin: 0; padding: 0; }
+
+dialog.search li a {
+    display: flex;
+    align-items: baseline;
+    gap: 0.75rem;
+    padding: 0.55rem 1.1rem;
+    color: var(--text);
+    text-decoration: none;
+}
+
+dialog.search li a:hover { background: var(--accent-soft); color: var(--accent); }
+
+/* The section a hit came from — "Guides", "Reference". Pushed right and quiet:
+   it answers "where am I about to land" without competing with the title. */
+dialog.search .kind {
+    margin-left: auto;
+    color: var(--muted);
+    font-size: 0.82rem;
+    white-space: nowrap;
+}
+
+dialog.search .empty {
+    margin: 0;
+    padding: 1.1rem;
+    color: var(--muted);
+    font-size: 0.92rem;
+}

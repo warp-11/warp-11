@@ -46,7 +46,7 @@ pub const FB_BASE_ADDR_OFFSET: usize = 0x024;
 pub const LOAD_ROW_OFFSET: usize = 0x200;
 pub const LOAD_ROW_WORDS: usize = 128;
 
-pub const GENS_PER_CYCLE: usize = 3;
+pub const GENS_PER_CYCLE: usize = 1;
 pub const GRID_WIDTH: usize = 64;
 pub const GRID_HEIGHT: usize = 64;
 pub const ROWS_PER_BEAT: usize = 2;

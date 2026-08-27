@@ -6,11 +6,13 @@ from a Rust runtime over AXI. The same source elaborates the simulator and the
 bitstream, so what you debug is what you deploy.
 
 *A desktop application rendering Game of Life out of the fabric of a KV260:
-64×64, **503 million generations per second**, 2 billion generations in. The
-blocks and blinkers are what a random soup settles into after that many — at
-this rate it gets there in the first few microseconds.*
+64×64, 2 billion generations in. The blocks and blinkers are what a random soup
+settles into after that many — at this rate it gets there in the first few
+microseconds. The 503M/s on the readout is a k=3 combinational unroll that has
+since been removed; the design now runs one generation per 166.67 MHz cycle,
+**167 million generations per second**.*
 
-![Game of Life running on a KV260 at 503 million generations per second](https://warp11.org/images/gol-500m.png)
+![Game of Life running on a KV260, 2 billion generations into a random soup](https://warp11.org/images/gol-500m.png)
 
 - **Simulate the whole application, host side included.** The same driver code
   runs against the simulator and against the board, so the program and the

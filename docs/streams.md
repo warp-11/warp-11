@@ -125,7 +125,7 @@ region: three slots, keep-latest, with an overrun count and an IRQ pulse. The
 host reads whichever slot was most recently published.
 
 The gate that matters: publication is held behind `writerIdle`, so no in-flight
-AXI write can race a host read. Game of Life streams 500M generations/s into
+AXI write can race a host read. Game of Life streams 167M generations/s into
 DDR through this and the host sees coherent frames at 30 Hz.
 
 ## What is not built
