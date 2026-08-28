@@ -20,7 +20,7 @@ let catalog =
           entry "Priority mux" (nameof priorityMux) (fun () -> priorityMux)
           entry "Dot product" (nameof dotProduct) (fun () -> dotProduct)
           entry "Your own modules" (nameof ownModules) (fun () -> ownModules)
-          |> watching [ "left_r"; "right_r" ]
+          |> watching [ "left_r"; "right_r"; "satAcc8_1_r" ]
           |> poking [ "add_left", 3UL; "add_right", 5UL; "en", 1UL ]
           entry "Bit shapes" (nameof bitShapes) (fun () -> bitShapes)
           entry "Signed operations" (nameof signedOps) (fun () -> signedOps)

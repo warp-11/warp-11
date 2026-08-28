@@ -1429,44 +1429,54 @@ let private beatGatherer rows =
 /// pipelined stage never needs replication (1 beat/cycle already); this is
 /// the shape whose farm width is worth sweeping.
 let private slowWorker cycles =
-    defineModule
+    viewModule
         $"SlowWorker%d{cycles}"
         (fun p ->
-            (p.inPort "in_data" 8,
-             p.inPort "in_valid" 1,
-             p.outPort "in_ready" 1,
-             p.outPort "out_data" 8,
-             p.outPort "out_valid" 1,
-             p.inPort "out_ready" 1))
-        (fun m (inData, inValid, inReady, outData, outValid, outReady) (s: Stream<Expr>) ->
-            s.payload ==> inData
-            s.valid ==> inValid
-            inReady ==> s.ready
-            m.RegisterStreamReady outReady
+            let inData = p.inPort "in_data" 8
+            let inValid = p.inPort "in_valid" 1
+            let inReady = p.outPort "in_ready" 1
+            let outData = p.outPort "out_data" 8
+            let outValid = p.outPort "out_valid" 1
+            let outReady = p.inPort "out_ready" 1
 
-            { payload = outData
-              valid = outValid
-              ready = outReady
-              layout = byteLayout })
-        (fun (inData, inValid, inReady, outData, outValid, outReady) _ ->
+            (inData, inValid, inReady, outData, outValid, outReady),
+            { payload = inData
+              valid = inValid
+              outReady = outReady },
+            fun (d: StreamOutputs<Expr>) ->
+                d.inReady ==> inReady
+                d.valid ==> outValid
+                d.payload ==> outData)
+        (fun m (inData, inValid, inReady, outData, outValid, outReady) ->
+            fun (s: Stream<Expr>) ->
+                s.payload ==> inData
+                s.valid ==> inValid
+                inReady ==> s.ready
+                m.RegisterStreamReady outReady
+
+                { payload = outData
+                  valid = outValid
+                  ready = outReady
+                  layout = byteLayout })
+        (fun (view: StreamInputs<Expr>) ->
             let busy = regBit "busy"
             let held = reg "held" 8
             let remaining = reg "remaining" 8
 
             let emit = wireBit "emit"
             (busy &&& eq remaining (lit 0UL 8)) ==> emit
-
-            bnot busy ==> inReady
-            emit ==> outValid
-            held ==> outData
-
+            
             If (busy &&& bnot emit) (fun () -> remaining - lit 1UL 8 ==> remaining)
-            If (emit &&& outReady) (fun () -> lit 0UL 1 ==> busy)
+            If (emit &&& view.outReady) (fun () -> lit 0UL 1 ==> busy)
 
-            If (inValid &&& bnot busy) (fun () ->
+            If (view.valid &&& bnot busy) (fun () ->
                 lit 1UL 1 ==> busy
-                satInc inData ==> held
-                lit (uint64 cycles) 8 ==> remaining))
+                satInc view.payload ==> held
+                lit (uint64 cycles) 8 ==> remaining)
+
+            { inReady = bnot busy
+              payload = held
+              valid = emit })
 
 /// Test case 3: the decomposed frame pipeline — the FramePod refactor shape,
 /// proven at toy scale. Command source, beat expander, a farm of three

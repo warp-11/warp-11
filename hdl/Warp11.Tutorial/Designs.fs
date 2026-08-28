@@ -85,36 +85,38 @@ let dotProduct =
 
 /// A module of your own, defined once and instantiated twice.
 ///
-/// `SatAcc8` is the full `defineModule` route — typed ports, state, a body
-/// that is ordinary design code. `Min8` is the light route: a pure function
-/// wrapped by `fnModule2`, made callable by `liftBinary`. The design holds two
-/// `SatAcc8` instances so the one-definition-many-instances shape is visible
+/// `SatAcc8` is the typed `fnModule` route — ports read as a view, state, a
+/// body that is ordinary design code returning what drives the output. `Min8`
+/// is the light route: a pure function
+/// wrapped by `fnModule2`, made callable by `liftBinary`. The design holds
+/// three `SatAcc8` instances — two named, one via `.New` — so the
+/// one-definition-many-instances shape is visible
 /// in the emitted Verilog, and its outputs are named `total_left`, not
 /// `left_total` — an instance's staging wires are `{instance}_{port}` in the
 /// parent's namespace, so `left_total` is already taken by the instance
 /// called `left`.
 let satAcc =
-    defineModule
+    fnModule
         "SatAcc8"
         (fun p ->
-            {| add = p.inPort "add" 8
-               en = p.inPort "en" 1
-               total = p.outPort "total" 8 |})
-        (fun m io ->
+            let add = p.inPort "add" 8
+            let en = p.inPort "en" 1
+            (add, en), (add, en), p.outPort "total" 8)
+        (fun (addPort, enPort) total ->
             fun (add: Expr) (en: Expr) ->
-                add ==> io.add
-                en ==> io.en
-                io.total)
-        (fun io _ ->
+                add ==> addPort
+                en ==> enPort
+                total)
+        (fun (add, en) ->
             let r = reg "r" 8
             let sum = wire "sum" 9
-            pad 9 r + pad 9 io.add ==> sum
+            pad 9 r + pad 9 add ==> sum
 
             let next = wire "next" 8
             mux (slice 8 8 sum) (lit 0xFFUL 8) (slice 7 0 sum) ==> next
 
-            If io.en (fun () -> next ==> r)
-            r ==> io.total)
+            If en (fun () -> next ==> r)
+            r)
 
 let minOf8 =
     fnModule2 "Min8" ("a", 8) ("b", 8) "m" (fun a b -> mux (lt a b) a b)
@@ -129,8 +131,14 @@ let ownModules =
         let totalLeft = instanceNamed "left" satAcc addLeft en
         let totalRight = instanceNamed "right" satAcc addRight en
 
+        // The third accumulator does not care what its instance is called, so
+        // `.New` names it: one read, one auto-named copy, applied like the
+        // function it is.
+        let totalBoth = satAcc.New (addLeft + addRight) en
+
         totalLeft ==> output "total_left" 8
         totalRight ==> output "total_right" 8
+        totalBoth ==> output "total_both" 8
         minOf8 totalLeft totalRight ==> output "lowest" 8)
 
 /// The bit utilities in one place: join, fill, reverse, count, and the one-hot

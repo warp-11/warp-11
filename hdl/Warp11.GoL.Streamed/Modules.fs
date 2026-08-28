@@ -63,28 +63,33 @@ let private nextState (view: CellView) : Expr =
 /// `neighborhood Stencil.Moore` — row-major, centre excluded. Life only counts
 /// them, so the order is a convention here rather than a constraint; a rule that
 /// cared would read it.
+///
+/// The definition is `fnModule`'s three parts: `io` declares the ports and
+/// states, beside the declarations, how they read as a `CellView`; `mapIn`
+/// packs a caller's view onto the raw ports; and the body is `nextState`
+/// itself — view in, next state out, with the output wired for it. Both
+/// directions of the port crossing face each other across a dozen lines, and
+/// neither the body nor any call site touches a wire.
 let cell =
-    defineModule
+    fnModule
         "Cell"
         (fun p ->
-            (p.inPort "state" 1,
-             p.inPort "neighbors" neighborCount,
-             p.outPort "state_out" 1))
-        (fun m (stateIn, neighborsIn, stateOut) (view: CellView) ->
-            if List.length view.neighbors <> neighborCount then
-                failwith
-                    $"cell: a Moore neighbourhood is %d{neighborCount} cells, got %d{List.length view.neighbors}"
+            let state = p.inPort "state" 1
+            let neighbors = p.inPort "neighbors" neighborCount
 
-            m.Assign(stateIn, view.state)
-            // `catAll` puts its first element at the most significant end, so
-            // the list is reversed to land neighbour `i` on bit `i`.
-            m.Assign(neighborsIn, catAll (List.rev view.neighbors))
+            (state, neighbors),
+            { state = state
+              neighbors = [ for i in 0 .. neighborCount - 1 -> slice i i neighbors ] },
+            p.outPort "state_out" 1)
+        (fun (stateIn, neighborsIn) stateOut ->
+            fun (view: CellView) ->
+                if List.length view.neighbors <> neighborCount then
+                    failwith
+                        $"cell: a Moore neighbourhood is %d{neighborCount} cells, got %d{List.length view.neighbors}"
 
-            stateOut)
-        (fun (stateIn, neighborsIn, stateOut) m ->
-            let next =
-                nextState
-                    { state = stateIn
-                      neighbors = [ for i in 0 .. neighborCount - 1 -> slice i i neighborsIn ] }
-
-            m.Assign(stateOut, next))
+                view.state ==> stateIn
+                // `catAll` puts its first element at the most significant end, so
+                // the list is reversed to land neighbour `i` on bit `i`.
+                catAll (List.rev view.neighbors) ==> neighborsIn
+                stateOut)
+        nextState

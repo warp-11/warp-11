@@ -1,6 +1,32 @@
 [<AutoOpen>]
 module Warp11.Streams
 
+/// The input ports of a one-in, one-out stream stage, as its body reads them.
+///
+/// Split by port direction — what the body reads — not by which stream a wire
+/// belongs to, which is why `outReady` is here: downstream's ready is an input
+/// port, and the one wire of the *output* stream a stage body paces on. The
+/// [viewModule] view for the most common module shape in the tree.
+type StreamInputs<'p> =
+    { /// The offered beat.
+      payload: 'p
+      /// The beat is offered this cycle.
+      valid: Expr
+      /// Downstream will take the offered result this cycle.
+      outReady: Expr }
+
+/// The output ports of the same stage, as its body drives them — returned from
+/// a [viewModule] body and landed by its `io`. `inReady` is here for the same
+/// direction-not-stream reason `outReady` is in [StreamInputs]: accepting the
+/// input beat is an output port.
+type StreamOutputs<'r> =
+    { /// Accept the offered input beat this cycle.
+      inReady: Expr
+      /// The result.
+      payload: 'r
+      /// The result is offered this cycle.
+      valid: Expr }
+
 /// Typed match over a union beat: each handler runs under If(tag == k) with its
 /// variant's fields unpacked from the shared data bits — the conditions and the
 /// slicing both managed, so a handler reads like a DU match arm.
