@@ -1424,59 +1424,63 @@ let private beatGatherer rows =
             count ==> beatCount
             eq count (lit (uint64 rows) 16) ==> frameDone)
 
+/// SlowWorker's port bundle: one stream in, one stream out, as the six wires
+/// they actually are.
+type private SlowWorkerIo =
+    { inData: Expr
+      inValid: Expr
+      inReady: Expr
+      outData: Expr
+      outValid: Expr
+      outReady: Expr }
+
 /// A worker that GRINDS: accepts a beat, is busy `cycles` cycles, then offers
 /// the bumped result — throughput 1/(cycles+2), the rowProcessor reality. A
 /// pipelined stage never needs replication (1 beat/cycle already); this is
 /// the shape whose farm width is worth sweeping.
 let private slowWorker cycles =
-    viewModule
+    defModule
         $"SlowWorker%d{cycles}"
         (fun p ->
-            let inData = p.inPort "in_data" 8
-            let inValid = p.inPort "in_valid" 1
-            let inReady = p.outPort "in_ready" 1
-            let outData = p.outPort "out_data" 8
-            let outValid = p.outPort "out_valid" 1
-            let outReady = p.inPort "out_ready" 1
-
-            (inData, inValid, inReady, outData, outValid, outReady),
-            { payload = inData
-              valid = inValid
-              outReady = outReady },
-            fun (d: StreamOutputs<Expr>) ->
-                d.inReady ==> inReady
-                d.valid ==> outValid
-                d.payload ==> outData)
-        (fun m (inData, inValid, inReady, outData, outValid, outReady) ->
-            fun (s: Stream<Expr>) ->
-                s.payload ==> inData
-                s.valid ==> inValid
-                inReady ==> s.ready
-                m.RegisterStreamReady outReady
-
-                { payload = outData
-                  valid = outValid
-                  ready = outReady
-                  layout = byteLayout })
-        (fun (view: StreamInputs<Expr>) ->
+            { inData = p.inPort "in_data" 8
+              inValid = p.inPort "in_valid" 1
+              inReady = p.outPort "in_ready" 1
+              outData = p.outPort "out_data" 8
+              outValid = p.outPort "out_valid" 1
+              outReady = p.inPort "out_ready" 1 })
+        (fun io ->
             let busy = regBit "busy"
             let held = reg "held" 8
             let remaining = reg "remaining" 8
 
             let emit = wireBit "emit"
             (busy &&& eq remaining (lit 0UL 8)) ==> emit
-            
+
+            bnot busy ==> io.inReady
+            emit ==> io.outValid
+            held ==> io.outData
+
             If (busy &&& bnot emit) (fun () -> remaining - lit 1UL 8 ==> remaining)
-            If (emit &&& view.outReady) (fun () -> lit 0UL 1 ==> busy)
+            If (emit &&& io.outReady) (fun () -> lit 0UL 1 ==> busy)
 
-            If (view.valid &&& bnot busy) (fun () ->
+            If (io.inValid &&& bnot busy) (fun () ->
                 lit 1UL 1 ==> busy
-                satInc view.payload ==> held
-                lit (uint64 cycles) 8 ==> remaining)
+                satInc io.inData ==> held
+                lit (uint64 cycles) 8 ==> remaining))
 
-            { inReady = bnot busy
-              payload = held
-              valid = emit })
+/// The stream feel — an ordinary function over the bundle, one named instance
+/// per call.
+let private slowWorkerOf cycles instName (s: Stream<Expr>) : Stream<Expr> =
+    let c = (slowWorker cycles).NewNamed instName
+    s.payload ==> c.inData
+    s.valid ==> c.inValid
+    c.inReady ==> s.ready
+    registerStreamReady c.outReady
+
+    { payload = c.outData
+      valid = c.outValid
+      ready = c.outReady
+      layout = byteLayout }
 
 /// Test case 3: the decomposed frame pipeline — the FramePod refactor shape,
 /// proven at toy scale. Command source, beat expander, a farm of three
@@ -1514,7 +1518,7 @@ let sweepPipeline nWorkers =
             Stream.input "cmd" byteLayout
             |> Stream.pipeline
                 [ Stream.spec "expand" (rowExpander rows)
-                  Stream.spec "worker" (slowWorker 3) |> Stream.lanes nWorkers |> Stream.probed "runs" ]
+                  Stream.specOf "worker" (slowWorkerOf 3) |> Stream.lanes nWorkers |> Stream.probed "runs" ]
             |> Stream.probe "results"
             |> instanceNamed "gather" (beatGatherer rows)
 

@@ -45,51 +45,49 @@ let private nextState (view: CellView) : Expr =
 
     eq live (lit 3UL liveWidth) ||| (view.state &&& eq live (lit 2UL liveWidth))
 
-/// **The cell: a view in, its next state out.**
+/// The cell's port bundle. Neighbours arrive as one word, bit `i` being
+/// neighbour `i` of `neighborhood Stencil.Moore` — row-major, centre excluded.
+/// Life only counts them, so the order is a convention here rather than a
+/// constraint; a rule that cared would read it.
+type CellIo =
+    { state: Expr
+      neighbors: Expr
+      stateOut: Expr }
+
+/// **The cell: a module that is exactly its wires.**
 ///
-/// A real module, instantiated per call — `cell view` inside a design elaborates
-/// a `Cell` instance, wires the view onto its ports and hands back its outputs.
-/// So a caller composes with it rather than opening it, and `cell.def` is the
-/// same module for the debugger, the tests and the differential. There is no
-/// separate harness, because there is nothing left for one to do.
+/// `defModule`'s two parts: the bundle, and one body over it — the slicing of
+/// the packed neighbour word happens where it is used, and `cell.def` is the
+/// same module for the debugger, the tests and the differential.
 ///
 /// **No position, and no grid.** The rule does not read where the cell is — an
 /// edge policy belongs to whatever gathers the neighbourhood. Position is
 /// *context*, carried around this by its caller (`withContext` is the general
 /// form; for a combinational stage it is just wires not routed through here).
 /// One `Cell` serves every grid, at every size.
-///
-/// Neighbours arrive as one word, bit `i` being neighbour `i` of
-/// `neighborhood Stencil.Moore` — row-major, centre excluded. Life only counts
-/// them, so the order is a convention here rather than a constraint; a rule that
-/// cared would read it.
-///
-/// The definition is `fnModule`'s three parts: `io` declares the ports and
-/// states, beside the declarations, how they read as a `CellView`; `mapIn`
-/// packs a caller's view onto the raw ports; and the body is `nextState`
-/// itself — view in, next state out, with the output wired for it. Both
-/// directions of the port crossing face each other across a dozen lines, and
-/// neither the body nor any call site touches a wire.
 let cell =
-    fnModule
+    defModule
         "Cell"
         (fun p ->
-            let state = p.inPort "state" 1
-            let neighbors = p.inPort "neighbors" neighborCount
+            { state = p.inPort "state" 1
+              neighbors = p.inPort "neighbors" neighborCount
+              stateOut = p.outPort "state_out" 1 })
+        (fun io ->
+            nextState
+                { state = io.state
+                  neighbors = [ for i in 0 .. neighborCount - 1 -> slice i i io.neighbors ] }
+            ==> io.stateOut)
 
-            (state, neighbors),
-            { state = state
-              neighbors = [ for i in 0 .. neighborCount - 1 -> slice i i neighbors ] },
-            p.outPort "state_out" 1)
-        (fun (stateIn, neighborsIn) stateOut ->
-            fun (view: CellView) ->
-                if List.length view.neighbors <> neighborCount then
-                    failwith
-                        $"cell: a Moore neighbourhood is %d{neighborCount} cells, got %d{List.length view.neighbors}"
+/// The function feel, as ordinary code beside the module: a view in, the next
+/// state out, one auto-named `Cell` instance per call.
+let cellOf (view: CellView) =
+    if List.length view.neighbors <> neighborCount then
+        failwith
+            $"cell: a Moore neighbourhood is %d{neighborCount} cells, got %d{List.length view.neighbors}"
 
-                view.state ==> stateIn
-                // `catAll` puts its first element at the most significant end, so
-                // the list is reversed to land neighbour `i` on bit `i`.
-                catAll (List.rev view.neighbors) ==> neighborsIn
-                stateOut)
-        nextState
+    let c = cell.New
+    view.state ==> c.state
+    // `catAll` puts its first element at the most significant end, so the
+    // list is reversed to land neighbour `i` on bit `i`.
+    catAll (List.rev view.neighbors) ==> c.neighbors
+    c.stateOut

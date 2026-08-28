@@ -85,38 +85,46 @@ let dotProduct =
 
 /// A module of your own, defined once and instantiated twice.
 ///
-/// `SatAcc8` is the typed `fnModule` route — ports read as a view, state, a
-/// body that is ordinary design code returning what drives the output. `Min8`
+/// `SatAcc8` is the full `defModule` route — an IO bundle, and one body that
+/// is ordinary design code over those wires. `Min8`
 /// is the light route: a pure function
 /// wrapped by `fnModule2`, made callable by `liftBinary`. The design holds
-/// three `SatAcc8` instances — two named, one via `.New` — so the
-/// one-definition-many-instances shape is visible
+/// three `SatAcc8` instances — two named, one via the `satAccOf` wrapper — so
+/// the one-definition-many-instances shape is visible
 /// in the emitted Verilog, and its outputs are named `total_left`, not
 /// `left_total` — an instance's staging wires are `{instance}_{port}` in the
 /// parent's namespace, so `left_total` is already taken by the instance
 /// called `left`.
+type SatAccIo =
+    { add: Expr
+      en: Expr
+      total: Expr }
+
 let satAcc =
-    fnModule
+    defModule
         "SatAcc8"
         (fun p ->
-            let add = p.inPort "add" 8
-            let en = p.inPort "en" 1
-            (add, en), (add, en), p.outPort "total" 8)
-        (fun (addPort, enPort) total ->
-            fun (add: Expr) (en: Expr) ->
-                add ==> addPort
-                en ==> enPort
-                total)
-        (fun (add, en) ->
+            { add = p.inPort "add" 8
+              en = p.inPort "en" 1
+              total = p.outPort "total" 8 })
+        (fun io ->
             let r = reg "r" 8
             let sum = wire "sum" 9
-            pad 9 r + pad 9 add ==> sum
+            pad 9 r + pad 9 io.add ==> sum
 
             let next = wire "next" 8
             mux (slice 8 8 sum) (lit 0xFFUL 8) (slice 7 0 sum) ==> next
 
-            If en (fun () -> next ==> r)
-            r)
+            If io.en (fun () -> next ==> r)
+            r ==> io.total)
+
+/// The call shape, as an ordinary function beside the module — one auto-named
+/// instance per call, wired and done.
+let satAccOf (add: Expr) (en: Expr) =
+    let c = satAcc.New
+    add ==> c.add
+    en ==> c.en
+    c.total
 
 let minOf8 =
     fnModule2 "Min8" ("a", 8) ("b", 8) "m" (fun a b -> mux (lt a b) a b)
@@ -128,13 +136,23 @@ let ownModules =
         let addRight = input "add_right" 8
         let en = inputBit "en"
 
-        let totalLeft = instanceNamed "left" satAcc addLeft en
-        let totalRight = instanceNamed "right" satAcc addRight en
+        // The named instances: the bundle over `left_*`/`right_*` staging
+        // wires, wired where it is used.
+        let totalLeft =
+            let c = satAcc.NewNamed "left"
+            addLeft ==> c.add
+            en ==> c.en
+            c.total
 
-        // The third accumulator does not care what its instance is called, so
-        // `.New` names it: one read, one auto-named copy, applied like the
-        // function it is.
-        let totalBoth = satAcc.New (addLeft + addRight) en
+        let totalRight =
+            let c = satAcc.NewNamed "right"
+            addRight ==> c.add
+            en ==> c.en
+            c.total
+
+        // The third accumulator does not care what its instance is called —
+        // `satAccOf` is the function feel, one auto-named copy per call.
+        let totalBoth = satAccOf (addLeft + addRight) en
 
         totalLeft ==> output "total_left" 8
         totalRight ==> output "total_right" 8

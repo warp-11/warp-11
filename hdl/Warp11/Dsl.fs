@@ -764,50 +764,18 @@ let connect (target: Expr) (value: Expr) = (current ()).Assign(target, value)
 /// wide a connection is.
 let inline (==>) value (target: Expr) = connect target ((Widen $ value) (width target))
 
-/// A module that is a function of a typed view — the `fnModuleN` shape with the
-/// ports read as a domain type instead of positional operands.
+/// A module defined as what it is: a bundle of ports, and one body over them.
 ///
-/// `io` declares the ports and states, beside the declarations, how they are
-/// seen from each side: the raw ports a caller's arguments land on, the view
-/// the body reads, and the output port. `apply` writes the call shape —
-/// curried or not, that is the definition's choice — landing the arguments on
-/// the raw ports and handing back the output it is given. `body` is pure —
-/// view in, result out — and its result is wired to the output port here, so
-/// neither the body nor any call site maps an output.
-let fnModule
-    name
-    (io: Ports -> 'ports * 'view * Expr)
-    (apply: 'ports -> Expr -> 'fn)
-    (body: 'view -> Expr)
-    : TypedModule<'ports * 'view * Expr, 'fn> =
-    defineModule
-        name
-        io
-        (fun _ (ports, _, out) -> apply ports out)
-        (fun (_, view, out) _ -> body view ==> out)
-
-/// `defineModule` with the body behind a typed view — the general form of
-/// [fnModule], for modules whose call shape is richer than argument-in,
-/// output-out (a stream stage, a module with side outputs).
-///
-/// `io` declares the ports and states, beside the declarations, how they are
-/// seen from inside: the raw ports `apply` works with, the view the body
-/// reads, and the landing that wires what the body returns onto the output
-/// ports. `apply` is exactly `defineModule`'s — it owns the caller-side
-/// mapping and may hand back anything built from the ports, a `Stream`
-/// included. The body never touches a port: it reads the view and returns
-/// what it drives.
-let viewModule
-    name
-    (io: Ports -> 'ports * 'view * ('drive -> unit))
-    (apply: Builder -> 'ports -> 'fn)
-    (body: 'view -> 'drive)
-    : TypedModule<'ports * 'view * ('drive -> unit), 'fn> =
-    defineModule
-        name
-        io
-        (fun m (ports, _, _) -> apply m ports)
-        (fun (_, view, land) _ -> land (body view))
+/// `io` declares the port bundle — a record shaped however the module wants —
+/// and `body` is the whole contents, ordinary design code over those wires.
+/// There is no third piece. Instantiating hands the same bundle back over the
+/// instance's staging wires (`.New`, or `.NewNamed` where the instance's name
+/// matters) and the caller wires it — or wraps the wiring in an ordinary
+/// function beside the module, when a call shape is worth naming. The mapping
+/// between domain values and wires is always plain code at one of those two
+/// places, never machinery.
+let defModule name (io: Ports -> 'io) (body: 'io -> unit) : TypedModule<'io, 'io> =
+    defineModule name io (fun _ bundle -> bundle) (fun bundle _ -> body bundle)
 
 /// A claim about the design, checked every cycle by a Sim built with
 /// `checkAsserts = true` and by the emitted Verilog under a simulator that
@@ -1079,8 +1047,14 @@ let liftStream (tm: TypedModule<'io, Stream<'p> -> Stream<'p>>) =
 let instanceNamed (name: string) (tm: TypedModule<'io, 'fn>) : 'fn = (current ()).Instance(name, tm)
 
 type TypedModule<'io, 'fn> with
-    /// A fresh instance, auto-named, in the module currently being elaborated:
-    /// `cell.New view`. Reading the property elaborates the instance, so bind
-    /// it once per instance — `let f = cell.New` applied three times drives
-    /// one instance three times, which the one-driver rule refuses.
+    /// A fresh instance, auto-named, in the module currently being elaborated.
+    /// For a [defModule] this is the port bundle over the instance's staging
+    /// wires. Reading the property elaborates the instance, so bind it once
+    /// per instance — one `let c = cell.New` wired twice drives one instance
+    /// twice, which the one-driver rule refuses.
     member this.New: 'fn = (current ()).Instance this
+
+    /// The same, under a name the design chooses — for instances whose name is
+    /// part of the story (the debugger's groups, the `{instance}_{port}`
+    /// staging wires).
+    member this.NewNamed(instName: string) : 'fn = (current ()).Instance(instName, this)
