@@ -1424,63 +1424,49 @@ let private beatGatherer rows =
             count ==> beatCount
             eq count (lit (uint64 rows) 16) ==> frameDone)
 
-/// SlowWorker's port bundle: one stream in, one stream out, as the six wires
-/// they actually are.
+/// SlowWorker's port bundle: one stream in, one stream out.
 type private SlowWorkerIo =
-    { inData: Expr
-      inValid: Expr
-      inReady: Expr
-      outData: Expr
-      outValid: Expr
-      outReady: Expr }
+    { input: StreamPorts
+      output: StreamPorts }
 
-/// A worker that GRINDS: accepts a beat, is busy `cycles` cycles, then offers
-/// the bumped result — throughput 1/(cycles+2), the rowProcessor reality. A
-/// pipelined stage never needs replication (1 beat/cycle already); this is
-/// the shape whose farm width is worth sweeping.
+/// The calculation, with no streams in sight — the recursion
+///
+///     let rec delay n out =
+///         if n = 0 then out
+///         else delay (n - 1) out
+///
+/// applied as `delay cycles (satInc beat)`, taken apart per `Iteration`: the
+/// arguments `(n, out)` are the state, each recursive call is one cycle's
+/// `step`, `n = 0` is the base case, and `out` is what it returns.
+let private grind cycles : Iteration<Expr, Expr * Expr, Expr> =
+    { state = layout2 ("remaining", 8) ("value", 8)
+      init = fun beat -> lit (uint64 cycles) 8, satInc beat
+      step = fun (n, out) -> n - lit 1UL 8, out
+      finished = fun (n, _) -> eq n (lit 0UL 8)
+      result = fun (_, out) -> out }
+
+/// A worker that GRINDS: accepts a beat, works `cycles` cycles, then offers
+/// the bumped result — throughput 1/(cycles+3) through the worker FSM's three
+/// phases, the rowProcessor reality. A pipelined stage never needs replication
+/// (1 beat/cycle already); this is the shape whose farm width is worth
+/// sweeping.
 let private slowWorker cycles =
     defModule
         $"SlowWorker%d{cycles}"
         (fun p ->
-            { inData = p.inPort "in_data" 8
-              inValid = p.inPort "in_valid" 1
-              inReady = p.outPort "in_ready" 1
-              outData = p.outPort "out_data" 8
-              outValid = p.outPort "out_valid" 1
-              outReady = p.inPort "out_ready" 1 })
+            { input = streamInPorts p "in" 8
+              output = streamOutPorts p "out" 8 })
         (fun io ->
-            let busy = regBit "busy"
-            let held = reg "held" 8
-            let remaining = reg "remaining" 8
-
-            let emit = wireBit "emit"
-            (busy &&& eq remaining (lit 0UL 8)) ==> emit
-
-            bnot busy ==> io.inReady
-            emit ==> io.outValid
-            held ==> io.outData
-
-            If (busy &&& bnot emit) (fun () -> remaining - lit 1UL 8 ==> remaining)
-            If (emit &&& io.outReady) (fun () -> lit 0UL 1 ==> busy)
-
-            If (io.inValid &&& bnot busy) (fun () ->
-                lit 1UL 1 ==> busy
-                satInc io.inData ==> held
-                lit (uint64 cycles) 8 ==> remaining))
+            streamOfPorts byteLayout io.input
+            |> streamIterate byteLayout (grind cycles)
+            |> streamToPorts io.output)
 
 /// The stream feel — an ordinary function over the bundle, one named instance
 /// per call.
 let private slowWorkerOf cycles instName (s: Stream<Expr>) : Stream<Expr> =
     let c = (slowWorker cycles).NewNamed instName
-    s.payload ==> c.inData
-    s.valid ==> c.inValid
-    c.inReady ==> s.ready
-    registerStreamReady c.outReady
-
-    { payload = c.outData
-      valid = c.outValid
-      ready = c.outReady
-      layout = byteLayout }
+    streamToPorts c.input s
+    streamOfPorts byteLayout c.output
 
 /// Test case 3: the decomposed frame pipeline — the FramePod refactor shape,
 /// proven at toy scale. Command source, beat expander, a farm of three

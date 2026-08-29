@@ -89,6 +89,60 @@ let streamOutput name (s: Stream<'p>) =
     s.valid ==> valid
     ready ==> s.ready
 
+/// One stream's ports on a module boundary, grouped: the payload word, its
+/// valid, and the ready that answers it. Which side of the handshake each wire
+/// is on is decided by the declaring helper, not the record — the same bundle
+/// shape reads back over an instance's staging wires.
+type StreamPorts =
+    { data: Expr
+      valid: Expr
+      ready: Expr }
+
+/// Declare the ports of a stream the module CONSUMES: `{prefix}_data` and
+/// `{prefix}_valid` arrive, `{prefix}_ready` is this module's answer to drive.
+let streamInPorts (p: Ports) prefix payloadWidth : StreamPorts =
+    { data = p.inPort $"{prefix}_data" payloadWidth
+      valid = p.inPort $"{prefix}_valid" 1
+      ready = p.outPort $"{prefix}_ready" 1 }
+
+/// Declare the ports of a stream the module PRODUCES: `{prefix}_data` and
+/// `{prefix}_valid` leave, `{prefix}_ready` arrives from the consumer.
+let streamOutPorts (p: Ports) prefix payloadWidth : StreamPorts =
+    { data = p.outPort $"{prefix}_data" payloadWidth
+      valid = p.outPort $"{prefix}_valid" 1
+      ready = p.inPort $"{prefix}_ready" 1 }
+
+/// A module body's view of its input port group as a real `Stream` — the
+/// body-side twin of `streamInput`, so inside a module the stream API is the
+/// same one a design body speaks. Multi-field payloads unpack from the packed
+/// data word, first field at the most significant end (the `catAll` order).
+let streamOfPorts (layout: Layout<'p>) (ports: StreamPorts) : Stream<'p> =
+    (current ()).RegisterStreamReady ports.ready
+
+    let fields =
+        match layout.fields with
+        | [ _ ] -> [ ports.data ]
+        | fields ->
+            fields
+            |> List.mapFold (fun hi (_, w) -> slice hi (hi - w + 1) ports.data, hi - w) (width ports.data - 1)
+            |> fst
+
+    { payload = layout.unpack fields
+      valid = ports.valid
+      ready = ports.ready
+      layout = layout }
+
+/// The consuming end: land a `Stream` on the module's output port group — the
+/// body-side twin of `streamOutput`. Packs the payload into the one data word,
+/// drives valid, and hands the consumer's ready back to the stream.
+let streamToPorts (ports: StreamPorts) (s: Stream<'p>) =
+    match s.layout.pack s.payload with
+    | [ one ] -> one ==> ports.data
+    | many -> catAll many ==> ports.data
+
+    s.valid ==> ports.valid
+    ports.ready ==> s.ready
+
 /// A combinational transform of the payload, zero cost — ready and valid pass
 /// straight through: no module, no state. Shape-preserving: field names kept,
 /// widths refreshed from the mapped exprs. A payload-TYPE change is

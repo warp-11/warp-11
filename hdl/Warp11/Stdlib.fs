@@ -558,6 +558,92 @@ let machineCoded (name: string) (states: ('s * uint64) list) : Machine<'s> =
 let machine (name: string) (states: 's list) : Machine<'s> =
     machineCoded name [ for i, s in List.indexed states -> s, uint64 i ]
 
+/// The phases of a one-beat-at-a-time stream worker, as an FSM's states — the
+/// debugger decodes them by these names. `Accepting` is the reset state and
+/// the only one with ready high; `Offering` the only one with valid.
+type StreamWorkerState =
+    | Accepting
+    | Working
+    | Offering
+
+/// The stream handshake as a state machine, and nothing else: consume a
+/// stream, hand back the machine and the output stream. Ready while
+/// `Accepting`, valid while `Offering`, into `Working` the cycle a beat
+/// arrives, back to `Accepting` the cycle the result is taken. Everything
+/// between is the caller's, written on the machine — latch the beat under
+/// `Is Accepting &&& input.valid`, do the work under `If Working`, drive the
+/// output payload (its fields are wires, one per layout field), and
+/// `Goto Offering` when done. A body that never leaves `Working` fails
+/// elaboration: `Offering` would be a state nothing transitions to.
+let streamFsm (input: Stream<'p>) (outputLayout: Layout<'q>) : Machine<StreamWorkerState> * Stream<'q> =
+    let b = current ()
+    let st = machine (b.FreshName "state") [ Accepting; Working; Offering ]
+
+    st.Is Accepting ==> input.ready
+    If (st.Is Accepting &&& input.valid) (fun () -> st.Goto Working)
+
+    let ready = wireBit (b.FreshName "ready")
+    b.RegisterStreamReady ready
+    If (st.Is Offering &&& ready) (fun () -> st.Goto Accepting)
+
+    let payloadWires = [ for n, w in outputLayout.fields -> wire (b.FreshName n) w ]
+
+    st,
+    { payload = outputLayout.unpack payloadWires
+      valid = st.Is Offering
+      ready = ready
+      layout = outputLayout }
+
+/// A tail-recursive computation over stream beats, split into what hardware
+/// needs. A recursive function costs no time at elaboration — F# runs it to
+/// completion in zero cycles — so to make each recursive call cost a cycle,
+/// its pieces come apart: the recursion's arguments become registers
+/// (`state`), the initial call becomes the accept-cycle load (`init`), one
+/// recursive call runs per cycle (`step`), the base-case test says when to
+/// stop (`finished`), and what the base case returns is the beat offered
+/// downstream (`result`).
+///
+///     let rec delay n out =
+///         if n = 0 then out
+///         else delay (n - 1) out
+///
+/// maps as: state `(n, out)` · finished `n = 0` · result `out` ·
+/// step `(n - 1, out)`. All four functions are pure — no streams, no
+/// handshake, no registers in sight.
+type Iteration<'p, 's, 'q> =
+    { state: Layout<'s>
+      init: 'p -> 's
+      step: 's -> 's
+      finished: 's -> Expr
+      result: 's -> 'q }
+
+/// Run an `Iteration` as a stream stage: `streamFsm` owns the handshake, the
+/// iteration owns the cycles inside `Working`, and nothing else exists. The
+/// state registers take the layout's field names; the result lands on the
+/// output payload continuously and `Offering` is what marks it meant.
+let streamIterate (outputLayout: Layout<'q>) (it: Iteration<'p, 's, 'q>) (input: Stream<'p>) : Stream<'q> =
+    let b = current ()
+    let st, out = streamFsm input outputLayout
+
+    let stateRegs = [ for n, w in it.state.fields -> reg (b.FreshName n) w ]
+    let state = it.state.unpack stateRegs
+
+    let load values =
+        for r, v in List.zip stateRegs (it.state.pack values) do
+            v ==> r
+
+    If (st.Is Accepting &&& input.valid) (fun () -> load (it.init input.payload))
+
+    st.If Working (fun () ->
+        ifElse
+            [ it.finished state, fun () -> st.Goto Offering
+              otherwise, fun () -> load (it.step state) ])
+
+    for wireRef, value in List.zip (outputLayout.pack out.payload) (outputLayout.pack (it.result state)) do
+        value ==> wireRef
+
+    out
+
 /// `reduceTree` with every level registered, gated by `enable` so the whole
 /// tree freezes together on backpressure. Returns the reduced value and its
 /// latency in cycles (= the number of levels); the caller must delay its own
