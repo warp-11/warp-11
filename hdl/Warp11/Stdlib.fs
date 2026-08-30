@@ -1045,6 +1045,94 @@ let neighborhood (stencil: Stencil) (edge: Edge) (grid: Expr list list) (y: int)
 
     [ for dy, dx in offsets -> sample (y + dy) (x + dx) ]
 
+/// One beat of a 3-row window over a raster stream: the three rows a stencil
+/// rule needs to update the centre one. Each field is the row widened to
+/// **P+2 bits** with its two horizontal edge columns — bit `c+1` is column
+/// `c`, so a rule slices column c's cells as bits `c, c+1, c+2` with no
+/// modular arithmetic anywhere near it.
+type WindowBeat =
+    { above: Expr
+      centre: Expr
+      below: Expr }
+
+/// The layout of a `WindowBeat` whose rows are `rowWidth` bits — P+2 for a
+/// window over P-bit rows. One codec for the stream payload and, should the
+/// window ever become a module, its boundary.
+let windowBeatLayout rowWidth : Layout<WindowBeat> =
+    { fields = [ ("above", rowWidth); ("centre", rowWidth); ("below", rowWidth) ]
+      pack = fun w -> [ w.above; w.centre; w.below ]
+      unpack =
+        fun nets ->
+            match nets with
+            | [ above; centre; below ] ->
+                { above = above
+                  centre = centre
+                  below = below }
+            | _ -> failwith "windowBeatLayout: expected 3 nets" }
+
+/// Raster rows in, 3-row windows out — the stage that feeds a stencil rule
+/// (`notes/STREAMING_ARCH.md`, *The line window, designed*). One whole row per
+/// beat; a frame is `rows + 2` input beats and `rows` output windows.
+///
+/// **The vertical halo is the loader's job**: the two extra beats are the rows
+/// above and below the frame — `N−1, 0 … N−1, 0` for a torus — so vertical
+/// wrap is address arithmetic where addresses live, and this stage never
+/// buffers a frame. The **horizontal** edge is applied here, by widening each
+/// row to P+2 bits under the `edge` policy.
+///
+/// A systolic 1-beat/cycle stage: two silent prologue beats fill the row
+/// registers, then each accepted beat completes the window for the previous
+/// one — `below` is the live input, so all `rows` windows are out by the time
+/// the last beat is taken, and the frame counter re-arms the prologue for the
+/// next frame. Under backpressure a primed stage accepts a beat only as its
+/// window is taken, so nothing is lost.
+let lineWindow (edge: Edge) (rows: int) (s: Stream<Expr>) : Stream<WindowBeat> =
+    if rows < 1 then
+        failwith $"lineWindow needs at least one output row, got %d{rows}"
+
+    let b = current ()
+    let p = width s.payload
+
+    // Bit 0 is column −1 and bit P+1 is column P (`catAll` puts its first
+    // element at the most significant end).
+    let widen (row: Expr) =
+        match edge with
+        | Edge.Zero -> catAll [ lit 0UL 1; row; lit 0UL 1 ]
+        | Edge.Wrap -> catAll [ slice 0 0 row; row; slice (p - 1) (p - 1) row ]
+        | Edge.Clamp -> catAll [ slice (p - 1) (p - 1) row; row; slice 0 0 row ]
+
+    let rowAbove = reg (b.FreshName "window_above") p
+    let rowCentre = reg (b.FreshName "window_centre") p
+
+    // Beats of the current frame already taken; ≥ 2 means both registers hold
+    // this frame's rows and the arriving beat completes a window.
+    let takenWidth = bitsToHold (rows + 2)
+    let taken = reg (b.FreshName "window_taken") takenWidth
+    let primed = wireBit (b.FreshName "window_primed")
+    bnot (lt taken (lit 2UL takenWidth)) ==> primed
+
+    let outReady = wireBit (b.FreshName "window_ready")
+    b.RegisterStreamReady outReady
+
+    // Filling, accept freely; primed, accept only as the window is taken.
+    (bnot primed ||| outReady) ==> s.ready
+
+    If (s.valid &&& s.ready) (fun () ->
+        s.payload ==> rowCentre
+        rowCentre ==> rowAbove
+
+        ifElse
+            [ eq taken (lit (uint64 (rows + 1)) takenWidth), fun () -> lit 0UL takenWidth ==> taken
+              otherwise, fun () -> taken + lit 1UL takenWidth ==> taken ])
+
+    { payload =
+        { above = widen rowAbove
+          centre = widen rowCentre
+          below = widen s.payload }
+      valid = s.valid &&& primed
+      ready = outReady
+      layout = windowBeatLayout (p + 2) }
+
 
 let private log2 n =
     if n <= 0 || n &&& (n - 1) <> 0 then failwith $"log2 requires a power of two, got %d{n}"

@@ -54,6 +54,7 @@ let private diffDesigns () =
       blockRomLookup
       sumOverLut
       sumOverBlock
+      sumOverUltra
       sumOverDdr
       oneOwnerOnePort
       twoOwnersOnePort
@@ -79,6 +80,7 @@ let private diffDesigns () =
       twoStreamSplitReplicateJoin
       framePipeline
       sweepPipeline 2
+      windowSweep
       typedPipeline
       probedPipe
       axiWriteMaster
@@ -574,11 +576,13 @@ let private inventoryNamesPeek () =
       blockRomLookup
       sumOverLut
       sumOverBlock
+      sumOverUltra
       sumOverDdr
       assertedSaturate
       cmdProcessor
       wideBeat
       framePipeline
+      windowSweep
       audioChain
       snapshotConflate ]
     |> List.forall peekable
@@ -1353,12 +1357,79 @@ let private elaborationGate () =
             memWrite lut addr (lit 9UL 8) (lit 1UL 1)
             (memReadPort lut addr).data ==> out)
 
+    // 4. A combinational read of a sync-only storage is the top hardware
+    //    gotcha; UltraRAM has the same physics as a block, and the same gate.
+    let ultraReadRefused =
+        refused "is an ultraMem" (fun () ->
+            let addr = input "addr" 2
+            let out = output "out" 8
+            let store = ultraMem "store" 2 8
+            memRead store addr ==> out)
+
     loopRefused
     && feedbackAccepted
     && undrivenRefused
     && conditionalDriveAccepted
     && romWriteRefused
     && memWriteAccepted
+    && ultraReadRefused
+
+/// `lineWindow`'s defining property, driven rather than trusted: across two
+/// frames of distinct rows, the emitted windows are exactly rows r−1, r, r+1
+/// widened under `Edge.Wrap` — which also proves the prologue emits nothing,
+/// the counter re-arms between frames, and a consumer that stalls on a
+/// pattern loses no window and duplicates none.
+let private lineWindowProperty () =
+    let rows = 4
+    let p = 8
+
+    // `widen` under Edge.Wrap, in software: bit 0 is column −1 (= bit P−1),
+    // the top bit is column P (= bit 0).
+    let widen (row: uint64) =
+        ((row &&& 1UL) <<< (p + 1)) ||| (row <<< 1) ||| ((row >>> (p - 1)) &&& 1UL)
+
+    let frame1 = [ 0xA3UL; 0x01UL; 0x52UL; 0x9CUL; 0x7FUL; 0xE8UL ]
+    let frame2 = [ 0x11UL; 0xB6UL; 0x40UL; 0x05UL; 0xDDUL; 0x66UL ]
+
+    let expected =
+        [ for beats in [ frame1; frame2 ] do
+              for r in 1..rows -> widen beats[r - 1], widen beats[r], widen beats[r + 1] ]
+
+    let sim = Sim windowSweep
+    let got = ResizeArray()
+    let mutable cycle = 0
+
+    for beats in [ frame1; frame2 ] do
+        for v in beats do
+            sim.Poke("in_row", v)
+            sim.Poke("in_valid", 1UL)
+            let mutable accepted = false
+
+            while not accepted do
+                // The consumer stalls every third cycle, so primed-and-held
+                // is exercised, not just the streaming fast path.
+                let ready = cycle % 3 <> 0
+                sim.Poke("win_ready", (if ready then 1UL else 0UL))
+
+                if sim.Peek "win_valid" = 1UL && ready then
+                    got.Add(sim.Peek "win_above", sim.Peek "win_centre", sim.Peek "win_below")
+
+                accepted <- sim.Peek "in_ready" = 1UL
+                sim.Tick()
+                cycle <- cycle + 1
+
+        sim.Poke("in_valid", 0UL)
+
+        // A gap between frames: nothing may be offered while no beat is in.
+        for _ in 1..3 do
+            sim.Poke("win_ready", 1UL)
+
+            if sim.Peek "win_valid" = 1UL then
+                got.Add(0UL, 0UL, 0UL)
+
+            sim.Tick()
+
+    List.ofSeq got = expected
 
 /// What `Machine.Switch` is for, in three claims.
 ///
@@ -2637,6 +2708,7 @@ let private oneKernelThreeStorages () =
 
     let lutGot, lutCycles = onChip sumOverLut
     let blockGot, blockCycles = onChip sumOverBlock
+    let ultraGot, ultraCycles = onChip sumOverUltra
 
     // ---- and the one that leaves the chip ----------------------------------
     let ddrGot, ddrCycles =
@@ -2662,7 +2734,11 @@ let private oneKernelThreeStorages () =
 
         [ for i in 0..63 -> uint64 (ddr.ReadWord(0x1000 + i * 4)) ], cycles
 
-    let agree = lutGot = expected && blockGot = expected && ddrGot = expected
+    let agree =
+        lutGot = expected
+        && blockGot = expected
+        && ultraGot = expected
+        && ddrGot = expected
 
     // ---- the structural half ------------------------------------------------
     //
@@ -2692,18 +2768,25 @@ let private oneKernelThreeStorages () =
 
     let sameDeclarations =
         let a = declarations sumOverLut
-        a = declarations sumOverBlock && a = declarations sumOverDdr && a.Length = 5
+
+        a = declarations sumOverBlock
+        && a = declarations sumOverUltra
+        && a = declarations sumOverDdr
+        && a.Length = 5
 
     let sameGenerator =
         let a = indexUpdate sumOverLut
         // Two lines: the reset value and the update. Both must match.
-        a = indexUpdate sumOverBlock && a = indexUpdate sumOverDdr && a.Length = 2
+        a = indexUpdate sumOverBlock
+        && a = indexUpdate sumOverUltra
+        && a = indexUpdate sumOverDdr
+        && a.Length = 2
 
-    // 64 words, so the floor is 64 cycles. LUTs and the skidded block both hit
-    // it; DDR does not, and that gap is the whole of §3's accepted caveat —
+    // 64 words, so the floor is 64 cycles. LUTs and both skidded sync storages
+    // hit it; DDR does not, and that gap is the whole of §3's accepted caveat —
     // a measured number belongs to a (design, mapping) pair, never a design.
     printfn
-        $"    (identical sums; cycles to walk 64 words — LUT %d{lutCycles} · block %d{blockCycles} · DDR %d{ddrCycles})"
+        $"    (identical sums; cycles to walk 64 words — LUT %d{lutCycles} · block %d{blockCycles} · ultra %d{ultraCycles} · DDR %d{ddrCycles})"
 
     agree && sameDeclarations && sameGenerator
 
@@ -3570,6 +3653,7 @@ let private mainDemo () =
           twoStreamSplitReplicateJoin
           framePipeline
           sweepPipeline 2
+          windowSweep
           typedPipeline
           probedPipe
           axiWriteMaster
@@ -3930,6 +4014,7 @@ let private mainDemo () =
           twoStreamSplitReplicateJoin
           framePipeline
           sweepPipeline 2
+          windowSweep
           typedPipeline
           probedPipe
           axiWriteMaster
@@ -4186,6 +4271,7 @@ let private mainDemo () =
     printfn $"ifElse ladders, four claims:  %b{ifElseLadders ()}"
     printfn $"Switch is linear, not 2^n:   %b{switchIsLinear ()}"
     printfn $"gate refuses silent bugs:    %b{elaborationGate ()}"
+    printfn $"line window property:         %b{lineWindowProperty ()}"
     printfn $"state machines, four claims:  %b{stateMachines ()}"
     printfn $"utility primitives:           %b{utilityPrimitives ()}"
     printfn $"flatten refuses collisions:   %b{flattenRefusesNameCollisions ()}"

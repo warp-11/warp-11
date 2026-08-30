@@ -63,6 +63,7 @@ let catalog =
           entry "ROM lookup (block RAM)" (nameof blockRomLookup) (fun () -> blockRomLookup)
           entry "Running sum over LUTs" (nameof sumOverLut) (fun () -> sumOverLut)
           entry "Running sum over block RAM" (nameof sumOverBlock) (fun () -> sumOverBlock)
+          entry "Running sum over UltraRAM" (nameof sumOverUltra) (fun () -> sumOverUltra)
           entry "Running sum over DDR" (nameof sumOverDdr) (fun () -> sumOverDdr)
           entry "Bus: one owner, one port" (nameof oneOwnerOnePort) (fun () -> oneOwnerOnePort)
           entry "Bus: two owners, one port" (nameof twoOwnersOnePort) (fun () -> twoOwnersOnePort)
@@ -77,7 +78,8 @@ let catalog =
           entry "Neighborhood count" (nameof neighborCount) (fun () -> neighborCount)
           entry "AXI-Lite scratch registers" (nameof regMapScratch) (fun () -> regMapScratch)
           entry "Frame pipeline" (nameof framePipeline) (fun () -> framePipeline)
-          entry "Sweep pipeline (4 workers)" (nameof sweepPipeline) (fun () -> sweepPipeline 4) ]
+          entry "Sweep pipeline (4 workers)" (nameof sweepPipeline) (fun () -> sweepPipeline 4)
+          entry "Line window (3-row stencil feed)" (nameof windowSweep) (fun () -> windowSweep) ]
 
 let designs = catalog.entries
 

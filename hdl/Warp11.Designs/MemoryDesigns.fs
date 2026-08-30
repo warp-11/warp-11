@@ -508,6 +508,27 @@ let sumOverBlock =
 
         runningSumOver sumCount (inputBit "run") (blockReadWindow "src_port" source) (memWriteWindow results))
 
+/// The same kernel over UltraRAM. Structurally `sumOverBlock` with the storage
+/// word swapped: URAM reads synchronously exactly as a block does, so the same
+/// skidded read port serves both — what differs is only which primitive the
+/// attribute pins, and that 18.4 of the KV260's 24.2 Mb are reachable through
+/// this one and not the others.
+let sumOverUltra =
+    design "SumOverUltra" (fun () ->
+        let source = ultraMem "src" sumIndexWidth sumWordWidth
+        let results = ultraMem "dst" sumIndexWidth sumWordWidth
+
+        memWrite
+            source
+            (input "fill_addr" sumIndexWidth)
+            (input "fill_data" sumWordWidth)
+            (inputBit "fill_enable")
+
+        (memReadPort results (input "probe_addr" sumIndexWidth)).data
+        ==> output "probe_data" sumWordWidth
+
+        runningSumOver sumCount (inputBit "run") (blockReadWindow "src_port" source) (memWriteWindow results))
+
 /// The same kernel again, with neither end on this chip. No `fill_*` and no
 /// `probe_addr`: the host stages the source and reads the results in DDR
 /// directly, which is the part of a mapping that stops being fabric at all.

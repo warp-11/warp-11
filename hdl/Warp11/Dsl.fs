@@ -913,6 +913,17 @@ let distributedMem name addrWidth width =
 let blockMem name addrWidth width =
     (current ()).Memory(name, addrWidth, width, None, Block)
 
+/// A memory built from UltraRAM: `ram_style = "ultra"`, and synchronous reads
+/// only — `blockMem`'s rule at 288 Kb a block. On the KV260 this is where
+/// 18.4 of the chip's 24.2 Mb live; without it the band architecture would be
+/// built against a fifth of the memory that motivates it.
+///
+/// There is no `ultraRom` and no initialized form: UltraRAM takes no INIT —
+/// its contents after configuration are zero, which happens to be exactly the
+/// Sim's zero default, so the two worlds agree without an `initial` block.
+let ultraMem name addrWidth width =
+    (current ()).Memory(name, addrWidth, width, None, Ultra)
+
 /// A read-only memory: contents fixed at elaboration, emitted as a Verilog
 /// `initial` block (Vivado turns it into a BRAM INIT). Depth is the smallest
 /// power of two covering the values; the remainder reads zero. The Sim loads
@@ -997,6 +1008,9 @@ let memRead (m: Mem) addr =
     | Block ->
         failwith
             $"memRead on '{m.memName}', which is a blockMem — block RAM cannot read combinationally, so this would gain a cycle on silicon that no check here would catch. Use memReadPort and pipeline the consumer, or declare it distributedMem if it is small enough to live in LUTs"
+    | Ultra ->
+        failwith
+            $"memRead on '{m.memName}', which is an ultraMem — UltraRAM cannot read combinationally, so this would gain a cycle on silicon that no check here would catch. Use memReadPort and pipeline the consumer, or declare it distributedMem if it is small enough to live in LUTs"
     | Unspecified ->
         failwith
             $"memRead on '{m.memName}', whose storage the synthesiser chooses — and if it chooses block RAM this read gains a cycle on silicon that no check here would catch. Declare it distributedMem to mean it, or use memReadPort and pipeline the consumer"

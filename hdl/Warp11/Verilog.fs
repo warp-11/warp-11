@@ -398,6 +398,7 @@ let internal emitVerilog m =
                       | Unspecified -> ""
                       | Distributed -> "(* ram_style = \"distributed\" *) "
                       | Block -> "(* ram_style = \"block\" *) "
+                      | Ultra -> "(* ram_style = \"ultra\" *) "
 
                   yield $"    {attribute}reg {range w}{n} [0:%d{(1 <<< aw) - 1}];"
               | _ -> ()

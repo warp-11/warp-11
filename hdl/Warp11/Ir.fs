@@ -680,13 +680,15 @@ let saturate toWidth source =
 /// bounded `streamFifo`'s depth.
 ///
 /// So the choice is stated rather than inferred: `Distributed` is LUTRAM and is
-/// the only style an asynchronous read is allowed on, `Block` is BRAM and takes
-/// sync reads only, and `Unspecified` leaves it to the tool — which is safe
-/// precisely because an async read is refused there too.
+/// the only style an asynchronous read is allowed on, `Block` is BRAM and
+/// `Ultra` is UltraRAM — both take sync reads only — and `Unspecified` leaves
+/// it to the tool, which is safe precisely because an async read is refused
+/// there too.
 type RamStyle =
     | Unspecified
     | Distributed
     | Block
+    | Ultra
 
 /// What a module declares: its ports, its state, its memories. Statements
 /// drive these names, and nothing else introduces one.

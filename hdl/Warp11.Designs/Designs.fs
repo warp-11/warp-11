@@ -1515,6 +1515,19 @@ let sweepPipeline nWorkers =
         let frameDoneOut = outputBit "frame_done"
         frameDone ==> frameDoneOut)
 
+/// `lineWindow`: raster rows in, 3-row windows out — the stage that feeds a
+/// stencil rule. Four rows of eight cells under toroidal edges; the loader's
+/// share of the contract (the two vertical-halo beats) is whatever the poke
+/// loop sends first and last. The living check drives two frames through it
+/// and asserts the window's own claim — output row r's three fields equal
+/// input rows r−1, r, r+1 with the edge columns right — plus the re-arm
+/// between frames and that backpressure loses nothing.
+let windowSweep =
+    design "WindowSweep" (fun () ->
+        streamInput "in" (layout1 ("row", 8))
+        |> lineWindow Edge.Wrap 4
+        |> streamOutput "win")
+
 /// Byte → pair: the payload TYPE changes across this stage (Expr becomes
 /// Expr * Expr), which is what the arity-typed pipelines exist for.
 let private widenStage =

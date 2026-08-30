@@ -280,7 +280,7 @@ latency number.
 | Chisel | `SyncReadMem` / `Mem`; style via `annotate` or a `ram_style` chisel-annotation |
 | SpinalHDL | `Mem(...).addAttribute("ram_style", "distributed")` |
 | Amaranth | `Memory` + platform-specific attributes |
-| Warp 11 | `distributedMem` / `blockMem` / `mem`, and **the read is checked against it** |
+| Warp 11 | `distributedMem` / `blockMem` / `ultraMem`, and **the read is checked against it** |
 
 The difference is where the mistake is caught. Everywhere else the style is an
 attribute you may or may not have attached, and a combinational read of an array
@@ -289,7 +289,10 @@ Verilator, and corrupts on the board. Warp 11 makes the style part of the
 declaration and a combinational `memRead` an error on anything but
 `distributedMem`, so the
 question is answered where the memory is created rather than discovered in a
-timing report or a garbled frame.
+timing report or a garbled frame. `ultraMem` (`ram_style = "ultra"`) is the
+same rule over UltraRAM — synchronous reads only, and no initialized form,
+because URAM takes no INIT and its post-configuration contents are zero, which
+is the simulator's default too.
 
 ### Memories
 
@@ -531,7 +534,7 @@ A tag is needed only to route results *back* to independent clients, which is
 | SpinalHDL | `Stream[T]`, `Flow[T]`, `Fragment[T]`, `>>` connect |
 | HardCaml | Library FIFOs; `hardcaml_axi` for streaming |
 | Amaranth | `lib.stream` (Amaranth-stream) |
-| Warp 11 | `Stream<'p>` with typed payloads from a shared `Layout` and `Union2` sum types. A stream is a *value you apply a sink to*, so chains are ordinary function application and the ready chain runs backwards through forward composition: `streamOutput "out" (stage (streamMap bump (stage (streamInput "in" layout))))`. Operators: `streamStageFor`/`streamMap`/`streamMapTo`/`streamFifo`/`streamBroadcast`/`streamBalance`/`streamMerge2`/`streamMergeTree`/`streamConflate3`/`streamProbe`; `wormhole` + `wormholeOut`/`wormholeIn` for fan shapes (flat or clustered ~√N registered tree) |
+| Warp 11 | `Stream<'p>` with typed payloads from a shared `Layout` and `Union2` sum types. A stream is a *value you apply a sink to*, so chains are ordinary function application and the ready chain runs backwards through forward composition: `streamOutput "out" (stage (streamMap bump (stage (streamInput "in" layout))))`. Operators: `streamStageFor`/`streamMap`/`streamMapTo`/`streamFifo`/`streamBroadcast`/`streamBalance`/`streamMerge2`/`streamMergeTree`/`streamConflate3`/`streamProbe`; `wormhole` + `wormholeOut`/`wormholeIn` for fan shapes (flat or clustered ~√N registered tree); `lineWindow` (raster rows in, 3-row stencil windows out — halo rows come from the loader, the horizontal edge policy is applied by widening, and a checked frame counter re-arms it between frames) |
 
 **This is a strength rather than a gap** — see [`docs/streams.md`](streams.md). Two things have no direct analogue in the field surveyed:
 
