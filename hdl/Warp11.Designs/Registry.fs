@@ -79,7 +79,11 @@ let catalog =
           entry "AXI-Lite scratch registers" (nameof regMapScratch) (fun () -> regMapScratch)
           entry "Frame pipeline" (nameof framePipeline) (fun () -> framePipeline)
           entry "Sweep pipeline (4 workers)" (nameof sweepPipeline) (fun () -> sweepPipeline 4)
-          entry "Line window (3-row stencil feed)" (nameof windowSweep) (fun () -> windowSweep) ]
+          entry "Line window (3-row stencil feed)" (nameof windowSweep) (fun () -> windowSweep)
+          entry "Pixel blur (3x3 over 8-bit cells)" (nameof pixelBlur) (fun () -> pixelBlur)
+          entry "Moving average (unframed taps)" (nameof movingAverage) (fun () -> movingAverage)
+          entry "Sparse dot (static irregular)" (nameof sparseDot) (fun () -> sparseDot)
+          entry "Indirect gather (dynamic irregular)" (nameof indirectGather) (fun () -> indirectGather) ]
 
 let designs = catalog.entries
 

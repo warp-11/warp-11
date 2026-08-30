@@ -1045,71 +1045,49 @@ let neighborhood (stencil: Stencil) (edge: Edge) (grid: Expr list list) (y: int)
 
     [ for dy, dx in offsets -> sample (y + dy) (x + dx) ]
 
-/// One beat of a 3-row window over a raster stream: the three rows a stencil
-/// rule needs to update the centre one. Each field is the row widened to
-/// **P+2 bits** with its two horizontal edge columns — bit `c+1` is column
-/// `c`, so a rule slices column c's cells as bits `c, c+1, c+2` with no
-/// modular arithmetic anywhere near it.
-type WindowBeat =
-    { above: Expr
-      centre: Expr
-      below: Expr }
+/// The layout of a `count`-beat window whose entries are `w` bits — field
+/// names `{name}0 … {name}{count−1}`, oldest first.
+let private beatsLayout (name: string) (count: int) (w: int) : Layout<Expr list> =
+    { fields = [ for i in 0 .. count - 1 -> ($"%s{name}%d{i}", w) ]
+      pack = fun beats -> beats
+      unpack = fun nets -> nets }
 
-/// The layout of a `WindowBeat` whose rows are `rowWidth` bits — P+2 for a
-/// window over P-bit rows. One codec for the stream payload and, should the
-/// window ever become a module, its boundary.
-let windowBeatLayout rowWidth : Layout<WindowBeat> =
-    { fields = [ ("above", rowWidth); ("centre", rowWidth); ("below", rowWidth) ]
-      pack = fun w -> [ w.above; w.centre; w.below ]
-      unpack =
-        fun nets ->
-            match nets with
-            | [ above; centre; below ] ->
-                { above = above
-                  centre = centre
-                  below = below }
-            | _ -> failwith "windowBeatLayout: expected 3 nets" }
+/// The last `k` beats of a stream as one window, oldest first — a tap delay
+/// line behind a handshake, and the 1D core every sliding window is built
+/// from: FIR taps over samples, a 1D convolution's receptive field, and
+/// (through `lineWindow`) the rows of a 2D stencil.
+///
+/// The newest entry is the live input beat, so a window adds no latency;
+/// `k − 1` silent prologue beats fill the registers, then it is a
+/// 1-beat/cycle systolic stage, and under backpressure a primed window
+/// accepts a beat only as its window is taken, so nothing is lost or
+/// duplicated.
+///
+/// `frame = Some n` re-arms the prologue every `n` beats — a raster frame,
+/// where a window must never straddle two frames. `frame = None` primes once
+/// and runs forever — an audio stream has no frames to straddle.
+let streamWindow (frame: int option) (k: int) (s: Stream<Expr>) : Stream<Expr list> =
+    if k < 2 then
+        failwith $"streamWindow of %d{k} beats — below 2 there is no window"
 
-/// Raster rows in, 3-row windows out — the stage that feeds a stencil rule
-/// (`notes/STREAMING_ARCH.md`, *The line window, designed*). One whole row per
-/// beat; a frame is `rows + 2` input beats and `rows` output windows.
-///
-/// **The vertical halo is the loader's job**: the two extra beats are the rows
-/// above and below the frame — `N−1, 0 … N−1, 0` for a torus — so vertical
-/// wrap is address arithmetic where addresses live, and this stage never
-/// buffers a frame. The **horizontal** edge is applied here, by widening each
-/// row to P+2 bits under the `edge` policy.
-///
-/// A systolic 1-beat/cycle stage: two silent prologue beats fill the row
-/// registers, then each accepted beat completes the window for the previous
-/// one — `below` is the live input, so all `rows` windows are out by the time
-/// the last beat is taken, and the frame counter re-arms the prologue for the
-/// next frame. Under backpressure a primed stage accepts a beat only as its
-/// window is taken, so nothing is lost.
-let lineWindow (edge: Edge) (rows: int) (s: Stream<Expr>) : Stream<WindowBeat> =
-    if rows < 1 then
-        failwith $"lineWindow needs at least one output row, got %d{rows}"
+    match frame with
+    | Some n when n < k -> failwith $"streamWindow: a %d{n}-beat frame cannot fill a %d{k}-beat window"
+    | _ -> ()
 
     let b = current ()
     let p = width s.payload
 
-    // Bit 0 is column −1 and bit P+1 is column P (`catAll` puts its first
-    // element at the most significant end).
-    let widen (row: Expr) =
-        match edge with
-        | Edge.Zero -> catAll [ lit 0UL 1; row; lit 0UL 1 ]
-        | Edge.Wrap -> catAll [ slice 0 0 row; row; slice (p - 1) (p - 1) row ]
-        | Edge.Clamp -> catAll [ slice (p - 1) (p - 1) row; row; slice 0 0 row ]
+    let held = [ for i in 1 .. k - 1 -> reg (b.FreshName $"window_held%d{i}") p ]
 
-    let rowAbove = reg (b.FreshName "window_above") p
-    let rowCentre = reg (b.FreshName "window_centre") p
+    let counterCeiling =
+        match frame with
+        | Some n -> n
+        | None -> k
 
-    // Beats of the current frame already taken; ≥ 2 means both registers hold
-    // this frame's rows and the arriving beat completes a window.
-    let takenWidth = bitsToHold (rows + 2)
+    let takenWidth = bitsToHold counterCeiling
     let taken = reg (b.FreshName "window_taken") takenWidth
     let primed = wireBit (b.FreshName "window_primed")
-    bnot (lt taken (lit 2UL takenWidth)) ==> primed
+    bnot (lt taken (lit (uint64 (k - 1)) takenWidth)) ==> primed
 
     let outReady = wireBit (b.FreshName "window_ready")
     b.RegisterStreamReady outReady
@@ -1118,20 +1096,103 @@ let lineWindow (edge: Edge) (rows: int) (s: Stream<Expr>) : Stream<WindowBeat> =
     (bnot primed ||| outReady) ==> s.ready
 
     If (s.valid &&& s.ready) (fun () ->
-        s.payload ==> rowCentre
-        rowCentre ==> rowAbove
+        // Shift towards oldest: the head of the list is the window's first beat.
+        for older, newer in List.pairwise held do
+            newer ==> older
 
-        ifElse
-            [ eq taken (lit (uint64 (rows + 1)) takenWidth), fun () -> lit 0UL takenWidth ==> taken
-              otherwise, fun () -> taken + lit 1UL takenWidth ==> taken ])
+        s.payload ==> List.last held
 
-    { payload =
-        { above = widen rowAbove
-          centre = widen rowCentre
-          below = widen s.payload }
+        match frame with
+        | Some n ->
+            ifElse
+                [ eq taken (lit (uint64 (n - 1)) takenWidth), fun () -> lit 0UL takenWidth ==> taken
+                  otherwise, fun () -> taken + lit 1UL takenWidth ==> taken ]
+        | None ->
+            // Saturating: primed is forever after the first k − 1 beats.
+            If (lt taken (lit (uint64 (k - 1)) takenWidth)) (fun () ->
+                taken + lit 1UL takenWidth ==> taken))
+
+    { payload = held @ [ s.payload ]
       valid = s.valid &&& primed
       ready = outReady
-      layout = windowBeatLayout (p + 2) }
+      layout = beatsLayout "beat" k p }
+
+/// The shape of a 2D sliding window — what `lineWindow` needs to know beyond
+/// the stream it sweeps. The kernel it serves is `rows` tall and
+/// `2 * edgeColumns + 1` wide; a cell is `cellBits` bits, and `edge` says
+/// what the off-grid columns read as.
+type WindowSpec =
+    { /// Kernel height, and the number of rows in each emitted window:
+      /// 3 for a 3×3 stencil, 5 for a 5×5 blur. Odd, so a centre row exists.
+      rows: int
+      /// Horizontal halo each side — (kernelWidth − 1) / 2. Each emitted row
+      /// is widened by this many columns of `cellBits` at both ends.
+      edgeColumns: int
+      /// Bits per cell: 1 for Life, 8 for a greyscale pixel, wider for
+      /// packed channels.
+      cellBits: int
+      /// What the widening columns hold: Zero | Wrap | Clamp.
+      edge: Edge }
+
+/// Raster rows in, `spec.rows`-row windows out — the stage that feeds a 2D
+/// stencil rule (`notes/STREAMING_ARCH.md`, *The line window, designed*).
+/// `streamWindow` over row-beats plus horizontal widening: each emitted row
+/// carries `edgeColumns` extra columns of `cellBits` at both ends under the
+/// edge policy, so a rule slices column c's cells as bit groups
+/// `c … c + 2·edgeColumns` with no modular arithmetic anywhere near it.
+///
+/// **The vertical halo is the loader's job**: a frame is
+/// `frameRows + spec.rows − 1` input beats — the frame plus
+/// `(spec.rows − 1) / 2` halo rows each side, `N−1, 0 … N−1, 0` for a torus —
+/// and `frameRows` windows come out. Vertical wrap is address arithmetic
+/// where addresses live; this stage never buffers a frame, and the frame
+/// counter re-arms the prologue between frames.
+let lineWindow (spec: WindowSpec) (frameRows: int) (s: Stream<Expr>) : Stream<Expr list> =
+    let p = width s.payload
+
+    if spec.rows < 3 || spec.rows % 2 = 0 then
+        failwith
+            $"lineWindow of %d{spec.rows} rows — a stencil window is an odd count of 3 or more (a 1D window is streamWindow)"
+
+    if spec.cellBits < 1 || p % spec.cellBits <> 0 then
+        failwith $"lineWindow: %d{p}-bit rows do not divide into %d{spec.cellBits}-bit cells"
+
+    if spec.edgeColumns < 0 || spec.edgeColumns * spec.cellBits > p then
+        failwith
+            $"lineWindow: %d{spec.edgeColumns} edge columns of %d{spec.cellBits} bits exceed the %d{p}-bit row"
+
+    if frameRows < 1 then
+        failwith $"lineWindow needs at least one output row, got %d{frameRows}"
+
+    let edgeBits = spec.edgeColumns * spec.cellBits
+    let b = current ()
+
+    // Low bits are the left halo columns and high bits the right ones
+    // (`catAll` puts its first element at the most significant end). Each
+    // widened row lands on a named wire: a rule slices its rows once per
+    // kernel tap, and a bare `Expr` is re-inlined at every use — naming here
+    // is what keeps a 3×3 rule from emitting the widening 3P times, and what
+    // makes the rows sliceable at all under the named-operand rule.
+    let widen (row: Expr) =
+        if edgeBits = 0 then
+            row
+        else
+            let widened = wire (b.FreshName "window_row") (p + 2 * edgeBits)
+
+            (match spec.edge with
+             | Edge.Zero -> catAll [ lit 0UL edgeBits; row; lit 0UL edgeBits ]
+             | Edge.Wrap -> catAll [ slice (edgeBits - 1) 0 row; row; slice (p - 1) (p - edgeBits) row ]
+             | Edge.Clamp ->
+                 catAll
+                     [ yield! List.replicate spec.edgeColumns (slice (p - 1) (p - spec.cellBits) row)
+                       yield row
+                       yield! List.replicate spec.edgeColumns (slice (spec.cellBits - 1) 0 row) ])
+            ==> widened
+
+            widened
+
+    streamWindow (Some(frameRows + spec.rows - 1)) spec.rows s
+    |> streamMapTo (beatsLayout "row" spec.rows (p + 2 * edgeBits)) (List.map widen)
 
 
 let private log2 n =

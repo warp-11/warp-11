@@ -81,6 +81,10 @@ let private diffDesigns () =
       framePipeline
       sweepPipeline 2
       windowSweep
+      pixelBlur
+      movingAverage
+      sparseDot
+      indirectGather
       typedPipeline
       probedPipe
       axiWriteMaster
@@ -583,6 +587,10 @@ let private inventoryNamesPeek () =
       wideBeat
       framePipeline
       windowSweep
+      pixelBlur
+      movingAverage
+      sparseDot
+      indirectGather
       audioChain
       snapshotConflate ]
     |> List.forall peekable
@@ -1374,7 +1382,7 @@ let private elaborationGate () =
     && memWriteAccepted
     && ultraReadRefused
 
-/// `lineWindow`'s defining property, driven rather than trusted: across two
+/// `streamWindow`/`lineWindow`'s defining property, driven rather than trusted: across two
 /// frames of distinct rows, the emitted windows are exactly rows r−1, r, r+1
 /// widened under `Edge.Wrap` — which also proves the prologue emits nothing,
 /// the counter re-arms between frames, and a consumer that stalls on a
@@ -1412,7 +1420,7 @@ let private lineWindowProperty () =
                 sim.Poke("win_ready", (if ready then 1UL else 0UL))
 
                 if sim.Peek "win_valid" = 1UL && ready then
-                    got.Add(sim.Peek "win_above", sim.Peek "win_centre", sim.Peek "win_below")
+                    got.Add(sim.Peek "win_row0", sim.Peek "win_row1", sim.Peek "win_row2")
 
                 accepted <- sim.Peek "in_ready" = 1UL
                 sim.Tick()
@@ -1430,6 +1438,138 @@ let private lineWindowProperty () =
             sim.Tick()
 
     List.ofSeq got = expected
+
+/// A streaming design driven flat out — every beat offered, every output
+/// taken — collecting `wanted` outputs of the named port. The simple half of
+/// stream driving; `lineWindowProperty` covers the stalling half.
+let private streamRun (d: ModuleDef) (inPort: string) (outPort: string) (beats: uint64 list) (wanted: int) =
+    let inValid = $"{inPort.Split('_').[0]}_valid"
+    let outPrefix = outPort.Split('_').[0]
+    let sim = Sim d
+    sim.Poke($"{outPrefix}_ready", 1UL)
+    let got = ResizeArray()
+
+    for v in beats do
+        sim.Poke(inValid, 1UL)
+        sim.Poke(inPort, v)
+
+        if sim.Peek $"{outPrefix}_valid" = 1UL then
+            got.Add(sim.Peek outPort)
+
+        sim.Tick()
+
+    sim.Poke(inValid, 0UL)
+
+    for _ in 1..8 do
+        if sim.Peek $"{outPrefix}_valid" = 1UL then
+            got.Add(sim.Peek outPort)
+
+        sim.Tick()
+
+    got |> Seq.truncate wanted |> List.ofSeq
+
+/// `pixelBlur` against a software model of the same 3×3 mean over clamped
+/// borders — multi-bit cells through the same window the 1-bit check walks.
+let private pixelBlurAgrees () =
+    let pixels = 4
+    let rows = [| [| 10; 200; 30; 90 |]; [| 0; 50; 255; 20 |]; [| 70; 80; 90; 100 |]; [| 5; 15; 25; 35 |] |]
+    // The loader's vertical halo, Clamp flavoured: first and last rows repeated.
+    let beats = Array.concat [ [| rows[0] |]; rows; [| rows[rows.Length - 1] |] ]
+
+    let packRow (r: int[]) =
+        r |> Array.mapi (fun i v -> uint64 v <<< (i * 8)) |> Array.sum
+
+    let expected =
+        [ for r in 0 .. rows.Length - 1 ->
+              packRow
+                  [| for c in 0 .. pixels - 1 ->
+                         let mutable sum = 0
+
+                         for dr in 0..2 do
+                             for dc in -1..1 do
+                                 let cc = max 0 (min (pixels - 1) (c + dc))
+                                 sum <- sum + beats[r + dr][cc]
+
+                         (sum >>> 3) &&& 0xFF |] ]
+
+    streamRun pixelBlur "in_row" "out_row" (beats |> Array.map packRow |> List.ofArray) rows.Length = expected
+
+/// `movingAverage` against the arithmetic: unframed, so the window primes
+/// once and every input from the fourth onward produces one output.
+let private movingAverageAgrees () =
+    let samples = [ 100UL; 200UL; 300UL; 400UL; 60000UL; 8UL; 12UL; 500UL ]
+
+    let expected =
+        samples
+        |> List.windowed 4
+        |> List.map (fun w -> (List.sum w) / 4UL)
+
+    streamRun movingAverage "in_sample" "out_sample" samples expected.Length = expected
+
+/// `sparseDot`: fill the activation vector, then the dot is simply there —
+/// the gather is wiring, which is the claim the design exists to make.
+let private sparseDotAgrees () =
+    let activations = [| 9UL; 14UL; 3UL; 200UL; 77UL; 1UL; 130UL; 42UL |]
+    let sim = Sim sparseDot
+
+    activations
+    |> Array.iteri (fun i v ->
+        sim.Poke("fill_addr", uint64 i)
+        sim.Poke("fill_data", v)
+        sim.Poke("fill_enable", 1UL)
+        sim.Tick())
+
+    sim.Poke("fill_enable", 0UL)
+    sim.Tick()
+
+    let expected = 3UL * activations[1] + 1UL * activations[3] + 2UL * activations[4] + 5UL * activations[6]
+    sim.Peek "dot" = expected
+
+/// `indirectGather`: B[A[i]] for a handful of indices — each answer costs the
+/// two-hop walk, which is dynamic-irregular access priced honestly.
+let private indirectGatherAgrees () =
+    let table = [| 5UL; 2UL; 7UL; 0UL; 3UL; 6UL; 1UL; 4UL |]
+    let values = [| 11UL; 22UL; 33UL; 44UL; 55UL; 66UL; 77UL; 88UL |]
+    let sim = Sim indirectGather
+
+    for i in 0..7 do
+        sim.Poke("fill_t_addr", uint64 i)
+        sim.Poke("fill_t_data", table[i])
+        sim.Poke("fill_v_addr", uint64 i)
+        sim.Poke("fill_v_data", values[i])
+        sim.Poke("fill_t_enable", 1UL)
+        sim.Poke("fill_v_enable", 1UL)
+        sim.Tick()
+
+    sim.Poke("fill_t_enable", 0UL)
+    sim.Poke("fill_v_enable", 0UL)
+
+    let indices = [ 2UL; 0UL; 6UL; 5UL ]
+    sim.Poke("out_ready", 1UL)
+    let got = ResizeArray()
+
+    for i in indices do
+        sim.Poke("in_index", i)
+        sim.Poke("in_valid", 1UL)
+        let mutable accepted = false
+
+        while not accepted do
+            accepted <- sim.Peek "in_ready" = 1UL
+
+            if sim.Peek "out_valid" = 1UL then
+                got.Add(sim.Peek "out_value")
+
+            sim.Tick()
+
+    sim.Poke("in_valid", 0UL)
+
+    for _ in 1..8 do
+        if sim.Peek "out_valid" = 1UL then
+            got.Add(sim.Peek "out_value")
+
+        sim.Tick()
+
+    List.ofSeq got = [ for i in indices -> values[int table[int i]] ]
 
 /// What `Machine.Switch` is for, in three claims.
 ///
@@ -3654,6 +3794,10 @@ let private mainDemo () =
           framePipeline
           sweepPipeline 2
           windowSweep
+          pixelBlur
+          movingAverage
+          sparseDot
+          indirectGather
           typedPipeline
           probedPipe
           axiWriteMaster
@@ -4015,6 +4159,10 @@ let private mainDemo () =
           framePipeline
           sweepPipeline 2
           windowSweep
+          pixelBlur
+          movingAverage
+          sparseDot
+          indirectGather
           typedPipeline
           probedPipe
           axiWriteMaster
@@ -4272,6 +4420,10 @@ let private mainDemo () =
     printfn $"Switch is linear, not 2^n:   %b{switchIsLinear ()}"
     printfn $"gate refuses silent bugs:    %b{elaborationGate ()}"
     printfn $"line window property:         %b{lineWindowProperty ()}"
+    printfn $"pixel blur (8-bit cells):     %b{pixelBlurAgrees ()}"
+    printfn $"moving average (unframed):    %b{movingAverageAgrees ()}"
+    printfn $"sparse dot (static gather):   %b{sparseDotAgrees ()}"
+    printfn $"indirect gather (dynamic):    %b{indirectGatherAgrees ()}"
     printfn $"state machines, four claims:  %b{stateMachines ()}"
     printfn $"utility primitives:           %b{utilityPrimitives ()}"
     printfn $"flatten refuses collisions:   %b{flattenRefusesNameCollisions ()}"

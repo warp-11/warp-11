@@ -1515,18 +1515,136 @@ let sweepPipeline nWorkers =
         let frameDoneOut = outputBit "frame_done"
         frameDone ==> frameDoneOut)
 
-/// `lineWindow`: raster rows in, 3-row windows out — the stage that feeds a
-/// stencil rule. Four rows of eight cells under toroidal edges; the loader's
-/// share of the contract (the two vertical-halo beats) is whatever the poke
-/// loop sends first and last. The living check drives two frames through it
-/// and asserts the window's own claim — output row r's three fields equal
-/// input rows r−1, r, r+1 with the edge columns right — plus the re-arm
-/// between frames and that backpressure loses nothing.
+/// `lineWindow` at its Life-shaped corner: 3-row windows over 1-bit cells,
+/// toroidal edges, four rows of eight cells. The loader's share of the
+/// contract (the two vertical-halo beats) is whatever the poke loop sends
+/// first and last. The living check drives two frames through it and asserts
+/// the window's own claim — output row r's three rows equal input rows
+/// r−1, r, r+1 with the edge columns right — plus the re-arm between frames
+/// and that backpressure loses nothing.
 let windowSweep =
     design "WindowSweep" (fun () ->
         streamInput "in" (layout1 ("row", 8))
-        |> lineWindow Edge.Wrap 4
+        |> lineWindow
+            { rows = 3
+              edgeColumns = 1
+              cellBits = 1
+              edge = Edge.Wrap }
+            4
         |> streamOutput "win")
+
+/// `lineWindow` over multi-bit cells: a 3×3 box blur on rows of four 8-bit
+/// pixels, borders replicated — each output pixel is the mean of its
+/// neighbourhood, `sum >>> 3` standing in for /9 as blurs on silicon do. The
+/// window hands back widened 48-bit rows; every slice below is plain bit
+/// arithmetic on them, which is the point of widening at the window.
+let pixelBlur =
+    design "PixelBlur" (fun () ->
+        let pixels = 4
+
+        let blurRow (win: Expr list) =
+            match win with
+            | [ above; centre; below ] ->
+                catAll
+                    [ for c in pixels - 1 .. -1 .. 0 ->
+                          // Column c's 3×3 patch: widened bit groups c, c+1, c+2 of each row.
+                          let cells =
+                              [ for row in [ above; centre; below ] do
+                                    for k in 0..2 -> slice ((c + k) * 8 + 7) ((c + k) * 8) row ]
+
+                          let sum = wire $"blur_sum%d{c}" 12
+                          (cells |> List.map (pad 12) |> List.reduce (+)) ==> sum
+                          // sum >>> 3, low 8 bits — one slice of the named sum.
+                          slice 10 3 sum ]
+            | _ -> failwith "pixelBlur: a 3-row window"
+
+        streamInput "in" (layout1 ("row", pixels * 8))
+        |> lineWindow
+            { rows = 3
+              edgeColumns = 1
+              cellBits = 8
+              edge = Edge.Clamp }
+            4
+        |> Stream.mapTo (layout1 ("row", pixels * 8)) blurRow
+        |> streamOutput "out")
+
+/// `streamWindow` unframed — the 1D case: a four-tap moving average over
+/// 16-bit samples, the shape of every FIR's front end. No frames, so the
+/// window primes once and then slides forever, one output per input.
+let movingAverage =
+    design "MovingAverage" (fun () ->
+        let average (taps: Expr list) =
+            let sum = wire "tap_sum" 18
+            (taps |> List.map (pad 18) |> List.reduce (+)) ==> sum
+            shr 2 sum
+
+        streamInput "in" (layout1 ("sample", 16))
+        |> streamWindow None 4
+        |> Stream.mapTo (layout1 ("sample", 16)) average
+        |> streamOutput "out")
+
+/// Static-irregular access — the middle row of the access-class table
+/// (`notes/STREAMING_ARCH.md`): the connection pattern is irregular but KNOWN
+/// at elaboration, so the gather compiles to wiring. Four taps at fixed
+/// positions over a LUTRAM activation vector: no window, no schedule, no
+/// cycles — `memRead` at a literal address is a mux, and the whole sparse dot
+/// is one combinational expression.
+let sparseDot =
+    design "SparseDot" (fun () ->
+        // index, weight — a sparse row of a weight matrix, fixed at elaboration.
+        let taps = [ 1, 3UL; 3, 1UL; 4, 2UL; 6, 5UL ]
+        let activations = distributedMem "act" 3 8
+
+        memWrite
+            activations
+            (input "fill_addr" 3)
+            (input "fill_data" 8)
+            (inputBit "fill_enable")
+
+        let dot = output "dot" 13
+
+        (taps
+         |> List.map (fun (i, w) -> pad 13 (mul (memRead activations (lit (uint64 i) 3)) (lit w 3)))
+         |> List.reduce (+))
+        ==> dot)
+
+/// Dynamic-irregular access — the bottom row of the table: the second address
+/// exists only after the first read answers, so no window can precompute the
+/// reuse and the gather pays real cycles. A two-hop indirect load, B[A[i]],
+/// as a stream worker: the protocol FSM owns the handshake, a hop counter
+/// owns the walk, and each hop is one synchronous read of a block — the
+/// "function that grabs what it needs", as hardware.
+let indirectGather =
+    design "IndirectGather" (fun () ->
+        let pointers = blockMem "pointers" 3 3
+        let values = blockMem "values" 3 8
+
+        memWrite pointers (input "fill_t_addr" 3) (input "fill_t_data" 3) (inputBit "fill_t_enable")
+        memWrite values (input "fill_v_addr" 3) (input "fill_v_data" 8) (inputBit "fill_v_enable")
+
+        let requests = streamInput "in" (layout1 ("index", 3))
+        let st, out = streamFsm requests (layout1 ("value", 8))
+
+        let index = reg "index" 3
+        If (st.Is Accepting &&& requests.valid) (fun () -> requests.payload ==> index)
+
+        // Both ports read continuously; each answer is a cycle behind its
+        // address, so the chain settles two cycles into Working.
+        let pointerWord = (memReadPort pointers index).data
+        let valueWord = (memReadPort values pointerWord).data
+
+        let hop = reg "hop" 2
+
+        st.If Working (fun () ->
+            ifElse
+                [ eq hop (lit 2UL 2),
+                  fun () ->
+                      lit 0UL 2 ==> hop
+                      st.Goto Offering
+                  otherwise, fun () -> hop + lit 1UL 2 ==> hop ])
+
+        valueWord ==> out.payload
+        streamOutput "out" out)
 
 /// Byte → pair: the payload TYPE changes across this stage (Expr becomes
 /// Expr * Expr), which is what the arity-typed pipelines exist for.
