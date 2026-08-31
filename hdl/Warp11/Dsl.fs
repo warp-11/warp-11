@@ -665,6 +665,13 @@ let private designWith (b: Builder) (body: unit -> unit) =
 /// Elaborate a top-level design. The body is ordinary code with the module
 /// ambient, and the result is what the emitter, the simulator and the debugger
 /// all take.
+///
+/// **Don't use this in new code — define a `defModule` and take `.def`**
+/// (Jason, 2026-08-30). A `defModule` is everything `design` is (its `.def`
+/// is the same `ModuleDef`) plus a typed port bundle and the ability to be
+/// instantiated later, and one way of writing a top means the next reader
+/// learns one form. `design` stays for the existing catalog, which is not
+/// worth a churn sweep; convert entries as they are opened for other reasons.
 let design name (body: unit -> unit) = designWith (Builder(name)) body
 
 /// A design with named clock/reset ports — `designClocked axiClock` is how an
@@ -728,6 +735,17 @@ let inputArray name rows cols =
 /// output direction.
 let outputArray name rows cols =
     [ for y in 0 .. rows - 1 -> [ for x in 0 .. cols - 1 -> outputBit $"{name}_{y}_{x}" ] ]
+
+/// `inputArray` for a module bundle: declared through the `Ports` factory, so
+/// the grid exists in both worlds — real ports at definition, staging nets at
+/// every instantiation — and the cells carry a width, where the design-level
+/// grid is one-bit. Ports are `{name}_{y}_{x}`, the result indexed `[y][x]`.
+let inPortArray (p: Ports) name rows cols width =
+    [ for y in 0 .. rows - 1 -> [ for x in 0 .. cols - 1 -> p.inPort $"{name}_{y}_{x}" width ] ]
+
+/// The output half of `inPortArray`.
+let outPortArray (p: Ports) name rows cols width =
+    [ for y in 0 .. rows - 1 -> [ for x in 0 .. cols - 1 -> p.outPort $"{name}_{y}_{x}" width ] ]
 
 /// A register that holds its value through reset. Same shape as `reg` without
 /// the initial value, because there is no reset for it to take.

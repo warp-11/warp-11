@@ -85,6 +85,10 @@ let private diffDesigns () =
       movingAverage
       sparseDot
       indirectGather
+      indexSweep
+      maxPoolDilate.def
+      maxPool2x2.def
+      maxPoolCombinational.def
       typedPipeline
       probedPipe
       axiWriteMaster
@@ -559,7 +563,13 @@ let private inventoryNamesPeek () =
             inv.mems
             |> List.forall (fun m ->
                 try
-                    sim.PeekMem(m.name, (1 <<< m.addrWidth) - 1) |> ignore
+                    // Wide-worded memories answer through the wide peek, the
+                    // same dispatch the signal half makes above.
+                    if m.wordWidth > 64 then
+                        sim.PeekMemWide(m.name, (1 <<< m.addrWidth) - 1) |> ignore
+                    else
+                        sim.PeekMem(m.name, (1 <<< m.addrWidth) - 1) |> ignore
+
                     true
                 with _ ->
                     false)
@@ -591,6 +601,10 @@ let private inventoryNamesPeek () =
       movingAverage
       sparseDot
       indirectGather
+      indexSweep
+      maxPoolDilate.def
+      maxPool2x2.def
+      maxPoolCombinational.def
       audioChain
       snapshotConflate ]
     |> List.forall peekable
@@ -1570,6 +1584,175 @@ let private indirectGatherAgrees () =
         sim.Tick()
 
     List.ofSeq got = [ for i in indices -> values[int table[int i]] ]
+
+/// `rangeStream`'s claim: exactly 0…n−1 per pulse, in order, nothing between
+/// pulses — held under a consumer that stalls on a pattern, and repeated,
+/// since a scan that runs once is not a schedule.
+let private rangeStreamProperty () =
+    let sim = Sim indexSweep
+    let got = ResizeArray()
+    let mutable cycle = 0
+
+    let run () =
+        sim.Poke("start", 1UL)
+        sim.Tick()
+        sim.Poke("start", 0UL)
+
+        for _ in 1..24 do
+            let ready = cycle % 3 <> 2
+            sim.Poke("out_ready", (if ready then 1UL else 0UL))
+
+            if sim.Peek "out_valid" = 1UL && ready then
+                got.Add(sim.Peek "out_index")
+
+            sim.Tick()
+            cycle <- cycle + 1
+
+    run ()
+    run ()
+    List.ofSeq got = [ 0UL; 1UL; 2UL; 3UL; 4UL; 0UL; 1UL; 2UL; 3UL; 4UL ]
+
+/// `maxPoolDilate` against a software model of iterated 5×5 max over a
+/// zero-padded 8×8 byte map — `bandedWorld`'s second user, driven through the
+/// same free-running contract as the Game of Life sweep: fill, hold `run`
+/// until the counter reaches the target, let any pass in flight finish, and
+/// step the model however many passes the counter says completed.
+let private maxPoolAgrees () =
+    let mapRows = 8
+    let columns = 8
+
+    let byteOf (world: uint64[]) y x =
+        if y < 0 || y >= mapRows || x < 0 || x >= columns then
+            0UL
+        else
+            (world[y] >>> (x * 8)) &&& 0xFFUL
+
+    let dilate (world: uint64[]) =
+        [| for y in 0 .. mapRows - 1 ->
+               let mutable row = 0UL
+
+               for x in 0 .. columns - 1 do
+                   let mutable best = 0UL
+
+                   for dy in -2 .. 2 do
+                       for dx in -2 .. 2 do
+                           best <- max best (byteOf world (y + dy) (x + dx))
+
+                   row <- row ||| (best <<< (x * 8))
+
+               row |]
+
+    let rand = System.Random 29
+    let start = [| for _ in 1..mapRows -> uint64 (rand.Next()) <<< 32 ||| uint64 (rand.Next()) |]
+
+    let sim = Sim maxPoolDilate.def
+
+    for y in 0 .. mapRows - 1 do
+        sim.Poke("fill_addr", uint64 y)
+        sim.Poke("fill_data", start[y])
+        sim.Poke("fill_enable", 1UL)
+        sim.Tick()
+
+    sim.Poke("fill_enable", 0UL)
+    sim.Poke("run", 1UL)
+    let mutable cycles = 0
+
+    while sim.Peek "generation" < 2UL && cycles < 2000 do
+        sim.Tick()
+        cycles <- cycles + 1
+
+    sim.Poke("run", 0UL)
+
+    for _ in 1..48 do
+        sim.Tick()
+
+    let completed = int (sim.Peek "generation")
+
+    let expected =
+        [ 1..completed ]
+        |> List.fold (fun world _ -> dilate world) start
+
+    let got =
+        [| for y in 0 .. mapRows - 1 ->
+               sim.Poke("probe_addr", uint64 y)
+               sim.Tick()
+               sim.Peek "probe_data" |]
+
+    completed >= 2 && List.ofArray got = List.ofArray expected
+
+/// `maxPool2x2` against the arithmetic: one pass, an 8×8 byte map in, its
+/// 2×2-stride-2 max in the 4×4 output — the CNN layer shape, exercising
+/// `streamStride`'s claim (the even-indexed windows and only those) and the
+/// shape-changing write side.
+let private maxPool2x2Agrees () =
+    let mapRows = 24
+    let columns = 24
+    let rand = System.Random 31
+    let cells = Array.init mapRows (fun _ -> Array.init columns (fun _ -> rand.Next 256))
+
+    let packRow (row: int[]) =
+        row
+        |> Array.mapi (fun x v -> System.Numerics.BigInteger v <<< (x * 8))
+        |> Array.sum
+
+    let expected =
+        [ for y in 0 .. mapRows / 2 - 1 ->
+              packRow
+                  [| for j in 0 .. columns / 2 - 1 ->
+                         [ for dy in 0..1 do
+                               for dx in 0..1 -> cells[2 * y + dy][2 * j + dx] ]
+                         |> List.max |] ]
+
+    let sim = Sim maxPool2x2.def
+
+    for y in 0 .. mapRows - 1 do
+        sim.Poke("fill_addr", uint64 y)
+        sim.PokeWide("fill_data", packRow cells[y])
+        sim.Poke("fill_enable", 1UL)
+        sim.Tick()
+
+    sim.Poke("fill_enable", 0UL)
+    sim.Poke("start", 1UL)
+    sim.Tick()
+    sim.Poke("start", 0UL)
+    let mutable cycles = 0
+
+    while sim.Peek "complete" = 0UL && cycles < 400 do
+        sim.Tick()
+        cycles <- cycles + 1
+
+    let got =
+        [ for y in 0 .. mapRows / 2 - 1 ->
+              sim.Poke("probe_addr", uint64 y)
+              sim.Tick()
+              sim.PeekWide "probe_data" ]
+
+    sim.Peek "complete" = 1UL && got = expected
+
+/// `maxPoolCombinational` against the arithmetic, several random maps: pure
+/// combinational, so pokes answer without a tick — which is itself part of
+/// the claim being checked.
+let private maxPoolCombinationalAgrees () =
+    let rand = System.Random 37
+    let sim = Sim maxPoolCombinational.def
+
+    [ 1..4 ]
+    |> List.forall (fun _ ->
+        let cells = [| for _ in 0..63 -> uint64 (rand.Next 256) |]
+
+        for y in 0..7 do
+            for x in 0..7 do
+                sim.Poke($"in_%d{y}_%d{x}", cells[y * 8 + x])
+
+        [ for y in 0..3 do
+              for x in 0..3 ->
+                  let expected =
+                      [ for dy in 0..1 do
+                            for dx in 0..1 -> cells[(2 * y + dy) * 8 + (2 * x + dx)] ]
+                      |> List.max
+
+                  sim.Peek $"out_%d{y}_%d{x}" = expected ]
+        |> List.forall id)
 
 /// What `Machine.Switch` is for, in three claims.
 ///
@@ -3798,6 +3981,10 @@ let private mainDemo () =
           movingAverage
           sparseDot
           indirectGather
+          indexSweep
+          maxPoolDilate.def
+          maxPool2x2.def
+          maxPoolCombinational.def
           typedPipeline
           probedPipe
           axiWriteMaster
@@ -4163,6 +4350,10 @@ let private mainDemo () =
           movingAverage
           sparseDot
           indirectGather
+          indexSweep
+          maxPoolDilate.def
+          maxPool2x2.def
+          maxPoolCombinational.def
           typedPipeline
           probedPipe
           axiWriteMaster
@@ -4424,6 +4615,10 @@ let private mainDemo () =
     printfn $"moving average (unframed):    %b{movingAverageAgrees ()}"
     printfn $"sparse dot (static gather):   %b{sparseDotAgrees ()}"
     printfn $"indirect gather (dynamic):    %b{indirectGatherAgrees ()}"
+    printfn $"range stream schedule:        %b{rangeStreamProperty ()}"
+    printfn $"max-pool dilation (banded):   %b{maxPoolAgrees ()}"
+    printfn $"max pool 2x2 stride 2:        %b{maxPool2x2Agrees ()}"
+    printfn $"max pool combinational:       %b{maxPoolCombinationalAgrees ()}"
     printfn $"state machines, four claims:  %b{stateMachines ()}"
     printfn $"utility primitives:           %b{utilityPrimitives ()}"
     printfn $"flatten refuses collisions:   %b{flattenRefusesNameCollisions ()}"

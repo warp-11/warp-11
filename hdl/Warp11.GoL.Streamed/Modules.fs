@@ -91,3 +91,186 @@ let cellOf (view: CellView) =
     // list is reversed to land neighbour `i` on bit `i`.
     catAll (List.rev view.neighbors) ==> c.neighbors
     c.stateOut
+
+/// One next-generation row from a 3-row window: one `Cell` instance per
+/// column, each handed its neighbourhood in `neighborhood`'s row-major order.
+/// The window's rows arrive widened — bit c is column c−1 — so column c's
+/// cells are bits c, c+1, c+2 of each row, plain slices with the wrap already
+/// resolved where the window was formed. `Cell` still knows no position and
+/// no grid, which is the contract this stage exists to honour.
+let lifeBeat (columns: int) (cells: Expr list) : Expr =
+    match cells with
+    | [ above; centre; below ] ->
+        catAll
+            [ for column in columns - 1 .. -1 .. 0 ->
+                  cellOf
+                      { state = slice (column + 1) (column + 1) centre
+                        neighbors =
+                          [ slice column column above
+                            slice (column + 1) (column + 1) above
+                            slice (column + 2) (column + 2) above
+                            slice column column centre
+                            slice (column + 2) (column + 2) centre
+                            slice column column below
+                            slice (column + 1) (column + 1) below
+                            slice (column + 2) (column + 2) below ] } ]
+    | win -> failwith $"lifeBeat: a 3-row window, got %d{List.length win} rows"
+
+
+/// Which storage the world lives in — the *mapping* of
+/// `notes/STREAMING_ARCH.md` §One design across the storage tiers.
+/// `Registers` is the whole-world beat: every cell in flip-flops, one
+/// generation per cycle, the all-parallel design as the degenerate sweep.
+/// `Bands` is the row beat: the world striped into per-band block memories,
+/// ping-ponged, rows + ε cycles per generation. The host contract is
+/// identical across tiers.
+type WorldTier =
+    | Registers
+    | Bands
+
+/// The sweep's port bundle: free-running — `run` is a level, `generation`
+/// counts completed generations, and the host fills and probes by global row
+/// address while `run` is low.
+type SweepIo =
+    { run: Expr
+      generation: Expr
+      fillAddr: Expr
+      fillData: Expr
+      fillEnable: Expr
+      probeAddr: Expr
+      probeData: Expr }
+
+/// The banded sweep's control states: waiting for `run`, or a sweep in
+/// flight. The register tier needs no machine — its whole sweep is a cycle.
+type private SweepPhase =
+    | Idle
+    | Sweeping
+
+/// The streamed Game of Life, free-running: generations proceed back to back
+/// while `run` holds, `generation` counting them — Life's specialisation of
+/// the band architecture (`notes/STREAMING_ARCH.md`), at `engines` parallel
+/// band engines, over the storage `tier` the mapping names.
+///
+/// **`Registers`**: the world is `gridSize` row registers; every cone fires
+/// every cycle, `run` is the clock enable, and one generation costs one
+/// cycle — the all-parallel design, reached as the degenerate sweep with the
+/// same `lifeBeat` cones and the same host contract.
+///
+/// **`Bands`**: the world is striped into `engines` band memories **twice
+/// over** — two buffer sets, ping-ponged by a parity bit, because the wrap
+/// rows are read again at the far end of a sweep after their next-generation
+/// values were written, so in-place is wrong by construction. The engines run
+/// in lockstep off ONE `rangeStream` schedule; every band memory serves at
+/// most one reader per cycle (its own engine mid-band, a neighbour on the two
+/// halo beats), so parallelism costs cones and window registers, never extra
+/// storage beyond the double buffer. The vertical halo is the loader's job:
+/// beat i of a band reads local row (i − 1) mod bandRows, and an engine's
+/// first and last beats take the neighbouring bands' edge rows. A small
+/// Idle/Sweeping machine restarts the schedule while `run` holds and flips
+/// the parity as each sweep completes.
+let generationSweep (gridSize: int) (engines: int) (tier: WorldTier) =
+    let addrWidth = bitsToHold gridSize
+
+    if (1 <<< addrWidth) <> gridSize then
+        failwith
+            $"generationSweep: the halo address wraps by truncation, so the grid must be a power of two rows — got %d{gridSize}"
+
+    match tier with
+    | Registers ->
+        if engines <> 1 then
+            failwith
+                $"generationSweep: the register tier updates every cell every cycle — engines is meaningless there, got %d{engines}"
+    | Bands ->
+        if engines < 1 || gridSize % engines <> 0 || gridSize / engines < 2 then
+            failwith
+                $"generationSweep: %d{engines} engines over %d{gridSize} rows — engines must divide the grid into bands of at least two rows"
+
+    let tierTag =
+        match tier with
+        | Registers -> "reg"
+        | Bands -> "mem"
+
+    defModule
+        $"GolStreamed%d{gridSize}x%d{engines}_%s{tierTag}"
+        (fun p ->
+            { run = p.inPort "run" 1
+              generation = p.outPort "generation" 16
+              fillAddr = p.inPort "fill_addr" addrWidth
+              fillData = p.inPort "fill_data" gridSize
+              fillEnable = p.inPort "fill_enable" 1
+              probeAddr = p.inPort "probe_addr" addrWidth
+              probeData = p.outPort "probe_data" gridSize })
+        (fun io ->
+            let generationCount = reg "generation_count" 16
+            generationCount ==> io.generation
+
+            match tier with
+            | Registers ->
+                let rows = [ for r in 0 .. gridSize - 1 -> reg $"world%d{r}" gridSize ]
+
+                // The same widening the line window applies — horizontal wrap,
+                // bit c is column c−1 — so `lifeBeat` is the identical rule.
+                let widened =
+                    [ for r, row in List.indexed rows ->
+                          let wide = wire $"world_wide%d{r}" (gridSize + 2)
+                          catAll [ slice 0 0 row; row; slice (gridSize - 1) (gridSize - 1) row ] ==> wide
+                          wide ]
+
+                for r in 0 .. gridSize - 1 do
+                    let next =
+                        lifeBeat
+                            gridSize
+                            [ widened[(r - 1 + gridSize) % gridSize]
+                              widened[r]
+                              widened[(r + 1) % gridSize] ]
+
+                    If io.run (fun () -> next ==> rows[r])
+
+                    If (io.fillEnable &&& eq io.fillAddr (lit (uint64 r) addrWidth)) (fun () ->
+                        io.fillData ==> rows[r])
+
+                If io.run (fun () -> generationCount + lit 1UL 16 ==> generationCount)
+                selectIndexed io.probeAddr rows ==> io.probeData
+
+            | Bands ->
+                let bandRows = gridSize / engines
+
+                let phase = machine "phase" [ Idle; Sweeping ]
+                let startPulse = wireBit "sweep_start"
+                (phase.Is Idle &&& io.run) ==> startPulse
+                If startPulse (fun () -> phase.Goto Sweeping)
+
+                let flip = wireBit "flip"
+
+                let world =
+                    bandedWorld
+                        { engines = engines
+                          bandRows = bandRows
+                          rowBits = gridSize
+                          haloRows = 1
+                          verticalEdge = Edge.Wrap }
+                        startPulse
+                        flip
+                        io.fillAddr
+                        io.fillData
+                        (io.fillEnable &&& phase.Is Idle)
+                        io.probeAddr
+
+                world.probe ==> io.probeData
+
+                for g in 0 .. engines - 1 do
+                    world.sweeps[g]
+                    |> lineWindow
+                        { rows = 3
+                          edgeColumns = 1
+                          cellBits = 1
+                          edge = Edge.Wrap }
+                        bandRows
+                    |> Stream.mapTo (layout1 ("row", gridSize)) (lifeBeat gridSize)
+                    |> world.landings[g]
+
+                (phase.Is Sweeping &&& world.swept) ==> flip
+
+                If flip (fun () ->
+                    generationCount + lit 1UL 16 ==> generationCount
+                    phase.Goto Idle))

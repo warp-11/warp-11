@@ -83,7 +83,11 @@ let catalog =
           entry "Pixel blur (3x3 over 8-bit cells)" (nameof pixelBlur) (fun () -> pixelBlur)
           entry "Moving average (unframed taps)" (nameof movingAverage) (fun () -> movingAverage)
           entry "Sparse dot (static irregular)" (nameof sparseDot) (fun () -> sparseDot)
-          entry "Indirect gather (dynamic irregular)" (nameof indirectGather) (fun () -> indirectGather) ]
+          entry "Indirect gather (dynamic irregular)" (nameof indirectGather) (fun () -> indirectGather)
+          entry "Index sweep (rangeStream)" (nameof indexSweep) (fun () -> indexSweep)
+          entry "Max-pool dilation (banded world)" (nameof maxPoolDilate) (fun () -> maxPoolDilate.def)
+          entry "Max pool 2x2, stride 2 (CNN layer)" (nameof maxPool2x2) (fun () -> maxPool2x2.def)
+          entry "Max pool, combinational" (nameof maxPoolCombinational) (fun () -> maxPoolCombinational.def) ]
 
 let designs = catalog.entries
 

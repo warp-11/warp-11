@@ -1608,6 +1608,291 @@ let sparseDot =
          |> List.reduce (+))
         ==> dot)
 
+/// `rangeStream`: the read schedule of every scan, as a value — a start pulse
+/// in, the indices 0…4 offered in order, then quiet until the next pulse. The
+/// living check walks it twice with a stalling consumer: exactly five
+/// indices per pulse, nothing between pulses.
+let indexSweep =
+    design "IndexSweep" (fun () -> streamOutput "out" (rangeStream (inputBit "start") 5))
+
+/// The pooling control's two states; the pass runs while `run` holds, one
+/// full sweep per count of the generation counter.
+type private PoolPhase =
+    | Resting
+    | Pooling
+
+/// The pool's port bundle — the same free-running contract the Game of Life
+/// sweep speaks: `run` as a level, `generation` counting completed passes,
+/// fill and probe by global row.
+type PoolIo =
+    { run: Expr
+      generation: Expr
+      fillAddr: Expr
+      fillData: Expr
+      fillEnable: Expr
+      probeAddr: Expr
+      probeData: Expr }
+
+/// 5×5 max pooling over an 8×8 map of 8-bit cells, stride 1 — iterated, it is
+/// greyscale dilation, which is what makes it a living design rather than a
+/// one-shot: each pass is a "generation" and the model is checkable across
+/// several. The representative second user of `bandedWorld` beside Game of
+/// Life, and the one that forced its honest parameters: a 5-row window means
+/// **haloRows = 2**, and pooling wants **Zero** beyond the map's rim where
+/// Life wanted a torus. The store, the schedule, the halo routing and the
+/// double buffer are all `bandedWorld`'s; the fifteen lines here are pooling.
+let maxPoolDilate =
+    let mapRows = 8
+    let columns = 8
+    let cellBits = 8
+    let rowBits = columns * cellBits
+    let addrWidth = bitsToHold mapRows
+
+    defModule
+        "MaxPoolDilate"
+        (fun p ->
+            { run = p.inPort "run" 1
+              generation = p.outPort "generation" 16
+              fillAddr = p.inPort "fill_addr" addrWidth
+              fillData = p.inPort "fill_data" rowBits
+              fillEnable = p.inPort "fill_enable" 1
+              probeAddr = p.inPort "probe_addr" addrWidth
+              probeData = p.outPort "probe_data" rowBits })
+        (fun io ->
+            let generationCount = reg "generation_count" 16
+            generationCount ==> io.generation
+
+            let phase = machine "pool_phase" [ Resting; Pooling ]
+            let startPulse = wireBit "pool_start"
+            (phase.Is Resting &&& io.run) ==> startPulse
+            If startPulse (fun () -> phase.Goto Pooling)
+
+            let flip = wireBit "pool_flip"
+
+            let world =
+                bandedWorld
+                    { engines = 2
+                      bandRows = 4
+                      rowBits = rowBits
+                      haloRows = 2
+                      verticalEdge = Edge.Zero }
+                    startPulse
+                    flip
+                    io.fillAddr
+                    io.fillData
+                    (io.fillEnable &&& phase.Is Resting)
+                    io.probeAddr
+
+            world.probe ==> io.probeData
+
+            // Each pairwise max lands on a named wire. Not cosmetic: `maxOf` uses
+            // both operands twice, and a bare `Expr` is re-inlined at every use —
+            // folded 25 deep, the unnamed form is 2^24 copies of the innermost
+            // slices at emission, the `splitBudget` story re-enacted. Named, it
+            // is 24 wires per column.
+            let mutable maxIndex = 0
+
+            let maxOf (a: Expr) (b: Expr) =
+                let best = wire $"pool_max%d{maxIndex}" cellBits
+                maxIndex <- maxIndex + 1
+                mux (lt a b) b a ==> best
+                best
+
+            // Column c of the original map is widened group c+2, so its 5-wide
+            // reach is groups c .. c+4 of each of the five rows: 25 slices, one
+            // max tree, no modular arithmetic — the widening's whole point.
+            let poolBeat (win: Expr list) =
+                catAll
+                    [ for c in columns - 1 .. -1 .. 0 ->
+                          [ for row in win do
+                                for k in 0..4 -> slice ((c + k) * cellBits + cellBits - 1) ((c + k) * cellBits) row ]
+                          |> List.reduce maxOf ]
+
+            for g in 0..1 do
+                world.sweeps[g]
+                |> lineWindow
+                    { rows = 5
+                      edgeColumns = 2
+                      cellBits = cellBits
+                      edge = Edge.Zero }
+                    4
+                |> Stream.mapTo (layout1 ("row", rowBits)) poolBeat
+                |> world.landings[g]
+
+            (phase.Is Pooling &&& world.swept) ==> flip
+
+            If flip (fun () ->
+                generationCount + lit 1UL 16 ==> generationCount
+                phase.Goto Resting))
+
+/// The combinational pool's bundle: a grid of byte ports in, a grid of byte
+/// ports out, both indexed `[y][x]`. No start, no complete, no clock — the
+/// answer is on the outputs the same cycle the inputs are.
+type ArrayPoolIo =
+    { inputArray: Expr list list
+      outputArray: Expr list list }
+
+/// The same 2×2/stride-2 max pool as `maxPool2x2`, as pure combinational
+/// logic: an 8×8 grid of byte inputs, a 4×4 grid of byte outputs, every
+/// output a three-comparator cone over its four bytes. No start, no
+/// complete, no clock — the answer is on the outputs the same cycle the
+/// inputs are. The pair is the area-buys-time lesson at layer scale, and
+/// `maxPool2x2` also instantiates this block unchanged, three abreast, as
+/// its per-window compute — one fixed module serving standalone and tiled.
+///
+/// The max tree here is UNNAMED expression code, deliberately, where
+/// `maxPoolDilate`'s is landed on wires: `maxOf` duplicates its operands, so
+/// an unnamed fold doubles per level — fatal at 25 values, and bounded and
+/// harmless at four, where the whole cone is a handful of terms.
+let maxPoolCombinational =
+    let mapRows = 8
+    let columns = 8
+    let cellBits = 8
+    let outRows = mapRows / 2
+    let outColumns = columns / 2
+
+    defModule
+        "MaxPoolCombinational"
+        (fun p ->
+            { inputArray = inPortArray p "in" mapRows columns cellBits
+              outputArray = outPortArray p "out" outRows outColumns cellBits })
+        (fun io ->
+            let maxOf a b = mux (lt a b) b a
+
+            for y in 0 .. outRows - 1 do
+                for x in 0 .. outColumns - 1 do
+                    [ for dy in 0..1 do
+                          for dx in 0..1 -> io.inputArray[2 * y + dy][2 * x + dx] ]
+                    |> List.reduce maxOf
+                    ==> io.outputArray[y][x])
+
+/// A one-pass layer's port bundle: a start pulse in, `complete` high while
+/// the result sits in the destination, fill and probe for the host. No
+/// generation counter — a CNN layer runs once per input, and a counter would
+/// dress a done flag up as a dynamic it does not have.
+type LayerIo =
+    { start: Expr
+      complete: Expr
+      fillAddr: Expr
+      fillData: Expr
+      fillEnable: Expr
+      probeAddr: Expr
+      probeData: Expr }
+
+/// A CNN pooling layer as CNNs actually use one: 2×2 max, **stride 2** — a
+/// 24×24 map of 8-bit cells in, a 12×12 map out, **one pass per start
+/// pulse**, `complete` while the pooled map is valid.
+///
+/// **The compute is the unchanged 8×8 `maxPoolCombinational`, by tiling.**
+/// A 24×24 map is a 3×3 grid of 8×8 tiles, and because 8 is even, no
+/// 2×2/stride-2 window ever crosses a tile edge — so the block composes
+/// without modification. Vertically: `streamWindow` holds 8 rows and
+/// `streamStride` keeps every 8th window, one per tile row. Horizontally:
+/// three instances of the block, side by side, pool a kept window in the
+/// same cycle. Each kept window therefore yields FOUR pooled rows at once,
+/// which land in the destination as one 384-bit word; the probe unpacks a
+/// word and a lane back into rows, so the host still reads by row.
+let maxPool2x2 =
+    let mapRows = 24
+    let columns = 24
+    let cellBits = 8
+    let rowBits = columns * cellBits
+    // The fixed core's edge, and the tiling it induces.
+    let tile = 8
+    let tilesAcross = columns / tile
+    let tilesDown = mapRows / tile
+    let outRows = mapRows / 2
+    let outColumns = columns / 2
+    let outRowBits = outColumns * cellBits
+    // Pooled rows per kept window, packed into one destination word.
+    let groupRows = tile / 2
+    let groupBits = groupRows * outRowBits
+    let addrWidth = bitsToHold mapRows
+    let groupAddrWidth = bitsToHold tilesDown
+    let probeAddrWidth = bitsToHold outRows
+    let laneWidth = bitsToHold groupRows
+    // `streamWindow` over mapRows beats emits mapRows − 7 eight-row windows;
+    // the stride keeps positions 0, 8, 16 — the tile rows.
+    let windowsPerPass = mapRows - (tile - 1)
+    let writtenWidth = bitsToHold (tilesDown + 1)
+
+    defModule
+        "MaxPool2x2"
+        (fun p ->
+            { start = p.inPort "start" 1
+              complete = p.outPort "complete" 1
+              fillAddr = p.inPort "fill_addr" addrWidth
+              fillData = p.inPort "fill_data" rowBits
+              fillEnable = p.inPort "fill_enable" 1
+              probeAddr = p.inPort "probe_addr" probeAddrWidth
+              probeData = p.outPort "probe_data" outRowBits })
+        (fun io ->
+            let phase = machine "pool_phase" [ Resting; Pooling ]
+            let startPulse = wireBit "pool_start"
+            (phase.Is Resting &&& io.start) ==> startPulse
+            If startPulse (fun () -> phase.Goto Pooling)
+
+            let src = blockMem "src" addrWidth rowBits
+            let dst = blockMem "dst" groupAddrWidth groupBits
+            memWrite src io.fillAddr io.fillData (io.fillEnable &&& phase.Is Resting)
+
+            // The probe splits its row address into a word and a lane; the
+            // lane select is registered to arrive with the synchronous word.
+            let word = (memReadPort dst (slice (probeAddrWidth - 1) laneWidth io.probeAddr)).data
+            let laneHeld = reg "probe_lane" laneWidth
+            slice (laneWidth - 1) 0 io.probeAddr ==> laneHeld
+
+            selectIndexed laneHeld [ for r in 0 .. groupRows - 1 -> slice ((r + 1) * outRowBits - 1) (r * outRowBits) word ]
+            ==> io.probeData
+
+            // Three unchanged 8×8 blocks pool a kept window side by side; the
+            // slicing into their byte grids and the packing of their outputs
+            // into the group word is all this layer writes.
+            let tiledPool (win: Expr list) =
+                // The newest window row is the live read-port word — name the
+                // rows so they slice.
+                let rows =
+                    [ for r, row in List.indexed win ->
+                          let named = wire $"pool_row%d{r}" rowBits
+                          row ==> named
+                          named ]
+
+                let cores =
+                    [ for t in 0 .. tilesAcross - 1 -> maxPoolCombinational.NewNamed $"tile%d{t}" ]
+
+                for t in 0 .. tilesAcross - 1 do
+                    for r in 0 .. tile - 1 do
+                        for x in 0 .. tile - 1 do
+                            let column = t * tile + x
+
+                            slice (column * cellBits + cellBits - 1) (column * cellBits) rows[r]
+                            ==> cores[t].inputArray[r][x]
+
+                catAll
+                    [ for r in groupRows - 1 .. -1 .. 0 ->
+                          catAll
+                              [ for j in outColumns - 1 .. -1 .. 0 ->
+                                    cores[j / (tile / 2)].outputArray[r][j % (tile / 2)] ] ]
+
+            let pooledGroups =
+                rangeStream startPulse mapRows
+                |> (blockReadWindow "src_port" src).read
+                |> streamWindow (Some mapRows) tile
+                |> streamStride (Some windowsPerPass) tile
+                |> Stream.mapTo (layout1 ("group", groupBits)) tiledPool
+
+            let written = reg "written" writtenWidth
+            lit 1UL 1 ==> pooledGroups.ready
+            memWrite dst (slice (groupAddrWidth - 1) 0 written) pooledGroups.payload pooledGroups.valid
+            If pooledGroups.valid (fun () -> written + lit 1UL writtenWidth ==> written)
+            If startPulse (fun () -> lit 0UL writtenWidth ==> written)
+
+            let landed = eq written (lit (uint64 tilesDown) writtenWidth)
+            If (phase.Is Pooling &&& landed) (fun () -> phase.Goto Resting)
+
+            // High from the pass's end until the next start clears `written`.
+            (phase.Is Resting &&& landed) ==> io.complete)
+
 /// Dynamic-irregular access — the bottom row of the table: the second address
 /// exists only after the first read answers, so no window can precompute the
 /// reuse and the gather pays real cycles. A two-hop indirect load, B[A[i]],

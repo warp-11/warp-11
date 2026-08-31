@@ -1045,6 +1045,40 @@ let neighborhood (stencil: Stencil) (edge: Edge) (grid: Expr list list) (y: int)
 
     [ for dy, dx in offsets -> sample (y + dy) (x + dx) ]
 
+/// A finite index stream: on a start pulse, the values 0 … n−1 in order, one
+/// per accepted beat, then quiet until the next pulse. Every scan in every
+/// design begins with this machine written by hand — composed into a window
+/// it is the whole read schedule: `window.read (rangeStream start beats)`.
+/// A pulse mid-run restarts from zero.
+let rangeStream (start: Expr) (n: int) : Stream<Expr> =
+    if n < 1 then
+        failwith $"rangeStream over %d{n} values — there is nothing to emit"
+
+    let b = current ()
+    // `bitsToHold n` covers 0 … n−1 — the values, including the terminal
+    // compare against n−1, which an off-by-one here would make unreachable
+    // and the stream unending.
+    let w = bitsToHold n
+    let index = reg (b.FreshName "range_index") w
+    let active = regBit (b.FreshName "range_active")
+    let ready = wireBit (b.FreshName "range_ready")
+    b.RegisterStreamReady ready
+
+    If (active &&& ready) (fun () ->
+        ifElse
+            [ eq index (lit (uint64 (n - 1)) w), fun () -> lit 0UL 1 ==> active
+              otherwise, fun () -> index + lit 1UL w ==> index ])
+
+    // After the advance, so a restart pulse wins over it.
+    If start (fun () ->
+        lit 1UL 1 ==> active
+        lit 0UL w ==> index)
+
+    { payload = index
+      valid = active
+      ready = ready
+      layout = layout1 ("index", w) }
+
 /// The layout of a `count`-beat window whose entries are `w` bits — field
 /// names `{name}0 … {name}{count−1}`, oldest first.
 let private beatsLayout (name: string) (count: int) (w: int) : Layout<Expr list> =
@@ -1116,6 +1150,56 @@ let streamWindow (frame: int option) (k: int) (s: Stream<Expr>) : Stream<Expr li
       valid = s.valid &&& primed
       ready = outReady
       layout = beatsLayout "beat" k p }
+
+/// Every n-th beat of a stream, dropping the rest — a stride is downstream
+/// decimation (a pooling layer's stride 2, a decimating filter's rate
+/// change). Beat 0 of each frame is kept, and the count re-aligns at frame
+/// boundaries, so a stride over a windowed stream keeps the geometrically
+/// right windows even when the frame length does not divide by the stride.
+/// `n = 1` is a pass-through (the scales-to-one rule); n is a power of two,
+/// so "kept" is a low-bits-are-zero slice rather than a divider. A dropped
+/// beat is consumed — upstream never stalls on it.
+let streamStride (frame: int option) (n: int) (s: Stream<'p>) : Stream<'p> =
+    if n < 1 then
+        failwith $"streamStride of %d{n} — a stride is at least 1"
+    elif n = 1 then
+        s
+    else
+        let strideBits = ceilLog2 n
+
+        if (1 <<< strideBits) <> n then
+            failwith $"streamStride of %d{n} — a stride is a power of two, so keeping is a slice"
+
+        match frame with
+        | Some m when m < n -> failwith $"streamStride: a %d{m}-beat frame is shorter than the %d{n} stride"
+        | _ -> ()
+
+        let b = current ()
+
+        let counterWrap =
+            match frame with
+            | Some m -> m
+            | None -> n
+
+        let w = bitsToHold counterWrap
+        let position = reg (b.FreshName "stride_position") w
+        let keep = wireBit (b.FreshName "stride_keep")
+        eq (slice (strideBits - 1) 0 position) (lit 0UL strideBits) ==> keep
+
+        let outReady = wireBit (b.FreshName "stride_ready")
+        b.RegisterStreamReady outReady
+
+        // Dropping, accept unconditionally; keeping, accept as the beat is taken.
+        (bnot keep ||| outReady) ==> s.ready
+
+        If (s.valid &&& s.ready) (fun () ->
+            ifElse
+                [ eq position (lit (uint64 (counterWrap - 1)) w), fun () -> lit 0UL w ==> position
+                  otherwise, fun () -> position + lit 1UL w ==> position ])
+
+        { s with
+            valid = s.valid &&& keep
+            ready = outReady }
 
 /// The shape of a 2D sliding window — what `lineWindow` needs to know beyond
 /// the stream it sweeps. The kernel it serves is `rows` tall and
