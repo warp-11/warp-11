@@ -41,6 +41,8 @@ let catalog =
           // Tier 2 — the ready/valid layer, in the order it builds up.
           entry "Stream pipe" (nameof streamPipe) (fun () -> streamPipe)
           entry "Stream stages" (nameof streamStages) (fun () -> streamStages)
+          entry "Your own stage" (nameof ownStage) (fun () -> ownStage)
+          |> poking [ "in_value", 5UL; "in_valid", 1UL; "out_ready", 1UL ]
           entry "Buffering" (nameof streamBuffer) (fun () -> streamBuffer)
           entry "Fork and join" (nameof streamFork) (fun () -> streamFork)
           entry "Farm" (nameof streamFarm) (fun () -> streamFarm)

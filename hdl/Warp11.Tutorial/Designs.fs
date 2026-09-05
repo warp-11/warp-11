@@ -364,6 +364,63 @@ let streamStages =
     design "StreamStages" (fun () ->
         Stream.input "in" beatLayout |> Stream.stages 3 bump |> Stream.out "out")
 
+/// The worker's port bundle: one stream in, one stream out. Each `StreamPorts`
+/// group is a data word, its valid, and the ready that answers it — which side
+/// of the handshake each wire is on is decided by the declaring helper, so the
+/// record reads the same at definition and over an instance's staging wires.
+type SlowWorkerIo =
+    { input: StreamPorts
+      output: StreamPorts }
+
+/// The calculation, with no streams in sight — the recursion
+///
+///     let rec delay n out =
+///         if n = 0 then out
+///         else delay (n - 1) out
+///
+/// applied as `delay cycles (bump beat)`, taken apart per `Iteration`: the
+/// arguments `(n, out)` are the state, each recursive call is one cycle's
+/// `step`, `n = 0` is the base case, and `out` is what it returns.
+let private grind cycles : Iteration<Expr, Expr * Expr, Expr> =
+    { state = layout2 ("remaining", 8) ("value", 8)
+      init = fun beat -> lit (uint64 cycles) 8, bump beat
+      step = fun (n, out) -> n - lit 1UL 8, out
+      finished = fun (n, _) -> eq n (lit 0UL 8)
+      result = fun (_, out) -> out }
+
+/// A worker that GRINDS: accepts a beat, works `cycles` cycles, then offers
+/// the bumped result. Both sides of its boundary speak ready/valid — the flow
+/// control belongs to the module, not to whoever instantiates it — and the
+/// body crosses that boundary through `streamOfPorts`/`streamToPorts`, so
+/// inside it the stream API is the same one a design body speaks.
+let slowWorker cycles =
+    defModule
+        $"SlowWorker%d{cycles}"
+        (fun p ->
+            { input = streamInPorts p "in" 8
+              output = streamOutPorts p "out" 8 })
+        (fun io ->
+            streamOfPorts beatLayout io.input
+            |> streamIterate beatLayout (grind cycles)
+            |> streamToPorts io.output)
+
+/// The call shape, an ordinary function beside the module: one named instance
+/// per call, its input side fed from the caller's stream, its output side
+/// handed back as one. The same two helpers the body used, pointed at the
+/// instance's staging wires instead of the real ports.
+let slowWorkerOf cycles instName (s: Stream<Expr>) : Stream<Expr> =
+    let c = (slowWorker cycles).NewNamed instName
+    streamToPorts c.input s
+    streamOfPorts beatLayout c.output
+
+/// A module with flow-control IO, dropped into a chain as if it were any
+/// library stage — because from the chain's side it is one.
+let ownStage =
+    design "OwnStage" (fun () ->
+        Stream.input "in" beatLayout
+        |> slowWorkerOf 3 "worker"
+        |> Stream.out "out")
+
 /// One beat in, two out: broadcast copies every beat to both branches, which
 /// do different work and merge back. A broadcast beat fires only when both
 /// branches can take it — the slower branch sets the pace.

@@ -606,6 +606,39 @@ let private pagesTellTheTruth () =
 
         idle && started && identity && readback && elapsed > 0UL
 
+    // Your own stage: the worker accepts, grinds with `in_ready` low, offers
+    // the bumped beat on step 5, accepts again on step 6 — one beat per
+    // cycles+3 — and a stalled sink holds the offer without losing it.
+    let workerGrinds =
+        let sim = Sim ownStage
+        sim.Poke("in_value", 5UL)
+        sim.Poke("in_valid", 1UL)
+        sim.Poke("out_ready", 1UL)
+
+        let trace =
+            [ for _ in 1..6 do
+                  sim.Tick()
+                  yield sim.Peek "in_ready", sim.Peek "out_valid" ]
+
+        let grindsThenOffers =
+            trace = [ 0UL, 0UL; 0UL, 0UL; 0UL, 0UL; 0UL, 0UL; 0UL, 1UL; 1UL, 0UL ]
+            && sim.Peek "out_value" = 6UL
+
+        // Beat 2 was accepted on step 6; stall the sink while it grinds.
+        sim.Poke("out_ready", 0UL)
+        for _ in 1..8 do sim.Tick()
+
+        let holdsUnderStall =
+            sim.Peek "out_valid" = 1UL
+            && sim.Peek "in_ready" = 0UL
+            && sim.Peek "out_value" = 6UL
+
+        sim.Poke("out_ready", 1UL)
+        sim.Tick()
+        let releases = sim.Peek "out_valid" = 0UL && sim.Peek "in_ready" = 1UL
+
+        grindsThenOffers && holdsUnderStall && releases
+
     // The arm gate, which is a hardware-safety property before it is a
     // correctness one: with no base address the master must not issue at all.
     let masterStaysDisarmed =
@@ -659,6 +692,7 @@ let private pagesTellTheTruth () =
     && instancesAreIndependent
     && oneHotRoundTrips
     && stallHolds
+    && workerGrinds
 
 let private report name ok =
     printfn "%-34s%b" (name + ":") ok

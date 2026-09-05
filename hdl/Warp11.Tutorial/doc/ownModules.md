@@ -171,6 +171,8 @@ named in the Verilog and grouped in the debugger — the hardware is the same.
 
 - [**Dot product**](dotProduct.md) — the consumer side: stdlib entries that are
   secretly modules.
+- [**Your own stage**](ownStage.md) — the same wrapper pattern for a module
+  whose ports carry a ready/valid handshake.
 - [**Counter**](counter.md) — the register and enable idiom `SatAcc8` is built
   from.
 - [**Shared unit**](sharedUnit.md) — when you *want* one piece of hardware

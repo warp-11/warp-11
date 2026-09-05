@@ -81,5 +81,6 @@ The `Flow` type exists for the case where you genuinely do not need this — see
 ## See also
 
 - [**Stream pipe**](streamPipe.md) — the same chain with no storage, where a stall is instant.
+- [**Your own stage**](ownStage.md) — a stage that is a module of your own, with the handshake at its ports.
 - [**Farm**](streamFarm.md) — several chains of *different* depth, and what that does to order.
 - [**Stall probes**](streamProbes.md) — measuring where the stalls actually are.

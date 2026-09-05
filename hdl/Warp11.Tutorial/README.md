@@ -61,6 +61,8 @@ substrates real accelerators are built from.
 - **Stream pipe** — the two-wire contract, and that `map` is free.
 - **Stream stages** — latency and throughput are different things, which is why
   pipelines get *deeper* to go faster.
+- **Your own stage** — a module whose ports carry the handshake, and the
+  three-line wrapper that drops it into a chain as if the library wrote it.
 - **Buffering** — a FIFO absorbs a burst, and its storage is not part of its
   contract: the depth decides LUTs or a block, and nothing a caller can name.
 - **Fork and join** — broadcast is lockstep; merge arbitrates and does not
