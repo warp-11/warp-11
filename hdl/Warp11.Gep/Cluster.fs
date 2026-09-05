@@ -400,7 +400,7 @@ let gepClusterPool (shape: GepClusterShape) (prefix: string) (cfg: GepClusterCon
 
             let selWord = wire $"{prefix}_selWord" 32
 
-            instanceNamed $"{prefix}_selRng" (xoshiro128pp "ClusterSelXoshiro128pp") selLoad ac.autoSeed selStep
+            xoshiro128pp "ClusterSelXoshiro128pp" $"{prefix}_selRng" selLoad ac.autoSeed selStep
             ==> selWord
 
             let selDrawIdx = wire $"{prefix}_selDrawIdx" 16

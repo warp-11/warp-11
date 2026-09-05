@@ -679,7 +679,7 @@ let prng =
         let load = inputBit "load"
         let seed = [ for i in 0..3 -> input $"seed{i}" 32 ]
 
-        let word = instanceNamed "rng" (xoshiro128pp "Xoshiro128pp") load seed step
+        let word = xoshiro128pp "Xoshiro128pp" "rng" load seed step
 
         let value = output "value" 32
         word ==> value

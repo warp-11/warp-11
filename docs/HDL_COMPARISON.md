@@ -95,7 +95,7 @@ Newer (~2023). NOT an embedded DSL — it's a standalone language with its own s
 | HardCaml | OCaml records via PPX deriver |
 | Amaranth | `lib.wiring.Signature` and `Component` |
 | Clash | Type-level via Haskell records |
-| Warp 11 | `defineModule` with a re-runnable IO factory, so a module's ports are a typed value (tuple or record) at both definition and use. **Instances are functions**: instantiating returns the module's own function, so a call site cannot tell a module from inline logic. Streams carry typed `Layout` payloads and `Union2` sum types; `Number` gives a format — width, fraction bits, signedness — so Q4.28 × Q4.28 is Q8.56 by construction and a mismatch fails at elaboration |
+| Warp 11 | `defModule` with a re-runnable IO factory, so a module's ports are a typed value (tuple or record) at both definition and use — instantiating hands the same bundle back. **Instances read as functions**: a module's call shape is an ordinary wrapper function beside it (or `liftUnary`/`liftBinary` for the operand shapes), so a call site cannot tell a module from inline logic. Streams carry typed `Layout` payloads and `Union2` sum types; `Number` gives a format — width, fraction bits, signedness — so Q4.28 × Q4.28 is Q8.56 by construction and a mismatch fails at elaboration |
 
 Two things here have no direct analogue in the field surveyed. **Call-site
 invariance**: `dot2Ambient` and `dot2Inline` are character-for-character the

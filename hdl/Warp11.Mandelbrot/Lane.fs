@@ -33,7 +33,7 @@ open Warp11.Mandelbrot.Step
 let laneIterWidth maxIter =
     bitsToHold (max (maxIter - 1) 1 + 1) |> max 1
 
-let mandelBarrelLane (maxIter: int) (fracBits: int) (nThreads: int) (addrWidth: int) =
+let mandelBarrelLaneDef (maxIter: int) (fracBits: int) (nThreads: int) (addrWidth: int) =
     if maxIter < 1 || maxIter > 256 then
         failwith $"maxIter must fit an 8-bit iter range, got %d{maxIter}"
 
@@ -49,7 +49,7 @@ let mandelBarrelLane (maxIter: int) (fracBits: int) (nThreads: int) (addrWidth: 
     let iterWidth = laneIterWidth maxIter
     let step = mandelStep fracBits
 
-    defineModule
+    defModule
         $"MandelBarrelLane_max%d{maxIter}_n%d{nThreads}_a%d{addrWidth}"
         (fun p ->
             (p.inPort "px_cx" 32,
@@ -62,21 +62,7 @@ let mandelBarrelLane (maxIter: int) (fracBits: int) (nThreads: int) (addrWidth: 
              p.outPort "res_valid" 1,
              p.inPort "res_ready" 1,
              p.outPort "all_idle" 1))
-        (fun m (pxCx, pxCy, pxAddr, pxValid, pxReady, resAddr, resIter, resValid, resReady, allIdle) (px: Stream<Expr * Expr * Expr>) ->
-            let cx, cy, addr = px.payload
-            cx ==> pxCx
-            cy ==> pxCy
-            addr ==> pxAddr
-            px.valid ==> pxValid
-            pxReady ==> px.ready
-            m.RegisterStreamReady resReady
-
-            { payload = (resAddr, resIter)
-              valid = resValid
-              ready = resReady
-              layout = layout2 ("addr", addrWidth) ("iter", iterWidth) },
-            allIdle)
-        (fun (pxCx, pxCy, pxAddr, pxValid, pxReady, resAddr, resIter, resValid, resReady, allIdle) _ ->
+        (fun (pxCx, pxCy, pxAddr, pxValid, pxReady, resAddr, resIter, resValid, resReady, allIdle) ->
             // ---- per-thread slot state: async-read register files ----
             // Single write site each: cx/cy/addr written at issue, zx/zy only
             // on continue, iter on every valid writeback (continue: +1, done:
@@ -133,7 +119,7 @@ let mandelBarrelLane (maxIter: int) (fracBits: int) (nThreads: int) (addrWidth: 
             let issueValid = wireBit "issueValid"
             (curActive ||| pull) ==> issueValid
 
-            let writebackZxN, writebackZyN, writebackEsc = instanceNamed "step" step issueZx issueZy issueCx issueCy
+            let writebackZxN, writebackZyN, writebackEsc = step "step" issueZx issueZy issueCx issueCy
 
             // ---- writeback, mandelStepLatency cycles after issue ----
             let writebackTurn = cone.Carry "writebackTurn" threadWidth turn
@@ -191,6 +177,28 @@ let mandelBarrelLane (maxIter: int) (fracBits: int) (nThreads: int) (addrWidth: 
             List.reduce (|||) (List.map2 (|||) active pend) ==> anyBusy
             bnot anyBusy ==> allIdle)
 
+/// One lane instance under `instName`, called as a stage: the pixel stream
+/// in, the (result stream, all_idle) pair out.
+let mandelBarrelLane (maxIter: int) (fracBits: int) (nThreads: int) (addrWidth: int) instName (px: Stream<Expr * Expr * Expr>) =
+    let iterWidth = laneIterWidth maxIter
+
+    let pxCx, pxCy, pxAddr, pxValid, pxReady, resAddr, resIter, resValid, resReady, allIdle =
+        (mandelBarrelLaneDef maxIter fracBits nThreads addrWidth).NewNamed instName
+
+    let cx, cy, addr = px.payload
+    cx ==> pxCx
+    cy ==> pxCy
+    addr ==> pxAddr
+    px.valid ==> pxValid
+    pxReady ==> px.ready
+    registerStreamReady resReady
+
+    { payload = (resAddr, resIter)
+      valid = resValid
+      ready = resReady
+      layout = layout2 ("addr", addrWidth) ("iter", iterWidth) },
+    allIdle
+
 /// The whole-pixel software twin: iterate with `stepTwin` from z=0 until the
 /// step escapes or the issue iteration reaches maxIter-1, reporting the issue
 /// iteration — exactly the lane's writeback rule.
@@ -209,7 +217,7 @@ let laneTwin (fracBits: int) (maxIter: int) (cx: uint64) (cy: uint64) =
 let mandelLaneHarness =
     design "MandelLaneHarness" (fun () ->
         let px = streamInput "px" (layout3 ("cx", 32) ("cy", 32) ("addr", 8))
-        let res, allIdle = instanceNamed "lane" (mandelBarrelLane 8 28 8 8) px
+        let res, allIdle = mandelBarrelLane 8 28 8 8 "lane" px
         streamOutput "res" res
         let idle = outputBit "all_idle"
         allIdle ==> idle)

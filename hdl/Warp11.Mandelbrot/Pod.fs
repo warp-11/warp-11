@@ -46,8 +46,8 @@ let resultLayout = layout2 ("pixel", 12) ("iter", 8)
 /// owns indices `4k + lane_base`, so `cat count base` is the next index and no
 /// adder exists. The lane index arrives as a constant-driven input port, which
 /// is what keeps all four instances one module.
-let mandelLane =
-    defineModule
+let mandelLaneDef =
+    defModule
         "MandelLane"
         (fun p ->
             (p.inPort "lane_base" 2,
@@ -55,15 +55,7 @@ let mandelLane =
              p.outPort "out_iter" 8,
              p.outPort "out_valid" 1,
              p.inPort "out_ready" 1))
-        (fun m (laneBase, outPixel, outIter, outValid, outReady) baseValue ->
-            baseValue ==> laneBase
-            m.RegisterStreamReady outReady
-
-            { payload = (outPixel, outIter)
-              valid = outValid
-              ready = outReady
-              layout = resultLayout })
-        (fun (laneBase, outPixel, outIter, outValid, outReady) _ ->
+        (fun (laneBase, outPixel, outIter, outValid, outReady) ->
             let zxMem = distributedMem "zx" 2 32
             let zyMem = distributedMem "zy" 2 32
             let cxMem = distributedMem "cx" 2 32
@@ -154,6 +146,18 @@ let mandelLane =
 
             If reload (fun () -> count + lit 1UL 10 ==> count))
 
+/// One lane instance under `instName`: the lane's stride base in, the
+/// (pixel, iter) result stream out.
+let mandelLane instName (baseValue: Expr) =
+    let laneBase, outPixel, outIter, outValid, outReady = mandelLaneDef.NewNamed instName
+    baseValue ==> laneBase
+    registerStreamReady outReady
+
+    { payload = (outPixel, outIter)
+      valid = outValid
+      ready = outReady
+      layout = resultLayout }
+
 /// The pod: four lanes, the merge tree, and a framebuffer as the sole (always
 /// ready) consumer. `done` rises when every pixel's result has landed; the
 /// merged beat is also exported at ports so the differential oracle sees the
@@ -175,7 +179,7 @@ type private PodParts =
 /// AXI wrapper are the same elaboration behind different boundaries.
 let private mandelPodParts () : PodParts =
     let lanes =
-        [ for i in 0 .. 3 -> instanceNamed $"lane%d{i}" mandelLane (lit (uint64 i) 2) ]
+        [ for i in 0 .. 3 -> mandelLane $"lane%d{i}" (lit (uint64 i) 2) ]
 
     // The framebuffer write cannot refuse a result, and never needed to: the
     // lanes are rate-matched to it by construction.

@@ -204,9 +204,9 @@ let audioBatchAxi =
         let rightGains = batchMap.gains |> List.map (fun g -> slice 31 16 (regs.value g))
 
         let processed, _envelope =
-            instanceNamed
+            multibandCompressor
+                "MultibandCompressor8"
                 "mb"
-                (multibandCompressor "MultibandCompressor8")
                 (regs.value batchMap.threshold)
                 (regs.value batchMap.ratio)
                 (regs.value batchMap.attack)
@@ -283,7 +283,7 @@ let multibandStageRef =
         let rightGains = List.init multibandBands (fun i -> input $"rg{i}" 16)
 
         let stage, _envelope =
-            instanceNamed "mb" (multibandCompressor "MultibandCompressor8") threshold ratio attack releaseRate leftGains rightGains
+            multibandCompressor "MultibandCompressor8" "mb" threshold ratio attack releaseRate leftGains rightGains
             |> fun apply -> apply (streamInput "in" sampleLayout)
 
         streamOutput "out" stage)
@@ -299,7 +299,7 @@ let gainStage =
         let mute = inputBit "mute"
 
         streamInput "in" sampleLayout
-        |> instanceNamed "g" (audioGain "AudioGain") volume mute
+        |> audioGain "AudioGain" "g" volume mute
         |> streamOutput "out")
 
 let eqStage =
@@ -307,7 +307,7 @@ let eqStage =
         let coeffs = [ for n in [ "b0"; "b1"; "b2"; "a1"; "a2" ] -> input n biquadCoeffWidth ]
 
         streamInput "in" sampleLayout
-        |> instanceNamed "eq" (audioEqBand "AudioEqBand") coeffs
+        |> audioEqBand "AudioEqBand" "eq" coeffs
         |> streamOutput "out")
 
 let compressorStage =
@@ -319,7 +319,7 @@ let compressorStage =
         let makeup = input "makeup" 16
 
         streamInput "in" sampleLayout
-        |> instanceNamed "c" (audioCompressor "AudioCompressor") threshold ratio attack releaseRate makeup
+        |> audioCompressor "AudioCompressor" "c" threshold ratio attack releaseRate makeup
         |> streamOutput "out")
 
 let limiterStage =
@@ -327,7 +327,7 @@ let limiterStage =
         let threshold = input "threshold" sampleWidth
 
         streamInput "in" sampleLayout
-        |> instanceNamed "l" (audioLimiter "AudioLimiter") threshold
+        |> audioLimiter "AudioLimiter" "l" threshold
         |> streamOutput "out")
 
 // ---------------------------------------------------------------------------
@@ -379,9 +379,9 @@ let driftHarness =
         If accepted (fun () -> sample + lit 1UL sampleWidth ==> sample)
 
         let out, envelope =
-            instanceNamed
+            multibandCompressor
+                "MultibandCompressor8"
                 "mb"
-                (multibandCompressor "MultibandCompressor8")
                 (lit 200_000UL sampleWidth)
                 (lit 4UL 8)
                 (lit (1UL <<< 14) 16)
@@ -435,5 +435,5 @@ let firStage =
         let preset = input "preset" 2
 
         streamInput "in" sampleLayout
-        |> instanceNamed "fir" (audioFir "AudioFir" 16 48_000.0 4_000.0 400.0) preset
+        |> audioFir "AudioFir" 16 48_000.0 4_000.0 400.0 "fir" preset
         |> streamOutput "out")

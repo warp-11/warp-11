@@ -130,7 +130,7 @@ type internal StreamTracker() =
 /// Held on a stack rather than threaded through the design, which is what
 /// makes a module body ordinary F# code: `mul8 a b` is a call, not a call
 /// with a context argument. Designs rarely name this type; they get it from
-/// `design`, `moduleDef` or `defineModule` and never see it again.
+/// `design`, `moduleDef` or `defModule` and never see it again.
 type Builder(name: string, ?clockSpec: ClockSpec) =
     do requireNotVerilogKeyword name "a module"
     let clock = defaultArg clockSpec defaultClock
@@ -389,10 +389,13 @@ type Builder(name: string, ?clockSpec: ClockSpec) =
         this.Assign(r, MemRead(mem.memName, addr, mem.memWidth))
         r
 
-    /// Instantiate a module under a given name, returning it as a function. Its
-    /// ports become `{instName}_{port}` staging wires in this module, each carrying
-    /// the port's own type so a signed port stays signed across the boundary.
-    member this.Instance<'io, 'fn>(instName: string, tm: TypedModule<'io, 'fn>) : 'fn =
+    /// Instantiate a module under a given name, handing back its port bundle.
+    /// Its ports become `{instName}_{port}` staging wires in this module, each
+    /// carrying the port's own type so a signed port stays signed across the
+    /// boundary, and the bundle is the module's own `io` re-run over those
+    /// staging nets — the caller wires it, or a wrapper function beside the
+    /// module does.
+    member this.Instance<'io>(instName: string, tm: TypedModule<'io>) : 'io =
         requireNotVerilogKeyword instName "an instance"
         instances.Add { instName = instName; child = tm.def }
 
@@ -413,16 +416,14 @@ type Builder(name: string, ?clockSpec: ClockSpec) =
         let net n w = Ref($"{instName}_{n}", UInt w)
         let netAs n (t: GroundType) = Ref($"{instName}_{n}", t)
 
-        tm.apply
-            this
-            (tm.io
-                { inPort = net
-                  outPort = net
-                  inPortAs = netAs
-                  outPortAs = netAs })
+        tm.io
+            { inPort = net
+              outPort = net
+              inPortAs = netAs
+              outPortAs = netAs }
 
     /// The same, with a name derived from the module's.
-    member this.Instance<'io, 'fn>(tm: TypedModule<'io, 'fn>) : 'fn =
+    member this.Instance<'io>(tm: TypedModule<'io>) : 'io =
         this.Instance(this.NextName tm.def.name, tm)
 
     /// Finish elaboration and hand back the module. Dangling conditionals flush
@@ -519,14 +520,15 @@ type Builder(name: string, ?clockSpec: ClockSpec) =
           probes = List.ofSeq streams.Probes
           stateMachines = [ for machine in machines.Machines -> machine.stateReg, machine.states ] }
 
-/// A module definition together with the two things that make it callable: how
-/// to view its ports as a typed value, and how to wire an instance up as a
-/// function of that view. `defineModule` builds one; `instance` and the `lift`
-/// family turn one into something a call site can apply.
-and TypedModule<'io, 'fn> =
+/// A module definition together with the typed view of its ports. `defModule`
+/// builds one; instantiating (`.New`, `.NewNamed`) re-runs `io` over the
+/// instance's staging wires and hands the same bundle back, so a call site
+/// sees exactly what the definition saw. Any richer call shape — a module
+/// applied as a function — is an ordinary wrapper function beside the module,
+/// never part of this type.
+and TypedModule<'io> =
     { def: ModuleDef
-      io: Ports -> 'io
-      apply: Builder -> 'io -> 'fn }
+      io: Ports -> 'io }
 
 /// Returned by `Builder.If`. The only way to call `Else` — dropping this
 /// without calling `.Else` is the else-less case, exactly as before, but a
@@ -578,17 +580,20 @@ let moduleDef name (body: Builder -> unit) =
 
     b.Def
 
-/// Define a module once, with a typed view of its ports and a call shape.
+/// A module defined as what it is: a bundle of ports, and one body over them.
 ///
-/// `io` declares the ports and packages them however the definition wants to
-/// see them; `apply` says what instantiating one *is* at a call site — usually
-/// "drive these inputs, hand back that output"; `body` is the module's
-/// contents, elaborated with the module ambient so it reads like any other
-/// design code.
+/// `io` declares the port bundle — a record shaped however the module wants —
+/// and `body` is the whole contents, ordinary design code over those wires,
+/// elaborated with the module ambient. There is no third piece. Instantiating
+/// hands the same bundle back over the instance's staging wires (`.New`, or
+/// `.NewNamed` where the instance's name matters) and the caller wires it —
+/// or wraps the wiring in an ordinary function beside the module, when a call
+/// shape is worth naming. The mapping between domain values and wires is
+/// always plain code at one of those two places, never machinery.
 ///
 /// The result is re-runnable: `io` runs again per instance, so a call site
 /// gets fresh port references rather than a shared record.
-let defineModule name (io: Ports -> 'io) (apply: Builder -> 'io -> 'fn) (body: 'io -> Builder -> unit) =
+let defModule name (io: Ports -> 'io) (body: 'io -> unit) : TypedModule<'io> =
     let b = Builder(name)
 
     let ioValue =
@@ -603,54 +608,11 @@ let defineModule name (io: Ports -> 'io) (apply: Builder -> 'io -> 'fn) (body: '
     elaborating.Push b
 
     try
-        body ioValue b
+        body ioValue
     finally
         elaborating.Pop() |> ignore
 
-    { def = b.Def
-      io = io
-      apply = apply }
-
-/// A module that is a pure function of one input. The output width is measured
-/// by running `f` on a reference — widths live in the values, so the definition
-/// does not have to be told.
-let fnModule1 name (an, aw) outName (f: Expr -> Expr) =
-    let outWidth = width (f (Ref(an, UInt aw)))
-
-    defineModule
-        name
-        (fun p -> (p.inPort an aw, p.outPort outName outWidth))
-        (fun m (pa, po) x ->
-            m.Assign(pa, x)
-            po)
-        (fun (ia, o) m -> m.Assign(o, f ia))
-
-/// The same for two inputs.
-let fnModule2 name (an, aw) (bn, bw) outName (f: Expr -> Expr -> Expr) =
-    let outWidth = width (f (Ref(an, UInt aw)) (Ref(bn, UInt bw)))
-
-    defineModule
-        name
-        (fun p -> (p.inPort an aw, p.inPort bn bw, p.outPort outName outWidth))
-        (fun m (pa, pb, po) x y ->
-            m.Assign(pa, x)
-            m.Assign(pb, y)
-            po)
-        (fun (ia, ib, o) m -> m.Assign(o, f ia ib))
-
-/// The same for three.
-let fnModule3 name (an, aw) (bn, bw) (cn, cw) outName (f: Expr -> Expr -> Expr -> Expr) =
-    let outWidth = width (f (Ref(an, UInt aw)) (Ref(bn, UInt bw)) (Ref(cn, UInt cw)))
-
-    defineModule
-        name
-        (fun p -> (p.inPort an aw, p.inPort bn bw, p.inPort cn cw, p.outPort outName outWidth))
-        (fun m (pa, pb, pc, po) x y z ->
-            m.Assign(pa, x)
-            m.Assign(pb, y)
-            m.Assign(pc, z)
-            po)
-        (fun (ia, ib, ic, o) m -> m.Assign(o, f ia ib ic))
+    { def = b.Def; io = io }
 
 let private designWith (b: Builder) (body: unit -> unit) =
     elaborating.Push b
@@ -781,19 +743,6 @@ let connect (target: Expr) (value: Expr) = (current ()).Assign(target, value)
 /// is the neighbour supplying it, and there is never a second opinion about how
 /// wide a connection is.
 let inline (==>) value (target: Expr) = connect target ((Widen $ value) (width target))
-
-/// A module defined as what it is: a bundle of ports, and one body over them.
-///
-/// `io` declares the port bundle — a record shaped however the module wants —
-/// and `body` is the whole contents, ordinary design code over those wires.
-/// There is no third piece. Instantiating hands the same bundle back over the
-/// instance's staging wires (`.New`, or `.NewNamed` where the instance's name
-/// matters) and the caller wires it — or wraps the wiring in an ordinary
-/// function beside the module, when a call shape is worth naming. The mapping
-/// between domain values and wires is always plain code at one of those two
-/// places, never machinery.
-let defModule name (io: Ports -> 'io) (body: 'io -> unit) : TypedModule<'io, 'io> =
-    defineModule name io (fun _ bundle -> bundle) (fun bundle _ -> body bundle)
 
 /// A claim about the design, checked every cycle by a Sim built with
 /// `checkAsserts = true` and by the emitted Verilog under a simulator that
@@ -1048,45 +997,63 @@ let memRead (m: Mem) addr =
 /// should be.
 let internal memReadNextCycle m addr = (current ()).SyncRead(m, addr)
 
-/// Turn a module into a function that creates a fresh instance on every call.
-let liftUnary (tm: TypedModule<'io, Expr -> Expr>) = fun x -> (current ()).Instance(tm) x
+/// Call a one-input module as a function: a fresh instance per call, its
+/// input driven from the argument, its output the result. This is the whole
+/// of "a module applied as a function" — a layer over `defModule`'s bundles,
+/// owed nothing by the core.
+let liftUnary (tm: TypedModule<Expr * Expr>) =
+    fun x ->
+        let (a, o) = (current ()).Instance tm
+        connect a x
+        o
 
 /// The same for a module of two operands.
-let liftBinary (tm: TypedModule<'io, Expr -> Expr -> Expr>) =
-    fun x y -> (current ()).Instance(tm) x y
+let liftBinary (tm: TypedModule<Expr * Expr * Expr>) =
+    fun x y ->
+        let (a, b, o) = (current ()).Instance tm
+        connect a x
+        connect b y
+        o
+
+/// A module that is a pure function of one input, as an (input, output)
+/// bundle `liftUnary` can call. The output width is measured by running `f`
+/// on a reference — widths live in the values, so the definition does not
+/// have to be told.
+let fnModule1 name (an, aw) outName (f: Expr -> Expr) =
+    let outWidth = width (f (Ref(an, UInt aw)))
+
+    defModule name (fun p -> (p.inPort an aw, p.outPort outName outWidth)) (fun (ia, o) -> connect o (f ia))
+
+/// The same for two inputs.
+let fnModule2 name (an, aw) (bn, bw) outName (f: Expr -> Expr -> Expr) =
+    let outWidth = width (f (Ref(an, UInt aw)) (Ref(bn, UInt bw)))
+
+    defModule
+        name
+        (fun p -> (p.inPort an aw, p.inPort bn bw, p.outPort outName outWidth))
+        (fun (ia, ib, o) -> connect o (f ia ib))
 
 /// A module whose body is ordinary ambient code — regs, wires, `==>` — rather than a
 /// pure function of its inputs. `build` runs inside the module's own context and
 /// returns the expression that drives the output. Output width is declared, not
 /// inferred: running the body to measure it would declare its registers.
 let stateModule1 name (an, aw) (outName, ow) (build: Expr -> Expr) =
-    defineModule
-        name
-        (fun p -> (p.inPort an aw, p.outPort outName ow))
-        (fun m (pa, po) x ->
-            m.Assign(pa, x)
-            po)
-        (fun (ia, o) m -> m.Assign(o, build ia))
-
-/// The same for a module that transforms a stream — a fresh instance per call,
-/// so a stage used twice in a chain is two instances of one definition.
-let liftStream (tm: TypedModule<'io, Stream<'p> -> Stream<'p>>) =
-    fun s -> (current ()).Instance(tm) s
+    defModule name (fun p -> (p.inPort an aw, p.outPort outName ow)) (fun (ia, o) -> connect o (build ia))
 
 /// A named instance of any typed module, in ambient context — for designs that
 /// name their instances (the pod's lanes), where the name is created, not
 /// looked up.
-let instanceNamed (name: string) (tm: TypedModule<'io, 'fn>) : 'fn = (current ()).Instance(name, tm)
+let instanceNamed (name: string) (tm: TypedModule<'io>) : 'io = (current ()).Instance(name, tm)
 
-type TypedModule<'io, 'fn> with
-    /// A fresh instance, auto-named, in the module currently being elaborated.
-    /// For a [defModule] this is the port bundle over the instance's staging
-    /// wires. Reading the property elaborates the instance, so bind it once
-    /// per instance — one `let c = cell.New` wired twice drives one instance
-    /// twice, which the one-driver rule refuses.
-    member this.New: 'fn = (current ()).Instance this
+type TypedModule<'io> with
+    /// A fresh instance, auto-named, in the module currently being elaborated:
+    /// the port bundle over the instance's staging wires. Reading the property
+    /// elaborates the instance, so bind it once per instance — one
+    /// `let c = cell.New` wired twice drives one instance twice, which the
+    /// one-driver rule refuses.
+    member this.New: 'io = (current ()).Instance this
 
     /// The same, under a name the design chooses — for instances whose name is
     /// part of the story (the debugger's groups, the `{instance}_{port}`
     /// staging wires).
-    member this.NewNamed(instName: string) : 'fn = (current ()).Instance(instName, this)
+    member this.NewNamed(instName: string) : 'io = (current ()).Instance(instName, this)

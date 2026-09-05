@@ -182,27 +182,15 @@ let streamStageFor (layout: Layout<'p>) : Stream<'p> -> Stream<'p> =
         |> List.map (fun (n, w) -> $"{n}%d{w}")
         |> String.concat "_"
 
-    liftStream (
-        defineModule
+    let stage =
+        defModule
             $"StreamStage_{stem}"
             (fun p ->
                 let ins = [ for n, w in layout.fields -> p.inPort $"in_{n}" w ]
                 let outs = [ for n, w in layout.fields -> p.outPort $"out_{n}" w ]
 
                 ins, outs, p.inPort "in_valid" 1, p.outPort "in_ready" 1, p.outPort "out_valid" 1, p.inPort "out_ready" 1)
-            (fun m (ins, outs, inValid, inReady, outValid, outReady) (s: Stream<'p>) ->
-                for port, value in List.zip ins (layout.pack s.payload) do
-                    value ==> port
-
-                s.valid ==> inValid
-                inReady ==> s.ready
-                m.RegisterStreamReady outReady
-
-                { payload = layout.unpack outs
-                  valid = outValid
-                  ready = outReady
-                  layout = layout })
-            (fun (ins, outs, inValid, inReady, outValid, outReady) _ ->
+            (fun (ins, outs, inValid, inReady, outValid, outReady) ->
                 let validR = regBit "validR"
                 (bnot validR ||| outReady) ==> inReady
 
@@ -212,7 +200,22 @@ let streamStageFor (layout: Layout<'p>) : Stream<'p> -> Stream<'p> =
                     r ==> o
 
                 mux inReady inValid validR ==> validR
-                validR ==> outValid))
+                validR ==> outValid)
+
+    fun (s: Stream<'p>) ->
+        let ins, outs, inValid, inReady, outValid, outReady = stage.New
+
+        for port, value in List.zip ins (layout.pack s.payload) do
+            value ==> port
+
+        s.valid ==> inValid
+        inReady ==> s.ready
+        registerStreamReady outReady
+
+        { payload = layout.unpack outs
+          valid = outValid
+          ready = outReady
+          layout = layout }
 
 /// The depth at which a FIFO's storage stops being LUTs and becomes a block.
 /// Not a limit — the crossover. Below it the head is a combinational read;
@@ -970,39 +973,21 @@ module Stream =
           laneCount: int
           stallProbe: string option }
 
-    /// The descriptor for one module as a stage: single lane, no probe —
-    /// widen with `lanes` / `probed`. The lane index reaches the instance
-    /// name only when there is more than one lane.
-    let spec name (tm: TypedModule<'io, Stream<'i> -> Stream<'o>>) : StageSpec<'i, 'o> =
-        { create =
-            fun lane s ->
-                let instName =
-                    match lane with
-                    | Some i -> $"{name}%d{i}"
-                    | None -> name
-
-                instanceNamed instName tm s
-          laneCount = 1
-          stallProbe = None }
-
-    /// The same descriptor from a stream function rather than a module — an
-    /// elastic register (`stage id`), a `map`, a hand-written combinator. Akka's
-    /// `Flow.fromFunction`. Without this a function-shaped stage cannot join a
-    /// pipeline at all, so whether a stage is a module or a function leaks to
-    /// the pipeline that composes it; with it, both are `StageSpec` and `lanes`
-    /// / `probed` apply to either. No name parameter: a function owns no
-    /// instance to name, and anything it instantiates internally is named by
-    /// the library (so lane counts above 1 get generated names, not `pod0`…).
+    /// The descriptor from a stream function with no instance of its own to
+    /// name — an elastic register (`stage id`), a `map`, a hand-written
+    /// combinator. Akka's `Flow.fromFunction`. Anything it instantiates
+    /// internally is named by the library (so lane counts above 1 get
+    /// generated names, not `pod0`…); a wrapper that does own its instance's
+    /// name goes through [specOf] instead.
     let specFromFunction (f: Stream<'i> -> Stream<'o>) : StageSpec<'i, 'o> =
         { create = fun _ s -> f s
           laneCount = 1
           stallProbe = None }
 
-    /// The descriptor for a stage that DOES own an instance to name, but wires
-    /// it through a function rather than a `TypedModule` apply — the
-    /// [defModule]-wrapper sibling of [spec]. `make` receives the lane-derived
-    /// instance name and plants one instance under it, so the emitted names
-    /// (`worker0`, `worker1`, …) match what [spec] would have produced.
+    /// The descriptor for a stage that DOES own an instance to name — a
+    /// `defModule` wrapper. `make` receives the lane-derived instance name and
+    /// plants one instance under it, so the emitted names (`worker0`,
+    /// `worker1`, …) carry the lane index.
     let specOf name (make: string -> Stream<'i> -> Stream<'o>) : StageSpec<'i, 'o> =
         { create =
             fun lane s ->

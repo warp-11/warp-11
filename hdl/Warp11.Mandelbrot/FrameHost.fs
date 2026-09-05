@@ -252,7 +252,7 @@ let cycleSweep () =
                     |> mandelFramePipeline w h maxIter 28 8 lanes
 
                 let out, busy, frameDone =
-                    instanceNamed "gather" (mandelFrameGatherer w h) start beats
+                    mandelFrameGatherer w h "gather" start beats
 
                 let busyOut = outputBit "busy"
                 busy ==> busyOut
@@ -325,7 +325,7 @@ let laneScale (configs: (int * int * int * int) list) =
                     |> mandelFramePipeline w h maxIter 28 8 lanes
 
                 let out, busy, frameDone =
-                    instanceNamed "gather" (mandelFrameGatherer w h) start beats
+                    mandelFrameGatherer w h "gather" start beats
 
                 let busyOut = outputBit "busy"
                 busy ==> busyOut

@@ -12,7 +12,7 @@ type and function is at [`Warp11`](/reference/warp11.html).
 
 | module | what is in it |
 |---|---|
-| [`Dsl`](/reference/warp11-dsl.html) | the ambient builder: `design`, `input`/`output`/`wire`/`reg`, `==>`, `If`/`Else`, `defineModule` and the instance-as-function surface. **The one to read first.** |
+| [`Dsl`](/reference/warp11-dsl.html) | the ambient builder: `design`, `input`/`output`/`wire`/`reg`, `==>`, `If`/`Else`, `defModule` and the typed instance bundles. **The one to read first.** |
 | [`Ir`](/reference/warp11-ir.html) | what a design *is* — `Expr`, `Decl`, `Stmt`, `ModuleDef` — and the operations over it. Width-only bit vectors with a signed/unsigned reading, and nothing above that |
 | [`Stdlib`](/reference/warp11-stdlib.html) | reusable hardware: counters, FSMs, barrel threading, AXI masters, the divider, `warpFu` |
 | [`Combinators`](/reference/warp11-combinators.html) | the small shapes — `delayChain`, `memReadPort`, `selectIndexed`, the width math |

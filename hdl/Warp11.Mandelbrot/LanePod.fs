@@ -41,13 +41,13 @@ let lanePodRunWidth width height = (lanePodRunTransporter width height).width
 /// column), `row_base` handed forward for the row's writes, `row_gathered`
 /// accepted back — the double-buffer feedback: the next run is taken when
 /// the current row is GATHERED, not drained.
-let mandelCoordGen (width: int) (height: int) =
+let mandelCoordGenDef (width: int) (height: int) =
     let widthPadded = paddedWidth width
     let colWidth = bitsToHold widthPadded
     let addrWidth = lanePodAddrWidth width height
     let runWidth = lanePodRunWidth width height
 
-    defineModule
+    defModule
         $"MandelCoordGen_%d{width}x%d{height}"
         (fun p ->
             (p.inPort "run_data" runWidth,
@@ -60,19 +60,7 @@ let mandelCoordGen (width: int) (height: int) =
              p.inPort "px_ready" 1,
              p.outPort "row_base" addrWidth,
              p.inPort "row_gathered" 1))
-        (fun m (rData, rValid, rReady, pxCx, pxCy, pxCol, pxValid, pxReady, rowBasePort, rowGatheredPort) (run: Stream<Expr>) (rowGathered: Expr) ->
-            run.payload ==> rData
-            run.valid ==> rValid
-            rReady ==> run.ready
-            rowGathered ==> rowGatheredPort
-            m.RegisterStreamReady pxReady
-
-            ({ payload = (pxCx, pxCy, pxCol)
-               valid = pxValid
-               ready = pxReady
-               layout = layout3 ("cx", 32) ("cy", 32) ("addr", colWidth) },
-             rowBasePort))
-        (fun (rData, rValid, rReady, pxCx, pxCy, pxCol, pxValid, pxReady, rowBasePort, rowGatheredPort) _ ->
+        (fun (rData, rValid, rReady, pxCx, pxCy, pxCol, pxValid, pxReady, rowBasePort, rowGatheredPort) ->
             let busy = regBit "busy" // feeding a row's pixels
             let gathering = regBit "gather" // all fed; waiting for the row to arrive
             let col = reg "col" colWidth
@@ -129,7 +117,28 @@ let mandelCoordGen (width: int) (height: int) =
             If runXfer (fun () -> runCy ==> cyCur)
             If runXfer (fun () -> runAddr0 ==> rowBase))
 
-let mandelLanePod (width: int) (height: int) (maxIter: int) (fracBits: int) (nThreads: int) =
+/// One coord-gen instance under `instName`: the row-run stream and the
+/// row_gathered feedback in, the (pixel stream, row_base) pair out.
+let mandelCoordGen (width: int) (height: int) instName (run: Stream<Expr>) (rowGathered: Expr) =
+    let widthPadded = paddedWidth width
+    let colWidth = bitsToHold widthPadded
+
+    let rData, rValid, rReady, pxCx, pxCy, pxCol, pxValid, pxReady, rowBasePort, rowGatheredPort =
+        (mandelCoordGenDef width height).NewNamed instName
+
+    run.payload ==> rData
+    run.valid ==> rValid
+    rReady ==> run.ready
+    rowGathered ==> rowGatheredPort
+    registerStreamReady pxReady
+
+    ({ payload = (pxCx, pxCy, pxCol)
+       valid = pxValid
+       ready = pxReady
+       layout = layout3 ("cx", 32) ("cy", 32) ("addr", colWidth) },
+     rowBasePort)
+
+let mandelLanePodDef (width: int) (height: int) (maxIter: int) (fracBits: int) (nThreads: int) =
     if width < 1 || height < 1 then
         failwith $"width/height must be >= 1, got %d{width}x%d{height}"
 
@@ -142,7 +151,7 @@ let mandelLanePod (width: int) (height: int) (maxIter: int) (fracBits: int) (nTh
     let lane = mandelBarrelLane maxIter fracBits nThreads colWidth // px addr carries the COLUMN
     let coalescer = mandelRowCoalescer widthPadded addrWidth
 
-    defineModule
+    defModule
         $"MandelLanePod_%d{width}x%d{height}_max%d{maxIter}_n%d{nThreads}"
         (fun p ->
             (p.inPort "run_data" runWidth,
@@ -152,17 +161,7 @@ let mandelLanePod (width: int) (height: int) (maxIter: int) (fracBits: int) (nTh
              p.outPort "res_beat" 128,
              p.outPort "res_valid" 1,
              p.inPort "res_ready" 1))
-        (fun m (runData, runValid, runReady, resAddr, resBeat, resValid, resReady) (run: Stream<Expr>) ->
-            run.payload ==> runData
-            run.valid ==> runValid
-            runReady ==> run.ready
-            m.RegisterStreamReady resReady
-
-            { payload = (resAddr, resBeat)
-              valid = resValid
-              ready = resReady
-              layout = layout2 ("addr", addrWidth) ("beat", 128) })
-        (fun (runData, runValid, runReady, resAddr, resBeat, resValid, resReady) _ ->
+        (fun (runData, runValid, runReady, resAddr, resBeat, resValid, resReady) ->
             // The pod is just the lane pipeline: coord-gen → barrel lane →
             // widen-to-byte → row coalescer → the boundary. The stream chain
             // carries the pixels; two control edges carry what it cannot —
@@ -176,8 +175,8 @@ let mandelLanePod (width: int) (height: int) (maxIter: int) (fracBits: int) (nTh
                   layout = layout1 ("data", runWidth) }
 
             let rowGathered = wireBit "row_gathered_w"
-            let px, rowBase = instanceNamed "cg" coordGen run rowGathered
-            let laneRes, _allIdle = instanceNamed "lane" lane px
+            let px, rowBase = coordGen "cg" run rowGathered
+            let laneRes, _allIdle = lane "lane" px
 
             // Lane result → coalescer fill: the escape count widens to the
             // framebuffer's byte.
@@ -187,10 +186,28 @@ let mandelLanePod (width: int) (height: int) (maxIter: int) (fracBits: int) (nTh
                     (layout2 ("col", colWidth) ("value", 8))
                     (fun (col, iter) -> col, (if iterWidth = 8 then iter else cat (lit 0UL (8 - iterWidth)) iter))
 
-            let coalOut, coalGathered, _rowDone = instanceNamed "coal" coalescer rowBase coalIn
+            let coalOut, coalGathered, _rowDone = coalescer "coal" rowBase coalIn
             coalGathered ==> rowGathered
 
             coalOut |> wormhole (streamExport (resAddr, resBeat) resValid resReady))
+
+/// One pod instance under `instName`, as a stage: the row-run stream in, the
+/// (addr, beat) result stream out.
+let mandelLanePod (width: int) (height: int) (maxIter: int) (fracBits: int) (nThreads: int) instName (run: Stream<Expr>) =
+    let addrWidth = lanePodAddrWidth width height
+
+    let runData, runValid, runReady, resAddr, resBeat, resValid, resReady =
+        (mandelLanePodDef width height maxIter fracBits nThreads).NewNamed instName
+
+    run.payload ==> runData
+    run.valid ==> runValid
+    runReady ==> run.ready
+    registerStreamReady resReady
+
+    { payload = (resAddr, resBeat)
+      valid = resValid
+      ready = resReady
+      layout = layout2 ("addr", addrWidth) ("beat", 128) }
 
 /// The pod at ports for the oracle and the mini-frame living check: 16×4 at
 /// maxIter 8, so a whole frame renders in a couple thousand Sim cycles. The
@@ -198,5 +215,5 @@ let mandelLanePod (width: int) (height: int) (maxIter: int) (fracBits: int) (nTh
 let mandelLanePodHarness =
     design "MandelLanePodHarness" (fun () ->
         let run = streamInput "run" (layout1 ("data", lanePodRunWidth 16 4))
-        let res = instanceNamed "pod" (mandelLanePod 16 4 8 28 8) run
+        let res = mandelLanePod 16 4 8 28 8 "pod" run
         streamOutput "res" res)

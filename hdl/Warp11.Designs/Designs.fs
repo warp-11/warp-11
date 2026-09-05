@@ -42,9 +42,13 @@ let add3 =
         let y = m.Input("y", 8)
         let z = m.Input("z", 8)
         let sum = m.Output("sum", 8)
-        let a1 = m.Instance("a1", adder8Def)
-        let a2 = m.Instance("a2", adder8Def)
-        a2 (a1 x y) z ==> sum)
+        let a1a, a1b, a1sum = m.Instance("a1", adder8Def)
+        let a2a, a2b, a2sum = m.Instance("a2", adder8Def)
+        connect a1a x
+        connect a1b y
+        connect a2a a1sum
+        connect a2b z
+        a2sum ==> sum)
 
 let dot2 =
     moduleDef "Dot2" (fun m ->
@@ -54,12 +58,19 @@ let dot2 =
         let d = m.Input("d", 8)
         let out = m.Output("out", 16)
 
-        let mul1 = m.Instance("mul1", mul8Def)
-        let mul2 = m.Instance("mul2", mul8Def)
-        let acc = m.Instance("acc", adder16Def)
-        let bump = m.Instance("bump", satInc8Def)
+        let mul1a, mul1b, mul1p = m.Instance("mul1", mul8Def)
+        let mul2a, mul2b, mul2p = m.Instance("mul2", mul8Def)
+        let acca, accb, accSum = m.Instance("acc", adder16Def)
+        let bumpX, bumpY = m.Instance("bump", satInc8Def)
 
-        acc (mul1 a b) (mul2 (bump c) d) ==> out)
+        connect mul1a a
+        connect mul1b b
+        connect bumpX c
+        connect mul2a bumpY
+        connect mul2b d
+        connect acca mul1p
+        connect accb mul2p
+        accSum ==> out)
 
 let dot2Auto =
     moduleDef "Dot2Auto" (fun m ->
@@ -70,8 +81,18 @@ let dot2Auto =
         let d = m.Input("d", 8)
         let out = m.Output("out", 16)
 
-        inst adder16Def (inst mul8Def a b) (inst mul8Def (inst satInc8Def c) d)
-        ==> out)
+        let mul1a, mul1b, mul1p = inst mul8Def
+        connect mul1a a
+        connect mul1b b
+        let bumpX, bumpY = inst satInc8Def
+        connect bumpX c
+        let mul2a, mul2b, mul2p = inst mul8Def
+        connect mul2a bumpY
+        connect mul2b d
+        let accA, accB, accSum = inst adder16Def
+        connect accA mul1p
+        connect accB mul2p
+        accSum ==> out)
 
 let dot2Ambient =
     design "Dot2Ambient" (fun () ->
@@ -1269,9 +1290,9 @@ let clusteredRoundTrip =
 /// Module A of the two-consumer case: one input stream routed onto TWO separate
 /// output streams by each beat's top bit — a router, not a fork; every beat
 /// lands on exactly one side. Two streams out of one module is nothing special:
-/// the apply returns a pair, one Stream per boundary port trio.
-let private byteSplitter =
-    defineModule
+/// the wrapper returns a pair, one Stream per boundary port trio.
+let private byteSplitterDef =
+    defModule
         "ByteSplitter"
         (fun p ->
             (p.inPort "in_data" 8,
@@ -1283,22 +1304,7 @@ let private byteSplitter =
              p.outPort "high_data" 8,
              p.outPort "high_valid" 1,
              p.inPort "high_ready" 1))
-        (fun m (inData, inValid, inReady, lowData, lowValid, lowReady, highData, highValid, highReady) (s: Stream<Expr>) ->
-            s.payload ==> inData
-            s.valid ==> inValid
-            inReady ==> s.ready
-            m.RegisterStreamReady lowReady
-            m.RegisterStreamReady highReady
-
-            ({ payload = lowData
-               valid = lowValid
-               ready = lowReady
-               layout = byteLayout },
-             { payload = highData
-               valid = highValid
-               ready = highReady
-               layout = byteLayout }))
-        (fun (inData, inValid, inReady, lowData, lowValid, lowReady, highData, highValid, highReady) _ ->
+        (fun (inData, inValid, inReady, lowData, lowValid, lowReady, highData, highValid, highReady) ->
             let isHigh = wireBit "is_high"
             slice 7 7 inData ==> isHigh
             inData ==> lowData
@@ -1306,6 +1312,25 @@ let private byteSplitter =
             (inValid &&& bnot isHigh) ==> lowValid
             (inValid &&& isHigh) ==> highValid
             mux isHigh highReady lowReady ==> inReady)
+
+let private byteSplitter instName (s: Stream<Expr>) =
+    let inData, inValid, inReady, lowData, lowValid, lowReady, highData, highValid, highReady =
+        byteSplitterDef.NewNamed instName
+
+    s.payload ==> inData
+    s.valid ==> inValid
+    inReady ==> s.ready
+    registerStreamReady lowReady
+    registerStreamReady highReady
+
+    ({ payload = lowData
+       valid = lowValid
+       ready = lowReady
+       layout = byteLayout },
+     { payload = highData
+       valid = highValid
+       ready = highReady
+       layout = byteLayout })
 
 /// Test case 1 of the connect-layer discussion: module A produces two separate
 /// streams, each consumed by its own chain — `Stream.stage f` registers the
@@ -1315,7 +1340,7 @@ let private byteSplitter =
 /// oracle's random ready/valid backpressures the chains independently.
 let twoStreamSplit =
     design "TwoStreamSplit" (fun () ->
-        let low, high = instanceNamed "split" byteSplitter (Stream.input "in" byteLayout)
+        let low, high = byteSplitter "split" (Stream.input "in" byteLayout)
         low |> Stream.stage satInc |> Stream.out "b_out"
         high |> Stream.stage (fun d -> lit 0xFFUL 8 - d) |> Stream.out "c_out")
 
@@ -1329,7 +1354,7 @@ let twoStreamSplit =
 /// reason.
 let declCollision () =
     design "DeclCollision" (fun () ->
-        let low, high = instanceNamed "b" byteSplitter (Stream.input "in" byteLayout)
+        let low, high = byteSplitter "b" (Stream.input "in" byteLayout)
         low |> Stream.out "b_low"
         high |> Stream.out "c_out")
 
@@ -1343,7 +1368,7 @@ let twoStreamSplitReplicateJoin =
     design "TwoStreamSplitReplicateJoin" (fun () ->
         let lowDepth = 5
         let highDepth = 10
-        let low, high = instanceNamed "split" byteSplitter (Stream.input "in" byteLayout)
+        let low, high = byteSplitter "split" (Stream.input "in" byteLayout)
         let lowPath = low |> Stream.stages lowDepth satInc
         let highPath = high |> Stream.stages highDepth (fun d -> lit 0xFFUL 8 - d)
         [ lowPath; highPath ] |> Stream.merge |> Stream.out "final_out")
@@ -1352,8 +1377,8 @@ let twoStreamSplitReplicateJoin =
 /// beats out (base, base+1, …), then ready for the next command — a stateful
 /// beat expander, which is a 1→1 stream stage no matter how many beats it
 /// mints. FramePod's row-run generator, extracted.
-let private rowExpander rows =
-    defineModule
+let private rowExpanderDef rows =
+    defModule
         $"RowExpander%d{rows}"
         (fun p ->
             (p.inPort "cmd_data" 8,
@@ -1362,17 +1387,7 @@ let private rowExpander rows =
              p.outPort "run_data" 8,
              p.outPort "run_valid" 1,
              p.inPort "run_ready" 1))
-        (fun m (cmdData, cmdValid, cmdReady, runData, runValid, runReady) (s: Stream<Expr>) ->
-            s.payload ==> cmdData
-            s.valid ==> cmdValid
-            cmdReady ==> s.ready
-            m.RegisterStreamReady runReady
-
-            { payload = runData
-              valid = runValid
-              ready = runReady
-              layout = byteLayout })
-        (fun (cmdData, cmdValid, cmdReady, runData, runValid, runReady) _ ->
+        (fun (cmdData, cmdValid, cmdReady, runData, runValid, runReady) ->
             let busy = regBit "busy"
             let baseReg = reg "base_v" 8
             let row = reg "row" 8
@@ -1391,12 +1406,25 @@ let private rowExpander rows =
                     row + lit 1UL 8 ==> row
                     If (eq row (lit (uint64 (rows - 1)) 8)) (fun () -> lit 0UL 1 ==> busy))) ])
 
+let private rowExpander rows instName (s: Stream<Expr>) =
+    let cmdData, cmdValid, cmdReady, runData, runValid, runReady = (rowExpanderDef rows).NewNamed instName
+
+    s.payload ==> cmdData
+    s.valid ==> cmdValid
+    cmdReady ==> s.ready
+    registerStreamReady runReady
+
+    { payload = runData
+      valid = runValid
+      ready = runReady
+      layout = byteLayout }
+
 /// The row-gatherer shape at toy scale: consume every result beat, fold it
 /// into state (a sum — order-insensitive, because the farm reorders), count,
 /// and raise `frame_done` when a frame's worth has landed. Completion lives
 /// where the results land — FramePod's written-count FSM, extracted.
-let private beatGatherer rows =
-    defineModule
+let private beatGathererDef rows =
+    defModule
         $"BeatGatherer%d{rows}"
         (fun p ->
             (p.inPort "in_data" 8,
@@ -1405,12 +1433,7 @@ let private beatGatherer rows =
              p.outPort "gathered" 8,
              p.outPort "beat_count" 16,
              p.outPort "frame_done" 1))
-        (fun m (inData, inValid, inReady, gathered, beatCount, frameDone) (s: Stream<Expr>) ->
-            s.payload ==> inData
-            s.valid ==> inValid
-            inReady ==> s.ready
-            (gathered, beatCount, frameDone))
-        (fun (inData, inValid, inReady, gathered, beatCount, frameDone) _ ->
+        (fun (inData, inValid, inReady, gathered, beatCount, frameDone) ->
             let sum = reg "sum" 8
             let count = reg "count" 16
 
@@ -1423,6 +1446,14 @@ let private beatGatherer rows =
             sum ==> gathered
             count ==> beatCount
             eq count (lit (uint64 rows) 16) ==> frameDone)
+
+let private beatGatherer rows instName (s: Stream<Expr>) =
+    let inData, inValid, inReady, gathered, beatCount, frameDone = (beatGathererDef rows).NewNamed instName
+
+    s.payload ==> inData
+    s.valid ==> inValid
+    inReady ==> s.ready
+    (gathered, beatCount, frameDone)
 
 /// SlowWorker's port bundle: one stream in, one stream out.
 type private SlowWorkerIo =
@@ -1479,9 +1510,9 @@ let framePipeline =
 
         let gathered, beatCount, frameDone =
             Stream.input "cmd" byteLayout
-            |> instanceNamed "expand" (rowExpander rows)
+            |> rowExpander rows "expand"
             |> Stream.farm 3 (fun i lane -> lane |> Stream.stages (i + 1) satInc)
-            |> instanceNamed "gather" (beatGatherer rows)
+            |> beatGatherer rows "gather"
 
         let gatheredOut = output "gathered" 8
         gathered ==> gatheredOut
@@ -1503,10 +1534,10 @@ let sweepPipeline nWorkers =
         let gathered, beatCount, frameDone =
             Stream.input "cmd" byteLayout
             |> Stream.pipeline
-                [ Stream.spec "expand" (rowExpander rows)
+                [ Stream.specOf "expand" (rowExpander rows)
                   Stream.specOf "worker" (slowWorkerOf 3) |> Stream.lanes nWorkers |> Stream.probed "runs" ]
             |> Stream.probe "results"
-            |> instanceNamed "gather" (beatGatherer rows)
+            |> beatGatherer rows "gather"
 
         let gatheredOut = output "gathered" 8
         gathered ==> gatheredOut
@@ -1933,8 +1964,8 @@ let indirectGather =
 
 /// Byte → pair: the payload TYPE changes across this stage (Expr becomes
 /// Expr * Expr), which is what the arity-typed pipelines exist for.
-let private widenStage =
-    defineModule
+let private widenStageDef =
+    defModule
         "WidenPair"
         (fun p ->
             (p.inPort "in_data" 8,
@@ -1944,29 +1975,32 @@ let private widenStage =
              p.outPort "out_b" 8,
              p.outPort "out_valid" 1,
              p.inPort "out_ready" 1))
-        (fun m (inData, inValid, inReady, outA, outB, outValid, outReady) (s: Stream<Expr>) ->
-            s.payload ==> inData
-            s.valid ==> inValid
-            inReady ==> s.ready
-            m.RegisterStreamReady outReady
-
-            { payload = (outA, outB)
-              valid = outValid
-              ready = outReady
-              layout = layout2 ("a", 8) ("b", 8) })
-        (fun (inData, inValid, inReady, outA, outB, outValid, outReady) _ ->
+        (fun (inData, inValid, inReady, outA, outB, outValid, outReady) ->
             inData ==> outA
             satInc inData ==> outB
             inValid ==> outValid
             outReady ==> inReady)
+
+let private widenStage instName (s: Stream<Expr>) =
+    let inData, inValid, inReady, outA, outB, outValid, outReady = widenStageDef.NewNamed instName
+
+    s.payload ==> inData
+    s.valid ==> inValid
+    inReady ==> s.ready
+    registerStreamReady outReady
+
+    { payload = (outA, outB)
+      valid = outValid
+      ready = outReady
+      layout = layout2 ("a", 8) ("b", 8) }
 
 /// Pair → byte, the narrowing half — REGISTERED, because a farm worker is an
 /// async boundary: a fully combinational worker couples the dispatch grant to
 /// the merge arbitration into a valid/ready loop, which elaboration rejects
 /// (the loop check caught exactly that when this stage was first written
 /// combinational).
-let private sumStage =
-    defineModule
+let private sumStageDef =
+    defModule
         "PairSum"
         (fun p ->
             (p.inPort "in_a" 8,
@@ -1976,19 +2010,7 @@ let private sumStage =
              p.outPort "out_sum" 8,
              p.outPort "out_valid" 1,
              p.inPort "out_ready" 1))
-        (fun m (inA, inB, inValid, inReady, outSum, outValid, outReady) (s: Stream<Expr * Expr>) ->
-            let a, b = s.payload
-            a ==> inA
-            b ==> inB
-            s.valid ==> inValid
-            inReady ==> s.ready
-            m.RegisterStreamReady outReady
-
-            { payload = outSum
-              valid = outValid
-              ready = outReady
-              layout = layout1 ("sum", 8) })
-        (fun (inA, inB, inValid, inReady, outSum, outValid, outReady) _ ->
+        (fun (inA, inB, inValid, inReady, outSum, outValid, outReady) ->
             let sumR = reg "sumR" 8
             let validR = regBit "validR"
             (bnot validR ||| outReady) ==> inReady
@@ -1997,6 +2019,21 @@ let private sumStage =
             sumR ==> outSum
             validR ==> outValid)
 
+let private sumStage instName (s: Stream<Expr * Expr>) =
+    let inA, inB, inValid, inReady, outSum, outValid, outReady = sumStageDef.NewNamed instName
+
+    let a, b = s.payload
+    a ==> inA
+    b ==> inB
+    s.valid ==> inValid
+    inReady ==> s.ready
+    registerStreamReady outReady
+
+    { payload = outSum
+      valid = outValid
+      ready = outReady
+      layout = layout1 ("sum", 8) }
+
 /// The type-changing pipeline under the oracle: byte → pair → sum through
 /// `pipeline2`, with the narrowing stage FARMED (2 lanes) — a spec farms
 /// across a payload-type change exactly as it does within one.
@@ -2004,8 +2041,8 @@ let typedPipeline =
     design "TypedPipeline" (fun () ->
         Stream.input "in" byteLayout
         |> Stream.pipeline2
-            (Stream.spec "widen" widenStage)
-            (Stream.spec "sum" sumStage |> Stream.lanes 2 |> Stream.probed "pairs")
+            (Stream.specOf "widen" widenStage)
+            (Stream.specOf "sum" sumStage |> Stream.lanes 2 |> Stream.probed "pairs")
         |> Stream.out "out")
 
 /// A probed link under the oracle: the counters ride output ports, so the
@@ -2202,7 +2239,7 @@ let audioOps =
         let left = output "left" sampleWidth
         let right = output "right" sampleWidth
 
-        let section = instanceNamed "section" (biquadSection "BiquadSection")
+        let section = biquadSection "BiquadSection" "section"
         section x advance { b0 = b0; b1 = b1; b2 = b2; a1 = a1; a2 = a2 } ==> y
 
         // 4-tap [1,2,2,1] low-pass over the low byte of the sample.
@@ -2237,9 +2274,9 @@ let audioChain =
         let makeup = input "makeup" 16
         let limit = input "limit" sampleWidth
 
-        let gain = instanceNamed "gain" (audioGain "AudioGain") volume mute
-        let compressor = instanceNamed "compressor" (audioCompressor "AudioCompressor") threshold ratio attack releaseRate makeup
-        let limiter = instanceNamed "limiter" (audioLimiter "AudioLimiter") limit
+        let gain = audioGain "AudioGain" "gain" volume mute
+        let compressor = audioCompressor "AudioCompressor" "compressor" threshold ratio attack releaseRate makeup
+        let limiter = audioLimiter "AudioLimiter" "limiter" limit
 
         streamInput "in" sampleLayout
         |> gain
@@ -2258,8 +2295,8 @@ let audioTone =
         let step = input "step" tonePhaseWidth
         let preset = input "preset" 2
 
-        let tone = instanceNamed "tone" (toneGenerator "ToneGenerator") enable step
-        let filter = instanceNamed "filter" (audioToneFilter "AudioToneFilter") preset
+        let tone = toneGenerator "ToneGenerator" "tone" enable step
+        let filter = audioToneFilter "AudioToneFilter" "filter" preset
 
         tone |> filter |> streamOutput "out")
 
@@ -2268,7 +2305,7 @@ let audioTone =
 let audioFirStage =
     design "AudioFirStage" (fun () ->
         let preset = input "preset" 2
-        let filter = instanceNamed "filter" (audioToneFilter "AudioToneFilter") preset
+        let filter = audioToneFilter "AudioToneFilter" "filter" preset
         streamInput "in" sampleLayout |> filter |> streamOutput "out")
 
 /// The three I2S modules wired as a loopback: the clock generator drives both
@@ -2284,15 +2321,15 @@ let audioFirStage =
 /// with it, since rx samples on one and tx updates on the other.
 let i2sLoopback =
     design "I2sLoopback" (fun () ->
-        let clocks = instanceNamed "clocks" (i2sMasterDefault "I2sMaster") ()
+        let clocks = instanceNamed "clocks" (i2sMasterDefault "I2sMaster")
 
         let sdin =
-            instanceNamed "tx" (i2sTx "I2sTx") clocks.sclkTxTick clocks.lrclk (streamInput "in" sampleLayout)
+            i2sTx "I2sTx" "tx" clocks.sclkTxTick clocks.lrclk (streamInput "in" sampleLayout)
 
         let line = wireBit "line"
         sdin ==> line
 
-        instanceNamed "rx" (i2sRx "I2sRx") clocks.sclkRxTick clocks.lrclk line
+        i2sRx "I2sRx" "rx" clocks.sclkRxTick clocks.lrclk line
         |> streamOutput "out"
 
         // The codec-facing pins, so the loopback covers what a wrapper drives.
@@ -2314,7 +2351,7 @@ let i2sRxStage =
         let lrclk = inputBit "lrclk"
         let sdout = inputBit "sdout"
 
-        instanceNamed "rx" (i2sRx "I2sRx") sclkTick lrclk sdout
+        i2sRx "I2sRx" "rx" sclkTick lrclk sdout
         |> streamOutput "out")
 
 let i2sTxStage =
@@ -2322,7 +2359,7 @@ let i2sTxStage =
         let sclkTick = inputBit "sclkTick"
         let lrclk = inputBit "lrclk"
         let sdin = outputBit "sdin"
-        instanceNamed "tx" (i2sTx "I2sTx") sclkTick lrclk (streamInput "in" sampleLayout) ==> sdin)
+        i2sTx "I2sTx" "tx" sclkTick lrclk (streamInput "in" sampleLayout) ==> sdin)
 
 /// The 8-band multiband compressor as a stream stage.
 let multibandStage =
@@ -2335,7 +2372,7 @@ let multibandStage =
         let rightGains = List.init multibandBands (fun i -> input $"rg{i}" 16)
 
         let stage, envelope =
-            instanceNamed "mb" (multibandCompressor "MultibandCompressor8") threshold ratio attack releaseRate leftGains rightGains
+            multibandCompressor "MultibandCompressor8" "mb" threshold ratio attack releaseRate leftGains rightGains
             |> fun apply -> apply (streamInput "in" sampleLayout)
 
         streamOutput "out" stage

@@ -20,7 +20,7 @@ cannot debug.
 ## Read, then step
 
 ```fsharp
-let word = instanceNamed "rng" (xoshiro128pp "Xoshiro128pp") load seed step
+let word = xoshiro128pp "Xoshiro128pp" "rng" load seed step
 ```
 
 `word` is combinational from the *current* state: the value is already there

@@ -15,7 +15,7 @@ let xoshiroWalk =
         let sIn = List.init 4 (fun i -> input $"s{i}" 32)
         let step = inputBit "step"
         let word = output "word" 32
-        instanceNamed "prng" (xoshiro128pp "Xoshiro128pp") load sIn step ==> word)
+        xoshiro128pp "Xoshiro128pp" "prng" load sIn step ==> word)
 
 /// The 512-entry reciprocal table as the first initialized memory: contents
 /// from `Fixed.fxRecipTable` (u31 words — one BRAM18 in fabric), sync read.
@@ -788,7 +788,7 @@ let gepOperatorEngine
     // through a declared wire below.
     let stepW = wireBit $"{prefix}_stepW"
     let word = wire $"{prefix}_word" 32
-    instanceNamed $"{prefix}_prng" (xoshiro128pp "Xoshiro128pp") start sIn stepW ==> word
+    xoshiro128pp "Xoshiro128pp" $"{prefix}_prng" start sIn stepW ==> word
 
     let st =
         machine

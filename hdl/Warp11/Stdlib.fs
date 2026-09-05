@@ -158,21 +158,15 @@ type Xoshiro128Ports =
 /// 64×64 multiplies here. The all-zero state is the lattice's one degenerate
 /// point; loaders must not supply it (the post-reset default state 1,2,3,4 is
 /// nonzero). Host-side mirror + reference stream: `Warp11.Gep.Rng.GepRng`.
-let xoshiro128pp name =
-    defineModule
+let xoshiro128ppDef name : TypedModule<Xoshiro128Ports> =
+    defModule
         name
         (fun p ->
             { load = p.inPort "load" 1
               sIn = List.init 4 (fun i -> p.inPort $"s{i}_in" 32)
               step = p.inPort "step" 1
               word = p.outPort "word" 32 })
-        (fun m io ->
-            fun (load: Expr) (sIn: Expr list) (step: Expr) ->
-                load ==> io.load
-                List.iter2 (fun port s -> s ==> port) io.sIn sIn
-                step ==> io.step
-                io.word)
-        (fun io _ ->
+        (fun io ->
             let s = List.init 4 (fun i -> regInit $"s{i}" 32 (uint64 (i + 1)))
 
             // word = rotl(s0 + s3, 7) + s0 — from the CURRENT state.
@@ -200,6 +194,16 @@ let xoshiro128pp name =
                     (s[1] ^^^ s2a) ==> s[1]
                     (s2a ^^^ t) ==> s[2]
                     cat (slice 20 0 s3a) (slice 31 21 s3a) ==> s[3])) ])
+
+/// One generator instance, called as a function: drive `load`/`sIn`/`step`,
+/// read `word`. The module name comes first (two designs may want differently
+/// named generators side by side), the instance name second.
+let xoshiro128pp name instName (load: Expr) (sIn: Expr list) (step: Expr) : Expr =
+    let io = (xoshiro128ppDef name).NewNamed instName
+    load ==> io.load
+    List.iter2 (fun port s -> s ==> port) io.sIn sIn
+    step ==> io.step
+    io.word
 
 /// Balanced lowest-index-first priority pick over parallel field lists:
 /// returns (anyValid, one Expr per field for the lowest-index valid entry) as

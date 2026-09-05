@@ -29,7 +29,7 @@ type private Drain =
     | Assemble
     | Emit
 
-let mandelRowCoalescer (widthPadded: int) (addrWidth: int) =
+let mandelRowCoalescerDef (widthPadded: int) (addrWidth: int) =
     if widthPadded % 16 <> 0 || widthPadded < 16 then
         failwith $"widthPadded must be a positive multiple of 16, got %d{widthPadded}"
 
@@ -39,7 +39,7 @@ let mandelRowCoalescer (widthPadded: int) (addrWidth: int) =
     let fillCountWidth = bitsToHold (widthPadded + 1)
     let bufAddrWidth = bitsToHold (2 * widthPadded)
 
-    defineModule
+    defModule
         $"MandelRowCoalescer_%d{widthPadded}_a%d{addrWidth}"
         (fun p ->
             (p.inPort "in_col" colWidth,
@@ -53,22 +53,7 @@ let mandelRowCoalescer (widthPadded: int) (addrWidth: int) =
              p.inPort "row_base" addrWidth,
              p.outPort "row_gathered" 1,
              p.outPort "row_done" 1))
-        (fun m (inCol, inValue, inValid, inReady, outAddr, outBeat, outValid, outReady, rowBasePort, rowGathered, rowDone) (rowBase: Expr) (inp: Stream<Expr * Expr>) ->
-            let col, value = inp.payload
-            col ==> inCol
-            value ==> inValue
-            inp.valid ==> inValid
-            inReady ==> inp.ready
-            rowBase ==> rowBasePort
-            m.RegisterStreamReady outReady
-
-            { payload = (outAddr, outBeat)
-              valid = outValid
-              ready = outReady
-              layout = layout2 ("addr", addrWidth) ("beat", 128) },
-            rowGathered,
-            rowDone)
-        (fun (inCol, inValue, inValid, inReady, outAddr, outBeat, outValid, outReady, rowBasePort, rowGathered, rowDone) _ ->
+        (fun (inCol, inValue, inValid, inReady, outAddr, outBeat, outValid, outReady, rowBasePort, rowGathered, rowDone) ->
             // Ping-pong row buffers packed into one mem (buffer = high address
             // bit), single write site + single sync read — the BRAM shape.
             let buf = blockMem "rowbuf" bufAddrWidth 8
@@ -188,6 +173,28 @@ let mandelRowCoalescer (widthPadded: int) (addrWidth: int) =
             // issued last cycle); asmCount=0's read is still in flight.
             If (cAsm &&& bnot (eq asmCount (lit 0UL 5))) (fun () -> cat (slice 119 0 beatReg) bufRd ==> beatReg))
 
+/// One coalescer instance under `instName`: the row base and (col, value)
+/// stream in, the (addr, beat) stream plus the row_gathered / row_done
+/// controls out.
+let mandelRowCoalescer (widthPadded: int) (addrWidth: int) instName (rowBase: Expr) (inp: Stream<Expr * Expr>) =
+    let inCol, inValue, inValid, inReady, outAddr, outBeat, outValid, outReady, rowBasePort, rowGathered, rowDone =
+        (mandelRowCoalescerDef widthPadded addrWidth).NewNamed instName
+
+    let col, value = inp.payload
+    col ==> inCol
+    value ==> inValue
+    inp.valid ==> inValid
+    inReady ==> inp.ready
+    rowBase ==> rowBasePort
+    registerStreamReady outReady
+
+    { payload = (outAddr, outBeat)
+      valid = outValid
+      ready = outReady
+      layout = layout2 ("addr", addrWidth) ("beat", 128) },
+    rowGathered,
+    rowDone
+
 /// The coalescer at ports (widthPadded 32 → two beats/row): the living check
 /// feeds shuffled columns and asserts byte placement; the oracle's random
 /// fill-side stimulus rides the same design.
@@ -197,7 +204,7 @@ let mandelCoalescerHarness =
         let inp = streamInput "px" (layout2 ("col", 5) ("value", 8))
 
         let out, rowGathered, rowDone =
-            instanceNamed "coal" (mandelRowCoalescer 32 8) rowBase inp
+            mandelRowCoalescer 32 8 "coal" rowBase inp
 
         streamOutput "beat" out
         let g = outputBit "row_gathered"
@@ -227,7 +234,7 @@ let mandelCoalescerLoop =
               layout = layout2 ("col", 4) ("value", 8) }
 
         let out, rowGathered, _ =
-            instanceNamed "coal" (mandelRowCoalescer 16 8) rowBase feed
+            mandelRowCoalescer 16 8 "coal" rowBase feed
 
         If feedReady (fun () -> feedCol + lit 1UL 4 ==> feedCol)
         If rowGathered (fun () -> feedRow + lit 1UL 3 ==> feedRow)

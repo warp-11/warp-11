@@ -85,7 +85,7 @@ let mandelFrameAxi
             |> mandelFramePipeline width height maxIter fracBits nThreads numLanes
 
         let beats, busy, frameDone =
-            instanceNamed "gather" (mandelFrameGatherer width height) startPulse piped
+            mandelFrameGatherer width height "gather" startPulse piped
 
         busy ==> busyW
 

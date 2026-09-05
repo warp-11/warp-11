@@ -135,13 +135,13 @@ designs are the interesting ones.
 | `width` / `emit` | `Ir.fs` / `Verilog.fs` | one `match` each; `width` implements Warp 11's rule that `a * b` is `width a + width b` |
 | `Decl` / `Stmt` / `ModuleDef` | `Ir.fs` | the module IR, including instances |
 | **the keyword check** | `Keywords.fs` | Verilog/SystemVerilog reserved words refused at elaboration, at every declared name, instance name and module name — closing the one gap where a *design* alone could emit invalid Verilog. Two live cases (`cross`, `matches`) before it landed. |
-| `Builder` | `Dsl.fs` | the mutable builder everything else runs on. `Instance` returns the module's *function*, not its port record; the one-argument overload derives an instance name from the child module. |
-| `defineModule` | `Dsl.fs` | the general typed-port form — a `Ports -> 'io` factory run twice, which is warp11-Kotlin's re-runnable-factory trick ported directly |
-| `fnModule1/2/3` | `Dsl.fs` | sugar over `defineModule` for combinational modules: one lambda is both the semantics and the call-site type, and the output width is inferred from it |
+| `Builder` | `Dsl.fs` | the mutable builder everything else runs on. `Instance` returns the module's port bundle over the instance's staging wires; the one-argument overload derives an instance name from the child module. |
+| `defModule` | `Dsl.fs` | **the module former: a port bundle and one body, nothing else.** The `Ports -> 'io` factory is re-run per instance — warp11-Kotlin's re-runnable-factory trick ported directly — so `.New`/`.NewNamed` hand a call site the same typed bundle the definition saw. A richer call shape is an ordinary wrapper function beside the module (2026-09-05: the io/apply/body triple retired; nothing needed the third piece). |
+| `fnModule1/2` | `Dsl.fs` | sugar over `defModule` for combinational modules: one lambda is both the semantics and the port list, and the output width is inferred from it |
 | **the ambient layer** | `Dsl.fs` | `elaborating` (a stack of builders), `design`, and free `input`/`output`/`wire`/`reg`/`==>`. This is what makes a module body read as ordinary F# — the same conclusion Rust reached with `thread_local!` and Kotlin with the receiver lambda. |
-| **`liftUnary` / `liftBinary`** | `Dsl.fs` | turn a module into a function that creates a fresh instance on every call. All naming happens here. |
+| **`liftUnary` / `liftBinary`** | `Dsl.fs` | wire a one- or two-operand bundle as a function that creates a fresh instance on every call — the whole of "call a module as a function", built on the bundles rather than into the core type. All naming happens here. |
 | **`*Logic` vs `*Of`** | `Stdlib.fs` | the same semantics inline (`mulLogic 8`) or wrapped in a module (`mulOf 8`). **Both are `Expr -> Expr -> Expr`, so a use site cannot tell them apart** — whether something becomes a Verilog module is a stdlib-definition choice, not a call-site one. `memoize` means `mulOf 8` at two use sites is one `Mul8`. |
-| **`stateModule1`** | `Dsl.fs` | a module whose body is ordinary ambient code — `reg`, `==>` — rather than a pure function of its inputs. `defineModule` pushes the module's builder, so a definition body and a design body are the same kind of code. `delayOf` and `counterOf` are the stateful stdlib entries; a register is four lines. |
+| **`stateModule1`** | `Dsl.fs` | a module whose body is ordinary ambient code — `reg`, `==>` — rather than a pure function of its inputs. `defModule` pushes the module's builder, so a definition body and a design body are the same kind of code. `delayOf` and `counterOf` are the stateful stdlib entries; a register is four lines. |
 | **`Stream<'p>` + `Layout<'p>`** | `Layout.fs` / `Streams.fs` | the ready/valid layer, generic over its payload. A `Stream` carries `payload`/`valid` forward **and the `ready` net its consumer must drive** — the backward wire travels forward inside the value, so `stage (streamMap f (stage src))` is ordinary nesting even though the handshake flows both ways. A `Layout` is the hand-written witness (field names/widths + pack/unpack) that turns a typed payload into ports — the no-reflection answer; `layout2 ("x", 8) ("lum", 8)` is one line. `streamMap` may change the payload *type*, so projections are ordinary maps, and touching the wrong field is a compile error rather than a name lookup. |
 | **`streamStageFor`** | `Streams.fs` | one register stage per layout. Not memoized — a `Layout` holds functions, which have no useful equality — so the module name derives from the fields and structurally identical re-elaborations are collapsed by the one-name-one-module check: the Rust spike's arrangement, adopted exactly where memoization stops being possible. |
 | **`streamFifo`** | `Streams.fs` | a FIFO between producer and consumer — a burst absorbed, a pause propagated only once full. First-word fall-through, so `payload` and `valid` arrive together as the contract requires. **Its storage is not part of its contract**: up to `streamFifoDistributedMax` (64) the words live in LUTs and the head is a combinational read; at or above it they live in a block and the head is a synchronous read behind a two-slot skid. Both hold exactly `depth` beats and both present the same `Stream`, so a depth going from 8 to 8192 changes where the bits sit and nothing a caller can name — which is the boundary the DSL draws generally, that code may assume a combinational read of something *always* LUT-shaped and never of something whose storage depends on how big it got. |
@@ -414,8 +414,11 @@ bindings violates the rule.
 The rule caught a real leak on 2026-08-04: `Stream.spec` took only a
 `TypedModule`, so a function-shaped stage could not join a `pipeline` at all and
 the frame pod's egress register had to hang off the end as a separate operator.
-`Stream.specFromFunction` (Akka's `Flow.fromFunction`) closes it — both forms are
-`StageSpec`, and `lanes`/`probed` apply to either.
+`Stream.specFromFunction` (Akka's `Flow.fromFunction`) closed it — both forms
+became `StageSpec`, and `lanes`/`probed` applied to either. The 2026-09-05
+module-API reshape finished the thought: `spec` itself is gone, and a module
+joins a pipeline through its wrapper via `Stream.specOf`, the same door a
+function uses.
 
 **One driver per signal per level (2026-08-04).** A second unconditional `==>` to
 one signal is an elaboration error naming the signal and the module. The scope

@@ -29,14 +29,14 @@ let mandelStepLatency = 4
 /// Stage 2  the three products, registered      (DSP48 M reg)
 /// Stage 3  second product register             (retimes into the cascade — PREG)
 /// Stage 4  recover Q, next-z + escape, register the outputs
-let mandelStep (fracBits: int) =
+let mandelStepDef (fracBits: int) =
     if fracBits < 1 || fracBits > 30 then
         failwith $"fracBits must be 1..30, got %d{fracBits}"
 
     let shWidth = 64 - fracBits // the shifted-product working width
     let escapeThresh = 4UL <<< fracBits
 
-    defineModule
+    defModule
         $"MandelStep_q%d{32 - fracBits}_%d{fracBits}"
         (fun p ->
             (p.inPortAs "zx" (SInt 32),
@@ -46,13 +46,7 @@ let mandelStep (fracBits: int) =
              p.outPortAs "zx_next" (SInt 32),
              p.outPortAs "zy_next" (SInt 32),
              p.outPort "escaped" 1))
-        (fun m (izx, izy, icx, icy, ozxn, ozyn, oesc) zx zy cx cy ->
-            zx ==> izx
-            zy ==> izy
-            cx ==> icx
-            cy ==> icy
-            (ozxn, ozyn, oesc))
-        (fun (zx, zy, cx, cy, zxNext, zyNext, escaped) _ ->
+        (fun (zx, zy, cx, cy, zxNext, zyNext, escaped) ->
             // Stage 1 — register the inputs.
             let s1zx = reg "s1_zx" (SInt 32)
             zx ==> s1zx
@@ -120,6 +114,16 @@ let mandelStep (fracBits: int) =
             s4zy ==> zyNext
             s4esc ==> escaped)
 
+/// One cone instance under `instName`, called as a function: drive the z and
+/// c vectors, read the (zxNext, zyNext, escaped) triple.
+let mandelStep (fracBits: int) instName (zx: Expr) (zy: Expr) (cx: Expr) (cy: Expr) =
+    let izx, izy, icx, icy, ozxn, ozyn, oesc = (mandelStepDef fracBits).NewNamed instName
+    zx ==> izx
+    zy ==> izy
+    cx ==> icx
+    cy ==> icy
+    (ozxn, ozyn, oesc)
+
 /// The software twin of one step — every truncation, wrap and compare the
 /// same, in host integers, latency aside. GEP's pattern: the fabric is right
 /// when it matches this with no tolerance.
@@ -153,7 +157,7 @@ let mandelStepHarness =
         let zyNextOut = output "zy_next" 32
         let escapedOut = outputBit "escaped"
 
-        let zxn, zyn, esc = instanceNamed "step" (mandelStep 28) zx zy cx cy
+        let zxn, zyn, esc = mandelStep 28 "step" zx zy cx cy
         zxn ==> zxNextOut
         zyn ==> zyNextOut
         esc ==> escapedOut)

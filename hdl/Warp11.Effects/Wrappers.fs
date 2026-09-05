@@ -147,12 +147,12 @@ let private codecPins mclkPin sclkPin lrclkPin serial =
 let audioToneAxi =
     designClocked axiClock "AudioToneAxi" (fun () ->
         let regs = axiLiteSlaveOf toneMap.map
-        let clocks = instanceNamed "clocks" (i2sMasterDefault "I2sMaster") ()
+        let clocks = instanceNamed "clocks" (i2sMasterDefault "I2sMaster")
 
         let tone =
-            instanceNamed "tone" (toneGenerator "ToneGenerator") (regs.value toneMap.enable) (regs.value toneMap.step)
+            toneGenerator "ToneGenerator" "tone" (regs.value toneMap.enable) (regs.value toneMap.step)
 
-        let serial = instanceNamed "tx" (i2sTx "I2sTx") clocks.sclkTxTick clocks.lrclk tone
+        let serial = i2sTx "I2sTx" "tx" clocks.sclkTxTick clocks.lrclk tone
         codecPins clocks.mclk clocks.sclk clocks.lrclk serial)
 
 /// Line in to line out, with a mute and two bring-up taps. The taps exist
@@ -161,10 +161,10 @@ let audioToneAxi =
 let audioPassthruAxi =
     designClocked axiClock "AudioPassthruAxi" (fun () ->
         let regs = axiLiteSlaveOf passthruMap.map
-        let clocks = instanceNamed "clocks" (i2sMasterDefault "I2sMaster") ()
+        let clocks = instanceNamed "clocks" (i2sMasterDefault "I2sMaster")
         let sdout = inputBit "sdout"
 
-        let received = instanceNamed "rx" (i2sRx "I2sRx") clocks.sclkRxTick clocks.lrclk sdout
+        let received = i2sRx "I2sRx" "rx" clocks.sclkRxTick clocks.lrclk sdout
 
         let count = reg "received_count" 32
         let lastLeft = reg "last_left" sampleWidth
@@ -186,23 +186,23 @@ let audioPassthruAxi =
             { received with
                 payload = (mux muted (lit 0UL sampleWidth) left, mux muted (lit 0UL sampleWidth) right) }
 
-        let serial = instanceNamed "tx" (i2sTx "I2sTx") clocks.sclkTxTick clocks.lrclk gated
+        let serial = i2sTx "I2sTx" "tx" clocks.sclkTxTick clocks.lrclk gated
         codecPins clocks.mclk clocks.sclk clocks.lrclk serial)
 
 /// Line in, master volume, line out.
 let audioGainAxi =
     designClocked axiClock "AudioGainAxi" (fun () ->
         let regs = axiLiteSlaveOf gainMap.map
-        let clocks = instanceNamed "clocks" (i2sMasterDefault "I2sMaster") ()
+        let clocks = instanceNamed "clocks" (i2sMasterDefault "I2sMaster")
         let sdout = inputBit "sdout"
 
         let gain =
-            instanceNamed "gain" (audioGain "AudioGain") (regs.value gainMap.volume) (regs.value gainMap.mute)
+            audioGain "AudioGain" "gain" (regs.value gainMap.volume) (regs.value gainMap.mute)
 
         let serial =
-            instanceNamed "rx" (i2sRx "I2sRx") clocks.sclkRxTick clocks.lrclk sdout
+            i2sRx "I2sRx" "rx" clocks.sclkRxTick clocks.lrclk sdout
             |> gain
-            |> instanceNamed "tx" (i2sTx "I2sTx") clocks.sclkTxTick clocks.lrclk
+            |> i2sTx "I2sTx" "tx" clocks.sclkTxTick clocks.lrclk
 
         codecPins clocks.mclk clocks.sclk clocks.lrclk serial)
 
@@ -211,18 +211,18 @@ let audioGainAxi =
 let audioEffectsAxi =
     designClocked axiClock "AudioEffectsAxi" (fun () ->
         let regs = axiLiteSlaveOf effectsMap.map
-        let clocks = instanceNamed "clocks" (i2sMasterDefault "I2sMaster") ()
+        let clocks = instanceNamed "clocks" (i2sMasterDefault "I2sMaster")
         let sdout = inputBit "sdout"
 
         let gain =
-            instanceNamed "gain" (audioGain "AudioGain") (regs.value effectsMap.volume) (regs.value effectsMap.mute)
+            audioGain "AudioGain" "gain" (regs.value effectsMap.volume) (regs.value effectsMap.mute)
 
-        let equaliser = instanceNamed "eq" (audioEqBand "AudioEqBand") (List.map regs.value effectsMap.eq)
+        let equaliser = audioEqBand "AudioEqBand" "eq" (List.map regs.value effectsMap.eq)
 
         let compressor =
-            instanceNamed
+            audioCompressor
+                "AudioCompressor"
                 "compressor"
-                (audioCompressor "AudioCompressor")
                 (regs.value effectsMap.compThreshold)
                 (regs.value effectsMap.compRatio)
                 (regs.value effectsMap.compAttack)
@@ -230,14 +230,14 @@ let audioEffectsAxi =
                 (regs.value effectsMap.compMakeup)
 
         let limiter =
-            instanceNamed "limiter" (audioLimiter "AudioLimiter") (regs.value effectsMap.limitThreshold)
+            audioLimiter "AudioLimiter" "limiter" (regs.value effectsMap.limitThreshold)
 
         let serial =
-            instanceNamed "rx" (i2sRx "I2sRx") clocks.sclkRxTick clocks.lrclk sdout
+            i2sRx "I2sRx" "rx" clocks.sclkRxTick clocks.lrclk sdout
             |> gain
             |> equaliser
             |> compressor
             |> limiter
-            |> instanceNamed "tx" (i2sTx "I2sTx") clocks.sclkTxTick clocks.lrclk
+            |> i2sTx "I2sTx" "tx" clocks.sclkTxTick clocks.lrclk
 
         codecPins clocks.mclk clocks.sclk clocks.lrclk serial)
