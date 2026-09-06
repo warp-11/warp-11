@@ -28,21 +28,24 @@ module BlinkerMap =
           entries = [ id; enable; count ] }
 
 let blinkerAxi =
-    designClocked axiClock "BlinkerAxi" (fun () ->
-        let regs = axiLiteSlaveOf BlinkerMap.map
-        let counter = reg "counter" 24
+    defModuleClocked
+        axiClock
+        "BlinkerAxi"
+        (fun p -> (axiLiteSlavePorts p BlinkerMap.map.apertureAddrWidth, p.outPort "led" 1))
+        (fun (slavePorts, led) ->
+            let regs = regMapSlave slavePorts BlinkerMap.map
+            let counter = reg "counter" 24
 
-        If (regs.value BlinkerMap.enable) (fun () -> counter + 1UL ==> counter)
-        regs.drive BlinkerMap.count counter
+            If (regs.value BlinkerMap.enable) (fun () -> counter + 1UL ==> counter)
+            regs.drive BlinkerMap.count counter
 
-        let led = outputBit "led"
-        slice 23 23 counter ==> led)
+            slice 23 23 counter ==> led)
 ```
 
 Three kinds of entry, which is most of what a map ever needs: `roConst` is a
 fixed value the host reads to know which bitstream it is talking to, `rwReg` is
 written by the host and read by the design, and `roField` is provided by the
-design and read by the host. `designClocked axiClock` gives the module the
+design and read by the host. `defModuleClocked axiClock` gives the module the
 AXI-style clock and active-low reset the bus expects.
 
 > If you name a map entry the same as a signal — `count` and `reg "count"` —
@@ -57,11 +60,11 @@ Add them as cases in `main`:
 [<EntryPoint>]
 let main argv =
     match argv with
-    | [| "simserve" |] -> SimAxi.serve (SimAxi.client (Sim blinkerAxi))
+    | [| "simserve" |] -> SimAxi.serve (SimAxi.client (Sim blinkerAxi.def))
     | [| "layout"; path |] ->
         System.IO.File.WriteAllLines(path, regMapRsLines BlinkerMap.map)
         printfn $"wrote {path}"
-    | _ -> printfn "%s" (emitDesign blinkerAxi)
+    | _ -> printfn "%s" (emitDesign blinkerAxi.def)
     0
 ```
 

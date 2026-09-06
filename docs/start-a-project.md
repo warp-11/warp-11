@@ -42,17 +42,17 @@ open Warp11.Catalog
 /// A counter whose top bit is an LED: it turns over every 2^23 clocks, which
 /// at 100 MHz is a blink you can see.
 let blinker =
-    design "Blinker" (fun () ->
-        let enable = inputBit "enable"
-        let led = outputBit "led"
+    defModule
+        "Blinker"
+        (fun p -> (p.inPort "enable" 1, p.outPort "led" 1))
+        (fun (enable, led) ->
+            let count = reg "count" 24
+            If enable (fun () -> count + 1UL ==> count)
 
-        let count = reg "count" 24
-        If enable (fun () -> count + 1UL ==> count)
-
-        slice 23 23 count ==> led)
+            slice 23 23 count ==> led)
 
 let catalog =
-    designs [ entry "Blinker" (nameof blinker) (fun () -> blinker)
+    designs [ entry "Blinker" (nameof blinker) (fun () -> blinker.def)
               |> watching [ "count" ]
               |> poking [ "enable", 1UL ] ]
 
@@ -170,7 +170,7 @@ open Expecto
 open Warp11
 
 let private blinking (enable: uint64) =
-    let sim = Sim Blinker.blinker
+    let sim = Sim Blinker.blinker.def
     sim.Reset()
     sim.Poke("enable", enable)
     sim
@@ -209,7 +209,7 @@ let tests =
           }
 
           test "the design emits" {
-              let verilog = emitDesign Blinker.blinker
+              let verilog = emitDesign Blinker.blinker.def
               Expect.stringContains verilog "module Blinker" "no module header"
           } ]
 

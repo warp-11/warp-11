@@ -30,13 +30,14 @@ everything downstream follows from it.
 
 ```fsharp
 let counter =
-    design "Counter" (fun () ->
-        let enable = inputBit "enable"
-        let count = output "count" 64
-        let r = reg "r" 64
+    defModule
+        "Counter"
+        (fun p -> (p.inPort "enable" 1, p.outPort "count" 64))
+        (fun (enable, count) ->
+            let r = reg "r" 64
 
-        If enable (fun () -> r + 1UL ==> r)
-        r ==> count)
+            If enable (fun () -> r + 1UL ==> r)
+            r ==> count)
 ```
 
 That `If` is not a branch taken at run time. It runs **once, on your machine**,

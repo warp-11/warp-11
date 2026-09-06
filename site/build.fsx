@@ -84,6 +84,13 @@ let pages =
       page "Examples" "Audio" "examples/audio" "hdl/Warp11.Effects/README.md"
       page "Examples" "The tutorial project" "examples/tutorial" "hdl/Warp11.Tutorial/README.md"
 
+      // Cookbook: one page per *task*, answering "how do I …" for the things
+      // you do while building a real project. Distinct from Tutorial, which is
+      // one page per *mechanism* and is read in the debugger — a reader who
+      // knows what a register map is and wants to write one should not have to
+      // find that out from a page about the AXI-Lite handshake.
+      page "Cookbook" "Create a register map" "cookbook/register-map" "docs/cookbook/register-map.md"
+
       page "Guides" "How it fits together" "guides/architecture" "docs/architecture.md"
       page "Guides" "Start your own project" "guides/start-a-project" "docs/start-a-project.md"
       page "Guides" "Drive it from Rust" "guides/drive-it-from-rust" "docs/drive-it-from-rust.md"
@@ -99,7 +106,7 @@ let pages =
 /// that before a catalogue of mechanisms. Tutorial is thirty-odd entries, so
 /// anything below it is a long way down; on a narrow screen that was the whole
 /// of the nav between the reader and the page.
-let private sectionOrder = [ "Guides"; "Tutorial"; "Examples" ]
+let private sectionOrder = [ "Guides"; "Cookbook"; "Tutorial"; "Examples" ]
 
 let sections =
     pages
