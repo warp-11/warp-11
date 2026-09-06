@@ -95,6 +95,11 @@ from the caller's stream, `streamOfPorts` reads its output side back as one.
 `streamOfPorts` also registers the returned `ready` net, so the one-consumer
 check applies to your module's stream exactly as it does to a library stage's.
 
+Wiring it backwards is caught, not trusted: every staging wire knows which
+side of the child it is, so swapping `c.input` and `c.output` fails at the
+first misdirected `==>` with the port and instance named, and a child input
+you forget to wire at all fails when the enclosing module finalizes.
+
 Third, the design — which is now one line per hop:
 
 ```fsharp

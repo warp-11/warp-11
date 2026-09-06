@@ -59,23 +59,23 @@ type BiquadCoeffs =
 /// host cares to write.
 type BiquadPorts =
     { /// The input sample.
-      x: Expr
+      x: Input
       /// High for one cycle per sample. The section advances on it, so the
       /// filter's rate is the caller's to set.
-      advance: Expr
+      advance: Input
       /// Feed-forward coefficient on the current sample.
-      b0: Expr
+      b0: Input
       /// Feed-forward coefficient on the previous sample.
-      b1: Expr
+      b1: Input
       /// Feed-forward coefficient on the sample before that.
-      b2: Expr
+      b2: Input
       /// Feedback coefficient on the previous output. Subtracted — the sign
       /// convention is the hardware's, and `BiquadDesign` already matches it.
-      a1: Expr
+      a1: Input
       /// Feedback coefficient on the output before that, same convention.
-      a2: Expr
+      a2: Input
       /// The filtered sample.
-      y: Expr }
+      y: Output }
 
 /// Single-section Direct Form I biquad over a mono sample.
 ///
@@ -194,14 +194,14 @@ let biquadSection name = biquad name sampleWidth biquadCoeffWidth biquadCoeffFra
 /// because it appears in each stage's module type, though nothing outside
 /// needs to build one.
 type StereoPorts =
-    { inLeft: Expr
-      inRight: Expr
-      inValid: Expr
-      inReady: Expr
-      outLeft: Expr
-      outRight: Expr
-      outValid: Expr
-      outReady: Expr }
+    { inLeft: Input
+      inRight: Input
+      inValid: Input
+      inReady: Output
+      outLeft: Output
+      outRight: Output
+      outValid: Output
+      outReady: Input }
 
 let private stereoPorts (p: Ports) : StereoPorts =
     { inLeft = p.inPortAs "in_left" (SInt sampleWidth)
@@ -259,9 +259,9 @@ type AudioGainPorts =
       s: StereoPorts
       /// Gain in Q8.8: `gainUnity` passes through, 512 doubles, 128 halves,
       /// 0 is silence.
-      volume: Expr
+      volume: Input
       /// High forces the output to zero, whatever `volume` says.
-      mute: Expr }
+      mute: Input }
 
 /// Combinational stereo volume / mute stage.
 ///
@@ -317,7 +317,7 @@ type AudioEqBandPorts =
       s: StereoPorts
       /// The five biquad coefficients in `b0, b1, b2, a1, a2` order, each
       /// Q2.30 — `biquadUnity` is +1.0. `biquadDesign` produces them.
-      coefficients: Expr list }
+      coefficients: Input list }
 
 /// One EQ band: a biquad section per channel, both fed the same five
 /// host-written coefficients.
@@ -368,7 +368,7 @@ type AudioLimiterPorts =
       s: StereoPorts
       /// The magnitude no sample may exceed, at sample scale. Signed,
       /// because it is compared against samples that are.
-      threshold: Expr }
+      threshold: Input }
 
 /// Hard brick-wall stereo limiter — the chain's final safety stage.
 ///
@@ -518,17 +518,17 @@ type AudioCompressorPorts =
     { /// The stereo stream through the compressor.
       s: StereoPorts
       /// The level above which gain reduction begins, at sample scale.
-      threshold: Expr
+      threshold: Input
       /// Compression ratio. Above the threshold, this much input change
       /// produces one unit of output change.
-      ratio: Expr
+      ratio: Input
       /// How fast the envelope rises toward a louder signal.
-      attack: Expr
+      attack: Input
       /// How fast it falls back toward a quieter one.
-      releaseRate: Expr
+      releaseRate: Input
       /// Gain applied after compression, in the same Q8.8 as `audioGain` —
       /// which is what makes the boost-then-compress order preservable.
-      makeup: Expr }
+      makeup: Input }
 
 /// Single-band stereo-coupled dynamic-range compressor.
 ///
@@ -688,10 +688,10 @@ let toneStep440 = 151199UL
 
 /// The output half of a stereo stage's ports — what a source declares.
 type StereoSourcePorts =
-    { outLeft: Expr
-      outRight: Expr
-      outValid: Expr
-      outReady: Expr }
+    { outLeft: Output
+      outRight: Output
+      outValid: Output
+      outReady: Input }
 
 let private stereoSourcePorts (p: Ports) : StereoSourcePorts =
     { outLeft = p.outPort "out_left" sampleWidth
@@ -712,10 +712,10 @@ type ToneGeneratorPorts =
     { /// The stereo stream out. A source, so there is nothing coming in.
       s: StereoSourcePorts
       /// High while the tone runs. Low holds the phase where it was.
-      enable: Expr
+      enable: Input
       /// Phase increment per sample — the frequency, as the numerically
       /// controlled oscillator sees it.
-      step: Expr }
+      step: Input }
 
 /// Triangle-wave tone generator — a numerically-controlled oscillator sourcing
 /// a stereo stream with the same value on both channels.
@@ -834,7 +834,7 @@ type AudioFirPorts =
       /// Which response to apply: `presetBypass`, `presetLowPass` or
       /// `presetHighPass`. Selected at run time, so all three sets of taps
       /// are elaborated and one is chosen.
-      preset: Expr }
+      preset: Input }
 
 /// Tone-control FIR: a stereo stage with a 2-bit `preset` selecting bypass,
 /// low-pass or high-pass. One delay line per channel feeds three parallel MAC
@@ -960,10 +960,10 @@ let audioToneFilter name = audioFir name 16 48_000.0 4_000.0 300.0
 
 /// The input half of a stereo stage's ports — what a sink declares.
 type StereoSinkPorts =
-    { inLeft: Expr
-      inRight: Expr
-      inValid: Expr
-      inReady: Expr }
+    { inLeft: Input
+      inRight: Input
+      inValid: Input
+      inReady: Output }
 
 let private stereoSinkPorts (p: Ports) : StereoSinkPorts =
     { inLeft = p.inPort "in_left" sampleWidth
@@ -982,15 +982,15 @@ let private stereoSink (sp: StereoSinkPorts) (s: Stream<Expr * Expr>) =
 /// hands its caller the ports themselves, because clocking is what it *is*.
 type I2sMasterPorts =
     { /// Master clock to the codec.
-      mclk: Expr
+      mclk: Output
       /// Serial bit clock.
-      sclk: Expr
+      sclk: Output
       /// Left/right word clock. High and low halves are the two channels.
-      lrclk: Expr
+      lrclk: Output
       /// One fabric cycle on each edge the receiver should sample on.
-      sclkRxTick: Expr
+      sclkRxTick: Output
       /// One fabric cycle on each edge the transmitter should drive on.
-      sclkTxTick: Expr }
+      sclkTxTick: Output }
 
 /// I2S clock generator: one fabric clock in, the codec's MCLK / SCLK / LRCLK
 /// out, plus the two internal edge ticks `i2sRx` and `i2sTx` hang off.
@@ -1065,11 +1065,11 @@ type I2sRxPorts =
     { /// The stereo stream out.
       s: StereoSourcePorts
       /// One fabric cycle on each edge to sample `sdout` on.
-      sclkTick: Expr
+      sclkTick: Input
       /// The current word-clock level — which channel is on the wire.
-      lrclk: Expr
+      lrclk: Input
       /// Serial data in from the converter.
-      sdout: Expr }
+      sdout: Input }
 
 /// I2S receiver: the ADC's serial line into a stereo stream.
 ///
@@ -1153,11 +1153,11 @@ type I2sTxPorts =
     { /// The stereo stream in.
       s: StereoSinkPorts
       /// One fabric cycle on each edge to drive `sdin` on.
-      sclkTick: Expr
+      sclkTick: Input
       /// The current word-clock level.
-      lrclk: Expr
+      lrclk: Input
       /// Serial data out to the converter.
-      sdin: Expr }
+      sdin: Output }
 
 /// I2S transmitter: a stereo stream out to the DAC's serial line. The mirror
 /// of `i2sRx`, and it shares the frame convention exactly — one transition
@@ -1370,28 +1370,28 @@ let gainedWidth = bandWidth + 9
 type MonoBandCompressorPorts =
     { /// This band's sample, signed and wider than a full-range sample —
       /// a crossover output can exceed the input it came from.
-      band: Expr
+      band: Input
       /// High for one cycle per sample.
-      advance: Expr
+      advance: Input
       /// Low passes the band through with makeup gain and no compression.
-      enable: Expr
+      enable: Input
       /// The level above which gain reduction begins, at sample scale.
-      threshold: Expr
+      threshold: Input
       /// Compression ratio above the threshold.
-      ratio: Expr
+      ratio: Input
       /// How fast the envelope rises toward a louder signal.
-      attack: Expr
+      attack: Input
       /// How fast it falls back toward a quieter one.
-      releaseRate: Expr
+      releaseRate: Input
       /// Per-band gain in Q8.8. This is the field a fitting prescription
       /// arrives in — the fabric knows nothing about where the number came
       /// from.
-      makeup: Expr
+      makeup: Input
       /// The band after compression and makeup.
-      gained: Expr
+      gained: Output
       /// The detector's current level, for a host measuring what the band is
       /// actually doing.
-      envelope: Expr }
+      envelope: Output }
 
 /// Mono single-band compressor — the per-band unit. The same envelope detector
 /// and gain computer as `audioCompressor`, in the same Q formats and with the
@@ -1490,20 +1490,20 @@ type MultibandCompressorPorts =
     { /// The stereo stream through the whole bank.
       s: StereoPorts
       /// The level above which gain reduction begins, shared by every band.
-      threshold: Expr
+      threshold: Input
       /// Compression ratio, shared by every band.
-      ratio: Expr
+      ratio: Input
       /// Envelope attack rate, shared by every band.
-      attack: Expr
+      attack: Input
       /// Envelope release rate, shared by every band.
-      releaseRate: Expr
+      releaseRate: Input
       /// Per-band makeup gain for the left channel, Q8.8, low band first.
-      leftGains: Expr list
+      leftGains: Input list
       /// The same for the right channel. Separate because the two ears are
       /// not the same ear.
-      rightGains: Expr list
+      rightGains: Input list
       /// The summed output's envelope, for a host measuring the result.
-      envelope: Expr }
+      envelope: Output }
 
 /// 8-band stereo multiband compressor.
 ///

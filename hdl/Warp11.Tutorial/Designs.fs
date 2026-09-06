@@ -96,9 +96,9 @@ let dotProduct =
 /// parent's namespace, so `left_total` is already taken by the instance
 /// called `left`.
 type SatAccIo =
-    { add: Expr
-      en: Expr
-      total: Expr }
+    { add: Input
+      en: Input
+      total: Output }
 
 let satAcc =
     defModule

@@ -138,13 +138,13 @@ let barrel (latency: int) (threads: int) =
 /// what lets a barrel keep a separate stream per thread from one instance.
 type Xoshiro128Ports =
     { /// High replaces the state with `sIn` instead of advancing it.
-      load: Expr
+      load: Input
       /// The four 32-bit state words, low index first.
-      sIn: Expr list
+      sIn: Input list
       /// High advances the generator by one step.
-      step: Expr
+      step: Input
       /// This step's output word.
-      word: Expr }
+      word: Output }
 
 /// xoshiro128++ (Blackman/Vigna) as a synthesizable core: 4×32-bit state, one
 /// 32-bit word per `step` — shifts, xors, rotates and two adds, no

@@ -1388,6 +1388,68 @@ let private elaborationGate () =
             let store = ultraMem "store" 2 8
             memRead store addr ==> out)
 
+    // 5. Direction. A port's direction is recorded at declaration and the flip
+    //    at Instance, so the same `==>` that wires a boundary correctly from
+    //    one side is refused from the other — at the connect, with the module
+    //    and port named, covering Sim-only paths the emission checks never see.
+    let ownInputDriveRefused =
+        refused "is an input of" (fun () ->
+            let a = input "a" 8
+            let b = output "b" 8
+            lit 0UL 8 ==> a
+            a ==> b)
+
+    let childDef =
+        defModule "GateChild" (fun p -> p.inPort "x" 8, p.outPort "y" 8) (fun (x, y) -> x ==> y)
+
+    let childOutputDriveRefused =
+        refused "read it, don't drive it" (fun () ->
+            let out = output "out" 8
+            let x, y = childDef.NewNamed "c"
+            input "a" 8 ==> x
+            lit 0UL 8 ==> y
+            y ==> out)
+
+    //    ...a child input nobody drove is a floating port, and the F#
+    //    parameter list stopped guaranteeing otherwise when bundles became
+    //    tuple-destructured: dropping one connect is one missing line.
+    let childInputUndrivenRefused =
+        refused "child inputs were never driven" (fun () ->
+            let out = output "out" 8
+            let _x, y = childDef.NewNamed "c"
+            y ==> out)
+
+    //    ...while a fully wired child, and a body driving its own *outputs* —
+    //    including the ready net `streamInput` declares — are the ordinary
+    //    shape of every design and must stay ordinary.
+    let childWiredAccepted =
+        accepted (fun () ->
+            let out = output "out" 8
+            let x, y = childDef.NewNamed "c"
+            input "a" 8 ==> x
+            y ==> out)
+
+    let ownReadyDriveAccepted =
+        accepted (fun () -> streamInput "in" (layout1 ("value", 8)) |> streamOutput "out")
+
+    // 6. The boundary is complete when the io factory returns: a port declared
+    //    from body depth — an ambient `input`, a library call, a stashed
+    //    factory — scatters the interface and is refused. `design` (this
+    //    harness included) and `moduleDef` are the unsealed legacy carriers.
+    let portInBodyRefused =
+        try
+            defModule
+                "GateSealed"
+                (fun p -> p.outPort "out" 8)
+                (fun out ->
+                    let a = input "a" 8
+                    a ==> out)
+            |> ignore
+
+            false
+        with e ->
+            e.Message.Contains "ports are declared in the io factory"
+
     loopRefused
     && feedbackAccepted
     && undrivenRefused
@@ -1395,6 +1457,12 @@ let private elaborationGate () =
     && romWriteRefused
     && memWriteAccepted
     && ultraReadRefused
+    && ownInputDriveRefused
+    && childOutputDriveRefused
+    && childInputUndrivenRefused
+    && childWiredAccepted
+    && ownReadyDriveAccepted
+    && portInBodyRefused
 
 /// `streamWindow`/`lineWindow`'s defining property, driven rather than trusted: across two
 /// frames of distinct rows, the emitted windows are exactly rows r−1, r, r+1

@@ -44,9 +44,9 @@ them.
 
 ```fsharp
 type SatAccIo =
-    { add: Expr
-      en: Expr
-      total: Expr }
+    { add: Input
+      en: Input
+      total: Output }
 
 let satAcc =
     defModule
@@ -65,7 +65,13 @@ Two arguments after the name:
 
 - **The IO bundle** — a record you shape yourself, which is what makes the IO
   *typed*: the body and every use go through named fields, so a port renamed
-  in one place is a compile error in the other, not a mis-wire.
+  in one place is a compile error in the other, not a mis-wire. `Input` and
+  `Output` are both just `Expr` — the record is saying which way each field
+  points, from the module's own perspective, and the elaborator holds you to
+  it: drive `io.add` from inside the body and elaboration stops with *"'add'
+  is an input of 'SatAcc8' — the caller drives it, the body reads it."* The
+  factory is also the *whole* interface — a port declared from inside the
+  body is refused, so the bundle is a complete receipt of the boundary.
 - **The body** — ordinary design code over those wires, and the *whole*
   module. `reg`, `wire`, `If`, `==>` all work, because the body elaborates
   with this module ambient, exactly as a `design` body does. Every mapping —

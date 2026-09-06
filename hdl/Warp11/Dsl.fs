@@ -50,6 +50,14 @@ type internal NameCounter() =
         counts[stem] <- n
         $"{stem}_{n}"
 
+/// Which way a boundary port points, recorded at declaration and consulted at
+/// every connect. Direction is a property of the declaration, not of the
+/// value's type — the same `Expr` is read on one side of the module boundary
+/// and driven on the other, so no host type could carry this.
+type internal PortDirection =
+    | PortIn
+    | PortOut
+
 /// Signal declarations: ports, wires, registers, and the type/kind tables that
 /// the rest of elaboration reads. One declaration per name, enforced here.
 /// Instance staging wires come through `DeclareAs` directly.
@@ -58,10 +66,12 @@ type internal DeclCollector(moduleName: string) =
     let declTypes = System.Collections.Generic.Dictionary<string, GroundType>()
     let declKinds = System.Collections.Generic.Dictionary<string, string>()
     let regNames = System.Collections.Generic.HashSet<string>()
+    let portDirections = System.Collections.Generic.Dictionary<string, PortDirection>()
 
     member _.Decls = decls
     member _.DeclTypes = declTypes
     member _.RegNames = regNames
+    member _.PortDirections = portDirections
 
     member _.DeclareAs(decl, n, (t: GroundType), kind) =
         requireNotVerilogKeyword n kind
@@ -75,6 +85,8 @@ type internal DeclCollector(moduleName: string) =
         declKinds[n] <- kind
 
         (match decl with
+         | Input _ -> portDirections[n] <- PortIn
+         | Output _ -> portDirections[n] <- PortOut
          | Reg _ -> regNames.Add n |> ignore
          | _ -> ())
 
@@ -139,6 +151,15 @@ type Builder(name: string, ?clockSpec: ClockSpec) =
     let streams = StreamTracker()
     let machines = MachineTracker()
     let instances = ResizeArray<Instance>()
+    // Staging nets declared by Instance, with their flip: (instance name,
+    // child module name, drive-side). A child's input is drive-side — this
+    // module must drive it — and a child's output is read-side. This is the
+    // one place both perspectives on a port meet, so the flip is recorded
+    // here as data and every connect can consult it.
+    let stagingNets = System.Collections.Generic.Dictionary<string, string * string * bool>()
+    // Set by `defModule` when the io factory has returned: the boundary is
+    // complete, and a port declared after that is refused.
+    let mutable boundarySealed = false
     // Raw write calls, each with its enable already ANDed with the If conditions
     // active at the call. Def merges them into one write site per mem.
     let memWrites = ResizeArray<string * Expr * Expr * Expr * Expr option>()
@@ -170,10 +191,23 @@ type Builder(name: string, ?clockSpec: ClockSpec) =
 
     member private this.Declare(decl, n, (t: GroundType)) = declColl.Declare(decl, n, t)
 
+    // Ports belong in the io factory, where the bundle is the receipt: a port
+    // declared from body depth scatters the boundary across wherever the body
+    // wandered. `design` and `moduleDef` never seal, so the legacy former and
+    // the explicit seam are untouched.
+    member private _.RequirePortsOpen(kind: string) =
+        if boundarySealed then
+            failwith $"'{name}': {kind} declared in the body — ports are declared in the io factory"
+
     /// Declare an input port.
-    member this.Input(n, t: GroundType) = declColl.Input(n, t)
+    member this.Input(n, t: GroundType) =
+        this.RequirePortsOpen "an input port"
+        declColl.Input(n, t)
+
     /// Declare an output port.
-    member this.Output(n, t: GroundType) = declColl.Output(n, t)
+    member this.Output(n, t: GroundType) =
+        this.RequirePortsOpen "an output port"
+        declColl.Output(n, t)
     /// Declare a wire.
     member this.Wire(n, t: GroundType) = declColl.Wire(n, t)
     /// Declare a register and the value it takes under reset.
@@ -188,9 +222,9 @@ type Builder(name: string, ?clockSpec: ClockSpec) =
     // A bare width still means unsigned, so every existing declaration — and the
     // `moduleDef` API's `m.Input("a", 8)` — reads exactly as it did.
     /// An input port at a bare width, which still means unsigned.
-    member this.Input(n, w: int) = declColl.Input(n, w)
+    member this.Input(n, w: int) = this.Input(n, UInt w)
     /// An output port at a bare width.
-    member this.Output(n, w: int) = declColl.Output(n, w)
+    member this.Output(n, w: int) = this.Output(n, UInt w)
     /// A wire at a bare width.
     member this.Wire(n, w: int) = declColl.Wire(n, w)
     /// A register at a bare width.
@@ -316,6 +350,20 @@ type Builder(name: string, ?clockSpec: ClockSpec) =
         match target with
         | Ref (n, _) ->
             this.FlushPending()
+
+            // Direction, before anything else: the same `==>` is legal on one
+            // side of a module boundary and a bug on the other, and only the
+            // tables filled at declaration and at Instance know which side
+            // this is.
+            (match declColl.PortDirections.TryGetValue n with
+             | true, PortIn -> failwith $"'{n}' is an input of '{name}' — the caller drives it, the body reads it"
+             | _ -> ())
+
+            (match stagingNets.TryGetValue n with
+             | true, (instName, childName, false) ->
+                 failwith $"'{n}' is '{childName}''s output (instance '{instName}') — read it, don't drive it"
+             | _ -> ())
+
             this.RequireUndriven n
 
             assignCounts[n] <-
@@ -325,6 +373,11 @@ type Builder(name: string, ?clockSpec: ClockSpec) =
 
             this.Set(n, value)
         | _ -> failwith "assign target must be a declared signal"
+
+    /// The boundary is complete: the io factory has returned, and any port
+    /// declared after this is an error. `defModule` calls it between the
+    /// factory and the body.
+    member internal _.SealBoundary() = boundarySealed <- true
 
     /// Record a stream's ready net so `checkStreams` can judge at emission whether
     /// it ended up with exactly one consumer.
@@ -402,13 +455,19 @@ type Builder(name: string, ?clockSpec: ClockSpec) =
         let staging = $"a staging wire for instance '{instName}'"
 
         // The staging wire takes the port's own type, so a signed port stays
-        // signed across the boundary rather than arriving as raw bits.
+        // signed across the boundary rather than arriving as raw bits — and it
+        // records the flip: the child's input is a net this module must drive,
+        // the child's output one it reads.
         for d in tm.def.decls do
             match d with
-            | Input (n, t)
+            | Input (n, t) ->
+                let stagingNet = $"{instName}_{n}"
+                this.DeclareAs(Wire(stagingNet, t), stagingNet, t, staging) |> ignore
+                stagingNets[stagingNet] <- (instName, tm.def.name, true)
             | Output (n, t) ->
                 let stagingNet = $"{instName}_{n}"
                 this.DeclareAs(Wire(stagingNet, t), stagingNet, t, staging) |> ignore
+                stagingNets[stagingNet] <- (instName, tm.def.name, false)
             | _ -> ()
 
         // The staging net carries the port's declared type, so a signed port
@@ -430,6 +489,20 @@ type Builder(name: string, ?clockSpec: ClockSpec) =
     /// here, and a state machine with a state nothing transitions to fails here.
     member this.Def =
         this.FlushPending()
+
+        // A child input nobody drove is a floating port on silicon. Checked at
+        // elaboration rather than emission so Sim-only paths are covered too —
+        // and because "the F# parameter list makes this impossible" stopped
+        // being true when bundles became tuple-destructured: dropping one
+        // connect is one missing line.
+        let undrivenChildInputs =
+            [ for KeyValue (net, (instName, childName, driveSide)) in stagingNets do
+                  if driveSide && not (assignCounts.ContainsKey net) then
+                      yield $"'{net.Substring(instName.Length + 1)}' of instance '{instName}' ({childName})" ]
+
+        if not (List.isEmpty undrivenChildInputs) then
+            failwith
+                $"""in '{name}', child inputs were never driven: {String.concat ", " undrivenChildInputs}"""
 
         // A state nothing transitions to is dead logic, and the hand-encoded
         // form cannot notice: `sFoo` is a number, and an unused number reads
@@ -557,26 +630,34 @@ and Branch internal (builder: Builder, condition: Expr, thenScope: Scope) =
 
 /// The module currently being elaborated. A stack, so a design may define another
 /// inside itself. This is the price of `mul8 a b` being a plain call: the builder
-/// has to be reachable without being passed.
-let private elaborating = System.Collections.Generic.Stack<Builder>()
+/// has to be reachable without being passed — dynamic scoping, entered only by
+/// the module formers, for exactly the extent of a body.
+///
+/// Thread-local, so two threads elaborating independently cannot see each
+/// other's builders. Nothing in the tree elaborates in parallel today; this is
+/// the discipline that keeps the carrier from being a global, not a feature
+/// anything relies on.
+let private elaborating =
+    new System.Threading.ThreadLocal<System.Collections.Generic.Stack<Builder>>(fun () ->
+        System.Collections.Generic.Stack<Builder>())
 
 let internal current () =
-    if elaborating.Count = 0 then
+    if elaborating.Value.Count = 0 then
         failwith "no module is being elaborated — this belongs inside a design { }"
 
-    elaborating.Peek()
+    elaborating.Value.Peek()
 
 /// Elaborate a module from a body that takes the builder explicitly. The
 /// untyped seam — no port view, no call shape — used where something wants a
 /// `ModuleDef` and nothing intends to instantiate it as a function.
 let moduleDef name (body: Builder -> unit) =
     let b = Builder(name)
-    elaborating.Push b
+    elaborating.Value.Push b
 
     try
         body b
     finally
-        elaborating.Pop() |> ignore
+        elaborating.Value.Pop() |> ignore
 
     b.Def
 
@@ -603,24 +684,29 @@ let defModule name (io: Ports -> 'io) (body: 'io -> unit) : TypedModule<'io> =
               inPortAs = fun n t -> b.Input(n, t)
               outPortAs = fun n t -> b.Output(n, t) }
 
+    // The factory has returned, so the boundary is complete before the first
+    // body statement runs — a port declared from body depth (an ambient
+    // `input`, a library call, a stashed factory) is refused from here on.
+    b.SealBoundary()
+
     // The body elaborates with this module ambient, so a definition body is the
     // same ordinary code a design body is.
-    elaborating.Push b
+    elaborating.Value.Push b
 
     try
         body ioValue
     finally
-        elaborating.Pop() |> ignore
+        elaborating.Value.Pop() |> ignore
 
     { def = b.Def; io = io }
 
 let private designWith (b: Builder) (body: unit -> unit) =
-    elaborating.Push b
+    elaborating.Value.Push b
 
     try
         body ()
     finally
-        elaborating.Pop() |> ignore
+        elaborating.Value.Pop() |> ignore
 
     b.Def
 
@@ -663,6 +749,21 @@ let declareRegNoReset name (t: GroundType) = (current ()).RegNoReset(name, t)
 let inline input name spec = declareInput name (AsType $ spec)
 /// An output port, at a width or a type.
 let inline output name spec = declareOutput name (AsType $ spec)
+
+/// A port bundle's field, read: `Input` and `Output` are `Expr` — direction is
+/// enforced at elaboration (recorded when the port is declared, checked at
+/// every `==>`), and these aliases are how a bundle record says which way each
+/// field points:
+///
+///     type SatAccIo = { add: Input; en: Input; total: Output }
+///
+/// Written from the module's own perspective, on both sides of the boundary —
+/// the body reads an `Input` and drives an `Output`; a call site does the
+/// reverse, and the elaborator knows which side it is on.
+type Input = Expr
+
+/// The output half of the pair — see [Input].
+type Output = Expr
 /// A wire, at a width or a type.
 let inline wire name spec = declareWire name (AsType $ spec)
 
