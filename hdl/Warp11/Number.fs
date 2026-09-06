@@ -178,6 +178,10 @@ let reinterpret (target: NumberFormat) (x: Number) : Number =
 /// interpretation survives into the IR rather than being reapplied at each use.
 let input name (fmt: NumberFormat) : Number = ofBits fmt (Dsl.input name (groundType fmt))
 
+/// The io-factory form of [input]: the same port, declared through the
+/// factory's receiver.
+let inPort (p: Ports) name (fmt: NumberFormat) : Number = ofBits fmt (p.inPortAs name (groundType fmt))
+
 /// Land a value in a named wire, keeping its format. This is how a computed
 /// value becomes multiplicable and renormalizable — `*` and `renormTo` need
 /// declared signals underneath (the slice rule).

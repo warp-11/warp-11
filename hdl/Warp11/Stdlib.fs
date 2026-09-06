@@ -1374,85 +1374,167 @@ let private claimBus (prefix: string) (half: string) (claimed: bool ref) =
 
     claimed.Value <- true
 
-/// Declare an AR/R boundary named `prefix`, and tie the transaction constants
-/// that never vary. `arlen` is left untied: the single-beat master zeroes it,
-/// the burst master drives it from the descriptor.
-let axiReadBusNamed (prefix: string) (addrWidth: int) (dataWidth: int) : AxiReadBus =
+/// Every wire of a read boundary, as an io factory declares it — including
+/// the transaction-constant ports the working `AxiReadBus` deliberately
+/// drops. `axiReadBusOf` in the body ties those and hands back the record the
+/// masters take. `arlen` is never tied: the single-beat master zeroes it, the
+/// burst master drives it from the descriptor.
+type AxiReadBusPorts =
+    { prefix: string
+      araddr: Output
+      arlen: Output
+      arsize: Output
+      arburst: Output
+      arcache: Output
+      arprot: Output
+      arvalid: Output
+      arready: Input
+      rdata: Input
+      rlast: Input
+      rvalid: Input
+      rready: Output }
+
+/// Declare an AR/R boundary named `prefix` in an io factory.
+let axiReadBusPorts (p: Ports) (prefix: string) (addrWidth: int) (dataWidth: int) : AxiReadBusPorts =
     axiWidths "axiReadBus" addrWidth dataWidth
 
-    let araddr = output $"{prefix}_araddr" addrWidth
-    let arlen = output $"{prefix}_arlen" 8
-    let arsize = output $"{prefix}_arsize" 3
-    let arburst = output $"{prefix}_arburst" 2
-    let arcache = output $"{prefix}_arcache" 4
-    let arprot = output $"{prefix}_arprot" 3
-    let arvalid = outputBit $"{prefix}_arvalid"
-    let arready = inputBit $"{prefix}_arready"
-    let rdata = input $"{prefix}_rdata" dataWidth
-    input $"{prefix}_rresp" 2 |> ignore // trusted OKAY
-    let rlast = inputBit $"{prefix}_rlast"
-    let rvalid = inputBit $"{prefix}_rvalid"
-    let rready = outputBit $"{prefix}_rready"
-
-    lit (axiSizeEncoding dataWidth) 3 ==> arsize
-    lit 1UL 2 ==> arburst // INCR
-    lit 0UL 4 ==> arcache
-    lit 0UL 3 ==> arprot
+    let araddr = p.outPort $"{prefix}_araddr" addrWidth
+    let arlen = p.outPort $"{prefix}_arlen" 8
+    let arsize = p.outPort $"{prefix}_arsize" 3
+    let arburst = p.outPort $"{prefix}_arburst" 2
+    let arcache = p.outPort $"{prefix}_arcache" 4
+    let arprot = p.outPort $"{prefix}_arprot" 3
+    let arvalid = p.outPort $"{prefix}_arvalid" 1
+    let arready = p.inPort $"{prefix}_arready" 1
+    let rdata = p.inPort $"{prefix}_rdata" dataWidth
+    p.inPort $"{prefix}_rresp" 2 |> ignore // trusted OKAY
+    let rlast = p.inPort $"{prefix}_rlast" 1
+    let rvalid = p.inPort $"{prefix}_rvalid" 1
+    let rready = p.outPort $"{prefix}_rready" 1
 
     { prefix = prefix
       araddr = araddr
       arlen = arlen
+      arsize = arsize
+      arburst = arburst
+      arcache = arcache
+      arprot = arprot
       arvalid = arvalid
       arready = arready
       rdata = rdata
       rlast = rlast
       rvalid = rvalid
-      rready = rready
+      rready = rready }
+
+/// The body half: tie the transaction constants — one beat per burst is the
+/// write side's; here it is INCR, cache and prot zero — and hand back the bus
+/// the masters take.
+let axiReadBusOf (ports: AxiReadBusPorts) : AxiReadBus =
+    lit (axiSizeEncoding (width ports.rdata)) 3 ==> ports.arsize
+    lit 1UL 2 ==> ports.arburst // INCR
+    lit 0UL 4 ==> ports.arcache
+    lit 0UL 3 ==> ports.arprot
+
+    { prefix = ports.prefix
+      araddr = ports.araddr
+      arlen = ports.arlen
+      arvalid = ports.arvalid
+      arready = ports.arready
+      rdata = ports.rdata
+      rlast = ports.rlast
+      rvalid = ports.rvalid
+      rready = ports.rready
       claimed = ref false }
+
+let axiReadBusNamed (prefix: string) (addrWidth: int) (dataWidth: int) : AxiReadBus =
+    axiReadBusOf (axiReadBusPorts (ambientPorts ()) prefix addrWidth dataWidth)
 
 /// The conventional `m_axi` read boundary.
 let axiReadBus (addrWidth: int) (dataWidth: int) = axiReadBusNamed "m_axi" addrWidth dataWidth
 
-/// Declare an AW/W/B boundary named `prefix` and tie its transaction constants:
-/// one beat per burst, INCR, WLAST always, cache and prot zero.
-let axiWriteBusNamed (prefix: string) (addrWidth: int) (dataWidth: int) : AxiWriteBus =
+/// Every wire of a write boundary, as an io factory declares it — the AW/W/B
+/// mirror of [AxiReadBusPorts]. `axiWriteBusOf` in the body ties the
+/// constants: one beat per burst, INCR, WLAST always, cache and prot zero.
+type AxiWriteBusPorts =
+    { prefix: string
+      awaddr: Output
+      awlen: Output
+      awsize: Output
+      awburst: Output
+      awcache: Output
+      awprot: Output
+      awvalid: Output
+      awready: Input
+      wdata: Output
+      wstrb: Output
+      wlast: Output
+      wvalid: Output
+      wready: Input
+      bvalid: Input
+      bready: Output }
+
+/// Declare an AW/W/B boundary named `prefix` in an io factory.
+let axiWriteBusPorts (p: Ports) (prefix: string) (addrWidth: int) (dataWidth: int) : AxiWriteBusPorts =
     axiWidths "axiWriteBus" addrWidth dataWidth
 
-    let awaddr = output $"{prefix}_awaddr" addrWidth
-    let awlen = output $"{prefix}_awlen" 8
-    let awsize = output $"{prefix}_awsize" 3
-    let awburst = output $"{prefix}_awburst" 2
-    let awcache = output $"{prefix}_awcache" 4
-    let awprot = output $"{prefix}_awprot" 3
-    let awvalid = outputBit $"{prefix}_awvalid"
-    let awready = inputBit $"{prefix}_awready"
-    let wdata = output $"{prefix}_wdata" dataWidth
-    let wstrb = output $"{prefix}_wstrb" (dataWidth / 8)
-    let wlast = outputBit $"{prefix}_wlast"
-    let wvalid = outputBit $"{prefix}_wvalid"
-    let wready = inputBit $"{prefix}_wready"
-    input $"{prefix}_bresp" 2 |> ignore // trusted OKAY
-    let bvalid = inputBit $"{prefix}_bvalid"
-    let bready = outputBit $"{prefix}_bready"
-
-    lit 0UL 8 ==> awlen // 1 beat per burst
-    lit (axiSizeEncoding dataWidth) 3 ==> awsize
-    lit 1UL 2 ==> awburst // INCR
-    lit 0UL 4 ==> awcache
-    lit 0UL 3 ==> awprot
-    lit 1UL 1 ==> wlast // every beat is last
+    let awaddr = p.outPort $"{prefix}_awaddr" addrWidth
+    let awlen = p.outPort $"{prefix}_awlen" 8
+    let awsize = p.outPort $"{prefix}_awsize" 3
+    let awburst = p.outPort $"{prefix}_awburst" 2
+    let awcache = p.outPort $"{prefix}_awcache" 4
+    let awprot = p.outPort $"{prefix}_awprot" 3
+    let awvalid = p.outPort $"{prefix}_awvalid" 1
+    let awready = p.inPort $"{prefix}_awready" 1
+    let wdata = p.outPort $"{prefix}_wdata" dataWidth
+    let wstrb = p.outPort $"{prefix}_wstrb" (dataWidth / 8)
+    let wlast = p.outPort $"{prefix}_wlast" 1
+    let wvalid = p.outPort $"{prefix}_wvalid" 1
+    let wready = p.inPort $"{prefix}_wready" 1
+    p.inPort $"{prefix}_bresp" 2 |> ignore // trusted OKAY
+    let bvalid = p.inPort $"{prefix}_bvalid" 1
+    let bready = p.outPort $"{prefix}_bready" 1
 
     { prefix = prefix
       awaddr = awaddr
+      awlen = awlen
+      awsize = awsize
+      awburst = awburst
+      awcache = awcache
+      awprot = awprot
       awvalid = awvalid
       awready = awready
       wdata = wdata
       wstrb = wstrb
+      wlast = wlast
       wvalid = wvalid
       wready = wready
       bvalid = bvalid
-      bready = bready
+      bready = bready }
+
+/// The body half: tie the write side's transaction constants and hand back
+/// the bus the masters take.
+let axiWriteBusOf (ports: AxiWriteBusPorts) : AxiWriteBus =
+    lit 0UL 8 ==> ports.awlen // 1 beat per burst
+    lit (axiSizeEncoding (width ports.wdata)) 3 ==> ports.awsize
+    lit 1UL 2 ==> ports.awburst // INCR
+    lit 0UL 4 ==> ports.awcache
+    lit 0UL 3 ==> ports.awprot
+    lit 1UL 1 ==> ports.wlast // every beat is last
+
+    { prefix = ports.prefix
+      awaddr = ports.awaddr
+      awvalid = ports.awvalid
+      awready = ports.awready
+      wdata = ports.wdata
+      wstrb = ports.wstrb
+      wvalid = ports.wvalid
+      wready = ports.wready
+      bvalid = ports.bvalid
+      bready = ports.bready
       claimed = ref false }
+
+let axiWriteBusNamed (prefix: string) (addrWidth: int) (dataWidth: int) : AxiWriteBus =
+    axiWriteBusOf (axiWriteBusPorts (ambientPorts ()) prefix addrWidth dataWidth)
 
 /// The conventional `m_axi` write boundary.
 let axiWriteBus (addrWidth: int) (dataWidth: int) = axiWriteBusNamed "m_axi" addrWidth dataWidth

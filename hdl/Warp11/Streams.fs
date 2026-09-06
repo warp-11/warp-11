@@ -143,6 +143,101 @@ let streamToPorts (ports: StreamPorts) (s: Stream<'p>) =
     s.valid ==> ports.valid
     ports.ready ==> s.ready
 
+/// A consumed stream's boundary at one port per layout field — the io-factory
+/// twin of the design-level `streamInput`, for tops whose payload should stay
+/// per-field at the ports rather than packed into one data word. The typed
+/// payload rides the record straight from the factory (unpacking is pure);
+/// `streamSource` in the body is what makes it a live `Stream`.
+type StreamInputPorts<'p> =
+    { payload: 'p
+      valid: Input
+      ready: Output
+      layout: Layout<'p> }
+
+/// The mirror: the fields a produced stream lands on, one output per layout
+/// field. `streamSink` in the body does the driving.
+type StreamOutputPorts<'p> =
+    { targets: Expr list
+      valid: Output
+      ready: Input
+      layout: Layout<'p> }
+
+/// Declare a consumed stream's boundary: one input per layout field
+/// (`{name}_{field}`), `{name}_valid` in, `{name}_ready` out.
+let streamInputPorts (p: Ports) name (layout: Layout<'p>) : StreamInputPorts<'p> =
+    { payload = layout.unpack [ for n, w in layout.fields -> p.inPort $"{name}_{n}" w ]
+      valid = p.inPort $"{name}_valid" 1
+      ready = p.outPort $"{name}_ready" 1
+      layout = layout }
+
+/// Declare a produced stream's boundary: one output per layout field,
+/// `{name}_valid` out, `{name}_ready` in.
+let streamOutputPorts (p: Ports) name (layout: Layout<'p>) : StreamOutputPorts<'p> =
+    { targets = [ for n, w in layout.fields -> p.outPort $"{name}_{n}" w ]
+      valid = p.outPort $"{name}_valid" 1
+      ready = p.inPort $"{name}_ready" 1
+      layout = layout }
+
+/// The body half of `streamInputPorts`: register the ready — exactly one
+/// consumer must drive it, as with any stream — and hand the boundary back as
+/// a live `Stream`.
+let streamSource (sp: StreamInputPorts<'p>) : Stream<'p> =
+    registerStreamReady sp.ready
+
+    { payload = sp.payload
+      valid = sp.valid
+      ready = sp.ready
+      layout = sp.layout }
+
+/// The body half of `streamOutputPorts`: land a stream on the boundary — each
+/// field driven from the payload, valid driven, the consumer's ready handed
+/// back to the stream.
+let streamSink (sp: StreamOutputPorts<'p>) (s: Stream<'p>) =
+    for target, value in List.zip sp.targets (s.layout.pack s.payload) do
+        value ==> target
+
+    s.valid ==> sp.valid
+    sp.ready ==> s.ready
+
+/// `streamInputPorts` minus the backward wire — a flow boundary in, for
+/// producers that cannot be told to wait.
+type FlowInputPorts<'p> =
+    { payload: 'p
+      valid: Input
+      layout: Layout<'p> }
+
+/// The flow mirror of `streamOutputPorts` — no ready to hand back.
+type FlowOutputPorts<'p> =
+    { targets: Expr list
+      valid: Output
+      layout: Layout<'p> }
+
+/// Declare a consumed flow's boundary: one input per layout field and
+/// `{name}_valid`, nothing driven back.
+let flowInputPorts (p: Ports) name (layout: Layout<'p>) : FlowInputPorts<'p> =
+    { payload = layout.unpack [ for n, w in layout.fields -> p.inPort $"{name}_{n}" w ]
+      valid = p.inPort $"{name}_valid" 1
+      layout = layout }
+
+/// Declare a produced flow's boundary.
+let flowOutputPorts (p: Ports) name (layout: Layout<'p>) : FlowOutputPorts<'p> =
+    { targets = [ for n, w in layout.fields -> p.outPort $"{name}_{n}" w ]
+      valid = p.outPort $"{name}_valid" 1
+      layout = layout }
+
+/// The body half of `flowInputPorts`.
+let flowSource (fp: FlowInputPorts<'p>) : Flow<'p> =
+    { payload = fp.payload
+      valid = fp.valid
+      layout = fp.layout }
+
+/// The body half of `flowOutputPorts`.
+let flowSink (fp: FlowOutputPorts<'p>) (f: Flow<'p>) =
+    for target, value in List.zip fp.targets (f.layout.pack f.payload) do
+        value ==> target
+
+    f.valid ==> fp.valid
+
 /// A combinational transform of the payload, zero cost — ready and valid pass
 /// straight through: no module, no state. Shape-preserving: field names kept,
 /// widths refreshed from the mapped exprs. A payload-TYPE change is

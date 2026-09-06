@@ -262,9 +262,14 @@ let private validate (m: RegMap) =
 /// The slave elaborated from a map — the same one-outstanding scratch-slave
 /// scheme as `axiLiteSlaveFull`, with the register file, decode, read mux and
 /// interrupt OR all derived from the entries.
-let axiLiteSlaveOf (m: RegMap) : SlaveRegs =
+let regMapSlave (ports: AxiLiteSlavePorts) (m: RegMap) : SlaveRegs =
     validate m
     let addrWidth = m.apertureAddrWidth
+
+    if ports.addrWidth <> addrWidth then
+        failwith
+            $"regMapSlave: the boundary was declared %d{ports.addrWidth} bits wide but the map's aperture needs %d{addrWidth}"
+
     let wordWidth = addrWidth - 2
     let wordOf (e: RegEntry) = e.offset >>> 2
 
@@ -276,7 +281,7 @@ let axiLiteSlaveOf (m: RegMap) : SlaveRegs =
 
     // No read source here costs a cycle — a window is written by the host and
     // read by the design, and reads of it answer 0.
-    let ch = axiLiteChannel addrWidth 1
+    let ch = axiLiteChannelOn ports 1
     let wdata = ch.wdata
     let writeFire = ch.writeFire
     let awWord = ch.awWord
@@ -446,6 +451,12 @@ let axiLiteSlaveOf (m: RegMap) : SlaveRegs =
             designAddr ==> p.designAddr
             p.port
       irq = irqLevel }
+
+/// The ambient form of [regMapSlave], for `design` bodies: declares the
+/// boundary at the ambient builder, sized by the map's aperture. Dies with
+/// `design`.
+let axiLiteSlaveOf (m: RegMap) : SlaveRegs =
+    regMapSlave (axiLiteSlavePorts (ambientPorts ()) m.apertureAddrWidth) m
 
 let private upperSnake (name: string) =
     [ for i, c in Seq.indexed name do

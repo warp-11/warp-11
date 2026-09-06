@@ -46,48 +46,61 @@ type private AxiLitePorts =
       /// The host takes it.
       rready: Expr }
 
-/// The sixteen ports and the one-outstanding write channel, shared between the
-/// classic channel and the pipelined one — declaration for declaration, so the
-/// extraction is invisible in the emission.
-let private axiLitePortsAndWrite (addrWidth: int) : AxiLitePorts =
-    let wordWidth = addrWidth - 2
+/// The raw seventeen `s_axi_*` wires of an AXI-Lite slave boundary, as an io
+/// factory declares them — no logic, no interpretation. `axiLiteChannelOn`
+/// (or the slaves over it) is the body half that makes them a bus.
+type AxiLiteSlavePorts =
+    { /// The aperture's address width in bytes — carried so the body halves
+      /// need not be told twice.
+      addrWidth: int
+      awaddr: Input
+      awvalid: Input
+      awready: Output
+      wdata: Input
+      wvalid: Input
+      wready: Output
+      bresp: Output
+      bvalid: Output
+      bready: Input
+      araddr: Input
+      arvalid: Input
+      arready: Output
+      rdata: Output
+      rresp: Output
+      rvalid: Output
+      rready: Input }
 
-    let awaddr = input "s_axi_awaddr" addrWidth
-    let awvalid = inputBit "s_axi_awvalid"
-    let awready = outputBit "s_axi_awready"
-    let wdata = input "s_axi_wdata" 32
-    input "s_axi_wstrb" 4 |> ignore
-    let wvalid = inputBit "s_axi_wvalid"
-    let wready = outputBit "s_axi_wready"
-    let bresp = output "s_axi_bresp" 2
-    let bvalid = outputBit "s_axi_bvalid"
-    let bready = inputBit "s_axi_bready"
-    let araddr = input "s_axi_araddr" addrWidth
-    let arvalid = inputBit "s_axi_arvalid"
-    let arready = outputBit "s_axi_arready"
-    let rdata = output "s_axi_rdata" 32
-    let rresp = output "s_axi_rresp" 2
-    let rvalid = outputBit "s_axi_rvalid"
-    let rready = inputBit "s_axi_rready"
+/// Declare the slave boundary in an io factory. `s_axi_wstrb` is declared and
+/// deliberately unread — the slave trusts whole-word writes.
+let axiLiteSlavePorts (p: Ports) (addrWidth: int) : AxiLiteSlavePorts =
+    let awaddr = p.inPort "s_axi_awaddr" addrWidth
+    let awvalid = p.inPort "s_axi_awvalid" 1
+    let awready = p.outPort "s_axi_awready" 1
+    let wdata = p.inPort "s_axi_wdata" 32
+    p.inPort "s_axi_wstrb" 4 |> ignore
+    let wvalid = p.inPort "s_axi_wvalid" 1
+    let wready = p.outPort "s_axi_wready" 1
+    let bresp = p.outPort "s_axi_bresp" 2
+    let bvalid = p.outPort "s_axi_bvalid" 1
+    let bready = p.inPort "s_axi_bready" 1
+    let araddr = p.inPort "s_axi_araddr" addrWidth
+    let arvalid = p.inPort "s_axi_arvalid" 1
+    let arready = p.outPort "s_axi_arready" 1
+    let rdata = p.outPort "s_axi_rdata" 32
+    let rresp = p.outPort "s_axi_rresp" 2
+    let rvalid = p.outPort "s_axi_rvalid" 1
+    let rready = p.inPort "s_axi_rready" 1
 
-    // write channel — aw and w accepted together, one response outstanding
-    let bvalidR = regBit "bvalidR"
-    let writeFire = wireBit "write_fire"
-    (awvalid &&& wvalid &&& bnot bvalidR) ==> writeFire
-    writeFire ==> awready
-    writeFire ==> wready
-    If writeFire (fun () -> lit 1UL 1 ==> bvalidR)
-    If (bvalidR &&& bready) (fun () -> lit 0UL 1 ==> bvalidR)
-    bvalidR ==> bvalid
-    lit 0UL 2 ==> bresp
-
-    let awWord = wire "aw_word" wordWidth
-    slice (addrWidth - 1) 2 awaddr ==> awWord
-
-    { wordWidth = wordWidth
+    { addrWidth = addrWidth
+      awaddr = awaddr
+      awvalid = awvalid
+      awready = awready
       wdata = wdata
-      writeFire = writeFire
-      awWord = awWord
+      wvalid = wvalid
+      wready = wready
+      bresp = bresp
+      bvalid = bvalid
+      bready = bready
       araddr = araddr
       arvalid = arvalid
       arready = arready
@@ -95,6 +108,39 @@ let private axiLitePortsAndWrite (addrWidth: int) : AxiLitePorts =
       rresp = rresp
       rvalid = rvalid
       rready = rready }
+
+/// The one-outstanding write channel over a declared boundary, shared between
+/// the classic channel and the pipelined one — the body half of
+/// `axiLiteSlavePorts`.
+let private axiLiteWriteChannelOn (ports: AxiLiteSlavePorts) : AxiLitePorts =
+    let addrWidth = ports.addrWidth
+    let wordWidth = addrWidth - 2
+
+    // write channel — aw and w accepted together, one response outstanding
+    let bvalidR = regBit "bvalidR"
+    let writeFire = wireBit "write_fire"
+    (ports.awvalid &&& ports.wvalid &&& bnot bvalidR) ==> writeFire
+    writeFire ==> ports.awready
+    writeFire ==> ports.wready
+    If writeFire (fun () -> lit 1UL 1 ==> bvalidR)
+    If (bvalidR &&& ports.bready) (fun () -> lit 0UL 1 ==> bvalidR)
+    bvalidR ==> ports.bvalid
+    lit 0UL 2 ==> ports.bresp
+
+    let awWord = wire "aw_word" wordWidth
+    slice (addrWidth - 1) 2 ports.awaddr ==> awWord
+
+    { wordWidth = wordWidth
+      wdata = ports.wdata
+      writeFire = writeFire
+      awWord = awWord
+      araddr = ports.araddr
+      arvalid = ports.arvalid
+      arready = ports.arready
+      rdata = ports.rdata
+      rresp = ports.rresp
+      rvalid = ports.rvalid
+      rready = ports.rready }
 
 /// What `beginRead` hands back at the moment a read address is accepted.
 type ReadAccept =
@@ -149,8 +195,9 @@ type AxiLiteChannel =
 /// a later pass replaces: RDATA is a 0-cycle mux over registers *and* a 1-cycle
 /// window read, correct only because RVALID happens to rise exactly one cycle
 /// after the AR accept. Nothing states that alignment and nothing checks it.
-let axiLiteChannel (addrWidth: int) (answersAfter: int) : AxiLiteChannel =
-    let io = axiLitePortsAndWrite addrWidth
+let axiLiteChannelOn (ports: AxiLiteSlavePorts) (answersAfter: int) : AxiLiteChannel =
+    let addrWidth = ports.addrWidth
+    let io = axiLiteWriteChannelOn ports
     let wordWidth = io.wordWidth
     let wdata = io.wdata
     let writeFire = io.writeFire
@@ -222,6 +269,12 @@ let axiLiteChannel (addrWidth: int) (answersAfter: int) : AxiLiteChannel =
 /// The several-in-flight channel. The write half is the classic one's; the
 /// read half is a different contract, which is why this is a different type
 /// rather than the same one with three fields sometimes meaningless.
+/// The ambient form of [axiLiteChannelOn], for `design` bodies: declares the
+/// boundary at the ambient builder, then runs the same channel. Dies with
+/// `design`.
+let axiLiteChannel (addrWidth: int) (answersAfter: int) : AxiLiteChannel =
+    axiLiteChannelOn (axiLiteSlavePorts (ambientPorts ()) addrWidth) answersAfter
+
 type AxiLiteChannelPipelined =
     { /// Width of a word index.
       wordWidth: int
@@ -265,14 +318,19 @@ type AxiLiteChannelPipelined =
 /// that address exactly `answersAfter` cycles later. A memory read port fed
 /// `word` does this naturally at depth 1; a combinational register mux over
 /// `word` needs one capture register to arrive at the same time.
-let axiLiteChannelPipelined (addrWidth: int) (answersAfter: int) (maxOutstanding: int) : AxiLiteChannelPipelined =
+let axiLiteChannelPipelinedOn
+    (ports: AxiLiteSlavePorts)
+    (answersAfter: int)
+    (maxOutstanding: int)
+    : AxiLiteChannelPipelined =
     if maxOutstanding < 2 then
         failwith $"axiLiteChannelPipelined with %d{maxOutstanding} outstanding — one outstanding is axiLiteChannel"
 
     if answersAfter < 1 then
         failwith $"axiLiteChannelPipelined: answersAfter must be >= 1, got %d{answersAfter}"
 
-    let io = axiLitePortsAndWrite addrWidth
+    let addrWidth = ports.addrWidth
+    let io = axiLiteWriteChannelOn ports
     let wordWidth = io.wordWidth
 
     // In flight = accepted and the response not yet taken by the host.
@@ -329,6 +387,11 @@ let axiLiteChannelPipelined (addrWidth: int) (answersAfter: int) (maxOutstanding
       present = accept
       answer = answer }
 
+/// The ambient form of [axiLiteChannelPipelinedOn], for `design` bodies. Dies
+/// with `design`.
+let axiLiteChannelPipelined (addrWidth: int) (answersAfter: int) (maxOutstanding: int) : AxiLiteChannelPipelined =
+    axiLiteChannelPipelinedOn (axiLiteSlavePorts (ambientPorts ()) addrWidth) answersAfter maxOutstanding
+
 /// A read source has to have its answer by the time the channel samples RDATA.
 ///
 /// This is the alignment the slave used to make by accident. RDATA is a 0-cycle
@@ -372,13 +435,14 @@ let internal requireSourceFits (channelAnswersAfter: int) (sourceName: string) (
 /// while RVALID waits relies on the read sources being stable (true after
 /// `done`); wstrb is accepted and ignored — full-word writes only. Protocol
 /// behavior against a real master is the FsSimWindow bridge's job.
-let axiLiteSlaveFull
-    (addrWidth: int)
+let axiLiteSlaveFullOn
+    (ports: AxiLiteSlavePorts)
     (pulseRegs: (string * uint64) list)
     (writeRegs: (string * uint64 * int) list)
     (readValues: (uint64 * Expr) list)
     (memWindows: (uint64 * Mem) list)
     : Expr list * Expr list =
+    let addrWidth = ports.addrWidth
     let wordWidth = addrWidth - 2
 
     let wordOf off =
@@ -427,7 +491,7 @@ let axiLiteSlaveFull
     let answersAfter =
         memWindows |> List.fold (fun deepest (_, m: Mem) -> max deepest (memReadDepth m)) 1
 
-    let ch = axiLiteChannel addrWidth answersAfter
+    let ch = axiLiteChannelOn ports answersAfter
     let wdata = ch.wdata
     let writeFire = ch.writeFire
     let awWord = ch.awWord
@@ -488,10 +552,17 @@ let axiLiteSlaveFull
 
 /// The common form — write registers, read values, an optional mem window, no
 /// pulse registers. Emission is byte-identical to the pre-`w1p` slave.
-let axiLiteSlave
-    (addrWidth: int)
+let axiLiteSlaveOn
+    (ports: AxiLiteSlavePorts)
     (writeRegs: (string * uint64 * int) list)
     (readValues: (uint64 * Expr) list)
     (memWindows: (uint64 * Mem) list)
     : Expr list =
-    axiLiteSlaveFull addrWidth [] writeRegs readValues memWindows |> snd
+    axiLiteSlaveFullOn ports [] writeRegs readValues memWindows |> snd
+
+/// The ambient forms, for `design` bodies. They die with `design`.
+let axiLiteSlaveFull addrWidth pulseRegs writeRegs readValues memWindows =
+    axiLiteSlaveFullOn (axiLiteSlavePorts (ambientPorts ()) addrWidth) pulseRegs writeRegs readValues memWindows
+
+let axiLiteSlave addrWidth writeRegs readValues memWindows =
+    axiLiteSlaveOn (axiLiteSlavePorts (ambientPorts ()) addrWidth) writeRegs readValues memWindows

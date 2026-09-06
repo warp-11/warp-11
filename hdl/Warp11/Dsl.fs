@@ -661,22 +661,7 @@ let moduleDef name (body: Builder -> unit) =
 
     b.Def
 
-/// A module defined as what it is: a bundle of ports, and one body over them.
-///
-/// `io` declares the port bundle — a record shaped however the module wants —
-/// and `body` is the whole contents, ordinary design code over those wires,
-/// elaborated with the module ambient. There is no third piece. Instantiating
-/// hands the same bundle back over the instance's staging wires (`.New`, or
-/// `.NewNamed` where the instance's name matters) and the caller wires it —
-/// or wraps the wiring in an ordinary function beside the module, when a call
-/// shape is worth naming. The mapping between domain values and wires is
-/// always plain code at one of those two places, never machinery.
-///
-/// The result is re-runnable: `io` runs again per instance, so a call site
-/// gets fresh port references rather than a shared record.
-let defModule name (io: Ports -> 'io) (body: 'io -> unit) : TypedModule<'io> =
-    let b = Builder(name)
-
+let private defModuleWith (b: Builder) (io: Ports -> 'io) (body: 'io -> unit) : TypedModule<'io> =
     let ioValue =
         io
             { inPort = fun n w -> b.Input(n, w)
@@ -699,6 +684,27 @@ let defModule name (io: Ports -> 'io) (body: 'io -> unit) : TypedModule<'io> =
         elaborating.Value.Pop() |> ignore
 
     { def = b.Def; io = io }
+
+/// A module defined as what it is: a bundle of ports, and one body over them.
+///
+/// `io` declares the port bundle — a record shaped however the module wants —
+/// and `body` is the whole contents, ordinary design code over those wires,
+/// elaborated with the module ambient. There is no third piece. Instantiating
+/// hands the same bundle back over the instance's staging wires (`.New`, or
+/// `.NewNamed` where the instance's name matters) and the caller wires it —
+/// or wraps the wiring in an ordinary function beside the module, when a call
+/// shape is worth naming. The mapping between domain values and wires is
+/// always plain code at one of those two places, never machinery.
+///
+/// The result is re-runnable: `io` runs again per instance, so a call site
+/// gets fresh port references rather than a shared record.
+let defModule name (io: Ports -> 'io) (body: 'io -> unit) : TypedModule<'io> = defModuleWith (Builder(name)) io body
+
+/// The same former under a clock other than the default `clk`/`rst` — the AXI
+/// tops' `s_axi_aclk`/`s_axi_aresetn` (`axiClock`). The spec changes what the
+/// emitter and testbench call the pins; the Sim never models them.
+let defModuleClocked (spec: ClockSpec) name (io: Ports -> 'io) (body: 'io -> unit) : TypedModule<'io> =
+    defModuleWith (Builder(name, spec)) io body
 
 let private designWith (b: Builder) (body: unit -> unit) =
     elaborating.Value.Push b
@@ -734,6 +740,16 @@ let designClocked spec name (body: unit -> unit) = designWith (Builder(name, spe
 let declareInput name (t: GroundType) = (current ()).Input(name, t)
 /// Declare an output port at a ground type.
 let declareOutput name (t: GroundType) = (current ()).Output(name, t)
+
+/// The ambient boundary as a `Ports` record — what lets a legacy `design`
+/// body hand an io-factory former the same four declaration doors the factory
+/// would get. Exists so a former written for the factory can be wrapped for
+/// `design` without duplicating a line; dies with `design`.
+let internal ambientPorts () : Ports =
+    { inPort = fun n w -> declareInput n (UInt w)
+      outPort = fun n w -> declareOutput n (UInt w)
+      inPortAs = declareInput
+      outPortAs = declareOutput }
 /// Declare a wire at a ground type.
 let declareWire name (t: GroundType) = (current ()).Wire(name, t)
 /// Declare a register at a ground type, with the value it takes under reset.
