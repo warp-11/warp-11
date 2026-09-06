@@ -169,8 +169,15 @@ let private framesToBeats (frames: Stream<Expr * Expr>) : Stream<Expr> =
 /// design that silently processed a truncated block would be worse than one
 /// that refused.
 let audioBatchAxi =
-    designClocked axiClock "AudioBatchAxi" (fun () ->
-        let regs = axiLiteSlaveOf batchMap.map
+    defModuleClocked
+        axiClock
+        "AudioBatchAxi"
+        (fun p ->
+            (axiLiteSlavePorts p batchMap.map.apertureAddrWidth,
+             axiReadBusPorts p "m_axi" 32 beatWidth,
+             axiWriteBusPorts p "m_axi" 32 beatWidth))
+        (fun (slavePorts, readBusPorts, writeBusPorts) ->
+        let regs = regMapSlave slavePorts batchMap.map
 
         let bursts = wire "bursts" 32
         // frameCount / framesPerBurst, and framesPerBurst is 32 — a slice.
@@ -197,7 +204,7 @@ let audioBatchAxi =
 
         If (arMore &&& reqReady) (fun () -> arIssued + lit 1UL 32 ==> arIssued)
 
-        let beats = axiMasterReaderBurstOn (axiReadBus 32 beatWidth) 4 beatsPerBurst requests
+        let beats = axiMasterReaderBurstOn (axiReadBusOf readBusPorts) 4 beatsPerBurst requests
 
         // --- the DSP ---------------------------------------------------------
         let leftGains = batchMap.gains |> List.map (fun g -> slice 15 0 (regs.value g))
@@ -231,7 +238,7 @@ let audioBatchAxi =
 
         wrReady ==> outBeats.ready
 
-        let writerIdle = axiMasterWriterWithIdleOn (axiWriteBus 32 beatWidth) 4 writeBeats
+        let writerIdle = axiMasterWriterWithIdleOn (axiWriteBusOf writeBusPorts) 4 writeBeats
 
         If (outBeats.valid &&& wrReady) (fun () -> beatsWritten + lit 1UL 32 ==> beatsWritten)
 
@@ -274,19 +281,23 @@ let audioBatchAxi =
 /// twin the batch path is checked against: identical DSP, none of the DDR
 /// plumbing, so a mismatch localises to the plumbing rather than to the audio.
 let multibandStageRef =
-    design "MultibandStageRef" (fun () ->
-        let threshold = input "threshold" sampleWidth
-        let ratio = input "ratio" 8
-        let attack = input "attack" 16
-        let releaseRate = input "releaseRate" 16
-        let leftGains = List.init multibandBands (fun i -> input $"lg{i}" 16)
-        let rightGains = List.init multibandBands (fun i -> input $"rg{i}" 16)
+    defModule
+        "MultibandStageRef"
+        (fun p ->
+            (p.inPort "threshold" sampleWidth,
+             p.inPort "ratio" 8,
+             p.inPort "attack" 16,
+             p.inPort "releaseRate" 16,
+             List.init multibandBands (fun i -> p.inPort $"lg{i}" 16),
+             List.init multibandBands (fun i -> p.inPort $"rg{i}" 16),
+             streamInputPorts p "in" sampleLayout,
+             streamOutputPorts p "out" sampleLayout))
+        (fun (threshold, ratio, attack, releaseRate, leftGains, rightGains, inPorts, outPorts) ->
+            let stage, _envelope =
+                multibandCompressor "MultibandCompressor8" "mb" threshold ratio attack releaseRate leftGains rightGains
+                |> fun apply -> apply (streamSource inPorts)
 
-        let stage, _envelope =
-            multibandCompressor "MultibandCompressor8" "mb" threshold ratio attack releaseRate leftGains rightGains
-            |> fun apply -> apply (streamInput "in" sampleLayout)
-
-        streamOutput "out" stage)
+            streamSink outPorts stage)
 
 // ---------------------------------------------------------------------------
 // One stage each, as a bare stream design, so the stall-independence property
@@ -294,41 +305,57 @@ let multibandStageRef =
 // whole chain shows; they are fixtures, not board designs.
 
 let gainStage =
-    design "GainStage" (fun () ->
-        let volume = input "volume" 16
-        let mute = inputBit "mute"
-
-        streamInput "in" sampleLayout
-        |> audioGain "AudioGain" "g" volume mute
-        |> streamOutput "out")
+    defModule
+        "GainStage"
+        (fun p ->
+            (p.inPort "volume" 16,
+             p.inPort "mute" 1,
+             streamInputPorts p "in" sampleLayout,
+             streamOutputPorts p "out" sampleLayout))
+        (fun (volume, mute, inPorts, outPorts) ->
+            streamSource inPorts
+            |> audioGain "AudioGain" "g" volume mute
+            |> streamSink outPorts)
 
 let eqStage =
-    design "EqStage" (fun () ->
-        let coeffs = [ for n in [ "b0"; "b1"; "b2"; "a1"; "a2" ] -> input n biquadCoeffWidth ]
-
-        streamInput "in" sampleLayout
-        |> audioEqBand "AudioEqBand" "eq" coeffs
-        |> streamOutput "out")
+    defModule
+        "EqStage"
+        (fun p ->
+            ([ for n in [ "b0"; "b1"; "b2"; "a1"; "a2" ] -> p.inPort n biquadCoeffWidth ],
+             streamInputPorts p "in" sampleLayout,
+             streamOutputPorts p "out" sampleLayout))
+        (fun (coeffs, inPorts, outPorts) ->
+            streamSource inPorts
+            |> audioEqBand "AudioEqBand" "eq" coeffs
+            |> streamSink outPorts)
 
 let compressorStage =
-    design "CompressorStage" (fun () ->
-        let threshold = input "threshold" sampleWidth
-        let ratio = input "ratio" 8
-        let attack = input "attack" 16
-        let releaseRate = input "releaseRate" 16
-        let makeup = input "makeup" 16
-
-        streamInput "in" sampleLayout
-        |> audioCompressor "AudioCompressor" "c" threshold ratio attack releaseRate makeup
-        |> streamOutput "out")
+    defModule
+        "CompressorStage"
+        (fun p ->
+            (p.inPort "threshold" sampleWidth,
+             p.inPort "ratio" 8,
+             p.inPort "attack" 16,
+             p.inPort "releaseRate" 16,
+             p.inPort "makeup" 16,
+             streamInputPorts p "in" sampleLayout,
+             streamOutputPorts p "out" sampleLayout))
+        (fun (threshold, ratio, attack, releaseRate, makeup, inPorts, outPorts) ->
+            streamSource inPorts
+            |> audioCompressor "AudioCompressor" "c" threshold ratio attack releaseRate makeup
+            |> streamSink outPorts)
 
 let limiterStage =
-    design "LimiterStage" (fun () ->
-        let threshold = input "threshold" sampleWidth
-
-        streamInput "in" sampleLayout
-        |> audioLimiter "AudioLimiter" "l" threshold
-        |> streamOutput "out")
+    defModule
+        "LimiterStage"
+        (fun p ->
+            (p.inPort "threshold" sampleWidth,
+             streamInputPorts p "in" sampleLayout,
+             streamOutputPorts p "out" sampleLayout))
+        (fun (threshold, inPorts, outPorts) ->
+            streamSource inPorts
+            |> audioLimiter "AudioLimiter" "l" threshold
+            |> streamSink outPorts)
 
 // ---------------------------------------------------------------------------
 // The drift, as something you can step.
@@ -349,10 +376,18 @@ let limiterStage =
 // happens rather than leaving you to spot it.
 
 let driftHarness =
-    design "MultibandDrift" (fun () ->
-        let run = inputBit "run"
-        // Pokeable: move the bubble and watch the stop move with it.
-        let stallAt = input "stallAt" 8
+    defModule
+        "MultibandDrift"
+        (fun p ->
+            (p.inPort "run" 1,
+             p.inPort "stallAt" 8,
+             p.outPortAs "out_left" (SInt sampleWidth),
+             p.outPortAs "out_right" (SInt sampleWidth),
+             p.outPort "out_valid" 1,
+             p.outPort "envelope" sampleWidth,
+             p.outPort "drift" 8,
+             p.outPort "drift_baseline_out" 8))
+        (fun (run, stallAt, outLeftPort, outRightPort, outValidPort, envelopePort, driftPort, baselinePort) ->
 
         let cycle = reg "cycle" 8
         If run (fun () -> cycle + lit 1UL 8 ==> cycle)
@@ -395,10 +430,10 @@ let driftHarness =
         lit 1UL 1 ==> out.ready
 
         let outLeft, outRight = out.payload
-        outLeft ==> output "out_left" (SInt sampleWidth)
-        outRight ==> output "out_right" (SInt sampleWidth)
-        out.valid ==> outputBit "out_valid"
-        envelope ==> output "envelope" sampleWidth
+        outLeft ==> outLeftPort
+        outRight ==> outRightPort
+        out.valid ==> outValidPort
+        envelope ==> envelopePort
 
         // `advance` one level down, restated here so the counters can see it:
         // a beat accepted last cycle, with the consumer ready now.
@@ -410,9 +445,10 @@ let driftHarness =
         If acceptedLast (fun () -> dspSteps + lit 1UL 8 ==> dspSteps)
         If run (fun () -> pipeSteps + lit 1UL 8 ==> pipeSteps)
 
-        // The gap between the two gates, as a port so it is easy to watch.
-        let drift = output "drift" 8
+        // The gap between the two gates, at a port so it is easy to watch.
+        let drift = wire "drift_w" 8
         sub pipeSteps dspSteps ==> drift
+        drift ==> driftPort
 
         // Latch the settled gap once the pipeline is warm, then hold the design
         // to it. A stage whose two halves agree keeps this forever; this one
@@ -426,14 +462,18 @@ let driftHarness =
 
         assertThat (bnot armed ||| eq drift baseline) "the valid pipe drifted from the DSP path"
 
-        baseline ==> output "drift_baseline_out" 8)
+        baseline ==> baselinePort)
 
 /// The FIR, as a bare stream stage. The third of the three hand-rolled valid
 /// delay lines in the audio library, and the only one the sweep did not reach.
 let firStage =
-    design "FirStage" (fun () ->
-        let preset = input "preset" 2
-
-        streamInput "in" sampleLayout
-        |> audioFir "AudioFir" 16 48_000.0 4_000.0 400.0 "fir" preset
-        |> streamOutput "out")
+    defModule
+        "FirStage"
+        (fun p ->
+            (p.inPort "preset" 2,
+             streamInputPorts p "in" sampleLayout,
+             streamOutputPorts p "out" sampleLayout))
+        (fun (preset, inPorts, outPorts) ->
+            streamSource inPorts
+            |> audioFir "AudioFir" 16 48_000.0 4_000.0 400.0 "fir" preset
+            |> streamSink outPorts)

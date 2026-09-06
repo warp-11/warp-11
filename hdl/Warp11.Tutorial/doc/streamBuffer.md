@@ -5,9 +5,9 @@ the whole of what this buys is that the two ends stop having to move in
 lockstep.
 
 ```fsharp
-Stream.input "in" beatLayout
+streamSource inPorts
 |> streamFifo "fifo" 8
-|> Stream.out "out"
+|> streamSink outPorts
 ```
 
 ## What to look at

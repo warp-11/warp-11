@@ -20,12 +20,12 @@ Then read the source, which is the point.
 let bumpStage = Stream.specFromFunction (Stream.stage bump)
 let doubleStage = Stream.specFromFunction (Stream.stage (fun v -> v + v))
 
-Stream.input "in" beatLayout
+streamSource inPorts
 |> Stream.pipeline
     [ bumpStage |> Stream.probed "intake"
       doubleStage |> Stream.lanes 3 |> Stream.probed "farm"
       bumpStage ]
-|> Stream.out "out"
+|> streamSink outPorts
 ```
 
 A `StageSpec` is a record: how to create the stage, how many lanes it wants,
@@ -56,7 +56,7 @@ instead of to module boundaries.
 ## Modules and functions are both stages
 
 ```fsharp
-Stream.spec "pod" someModule          // a module instance
+Stream.specOf "pod" (someWrapper args)        // a module, via its wrapper
 Stream.specFromFunction (Stream.stage bump)   // a plain function
 ```
 

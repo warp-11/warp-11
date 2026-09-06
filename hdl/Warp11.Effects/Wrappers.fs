@@ -128,41 +128,59 @@ let effectsMap: EffectsMap =
 // ---------------------------------------------------------------------------
 // The designs.
 
-/// The codec-facing pins, declared once. Every audio app drives exactly these.
-/// Taken as four values rather than the clock generator's IO record: an
-/// anonymous record does not unify across an assembly boundary, so naming the
-/// pins is both simpler and the only thing that compiles here.
-let private codecPins mclkPin sclkPin lrclkPin serial =
-    let mclk = outputBit "mclk"
-    mclkPin ==> mclk
-    let sclk = outputBit "sclk"
-    sclkPin ==> sclk
-    let lrclk = outputBit "lrclk"
-    lrclkPin ==> lrclk
-    let sdin = outputBit "sdin"
-    serial ==> sdin
+/// The codec-facing pins, declared once in each top's io factory. Every audio
+/// app drives exactly these.
+type CodecPorts =
+    { mclk: Output
+      sclk: Output
+      lrclk: Output
+      sdin: Output }
+
+let codecPorts (p: Ports) : CodecPorts =
+    { mclk = p.outPort "mclk" 1
+      sclk = p.outPort "sclk" 1
+      lrclk = p.outPort "lrclk" 1
+      sdin = p.outPort "sdin" 1 }
+
+/// The body half: the clock generator's pins and the serial line onto the
+/// boundary.
+let private driveCodec (pins: CodecPorts) mclkPin sclkPin lrclkPin serial =
+    mclkPin ==> pins.mclk
+    sclkPin ==> pins.sclk
+    lrclkPin ==> pins.lrclk
+    serial ==> pins.sdin
 
 /// Tone generator straight into the transmitter — no receiver, because there
 /// is nothing to receive. The smallest thing that makes noise on the board.
 let audioToneAxi =
-    designClocked axiClock "AudioToneAxi" (fun () ->
-        let regs = axiLiteSlaveOf toneMap.map
+    defModuleClocked
+        axiClock
+        "AudioToneAxi"
+        (fun p -> (axiLiteSlavePorts p toneMap.map.apertureAddrWidth, codecPorts p))
+        (fun (slavePorts, pins) ->
+        let regs = regMapSlave slavePorts toneMap.map
         let clocks = instanceNamed "clocks" (i2sMasterDefault "I2sMaster")
 
         let tone =
             toneGenerator "ToneGenerator" "tone" (regs.value toneMap.enable) (regs.value toneMap.step)
 
         let serial = i2sTx "I2sTx" "tx" clocks.sclkTxTick clocks.lrclk tone
-        codecPins clocks.mclk clocks.sclk clocks.lrclk serial)
+        driveCodec pins clocks.mclk clocks.sclk clocks.lrclk serial)
 
 /// Line in to line out, with a mute and two bring-up taps. The taps exist
 /// because "no sound" has two very different causes — a silent ADC and a dead
 /// transmitter — and on a board you cannot see which.
 let audioPassthruAxi =
-    designClocked axiClock "AudioPassthruAxi" (fun () ->
-        let regs = axiLiteSlaveOf passthruMap.map
+    defModuleClocked
+        axiClock
+        "AudioPassthruAxi"
+        (fun p ->
+            (axiLiteSlavePorts p passthruMap.map.apertureAddrWidth,
+             p.inPort "sdout" 1,
+             codecPorts p))
+        (fun (slavePorts, sdout, pins) ->
+        let regs = regMapSlave slavePorts passthruMap.map
         let clocks = instanceNamed "clocks" (i2sMasterDefault "I2sMaster")
-        let sdout = inputBit "sdout"
 
         let received = i2sRx "I2sRx" "rx" clocks.sclkRxTick clocks.lrclk sdout
 
@@ -187,14 +205,20 @@ let audioPassthruAxi =
                 payload = (mux muted (lit 0UL sampleWidth) left, mux muted (lit 0UL sampleWidth) right) }
 
         let serial = i2sTx "I2sTx" "tx" clocks.sclkTxTick clocks.lrclk gated
-        codecPins clocks.mclk clocks.sclk clocks.lrclk serial)
+        driveCodec pins clocks.mclk clocks.sclk clocks.lrclk serial)
 
 /// Line in, master volume, line out.
 let audioGainAxi =
-    designClocked axiClock "AudioGainAxi" (fun () ->
-        let regs = axiLiteSlaveOf gainMap.map
+    defModuleClocked
+        axiClock
+        "AudioGainAxi"
+        (fun p ->
+            (axiLiteSlavePorts p gainMap.map.apertureAddrWidth,
+             p.inPort "sdout" 1,
+             codecPorts p))
+        (fun (slavePorts, sdout, pins) ->
+        let regs = regMapSlave slavePorts gainMap.map
         let clocks = instanceNamed "clocks" (i2sMasterDefault "I2sMaster")
-        let sdout = inputBit "sdout"
 
         let gain =
             audioGain "AudioGain" "gain" (regs.value gainMap.volume) (regs.value gainMap.mute)
@@ -204,15 +228,21 @@ let audioGainAxi =
             |> gain
             |> i2sTx "I2sTx" "tx" clocks.sclkTxTick clocks.lrclk
 
-        codecPins clocks.mclk clocks.sclk clocks.lrclk serial)
+        driveCodec pins clocks.mclk clocks.sclk clocks.lrclk serial)
 
 /// The full chain: volume, one EQ band, a compressor and a brick-wall limiter,
 /// every stage host-controlled and every default a no-op.
 let audioEffectsAxi =
-    designClocked axiClock "AudioEffectsAxi" (fun () ->
-        let regs = axiLiteSlaveOf effectsMap.map
+    defModuleClocked
+        axiClock
+        "AudioEffectsAxi"
+        (fun p ->
+            (axiLiteSlavePorts p effectsMap.map.apertureAddrWidth,
+             p.inPort "sdout" 1,
+             codecPorts p))
+        (fun (slavePorts, sdout, pins) ->
+        let regs = regMapSlave slavePorts effectsMap.map
         let clocks = instanceNamed "clocks" (i2sMasterDefault "I2sMaster")
-        let sdout = inputBit "sdout"
 
         let gain =
             audioGain "AudioGain" "gain" (regs.value effectsMap.volume) (regs.value effectsMap.mute)
@@ -240,4 +270,4 @@ let audioEffectsAxi =
             |> limiter
             |> i2sTx "I2sTx" "tx" clocks.sclkTxTick clocks.lrclk
 
-        codecPins clocks.mclk clocks.sclk clocks.lrclk serial)
+        driveCodec pins clocks.mclk clocks.sclk clocks.lrclk serial)

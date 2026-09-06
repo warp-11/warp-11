@@ -14,8 +14,8 @@ identical**. Nothing about the wire says which you meant.
 So a signal says how to read it, once, where it is declared:
 
 ```fsharp
-let count = input "count" 8            // unsigned — UInt 8
-let sample = input "sample" (SInt 16)  // signed
+p.inPort "count" 8               // unsigned — UInt 8
+p.inPortAs "sample" (SInt 16)    // signed
 ```
 
 and the operations follow. `mul` on signed operands *is* a signed multiply;
@@ -97,8 +97,9 @@ bits* both ways — that is the whole lesson. A design whose values are genuinel
 signed says so once, at the declaration, and then just multiplies:
 
 ```fsharp
-let a = input "a" (SInt 8)
-let b = input "b" (SInt 8)
+p.inPortAs "a" (SInt 8)
+p.inPortAs "b" (SInt 8)
+// ...and in the body:
 mul a b ==> product
 ```
 

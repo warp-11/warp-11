@@ -143,7 +143,7 @@ let private brokenClaim =
 let private pagesTellTheTruth () =
     // Counter: holds when neither input is high, clears regardless of enable.
     let counterHolds =
-        let sim = Sim counter
+        let sim = Sim counter.def
         sim.Poke("enable", 1UL)
         for _ in 1..5 do sim.Tick()
         let climbed = sim.Peek "count" = 5UL
@@ -159,7 +159,7 @@ let private pagesTellTheTruth () =
 
     // Priority mux: sel1 outranks sel0, which is the page's whole claim.
     let sel1Wins =
-        let sim = Sim priorityMux
+        let sim = Sim priorityMux.def
         sim.Poke("a", 0x11UL)
         sim.Poke("b", 0x22UL)
         sim.Poke("c", 0x33UL)
@@ -169,7 +169,7 @@ let private pagesTellTheTruth () =
 
     // Signed operations: the same bits, two answers.
     let signednessDiffers =
-        let sim = Sim signedOps
+        let sim = Sim signedOps.def
         sim.Poke("a", 0xFFUL)
         sim.Poke("b", 0x01UL)
         sim.Peek "below" = 0UL && sim.Peek "below_signed" = 1UL
@@ -179,7 +179,7 @@ let private pagesTellTheTruth () =
     // definition, saturation lives inside the module so both have it, and
     // `lowest` is the Min8 instance doing its one job.
     let instancesAreIndependent =
-        let sim = Sim ownModules
+        let sim = Sim ownModules.def
         sim.Poke("add_left", 3UL)
         sim.Poke("add_right", 5UL)
         sim.Poke("en", 1UL)
@@ -207,7 +207,7 @@ let private pagesTellTheTruth () =
         climbedApart && saturated && held
 
     let thisCycleLeadsNextByOne =
-        let sim = Sim ram
+        let sim = Sim ram.def
         sim.Poke("waddr", 3UL)
         sim.Poke("wdata", 0xAAUL)
         sim.Poke("wen", 1UL)
@@ -221,7 +221,7 @@ let private pagesTellTheTruth () =
 
     // Bit shapes: the one-hot round trip is the identity, every index.
     let oneHotRoundTrips =
-        let sim = Sim bitShapes
+        let sim = Sim bitShapes.def
 
         [ 0UL..3UL ]
         |> List.forall (fun i ->
@@ -230,7 +230,7 @@ let private pagesTellTheTruth () =
 
     // FSM: stall holds Execute, and a full run retires four passes.
     let stallHolds =
-        let sim = Sim fsm
+        let sim = Sim fsm.def
         sim.Poke("stall", 1UL)
         sim.Poke("start", 1UL)
         sim.Tick()
@@ -246,7 +246,7 @@ let private pagesTellTheTruth () =
 
     // Fixed-point: 1.5 * 2.0 is 3.0, and reinterpreting moves no bits.
     let fixedArithmetic =
-        let sim = Sim fixedPoint
+        let sim = Sim fixedPoint.def
         sim.Poke("a", 0x18UL) // 1.5 in Q4.4
         sim.Poke("b", 0x20UL) // 2.0 in Q4.4
         // 3.0 in Q4.4 is 48. `doubled` reads a as Q5.3 — same bits, twice the
@@ -257,7 +257,7 @@ let private pagesTellTheTruth () =
 
     // ROM: the table is there before the first cycle, and the padding reads zero.
     let romIsPreloaded =
-        let sim = Sim romTable
+        let sim = Sim romTable.def
 
         let squaresRight =
             [ 0UL..7UL ]
@@ -273,7 +273,7 @@ let private pagesTellTheTruth () =
     // Assertions: the shipped claim survives every reachable state, and the
     // machinery does fire when a claim is false.
     let claimsHold =
-        let sim = Sim(assertions, checkAsserts = true)
+        let sim = Sim(assertions.def, checkAsserts = true)
         sim.Poke("step", 1UL)
         for _ in 1..50 do sim.Tick()
         let held = sim.ViolationCount = 0 && sim.Peek "phase" <= 4UL
@@ -286,7 +286,7 @@ let private pagesTellTheTruth () =
     // The pipe is wires: the transform is combinational and backpressure
     // passes straight back through it.
     let pipeIsFree =
-        let sim = Sim streamPipe
+        let sim = Sim streamPipe.def
         sim.Poke("in_valid", 1UL)
         sim.Poke("in_value", 7UL)
         sim.Poke("out_ready", 1UL)
@@ -296,7 +296,7 @@ let private pagesTellTheTruth () =
 
     // Three stages are three cycles.
     let stagesCostCycles =
-        let sim = Sim streamStages
+        let sim = Sim streamStages.def
         sim.Poke("in_valid", 1UL)
         sim.Poke("in_value", 5UL)
         sim.Poke("out_ready", 1UL)
@@ -311,7 +311,7 @@ let private pagesTellTheTruth () =
     // A farm returns everything it was given, and not in that order. The value
     // records which lane a beat took: lane i adds i+1.
     let farmReorders =
-        let sim = Sim streamFarm
+        let sim = Sim streamFarm.def
         sim.Poke("in_valid", 1UL)
         sim.Poke("out_ready", 0UL)
         let issued = ResizeArray<uint64>()
@@ -342,12 +342,12 @@ let private pagesTellTheTruth () =
 
     // Probes count the two ways a link wastes a cycle, and nothing else.
     let probesCount =
-        let blocked = Sim streamProbes
+        let blocked = Sim streamProbes.def
         blocked.Poke("in_valid", 1UL)
         blocked.Poke("out_ready", 0UL)
         for _ in 1..20 do blocked.Tick()
 
-        let starved = Sim streamProbes
+        let starved = Sim streamProbes.def
         starved.Poke("in_valid", 0UL)
         starved.Poke("out_ready", 1UL)
         for _ in 1..20 do starved.Tick()
@@ -360,13 +360,13 @@ let private pagesTellTheTruth () =
     // A flow cannot be told to wait, so a consumer that is not there loses
     // beats — and the design counts exactly how many.
     let flowLosesBeats =
-        let sim = Sim flowSampler
+        let sim = Sim flowSampler.def
         sim.Poke("sample", 1UL)
         sim.Poke("out_ready", 0UL)
         for _ in 1..10 do sim.Tick()
         let lost = sim.Peek "dropped_count"
 
-        let kept = Sim flowSampler
+        let kept = Sim flowSampler.def
         kept.Poke("sample", 1UL)
         kept.Poke("out_ready", 1UL)
         for _ in 1..10 do kept.Tick()
@@ -377,7 +377,7 @@ let private pagesTellTheTruth () =
     // mask still produces a plausible-looking stream, and only the full period
     // says otherwise.
     let lfsrIsMaximalLength =
-        let sim = Sim noise
+        let sim = Sim noise.def
         sim.Poke("step", 1UL)
         let seed = sim.Peek "value"
         let seen = System.Collections.Generic.HashSet<uint64>()
@@ -397,7 +397,7 @@ let private pagesTellTheTruth () =
     // Both trees compute the same sum; the pipelined one takes its depth in
     // cycles to say so, and reports that depth rather than being told it.
     let treesAgree =
-        let sim = Sim adderTree
+        let sim = Sim adderTree.def
         sim.Poke("enable", 1UL)
         for i in 0..7 do sim.Poke($"x{i}", uint64 (i + 1))
 
@@ -408,7 +408,7 @@ let private pagesTellTheTruth () =
 
     // A wrap is a signal, so it can drive the next counter up.
     let countersCascade =
-        let sim = Sim wrapCounter
+        let sim = Sim wrapCounter.def
         sim.Poke("enable", 1UL)
         sim.Poke("last", 2UL)
         for _ in 1..5 do sim.Tick()
@@ -418,7 +418,7 @@ let private pagesTellTheTruth () =
 
     // An edge is a level compared against its own past.
     let edgesFire =
-        let sim = Sim edges
+        let sim = Sim edges.def
         sim.Poke("enable", 1UL)
         sim.Poke("signal", 0UL)
         sim.Tick()
@@ -431,7 +431,7 @@ let private pagesTellTheTruth () =
 
     // A tag has to travel as far as the data it describes.
     let delaysAlign =
-        let sim = Sim delayAlign
+        let sim = Sim delayAlign.def
         sim.Poke("data", 10UL)
         sim.Poke("tag", 1UL)
         sim.Tick()
@@ -446,7 +446,7 @@ let private pagesTellTheTruth () =
 
     // One-hot grant, and a select with no comparator in it.
     let arbiterGrantsOne =
-        let sim = Sim arbiter
+        let sim = Sim arbiter.def
         for i in 0..3 do
             sim.Poke($"req{i}", 1UL)
             sim.Poke($"value{i}", uint64 (0x10 * (i + 1)))
@@ -464,7 +464,7 @@ let private pagesTellTheTruth () =
     // A barrel is a schedule: a thread's slot comes round once every `threads`
     // cycles, and its writeback lands inside that gap.
     let barrelInterleaves =
-        let sim = Sim barrelLane
+        let sim = Sim barrelLane.def
         sim.Poke("x", 1UL)
 
         let trace =
@@ -480,7 +480,7 @@ let private pagesTellTheTruth () =
         let everyFourth = advanced |> List.pairwise |> List.forall (fun (a, b) -> b - a = 4)
 
         // Forty-two cycles is ten turns each, and thread t adds t+1 per turn.
-        let totals = Sim barrelLane
+        let totals = Sim barrelLane.def
         totals.Poke("x", 1UL)
         for _ in 1..42 do totals.Tick()
 
@@ -506,7 +506,7 @@ let private pagesTellTheTruth () =
             s[3] <- rotl s[3] 11
             uint64 word
 
-        let sim = Sim prng
+        let sim = Sim prng.def
         sim.Poke("step", 1UL)
 
         [ 1..64 ]
@@ -518,7 +518,7 @@ let private pagesTellTheTruth () =
     // A FIR's impulse response *is* its coefficient list — the one measurement
     // that pins taps, order and delay-line depth at once.
     let firRespondsWithItsCoefficients =
-        let sim = Sim firFilter
+        let sim = Sim firFilter.def
         sim.Poke("sample", 1UL)
 
         let response =
@@ -534,7 +534,7 @@ let private pagesTellTheTruth () =
 
     // The three edge policies, each on a grid that only it reads as non-empty.
     let edgePoliciesDiffer =
-        let sim = Sim lifeCell
+        let sim = Sim lifeCell.def
         let poke cell = for y in 0..2 do for x in 0..2 do sim.Poke($"g_{y}_{x}", cell y x)
 
         poke (fun _ _ -> 1UL)
@@ -558,7 +558,7 @@ let private pagesTellTheTruth () =
     // Sharing is only safe if an answer comes back to the client that asked,
     // carrying the tag it asked with — and if neither client starves.
     let sharedUnitRoutesByTag =
-        let sim = Sim sharedUnit
+        let sim = Sim sharedUnit.def
         let operands = [ 0, (5UL, 3UL, 4UL); 1, (9UL, 6UL, 7UL) ]
 
         for client, (tag, a, b) in operands do
@@ -590,7 +590,7 @@ let private pagesTellTheTruth () =
     // The register map from the host's side: a write handshake, a readback,
     // and a constant the driver uses to know which bitstream it is talking to.
     let registerMapAnswers =
-        let sim = Sim registerMap
+        let sim = Sim registerMap.def
 
         // The handshakes live in `SimAxi`, which asserts every step rather
         // than polling for it — a slave that stalls fails here loudly.
@@ -610,7 +610,7 @@ let private pagesTellTheTruth () =
     // the bumped beat on step 5, accepts again on step 6 — one beat per
     // cycles+3 — and a stalled sink holds the offer without losing it.
     let workerGrinds =
-        let sim = Sim ownStage
+        let sim = Sim ownStage.def
         sim.Poke("in_value", 5UL)
         sim.Poke("in_valid", 1UL)
         sim.Poke("out_ready", 1UL)
@@ -642,7 +642,7 @@ let private pagesTellTheTruth () =
     // The arm gate, which is a hardware-safety property before it is a
     // correctness one: with no base address the master must not issue at all.
     let masterStaysDisarmed =
-        let sim = Sim ddrMaster
+        let sim = Sim ddrMaster.def
         sim.Poke("m_axi_awready", 1UL)
         sim.Poke("m_axi_wready", 1UL)
         sim.Poke("m_axi_bvalid", 1UL)

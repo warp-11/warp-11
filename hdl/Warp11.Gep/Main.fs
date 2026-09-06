@@ -147,7 +147,7 @@ let private adfEngineSmoke () : bool =
 /// Sim against GepRng word-for-word — the reset-default state (1,2,3,4)
 /// first, then a SplitMix64-expanded seed loaded through the ports.
 let private xoshiroVsRng () : bool =
-    let sim = Sim(Hdl.xoshiroWalk)
+    let sim = Sim(Hdl.xoshiroWalk.def)
     sim.Poke("step", 1UL)
 
     let walk (rng: GepRng) (count: int) =
@@ -179,7 +179,7 @@ let private xoshiroVsRng () : bool =
 /// against `fxRecipTable` — plus Reset(), which must reload the contents (a
 /// BRAM INIT comes back with the bitstream).
 let private recipRomVsTable () : bool =
-    let sim = Sim(Hdl.recipRomWalk)
+    let sim = Sim(Hdl.recipRomWalk.def)
 
     let readAll () =
         Seq.forall
@@ -221,7 +221,7 @@ let private divArmVsFxDivRecip () : bool =
     let expected =
         cases |> Array.map (fun (a, b) -> uint64 (uint32 (fxDivRecip a b)))
 
-    let sim = Sim(Hdl.gepDivRecip)
+    let sim = Sim(Hdl.gepDivRecip.def)
     let results = ResizeArray<uint64>()
 
     for i in 0 .. cases.Length + Hdl.gepDivLatency - 2 do
@@ -286,8 +286,8 @@ let private aluVsApplyOp () : bool =
         useRecipDiv <- false
         e
 
-    streamCases Hdl.gepAluPlain (Hdl.gepAluLatency false) plainCases plainExpected
-    && streamCases Hdl.gepAluDiv (Hdl.gepAluLatency true) divCases divExpected
+    streamCases Hdl.gepAluPlain.def (Hdl.gepAluLatency false) plainCases plainExpected
+    && streamCases Hdl.gepAluDiv.def (Hdl.gepAluLatency true) divCases divExpected
 
 /// The fabric compiler against `compileGene`: random genes (three geometries,
 /// plus the one-node terminal gene) loaded into the walk's gene buffer, the
@@ -309,7 +309,7 @@ let private karvaCompilerVsCompileGene () : bool =
           yield Array.append [| variable 2 |] (Array.create 4 (variable 0)) ]
 
     let runOne (g: int[]) =
-        let sim = Sim(Hdl.karvaCompilerWalk)
+        let sim = Sim(Hdl.karvaCompilerWalk.def)
 
         for i in 0 .. g.Length - 1 do
             sim.Poke("load_en", 1UL)
@@ -373,7 +373,7 @@ let private operatorEngineVsHwBreed () : bool =
         let parentB = hwRandomChromosome config rangeFx parentRng
         let expected = hwBreedOffspring parentA parentB config thresholds (GepRng(seed))
 
-        let sim = Sim(Hdl.operatorEngineWalk)
+        let sim = Sim(Hdl.operatorEngineWalk.def)
 
         let loadParent (par: uint64) (c: Chromosome) =
             sim.Poke("ld_par", par)
@@ -480,7 +480,7 @@ let private unitEngineVsEvaluate () : bool =
     let capacity = 32
     let indivWords = Hdl.gepUnitIndivWords capacity config.constantCount
 
-    let sim = Sim(Hdl.unitEngineWalk)
+    let sim = Sim(Hdl.unitEngineWalk.def)
     let bigOf (words: uint64[]) =
         Array.fold
             (fun acc (w: uint64) -> (acc <<< 32) ||| System.Numerics.BigInteger(w))
@@ -612,7 +612,7 @@ let private unitEngineDivSharing () : bool =
             (Array.rev words)
 
     let run (sharing: FuSharing) =
-        let sim = Sim(Hdl.unitEngineDivWalk sharing)
+        let sim = Sim (Hdl.unitEngineDivWalk sharing).def
 
         for idx in 0 .. nCases - 1 do
             let vars, target = cases[idx]
@@ -716,7 +716,7 @@ let private breederBlockVsOracle () : bool =
         let child = hwBreedOffspring parentA parentB config thresholds (GepRng(seed))
         let program = compileChromosome config child
 
-        let sim = Sim(Hdl.breederBlockWalk)
+        let sim = Sim(Hdl.breederBlockWalk.def)
 
         let loadParent (par: uint64) (c: Chromosome) =
             sim.Poke("ld_par", par)
@@ -821,7 +821,7 @@ let private breederBlockVsOracle () : bool =
 /// a released lane accepts the next record. Ready must be low before binding
 /// (it is a registered binding bit).
 let private recordRouterChoreography () : bool =
-    let sim = Sim(Hdl.recordRouterWalk)
+    let sim = Sim(Hdl.recordRouterWalk.def)
     let big (v: int) = System.Numerics.BigInteger(v)
 
     let mkRecord (baseV: int) (n: int) =
@@ -1050,14 +1050,14 @@ let private boardVectorData (entries: int) = boardVectorDataCases 32 entries
 /// including the pooled divide — a shared pod across the lanes — which the
 /// queue-mode oracle run does not exercise.
 let private clusterElaborations () : bool =
-    [ Cluster.clusterPoolWalk 1 false
-      Cluster.clusterPoolWalk 2 false
-      Cluster.clusterPoolWalk 1 true
-      Cluster.clusterPoolWalk 2 true
-      Cluster.clusterPoolDivWalk PerLane
-      Cluster.clusterPoolDivWalk Pooled
-      Cluster.clusterAutoWalk false
-      Cluster.clusterAutoWalk true ]
+    [ (Cluster.clusterPoolWalk 1 false).def
+      (Cluster.clusterPoolWalk 2 false).def
+      (Cluster.clusterPoolWalk 1 true).def
+      (Cluster.clusterPoolWalk 2 true).def
+      (Cluster.clusterPoolDivWalk PerLane).def
+      (Cluster.clusterPoolDivWalk Pooled).def
+      (Cluster.clusterAutoWalk false).def
+      (Cluster.clusterAutoWalk true).def ]
     |> List.forall (fun d -> emitDesign d |> String.length > 0)
 
 /// The WarpCPU cluster in queue mode, end to end against the software chain.
@@ -1136,7 +1136,7 @@ let private clusterQueueVsOracle (nFillers: int) (inlineParents: bool) : bool =
                skip = e % profiles.Length = 2
                child = hwBreedOffspring population[parentA] population[parentB] config thresholds (GepRng seed) |} ]
 
-    let sim = Sim(Cluster.clusterPoolWalk nFillers inlineParents)
+    let sim = Sim (Cluster.clusterPoolWalk nFillers inlineParents).def
     let ddr = SimAxiDdr(sim, 16384)
 
     let writeWords (byteAddr: int) (words: uint32[]) =
@@ -1411,7 +1411,7 @@ let private clusterAutoVsMirror () : bool =
     let lastBest = mirror.lastBest
 
     // ---- The fabric ----
-    let sim = Sim(Cluster.clusterAutoWalk false)
+    let sim = Sim (Cluster.clusterAutoWalk false).def
     let ddr = SimAxiDdr(sim, 4096)
 
     let writeWords (byteAddr: int) (words: uint32[]) =
@@ -1629,7 +1629,7 @@ let private clusterOpListVsMirror () : bool =
            yield 0u
            for w in e.seeds -> uint32 w |]
 
-    let sim = Sim(Cluster.clusterAutoWalk true)
+    let sim = Sim (Cluster.clusterAutoWalk true).def
     let ddr = SimAxiDdr(sim, 4096)
 
     let writeWords (byteAddr: int) (words: uint32[]) =
@@ -1792,7 +1792,7 @@ let private clusterAxiSeamParts (jitter: int option) : bool * bool =
                child = hwBreedOffspring population[parentA] population[parentB] config thresholds (GepRng seed)
                words = entryWordsOf parentA parentB (destBase + e) thresholds (0xAB00 + e) skip seed |} ]
 
-    let sim = Sim(ClusterAxi.clusterAxiWalk)
+    let sim = Sim ClusterAxi.clusterAxiWalk.def
     let ddr = SimAxiDdr(sim, 8192, ?jitter = jitter)
 
     let writeWords (byteAddr: int) (words: uint32[]) =
@@ -1961,7 +1961,7 @@ let private laneDivFitnessVsEvaluate () : bool =
             System.Numerics.BigInteger.Zero
             (Array.rev words)
 
-    let sim = Sim(Hdl.unitEngineDivWalk PerLane)
+    let sim = Sim (Hdl.unitEngineDivWalk PerLane).def
 
     for idx in 0 .. nCases - 1 do
         let vars, target = cases[idx]
@@ -2087,7 +2087,8 @@ let private runClusterMix (sharing: FuSharing) (nBreeders: int) (nLanes: int) (n
         | Pooled -> "Pooled"
 
     let design =
-        Cluster.clusterPoolDesign $"GepClusterMix%d{nBreeders}b%d{nLanes}l%d{nFillers}f{tag}" shape
+        (Cluster.clusterPoolDesign $"GepClusterMix%d{nBreeders}b%d{nLanes}l%d{nFillers}f{tag}" shape)
+            .def
 
     // Through the width/name/stream gates before simulating: a mis-sized net
     // shows up here as a message, and in the Sim as an out-of-range DDR write
@@ -2222,13 +2223,13 @@ let private printMixRow (r: {| breeders: int
 /// registry keeps — a design is here because someone put it here — on this side
 /// of the dependency, where the state machines worth watching live.
 let private debuggable =
-    [ "operator-engine", fun () -> Hdl.operatorEngineWalk
-      "karva", fun () -> Hdl.karvaCompilerWalk
-      "breeder", fun () -> Hdl.breederBlockWalk
-      "unit-engine", fun () -> Hdl.unitEngineWalk
-      "router", fun () -> Hdl.recordRouterWalk
-      "cluster", fun () -> Cluster.clusterPoolWalk 2 true
-      "cluster-auto", fun () -> Cluster.clusterAutoWalk false ]
+    [ "operator-engine", fun () -> Hdl.operatorEngineWalk.def
+      "karva", fun () -> Hdl.karvaCompilerWalk.def
+      "breeder", fun () -> Hdl.breederBlockWalk.def
+      "unit-engine", fun () -> Hdl.unitEngineWalk.def
+      "router", fun () -> Hdl.recordRouterWalk.def
+      "cluster", fun () -> (Cluster.clusterPoolWalk 2 true).def
+      "cluster-auto", fun () -> (Cluster.clusterAutoWalk false).def ]
 
 [<EntryPoint>]
 let main argv =
@@ -2242,18 +2243,18 @@ let main argv =
             1
     | [| "diff"; outDir |] ->
         writeDiff
-            [ Hdl.xoshiroWalk
-              Hdl.recipRomWalk
-              Hdl.gepDivRecip
-              Hdl.gepAluPlain
-              Hdl.gepAluDiv
-              Hdl.karvaCompilerWalk
-              Hdl.operatorEngineWalk
-              Hdl.unitEngineWalk
-              Hdl.unitEngineDivWalk PerLane
-              Hdl.unitEngineDivWalk Pooled
-              Hdl.breederBlockWalk
-              Hdl.recordRouterWalk ]
+            [ Hdl.xoshiroWalk.def
+              Hdl.recipRomWalk.def
+              Hdl.gepDivRecip.def
+              Hdl.gepAluPlain.def
+              Hdl.gepAluDiv.def
+              Hdl.karvaCompilerWalk.def
+              Hdl.operatorEngineWalk.def
+              Hdl.unitEngineWalk.def
+              (Hdl.unitEngineDivWalk PerLane).def
+              (Hdl.unitEngineDivWalk Pooled).def
+              Hdl.breederBlockWalk.def
+              Hdl.recordRouterWalk.def ]
             outDir
         0
     | [| "emit-cluster"; dir |] ->
@@ -2263,11 +2264,11 @@ let main argv =
         System.IO.Directory.CreateDirectory dir |> ignore
 
         for name, design in
-            [ "queue", Cluster.clusterPoolWalk 1 false
-              "inline", Cluster.clusterPoolWalk 2 true
-              "divpooled", Cluster.clusterPoolDivWalk Pooled
-              "auto", Cluster.clusterAutoWalk false
-              "oplist", Cluster.clusterAutoWalk true ] do
+            [ "queue", (Cluster.clusterPoolWalk 1 false).def
+              "inline", (Cluster.clusterPoolWalk 2 true).def
+              "divpooled", (Cluster.clusterPoolDivWalk Pooled).def
+              "auto", (Cluster.clusterAutoWalk false).def
+              "oplist", (Cluster.clusterAutoWalk true).def ] do
             System.IO.File.WriteAllText(System.IO.Path.Combine(dir, name + ".v"), emitDesign design + "\n")
             printfn $"{design.name} -> {name}.v"
 
@@ -2282,7 +2283,7 @@ let main argv =
         let verilogPath = System.IO.Path.Combine(buildDir, "GepClusterAxi.v")
         let layoutPath = System.IO.Path.Combine(runtimeSrc, "gep_layout.rs")
         let started = System.Diagnostics.Stopwatch.StartNew()
-        let verilog = emitDesign ClusterAxi.clusterAxiSilicon.Value
+        let verilog = emitDesign ClusterAxi.clusterAxiSilicon.Value.def
         System.IO.File.WriteAllText(verilogPath, verilog + "\n")
 
         System.IO.File.WriteAllText(
@@ -2449,7 +2450,7 @@ let main argv =
 
         for sharing, name in [ PerLane, "perlane"; Pooled, "pooled" ] do
             let shape = { ClusterAxi.clusterSiliconShape with divide = Some sharing }
-            let design = ClusterAxi.gepClusterAxi $"GepClusterAxi{name}" shape
+            let design = (ClusterAxi.gepClusterAxi $"GepClusterAxi{name}" shape).def
             let path = System.IO.Path.Combine(dir, name + ".v")
             System.IO.File.WriteAllText(path, emitDesign design + "\n")
             printfn $"wrote {path}"

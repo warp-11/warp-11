@@ -46,7 +46,7 @@ will not let you confuse them.
 ### Why the ports are called `less` and `greater`
 
 ```fsharp
-let less = outputBit "less"
+p.outPort "less" 1
 ```
 
 Not `lt` and `gt` — because `lt` and `gt` are the operators' own names, and a

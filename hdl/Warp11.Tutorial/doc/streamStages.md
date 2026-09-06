@@ -43,7 +43,7 @@ exactly this reason, and its 166 MHz clock is what the depth bought.
 ## Reading the source
 
 ```fsharp
-Stream.input "in" beatLayout |> Stream.stages 3 bump |> Stream.out "out"
+streamSource inPorts |> Stream.stages 3 bump |> streamSink outPorts
 ```
 
 `stages n f` is `stage f` applied `n` times, and `stage` is the word that costs

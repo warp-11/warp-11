@@ -190,7 +190,13 @@ type private Emitter =
     | Genome
     | Ring
 
-let gepClusterPool (shape: GepClusterShape) (prefix: string) (cfg: GepClusterConfig) =
+let gepClusterPool
+    (shape: GepClusterShape)
+    (prefix: string)
+    (readBusPorts: AxiReadBusPorts)
+    (writeBusPorts: AxiWriteBusPorts)
+    (cfg: GepClusterConfig)
+    =
     let nBreeders = shape.nBreeders
     let nLanes = shape.nLanes
     let nFillers = shape.nFillers
@@ -745,7 +751,7 @@ let gepClusterPool (shape: GepClusterShape) (prefix: string) (cfg: GepClusterCon
 
     let resp =
         axiMasterReaderBurstOn
-            (axiReadBus addrWidth 128)
+            (axiReadBusOf readBusPorts)
             shape.readOutstanding
             16
             { payload = (ownReqAddr, mux singleBurst (k (gepWorkItemBeats - 1) 8) (k 3 8))
@@ -1548,7 +1554,7 @@ let gepClusterPool (shape: GepClusterShape) (prefix: string) (cfg: GepClusterCon
 
     let writer =
         axiMasterWriterTrackedOn
-            (axiWriteBus addrWidth 128)
+            (axiWriteBusOf writeBusPorts)
             shape.writeOutstanding
             { payload = (beatAddr, beatData, lit 0xFFFFUL 16)
               valid = beatValid
@@ -1838,86 +1844,139 @@ let clusterShape (nFillers: int) (inlineParents: bool) =
 /// block's ports exist exactly when the shape carries the generation loop —
 /// absent rather than tied off, so reaching for one is a type error and not a
 /// silently dead wire.
+/// The auto block's status ports, present exactly when the shape carries the
+/// generation loop.
+type ClusterPoolWalkAutoOuts =
+    { round: Output
+      finished: Output
+      baseFlag: Output
+      bestIdx: Output
+      bestFitLo: Output
+      bestFitHi: Output
+      oplistDone: Output option }
+
+/// The walk's boundary, in the old ambient declaration order: the queue
+/// block, the case-load bus, the optional auto block (all inside `cfg`), the
+/// two DDR master buses, then every status output.
+type ClusterPoolWalkIo =
+    { cfg: GepClusterConfig
+      readBus: AxiReadBusPorts
+      writeBus: AxiWriteBusPorts
+      running: Output
+      allIdle: Output
+      autoOuts: ClusterPoolWalkAutoOuts option
+      resultsDone: Output
+      entriesTaken: Output
+      cycleCount: Output
+      feedStallCycles: Output
+      breederStallCycles: Output
+      fillBusyCycles: Output
+      packBusyCycles: Output
+      emitBusyCycles: Output
+      busyBreederCycles: Output
+      busyLaneCycles: Output
+      streamsActive: Output
+      breederBusyCycles: Output list
+      laneBusyCycles: Output list }
+
 let clusterPoolDesign (name: string) (shape: GepClusterShape) =
     let caseAddrW = log2Exact shape.caseCapacity
+    // streamsActive's width, stated statically — the router sizes it as one
+    // bit past the breeder index.
+    let breederIndexWidth =
+        if shape.nBreeders <= 1 then 1
+        else 32 - System.Numerics.BitOperations.LeadingZeroCount(uint (shape.nBreeders - 1))
 
-    design name (fun () ->
-        // Declaration order is emitted port order: the queue block, the
-        // case-load bus, then the auto block.
-        let startQueue = inputBit "start_queue"
-        let queueBase = input "queue_base" 32
-        let popBase = input "pop_base" 32
-        let ringBase = input "ring_base" 32
-        let queueMask = input "queue_mask" 32
-        let ringMask = input "ring_mask" 32
-        let entriesPublished = input "entries_published" 32
-        let nCases = input "n_cases" (caseAddrW + 1)
-        let ldCase = inputBit "ld_case"
-        let caseAddr = input "case_addr" caseAddrW
-        let caseField = input "case_field" 8
-        let caseData = input "case_data" 32
+    defModule
+        name
+        (fun p ->
+            { cfg =
+                { startQueue = p.inPort "start_queue" 1
+                  queueBase = p.inPort "queue_base" 32
+                  popBase = p.inPort "pop_base" 32
+                  ringBase = p.inPort "ring_base" 32
+                  queueMask = p.inPort "queue_mask" 32
+                  ringMask = p.inPort "ring_mask" 32
+                  entriesPublished = p.inPort "entries_published" 32
+                  nCases = p.inPort "n_cases" (caseAddrW + 1)
+                  ldCase = p.inPort "ld_case" 1
+                  caseAddr = p.inPort "case_addr" caseAddrW
+                  caseField = p.inPort "case_field" 8
+                  caseData = p.inPort "case_data" 32
+                  auto =
+                    shape.auto
+                    |> Option.map (fun ashape ->
+                        { autoMode = p.inPort "auto_mode" 1
+                          autoPop = p.inPort "auto_pop" 16
+                          autoGens = p.inPort "auto_gens" 32
+                          autoRates = [ for i in 0 .. (rateCount + 1) / 2 - 1 -> p.inPort $"auto_r{i}" 32 ]
+                          autoSigma = p.inPort "auto_sigma" 32
+                          autoRange = p.inPort "auto_range" 32
+                          autoSeed = [ for i in 0..3 -> p.inPort $"auto_s{i}" 32 ]
+                          oplistBase = (if ashape.opList then Some(p.inPort "oplist_base" 32) else None)
+                          skipScore = (if ashape.opList then Some(p.inPort "skip_score" 1) else None)
+                          rngContinue = (if ashape.opList then Some(p.inPort "rng_continue" 1) else None) }) }
+              readBus = axiReadBusPorts p "m_axi" shape.addrWidth 128
+              writeBus = axiWriteBusPorts p "m_axi" shape.addrWidth 128
+              running = p.outPort "running" 1
+              allIdle = p.outPort "all_idle" 1
+              autoOuts =
+                shape.auto
+                |> Option.map (fun ashape ->
+                    { round = p.outPort "auto_round" 32
+                      finished = p.outPort "auto_done" 1
+                      baseFlag = p.outPort "auto_base" 1
+                      bestIdx = p.outPort "best_idx" 16
+                      bestFitLo = p.outPort "best_fit_lo" 32
+                      bestFitHi = p.outPort "best_fit_hi" 32
+                      oplistDone = (if ashape.opList then Some(p.outPort "oplist_done" 1) else None) })
+              resultsDone = p.outPort "results_done" 32
+              entriesTaken = p.outPort "entries_taken" 32
+              cycleCount = p.outPort "cycle_count" 32
+              feedStallCycles = p.outPort "feed_stall_cycles" 32
+              breederStallCycles = p.outPort "breeder_stall_cycles" 32
+              fillBusyCycles = p.outPort "fill_busy_cycles" 32
+              packBusyCycles = p.outPort "pack_busy_cycles" 32
+              emitBusyCycles = p.outPort "emit_busy_cycles" 32
+              busyBreederCycles = p.outPort "busy_breeder_cycles" 32
+              busyLaneCycles = p.outPort "busy_lane_cycles" 32
+              streamsActive = p.outPort "streams_active" (breederIndexWidth + 1)
+              breederBusyCycles = [ for b in 0 .. shape.nBreeders - 1 -> p.outPort $"breeder{b}_busy_cycles" 32 ]
+              laneBusyCycles = [ for l in 0 .. shape.nLanes - 1 -> p.outPort $"lane{l}_busy_cycles" 32 ] })
+        (fun io ->
+            let pool = gepClusterPool shape "cl" io.readBus io.writeBus io.cfg
 
-        let autoCfg =
-            shape.auto
-            |> Option.map (fun ashape ->
-                { autoMode = inputBit "auto_mode"
-                  autoPop = input "auto_pop" 16
-                  autoGens = input "auto_gens" 32
-                  autoRates = [ for i in 0 .. (rateCount + 1) / 2 - 1 -> input $"auto_r{i}" 32 ]
-                  autoSigma = input "auto_sigma" 32
-                  autoRange = input "auto_range" 32
-                  autoSeed = [ for i in 0..3 -> input $"auto_s{i}" 32 ]
-                  oplistBase = (if ashape.opList then Some(input "oplist_base" 32) else None)
-                  skipScore = (if ashape.opList then Some(inputBit "skip_score") else None)
-                  rngContinue = (if ashape.opList then Some(inputBit "rng_continue") else None) })
+            pool.running ==> io.running
+            pool.allIdle ==> io.allIdle
 
-        let pool =
-            gepClusterPool
-                shape
-                "cl"
-                { startQueue = startQueue
-                  queueBase = queueBase
-                  popBase = popBase
-                  ringBase = ringBase
-                  queueMask = queueMask
-                  ringMask = ringMask
-                  entriesPublished = entriesPublished
-                  nCases = nCases
-                  ldCase = ldCase
-                  caseAddr = caseAddr
-                  caseField = caseField
-                  caseData = caseData
-                  auto = autoCfg }
+            (match pool.auto, io.autoOuts with
+             | Some a, Some o ->
+                 a.round ==> o.round
+                 a.finished ==> o.finished
+                 a.baseFlag ==> o.baseFlag
+                 a.bestIdx ==> o.bestIdx
+                 slice 31 0 a.bestFit ==> o.bestFitLo
+                 slice 63 32 a.bestFit ==> o.bestFitHi
 
-        pool.running ==> outputBit "running"
-        pool.allIdle ==> outputBit "all_idle"
+                 (match a.oplistDone, o.oplistDone with
+                  | Some d, Some port -> d ==> port
+                  | _ -> ())
+             | _ -> ())
 
-        pool.auto
-        |> Option.iter (fun a ->
-            a.round ==> output "auto_round" 32
-            a.finished ==> outputBit "auto_done"
-            a.baseFlag ==> outputBit "auto_base"
-            a.bestIdx ==> output "best_idx" 16
-            slice 31 0 a.bestFit ==> output "best_fit_lo" 32
-            slice 63 32 a.bestFit ==> output "best_fit_hi" 32
-            a.oplistDone |> Option.iter (fun d -> d ==> outputBit "oplist_done"))
-        pool.resultsDone ==> output "results_done" 32
-        pool.entriesTaken ==> output "entries_taken" 32
-        pool.cycleCount ==> output "cycle_count" 32
-        pool.feedStallCycles ==> output "feed_stall_cycles" 32
-        pool.breederStallCycles ==> output "breeder_stall_cycles" 32
-        pool.fillBusyCycles ==> output "fill_busy_cycles" 32
-        pool.packBusyCycles ==> output "pack_busy_cycles" 32
-        pool.emitBusyCycles ==> output "emit_busy_cycles" 32
-        pool.busyBreederCycles ==> output "busy_breeder_cycles" 32
-        pool.busyLaneCycles ==> output "busy_lane_cycles" 32
-        pool.streamsActive ==> output "streams_active" (width pool.streamsActive)
+            pool.resultsDone ==> io.resultsDone
+            pool.entriesTaken ==> io.entriesTaken
+            pool.cycleCount ==> io.cycleCount
+            pool.feedStallCycles ==> io.feedStallCycles
+            pool.breederStallCycles ==> io.breederStallCycles
+            pool.fillBusyCycles ==> io.fillBusyCycles
+            pool.packBusyCycles ==> io.packBusyCycles
+            pool.emitBusyCycles ==> io.emitBusyCycles
+            pool.busyBreederCycles ==> io.busyBreederCycles
+            pool.busyLaneCycles ==> io.busyLaneCycles
+            pool.streamsActive ==> io.streamsActive
 
-        pool.breederBusyCycles
-        |> List.iteri (fun b c -> c ==> output $"breeder{b}_busy_cycles" 32)
-
-        pool.laneBusyCycles
-        |> List.iteri (fun l c -> c ==> output $"lane{l}_busy_cycles" 32))
+            List.iter2 (fun c o -> c ==> o) pool.breederBusyCycles io.breederBusyCycles
+            List.iter2 (fun c o -> c ==> o) pool.laneBusyCycles io.laneBusyCycles)
 
 /// The two arrangements the queue-mode check walks.
 let clusterPoolWalk (nFillers: int) (inlineParents: bool) =

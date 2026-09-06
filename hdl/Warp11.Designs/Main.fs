@@ -6,107 +6,107 @@ open System.Numerics
 open Warp11
 
 let private diffDesigns () =
-    [ comparator8
-      holdThroughReset
-      dynamicShifts
-      bitReductions
-      constantDivision
-      streamDivider
-      maskedWrite
-      maskedWriteWide
-      pipelinedReadSlave
-      deepChannelSlave
-      twoWindowSlave
-      carriedRead
-      bufferedStream
-      deepBufferedStream
-      taggedDivide
-      farmedDivide
+    [ comparator8.def
+      holdThroughReset.def
+      dynamicShifts.def
+      bitReductions.def
+      constantDivision.def
+      streamDivider.def
+      maskedWrite.def
+      maskedWriteWide.def
+      pipelinedReadSlave.def
+      deepChannelSlave.def
+      twoWindowSlave.def
+      carriedRead.def
+      bufferedStream.def
+      deepBufferedStream.def
+      taggedDivide.def
+      farmedDivide.def
       add3
       dot2
       dot2Auto
-      dot2Ambient
-      dot2Inline
-      pipelinedDot
-      gatedCounter
-      streamPipe
-      coordPipe
-      onCounter
-      onPriority
-      ifElseLadder
-      switchRing
-      sequencer
-      lfsrSource
-      oneHotScan
-      mux1HSelect
-      edgeDetector
-      flowSampler
-      dividers
-      bitShapes
-      loopPipeline
-      treeSum
-      ramTest
-      dualRead
-      fillingMemory
-      priorityWrite
-      maskedWritePriority
-      romLookup
-      blockRomLookup
-      sumOverLut
-      sumOverBlock
-      sumOverUltra
-      sumOverDdr
-      oneOwnerOnePort
-      twoOwnersOnePort
-      twoOwnersTwoPorts
-      sumFromReadWindow
-      sumReportsDone
-      sumWhollyOnChip
-      assertedSaturate
-      cmdProcessor
-      unionRoundTrip
-      forkJoin
-      signedOps
-      xorOps
-      satOps
-      escapeStep
-      escapeStepFixed
-      escapeStep28
-      wideBeat
-      widenOps
-      dispatchRoundTrip
-      clusteredRoundTrip
-      twoStreamSplit
-      twoStreamSplitReplicateJoin
-      framePipeline
-      sweepPipeline 2
-      windowSweep
-      pixelBlur
-      movingAverage
-      sparseDot
-      indirectGather
-      indexSweep
+      dot2Ambient.def
+      dot2Inline.def
+      pipelinedDot.def
+      gatedCounter.def
+      streamPipe.def
+      coordPipe.def
+      onCounter.def
+      onPriority.def
+      ifElseLadder.def
+      switchRing.def
+      sequencer.def
+      lfsrSource.def
+      oneHotScan.def
+      mux1HSelect.def
+      edgeDetector.def
+      flowSampler.def
+      dividers.def
+      bitShapes.def
+      loopPipeline.def
+      treeSum.def
+      ramTest.def
+      dualRead.def
+      fillingMemory.def
+      priorityWrite.def
+      maskedWritePriority.def
+      romLookup.def
+      blockRomLookup.def
+      sumOverLut.def
+      sumOverBlock.def
+      sumOverUltra.def
+      sumOverDdr.def
+      oneOwnerOnePort.def
+      twoOwnersOnePort.def
+      twoOwnersTwoPorts.def
+      sumFromReadWindow.def
+      sumReportsDone.def
+      sumWhollyOnChip.def
+      assertedSaturate.def
+      cmdProcessor.def
+      unionRoundTrip.def
+      forkJoin.def
+      signedOps.def
+      xorOps.def
+      satOps.def
+      escapeStep.def
+      escapeStepFixed.def
+      escapeStep28.def
+      wideBeat.def
+      widenOps.def
+      dispatchRoundTrip.def
+      clusteredRoundTrip.def
+      twoStreamSplit.def
+      twoStreamSplitReplicateJoin.def
+      framePipeline.def
+      (sweepPipeline 2).def
+      windowSweep.def
+      pixelBlur.def
+      movingAverage.def
+      sparseDot.def
+      indirectGather.def
+      indexSweep.def
       maxPoolDilate.def
       maxPool2x2.def
       maxPoolCombinational.def
-      typedPipeline
-      probedPipe
-      axiWriteMaster
-      axiWriteMasterSingle
-      axiReadMaster
-      axiReadMasterSingle
-      axiReadMasterBurst
-      axiPulse
-      axiScratch
-      neighborCount
-      regMapScratch
-      snapshotConflate
-      snapshotDdr
-      audioOps
-      audioChain
-      audioTone
-      i2sLoopback
-      multibandStage ]
+      typedPipeline.def
+      probedPipe.def
+      axiWriteMaster.def
+      axiWriteMasterSingle.def
+      axiReadMaster.def
+      axiReadMasterSingle.def
+      axiReadMasterBurst.def
+      axiPulse.def
+      axiScratch.def
+      neighborCount.def
+      regMapScratch.def
+      snapshotConflate.def
+      snapshotDdr.def
+      audioOps.def
+      audioChain.def
+      audioTone.def
+      i2sLoopback.def
+      multibandStage.def ]
 
 /// Unity settings must be audibly transparent: gain at 1.0x unmuted,
 /// compression with a zero slope and 1.0x makeup, and a limiter threshold at
@@ -119,7 +119,7 @@ let private diffDesigns () =
 /// scale factor in three stages has to be exactly right for a sample to
 /// survive the trip unchanged.
 let private audioUnityPassthrough () : bool =
-    let sim = Sim(audioChain)
+    let sim = Sim(audioChain.def)
     sim.Poke("volume", gainUnity)
     sim.Poke("mute", 0UL)
     sim.Poke("threshold", 0UL)
@@ -228,7 +228,7 @@ let private wavThroughMultiband () : bool =
     let input = toneWav 48_000 2_000 440.0 0.8
 
     let run threshold =
-        let sim = Sim(multibandStage)
+        let sim = Sim(multibandStage.def)
         sim.Poke("threshold", threshold)
         sim.Poke("ratio", 4UL)
         sim.Poke("attack", 1UL <<< 14)
@@ -276,7 +276,7 @@ let private wavThroughMultiband () : bool =
 /// the band sum saturates once, so a least-significant bit or two is expected.
 /// Anything more means the split is not telescoping.
 let private multibandReconstructs () : bool =
-    let sim = Sim(multibandStage)
+    let sim = Sim(multibandStage.def)
     sim.Poke("threshold", 0UL)
     sim.Poke("ratio", 0UL) // zero slope — every band passes through
     sim.Poke("attack", 1UL <<< 15)
@@ -317,7 +317,7 @@ let private multibandReconstructs () : bool =
 /// pulls the output back below full scale. A detect-then-boost one pins it at
 /// the rail.
 let private compressorRegulatesOutput () : bool =
-    let sim = Sim(audioChain)
+    let sim = Sim(audioChain.def)
     let fullScale = (1UL <<< (sampleWidth - 1)) - 1UL
     sim.Poke("volume", gainUnity)
     sim.Poke("mute", 0UL)
@@ -364,7 +364,7 @@ let private compressorRegulatesOutput () : bool =
 /// tx. A real codec supplies exactly this frame, so it is the spec, not a
 /// convenience.
 let private i2sRxDecodes () : bool =
-    let sim = Sim(i2sRxStage)
+    let sim = Sim(i2sRxStage.def)
     sim.Poke("out_ready", 1UL)
 
     let step lrclk sdout tick =
@@ -398,7 +398,7 @@ let private i2sRxDecodes () : bool =
 /// independent: each is judged against the ideal frame rather than against the
 /// other, so a shared misreading of the convention cannot cancel out.
 let private i2sTxEmits () : bool =
-    let sim = Sim(i2sTxStage)
+    let sim = Sim(i2sTxStage.def)
     let left = 0x123456UL
     let right = 0xABCDEFUL
 
@@ -453,7 +453,7 @@ let private i2sTxEmits () : bool =
 /// Asserted as the measured relationship, so the check still fails if the link
 /// breaks in some *other* way.
 let private i2sLoopbackRoundTrip () : bool =
-    let sim = Sim(i2sLoopback)
+    let sim = Sim(i2sLoopback.def)
     let left = 0xA5A5A0UL
     let right = 0x5A5A50UL
     sim.Poke("in_left", left)
@@ -492,7 +492,7 @@ let private i2sLoopbackRoundTrip () : bool =
 /// reimplementing the filter.
 let private audioFirDcResponse () : bool =
     let settle (preset: uint64) (level: uint64) =
-        let sim = Sim(audioFirStage)
+        let sim = Sim(audioFirStage.def)
         sim.Poke("preset", preset)
         sim.Poke("in_valid", 1UL)
         sim.Poke("out_ready", 1UL)
@@ -532,10 +532,8 @@ let private nestedDelayOf w =
     )
 
 let private nestedGroups =
-    design "NestedGroups" (fun () ->
+    defModule "NestedGroups" (fun p -> (p.inPort "x" 8, p.outPort "out" 8)) (fun (x, out) ->
         let pair = nestedDelayOf 8
-        let x = input "x" 8
-        let out = output "out" 8
         pair x ==> out)
 
 /// The inventory's contract, and what the debugger's watch list rests on: every
@@ -577,36 +575,36 @@ let private inventoryNamesPeek () =
         signalsOk && memsOk
 
     [ add3
-      dot2Ambient
-      pipelinedDot
-      loopPipeline
-      nestedGroups
-      ramTest
-      dualRead
-      fillingMemory
-      priorityWrite
-      maskedWritePriority
-      romLookup
-      blockRomLookup
-      sumOverLut
-      sumOverBlock
-      sumOverUltra
-      sumOverDdr
-      assertedSaturate
-      cmdProcessor
-      wideBeat
-      framePipeline
-      windowSweep
-      pixelBlur
-      movingAverage
-      sparseDot
-      indirectGather
-      indexSweep
+      dot2Ambient.def
+      pipelinedDot.def
+      loopPipeline.def
+      nestedGroups.def
+      ramTest.def
+      dualRead.def
+      fillingMemory.def
+      priorityWrite.def
+      maskedWritePriority.def
+      romLookup.def
+      blockRomLookup.def
+      sumOverLut.def
+      sumOverBlock.def
+      sumOverUltra.def
+      sumOverDdr.def
+      assertedSaturate.def
+      cmdProcessor.def
+      wideBeat.def
+      framePipeline.def
+      windowSweep.def
+      pixelBlur.def
+      movingAverage.def
+      sparseDot.def
+      indirectGather.def
+      indexSweep.def
       maxPoolDilate.def
       maxPool2x2.def
       maxPoolCombinational.def
-      audioChain
-      snapshotConflate ]
+      audioChain.def
+      snapshotConflate.def ]
     |> List.forall peekable
 
 /// A signal's group is the instance it came from, by longest match. The rule
@@ -614,8 +612,8 @@ let private inventoryNamesPeek () =
 /// (`mul8_1`), and an instance inside an instance carries both prefixes.
 let private inventoryGroups () =
     let flat = Inventory.ofDesign add3
-    let nested = Inventory.ofDesign nestedGroups
-    let ram = Inventory.ofDesign ramTest
+    let nested = Inventory.ofDesign nestedGroups.def
+    let ram = Inventory.ofDesign ramTest.def
 
     let nestedPair =
         nested.groups
@@ -646,7 +644,7 @@ let private breakpointExpressions () =
         | Ok bp -> Breakpoint.runUntil sim bp.isHit 40 = expected
 
     let comparing a b text =
-        let sim = Sim(comparator8)
+        let sim = Sim(comparator8.def)
         sim.Poke("a", a)
         sim.Poke("b", b)
 
@@ -655,7 +653,7 @@ let private breakpointExpressions () =
         | Ok bp -> bp.isHit ()
 
     let afterWrite text =
-        let sim = Sim(ramTest)
+        let sim = Sim(ramTest.def)
         sim.Poke("waddr", 3UL)
         sim.Poke("wdata", 0x55UL)
         sim.Poke("wen", 1UL)
@@ -674,7 +672,7 @@ let private breakpointExpressions () =
     // A 128-bit register: the predicate routes onto the BigInteger path by the
     // same rule an assignment does, and a slice of it comes back narrow.
     let wideAfterBytes text =
-        let sim = Sim(wideBeat)
+        let sim = Sim(wideBeat.def)
         sim.Poke("shift_en", 1UL)
 
         for b in 1UL..3UL do
@@ -784,7 +782,7 @@ let private debugSessionDrives () =
 /// come back in every snapshot, and asking past the end pages to the tail
 /// instead of failing.
 let private debugSessionShowsMemory () =
-    use raw = new Debug.DebugSession(ramTest)
+    use raw = new Debug.DebugSession(ramTest.def)
     let session = raw :> Debug.IDebugSession
 
     session.ViewMemory("store", 0, 8)
@@ -893,7 +891,7 @@ let private tracesEveryCycle () =
 /// not asked to check them, and mean nothing about a branch that was not taken.
 let private assertionsHold () =
     let run checking pokes cycles =
-        let sim = Sim(assertedCounter, checkAsserts = checking)
+        let sim = Sim(assertedCounter.def, checkAsserts = checking)
 
         for name, value in pokes do
             sim.Poke(name, value)
@@ -917,7 +915,7 @@ let private assertionsHold () =
     // Driven to the ceiling and then wrapped: the saturation claim fires on the
     // cycle the counter comes back as zero, and only then.
     let saturationFires =
-        let sim = Sim(assertedCounter, checkAsserts = true)
+        let sim = Sim(assertedCounter.def, checkAsserts = true)
         sim.Poke("hold", 1UL)
         sim.Tick()
         sim.Poke("hold", 0UL)
@@ -931,7 +929,7 @@ let private assertionsHold () =
     // The same run with checking off records nothing — the claims are not in
     // the program at all rather than being evaluated and ignored.
     let silentWhenOff =
-        let sim = Sim assertedCounter
+        let sim = Sim assertedCounter.def
         sim.Poke("hold", 1UL)
         sim.Tick()
         sim.Poke("hold", 0UL)
@@ -979,7 +977,7 @@ let private utilityPrimitives () =
     // And the hardware is that function: same seed, same stream, and `step` low
     // holds the state rather than advancing it.
     let hardwareMatchesReference =
-        let sim = Sim lfsrSource
+        let sim = Sim lfsrSource.def
         let mutable expected = 1UL
         sim.Poke("step", 0UL)
         sim.Tick()
@@ -1000,7 +998,7 @@ let private utilityPrimitives () =
     // and all-zero stays all-zero.
     let oneHotLowestPicks =
         let n = 4
-        let sim = Sim oneHotScan
+        let sim = Sim oneHotScan.def
 
         [ for pattern in 0 .. (1 <<< n) - 1 ->
               for i in 0 .. n - 1 do
@@ -1016,7 +1014,7 @@ let private utilityPrimitives () =
 
     // One-hot select, including the no-select case the callers rely on.
     let mux1HSelects =
-        let sim = Sim mux1HSelect
+        let sim = Sim mux1HSelect.def
 
         for i in 0..3 do
             sim.Poke($"value{i}", uint64 (0x10 * (i + 1)))
@@ -1041,7 +1039,7 @@ let private utilityPrimitives () =
     // Edge detection is about the enable as much as the signal: a change that
     // happens while `enable` is low is seen when it next goes high, not missed.
     let edgesDetected =
-        let sim = Sim edgeDetector
+        let sim = Sim edgeDetector.def
 
         // Read the outputs BEFORE the clock edge that samples: an edge is
         // asserted during the cycle it happens, and `previous` catches up at
@@ -1082,7 +1080,7 @@ let private utilityPrimitives () =
     // lost when the consumer is not there, and the count of lost beats is
     // exactly the cycles `valid && !ready`.
     let flowLosesWhatItMust =
-        let sim = Sim flowSampler
+        let sim = Sim flowSampler.def
 
         let cycle (sample: uint64) (ready: uint64) =
             sim.Poke("sample", sample)
@@ -1131,7 +1129,7 @@ let private utilityPrimitives () =
     // the count must visit 0..n-1 in order and `wrap` must be high on exactly
     // the cycles where it reads n-1, three times and no more.
     let countersWrapWhereTheySay =
-        let sim = Sim dividers
+        let sim = Sim dividers.def
         let period = 6
 
         // Read before the tick: `wrap` is combinational from the count and the
@@ -1171,7 +1169,7 @@ let private utilityPrimitives () =
 
         // The divider itself: one flip per period, so half the frequency.
         let flips =
-            let flipping = Sim dividers
+            let flipping = Sim dividers.def
             flipping.Poke("enable", 1UL)
             flipping.Poke("last", 3UL)
             let before = flipping.Peek "divided"
@@ -1191,7 +1189,7 @@ let private utilityPrimitives () =
     // The bit shapes, against their definitions rather than against a vector —
     // exhaustively over 4-bit inputs, which is 256 cases and costs nothing.
     let bitShapesAreTheirDefinitions =
-        let sim = Sim bitShapes
+        let sim = Sim bitShapes.def
 
         // `&&&` and `|||` are the Expr operators here, so the host-side bit
         // arithmetic goes through division instead.
@@ -1307,16 +1305,16 @@ let private flattenRefusesNameCollisions () =
 /// conditionally-driven output is not an undriven one, and a memory with no
 /// initial contents is not a rom.
 let private elaborationGate () =
-    let refused (contains: string) body =
+    let refused (contains: string) (io: Ports -> 'io) (body: 'io -> unit) =
         try
-            emitDesign (design "Gate" body) |> ignore
+            emitDesign (defModule "Gate" io body).def |> ignore
             false
         with e ->
             e.Message.Contains contains
 
-    let accepted body =
+    let accepted (io: Ports -> 'io) (body: 'io -> unit) =
         try
-            emitDesign (design "Gate" body) |> ignore
+            emitDesign (defModule "Gate" io body).def |> ignore
             true
         with _ ->
             false
@@ -1326,17 +1324,15 @@ let private elaborationGate () =
     //    design headed straight for a bitstream cannot ship what the simulator
     //    would not run.
     let loopRefused =
-        refused "combinational loop" (fun () ->
+        refused "combinational loop" (fun p -> p.outPort "out" 1) (fun out ->
             let osc = wireBit "osc"
-            let out = outputBit "out"
             bnot osc ==> osc
             osc ==> out)
 
     //    ...but a register reading itself is every counter in the tree, and a
     //    plain combinational chain is every design.
     let feedbackAccepted =
-        accepted (fun () ->
-            let out = output "out" 8
+        accepted (fun p -> p.outPort "out" 8) (fun out ->
             let r = reg "r" 8
             let mid = wire "mid" 8
             r + lit 1UL 8 ==> r
@@ -1345,36 +1341,31 @@ let private elaborationGate () =
 
     // 2. An output nothing drives emits as a floating port.
     let undrivenRefused =
-        refused "never driven" (fun () ->
-            let a = input "a" 8
-            output "dangling" 8 |> ignore
-            let b = output "b" 8
-            a ==> b)
+        refused
+            "never driven"
+            (fun p ->
+                let a = p.inPort "a" 8
+                p.outPort "dangling" 8 |> ignore
+                (a, p.outPort "b" 8))
+            (fun (a, b) -> a ==> b)
 
     //    ...while one driven under a condition over a default is the ordinary
     //    idiom, and must stay ordinary.
     let conditionalDriveAccepted =
-        accepted (fun () ->
-            let c = inputBit "c"
-            let a = input "a" 8
-            let b = output "b" 8
+        accepted (fun p -> (p.inPort "c" 1, p.inPort "a" 8, p.outPort "b" 8)) (fun (c, a, b) ->
             lit 0UL 8 ==> b
             If c (fun () -> a ==> b))
 
     // 3. Initial contents mean a rom, and a rom cannot be written.
     let romWriteRefused =
-        refused "is a rom" (fun () ->
-            let addr = input "addr" 2
-            let out = output "out" 8
+        refused "is a rom" (fun p -> (p.inPort "addr" 2, p.outPort "out" 8)) (fun (addr, out) ->
             let lut = blockRom "lut" 8 [| 1UL; 2UL; 3UL; 4UL |]
             memWrite lut addr (lit 9UL 8) (lit 1UL 1)
             (memReadPort lut addr).data ==> out)
 
     //    ...and the same write to a memory that declared no contents is fine.
     let memWriteAccepted =
-        accepted (fun () ->
-            let addr = input "addr" 2
-            let out = output "out" 8
+        accepted (fun p -> (p.inPort "addr" 2, p.outPort "out" 8)) (fun (addr, out) ->
             let lut = blockMem "lut" 2 8
             memWrite lut addr (lit 9UL 8) (lit 1UL 1)
             (memReadPort lut addr).data ==> out)
@@ -1382,9 +1373,7 @@ let private elaborationGate () =
     // 4. A combinational read of a sync-only storage is the top hardware
     //    gotcha; UltraRAM has the same physics as a block, and the same gate.
     let ultraReadRefused =
-        refused "is an ultraMem" (fun () ->
-            let addr = input "addr" 2
-            let out = output "out" 8
+        refused "is an ultraMem" (fun p -> (p.inPort "addr" 2, p.outPort "out" 8)) (fun (addr, out) ->
             let store = ultraMem "store" 2 8
             memRead store addr ==> out)
 
@@ -1393,9 +1382,7 @@ let private elaborationGate () =
     //    one side is refused from the other — at the connect, with the module
     //    and port named, covering Sim-only paths the emission checks never see.
     let ownInputDriveRefused =
-        refused "is an input of" (fun () ->
-            let a = input "a" 8
-            let b = output "b" 8
+        refused "is an input of" (fun p -> (p.inPort "a" 8, p.outPort "b" 8)) (fun (a, b) ->
             lit 0UL 8 ==> a
             a ==> b)
 
@@ -1403,10 +1390,9 @@ let private elaborationGate () =
         defModule "GateChild" (fun p -> p.inPort "x" 8, p.outPort "y" 8) (fun (x, y) -> x ==> y)
 
     let childOutputDriveRefused =
-        refused "read it, don't drive it" (fun () ->
-            let out = output "out" 8
+        refused "read it, don't drive it" (fun p -> (p.inPort "a" 8, p.outPort "out" 8)) (fun (a, out) ->
             let x, y = childDef.NewNamed "c"
-            input "a" 8 ==> x
+            a ==> x
             lit 0UL 8 ==> y
             y ==> out)
 
@@ -1414,8 +1400,7 @@ let private elaborationGate () =
     //    parameter list stopped guaranteeing otherwise when bundles became
     //    tuple-destructured: dropping one connect is one missing line.
     let childInputUndrivenRefused =
-        refused "child inputs were never driven" (fun () ->
-            let out = output "out" 8
+        refused "child inputs were never driven" (fun p -> p.outPort "out" 8) (fun out ->
             let _x, y = childDef.NewNamed "c"
             y ==> out)
 
@@ -1423,14 +1408,17 @@ let private elaborationGate () =
     //    including the ready net `streamInput` declares — are the ordinary
     //    shape of every design and must stay ordinary.
     let childWiredAccepted =
-        accepted (fun () ->
-            let out = output "out" 8
+        accepted (fun p -> (p.inPort "a" 8, p.outPort "out" 8)) (fun (a, out) ->
             let x, y = childDef.NewNamed "c"
-            input "a" 8 ==> x
+            a ==> x
             y ==> out)
 
     let ownReadyDriveAccepted =
-        accepted (fun () -> streamInput "in" (layout1 ("value", 8)) |> streamOutput "out")
+        accepted
+            (fun p ->
+                (streamInputPorts p "in" (layout1 ("value", 8)),
+                 streamOutputPorts p "out" (layout1 ("value", 8))))
+            (fun (inPorts, outPorts) -> streamSource inPorts |> streamSink outPorts)
 
     // 6. The boundary is complete when the io factory returns: a port declared
     //    from body depth — an ambient `input`, a library call, a stashed
@@ -1485,7 +1473,7 @@ let private lineWindowProperty () =
         [ for beats in [ frame1; frame2 ] do
               for r in 1..rows -> widen beats[r - 1], widen beats[r], widen beats[r + 1] ]
 
-    let sim = Sim windowSweep
+    let sim = Sim windowSweep.def
     let got = ResizeArray()
     let mutable cycle = 0
 
@@ -1574,7 +1562,7 @@ let private pixelBlurAgrees () =
 
                          (sum >>> 3) &&& 0xFF |] ]
 
-    streamRun pixelBlur "in_row" "out_row" (beats |> Array.map packRow |> List.ofArray) rows.Length = expected
+    streamRun pixelBlur.def "in_row" "out_row" (beats |> Array.map packRow |> List.ofArray) rows.Length = expected
 
 /// `movingAverage` against the arithmetic: unframed, so the window primes
 /// once and every input from the fourth onward produces one output.
@@ -1586,13 +1574,13 @@ let private movingAverageAgrees () =
         |> List.windowed 4
         |> List.map (fun w -> (List.sum w) / 4UL)
 
-    streamRun movingAverage "in_sample" "out_sample" samples expected.Length = expected
+    streamRun movingAverage.def "in_sample" "out_sample" samples expected.Length = expected
 
 /// `sparseDot`: fill the activation vector, then the dot is simply there —
 /// the gather is wiring, which is the claim the design exists to make.
 let private sparseDotAgrees () =
     let activations = [| 9UL; 14UL; 3UL; 200UL; 77UL; 1UL; 130UL; 42UL |]
-    let sim = Sim sparseDot
+    let sim = Sim sparseDot.def
 
     activations
     |> Array.iteri (fun i v ->
@@ -1612,7 +1600,7 @@ let private sparseDotAgrees () =
 let private indirectGatherAgrees () =
     let table = [| 5UL; 2UL; 7UL; 0UL; 3UL; 6UL; 1UL; 4UL |]
     let values = [| 11UL; 22UL; 33UL; 44UL; 55UL; 66UL; 77UL; 88UL |]
-    let sim = Sim indirectGather
+    let sim = Sim indirectGather.def
 
     for i in 0..7 do
         sim.Poke("fill_t_addr", uint64 i)
@@ -1657,7 +1645,7 @@ let private indirectGatherAgrees () =
 /// pulses — held under a consumer that stalls on a pattern, and repeated,
 /// since a scan that runs once is not a schedule.
 let private rangeStreamProperty () =
-    let sim = Sim indexSweep
+    let sim = Sim indexSweep.def
     let got = ResizeArray()
     let mutable cycle = 0
 
@@ -1839,12 +1827,10 @@ let private switchIsLinear () =
     // in this tree is written today. Same module name, so the two are
     // comparable line for line.
     let handWritten =
-        design "SwitchRing" (fun () ->
-            let go = inputBit "go"
-            let halt = inputBit "halt"
-            let phase = output "phase" 3
-            let ticks = output "ticks" 8
-
+        defModule
+            "SwitchRing"
+            (fun p -> (p.inPort "go" 1, p.inPort "halt" 1, p.outPort "phase" 3, p.outPort "ticks" 8))
+            (fun (go, halt, phase, ticks) ->
             let st = machine "stage" [ Load; Warm; Run; Drain; Flush; Park ]
             let count = reg "count" 8
 
@@ -1871,7 +1857,7 @@ let private switchIsLinear () =
     //    claim that passes either way — it is here to establish that what
     //    follows is a cost difference and not a behavioural one.
     let sameBehaviour =
-        let a, b = Sim switchRing, Sim handWritten
+        let a, b = Sim switchRing.def, Sim handWritten.def
 
         [ for cycle in 0..199 do
               let go = uint64 ((cycle / 3) % 2)
@@ -1890,22 +1876,23 @@ let private switchIsLinear () =
     //    that makes the forms diverge — built both ways at three sizes, because
     //    the claim is about growth.
     let ring n useSwitch =
-        design "Ring" (fun () ->
-            let states = List.take n allPhases
-            let go = inputBit "go"
-            let st = machine "stage" states
-            let out = output "out" (width st.Value)
-            st.Value ==> out
-            let arm i = fun () -> If go (fun () -> st.Goto states[(i + 1) % n])
+        defModule
+            "Ring"
+            (fun p -> (p.inPort "go" 1, p.outPort "out" (bitsToHold n)))
+            (fun (go, out) ->
+                let states = List.take n allPhases
+                let st = machine "stage" states
+                st.Value ==> out
+                let arm i = fun () -> If go (fun () -> st.Goto states[(i + 1) % n])
 
-            if useSwitch then
-                st.Switch [ for i in 0 .. n - 1 -> states[i], arm i ]
-            else
-                for i in 0 .. n - 1 do
-                    st.If states[i] (arm i))
+                if useSwitch then
+                    st.Switch [ for i in 0 .. n - 1 -> states[i], arm i ]
+                else
+                    for i in 0 .. n - 1 do
+                        st.If states[i] (arm i))
 
-    let comparators d =
-        System.Text.RegularExpressions.Regex.Matches(emitDesign d, "stage == ").Count
+    let comparators (d: TypedModule<_>) =
+        System.Text.RegularExpressions.Regex.Matches(emitDesign d.def, "stage == ").Count
 
     // One comparator per arm out of `Switch`, at every size: the ladder names
     // each state's test once and shares one fall-through.
@@ -1921,8 +1908,7 @@ let private switchIsLinear () =
     //    the second is silicon nothing reaches.
     let refusesDuplicateArm =
         try
-            design "Dup" (fun () ->
-                let out = output "phase" 3
+            defModule "Dup" (fun p -> p.outPort "phase" 3) (fun out ->
                 let st = machine "stage" [ Load; Warm ]
                 st.Value ==> out
 
@@ -1957,7 +1943,7 @@ let private ifElseLadders () =
     //    the else arm are the cases that have to fall back to the unconditional
     //    default rather than to the arm above them.
     let walked =
-        let sim = Sim ifElseLadder
+        let sim = Sim ifElseLadder.def
 
         [ for x in 0UL..255UL do
               sim.Poke("x", x)
@@ -2008,7 +1994,7 @@ let private ifElseLadders () =
                 )
                 .Else(middle))
 
-    let sameVerilog = emitDesign ifElseLadder = emitDesign handNested
+    let sameVerilog = emitDesign ifElseLadder.def = emitDesign handNested
 
     // 4. The ladder's edges. `otherwise` is a condition rather than a limb of
     //    the syntax, so the shapes around it are what a fold gets wrong: an
@@ -2016,7 +2002,7 @@ let private ifElseLadders () =
     //    `otherwise` that something was written below.
     let refuses body =
         try
-            design "Refused" body |> ignore
+            moduleDef "Refused" (fun _ -> body ()) |> ignore
             false
         with _ ->
             true
@@ -2025,35 +2011,28 @@ let private ifElseLadders () =
     // `If` emits, which is what retired the empty function this used to need.
     let elseLess =
         let viaLadder =
-            design "Degenerate" (fun () ->
-                let c = inputBit "c"
-                let out = output "out" 8
+            defModule "Degenerate" (fun p -> (p.inPort "c" 1, p.outPort "out" 8)) (fun (c, out) ->
                 lit 0UL 8 ==> out
                 ifElse [ (c, fun () -> lit 5UL 8 ==> out) ])
 
         let written =
-            design "Degenerate" (fun () ->
-                let c = inputBit "c"
-                let out = output "out" 8
+            defModule "Degenerate" (fun p -> (p.inPort "c" 1, p.outPort "out" 8)) (fun (c, out) ->
                 lit 0UL 8 ==> out
                 If c (fun () -> lit 5UL 8 ==> out))
 
-        emitDesign viaLadder = emitDesign written
+        emitDesign viaLadder.def = emitDesign written.def
 
     // An `otherwise` alone is its body, run where the ladder stood — no mux on
     // a constant selector, which is what emitting the arm would have left.
     let otherwiseOnly =
         let viaLadder =
-            design "Degenerate" (fun () ->
-                let out = output "out" 8
+            defModule "Degenerate" (fun p -> p.outPort "out" 8) (fun out ->
                 ifElse [ (otherwise, fun () -> lit 7UL 8 ==> out) ])
 
         let written =
-            design "Degenerate" (fun () ->
-                let out = output "out" 8
-                lit 7UL 8 ==> out)
+            defModule "Degenerate" (fun p -> p.outPort "out" 8) (fun out -> lit 7UL 8 ==> out)
 
-        emitDesign viaLadder = emitDesign written
+        emitDesign viaLadder.def = emitDesign written.def
 
     // An empty ladder drives nothing, which is a bug rather than an identity.
     let refusesEmpty = refuses (fun () -> ifElse [])
@@ -2096,14 +2075,16 @@ let private stateMachines () =
     // writes them today. Same module name, so a difference in the emitted text
     // is a difference in the logic.
     let handEncoded =
-        design "Sequencer" (fun () ->
+        defModule
+            "Sequencer"
+            (fun p ->
+                (p.inPort "start" 1,
+                 p.inPort "stall" 1,
+                 p.outPort "busy" 1,
+                 p.outPort "finished" 1,
+                 p.outPort "retired" 8))
+            (fun (start, stall, busy, finished, retired) ->
             let sIdle, sFetch, sDecode, sExecute, sWriteback, sDone = 0UL, 1UL, 2UL, 3UL, 4UL, 5UL
-            let start = inputBit "start"
-            let stall = inputBit "stall"
-            let busy = outputBit "busy"
-            let finished = outputBit "finished"
-            let retired = output "retired" 8
-
             let stage = regInit "stage" 3 sIdle
             let inState s = eq stage (lit s 3)
             let count = reg "count" 8
@@ -2131,11 +2112,11 @@ let private stateMachines () =
                            (eq count (lit 3UL 8), fun () -> lit sDone 3 ==> stage)
                            (otherwise, fun () -> lit sFetch 3 ==> stage) ]) ])
 
-    let sameVerilog = emitDesign sequencer = emitDesign handEncoded
+    let sameVerilog = emitDesign sequencer.def = emitDesign handEncoded.def
 
     // The decode reaches the debugger under the flattened name the Sim peeks by.
     let decoded =
-        match (Inventory.ofDesign sequencer).stateMachines.TryFind "stage" with
+        match (Inventory.ofDesign sequencer.def).stateMachines.TryFind "stage" with
         | Some states ->
             states
             |> Map.toList
@@ -2145,8 +2126,8 @@ let private stateMachines () =
     // And it means what it says: the state the design is in is the state the
     // decode names, held at EXECUTE for as long as the stall lasts.
     let walked =
-        let sim = Sim sequencer
-        let stateNow () = (Inventory.ofDesign sequencer).stateMachines["stage"] |> Map.find (sim.Peek "stage")
+        let sim = Sim sequencer.def
+        let stateNow () = (Inventory.ofDesign sequencer.def).stateMachines["stage"] |> Map.find (sim.Peek "stage")
         sim.Poke("stall", 1UL)
         sim.Poke("start", 1UL)
         sim.Tick()
@@ -2168,8 +2149,7 @@ let private stateMachines () =
     // A state with no way in is dead logic, and a number cannot say so.
     let unreachableRefused =
         refuses (fun () ->
-            design "Unreachable" (fun () ->
-                let go = inputBit "go"
+            defModule "Unreachable" (fun p -> p.inPort "go" 1) (fun go ->
                 let m = machine "st" [ First; Second; Never ]
                 m.If First (fun () -> If go (fun () -> m.Goto Second))
                 m.If Second (fun () -> m.Goto First)))
@@ -2178,7 +2158,7 @@ let private stateMachines () =
     // A state the machine was not given is not a state, however well it types.
     let unknownRefused =
         refuses (fun () ->
-            design "Unknown" (fun () ->
+            moduleDef "Unknown" (fun _ ->
                 let m = machine "st" [ First; Second ]
                 m.If First (fun () -> m.Goto Never)))
         |> Option.exists (fun message -> message.Contains "is not a state of 'st'")
@@ -2278,11 +2258,10 @@ let private firrtlIsClosed () =
     // the contract and is checked like anything else.
     let refusesRomInit =
         let preloaded =
-            design "FirrtlRomRefusal" (fun () ->
-                let addr = input "addr" 2
-                let out = output "out" 8
+            (defModule "FirrtlRomRefusal" (fun p -> (p.inPort "addr" 2, p.outPort "out" 8)) (fun (addr, out) ->
                 let lookup = distributedRom "lookup" 8 [| 1UL; 2UL; 3UL; 4UL |]
-                memRead lookup addr ==> out)
+                memRead lookup addr ==> out))
+                .def
 
         try
             Firrtl.emitFirrtl preloaded |> ignore
@@ -2490,7 +2469,7 @@ circuit T :
 /// inspection, but that the simulator agrees is what the differential then
 /// carries onto silicon.
 let private holdsThroughReset () =
-    let sim = Sim holdThroughReset
+    let sim = Sim holdThroughReset.def
 
     sim.Poke("value", 42UL)
     sim.Tick()
@@ -2505,7 +2484,7 @@ let private holdsThroughReset () =
 
     // And the emission says the same thing: one register is named in the reset
     // branch and the other is not.
-    let verilog = emitDesign holdThroughReset
+    let verilog = emitDesign holdThroughReset.def
     let start = verilog.IndexOf "if (rst)"
     let stop = verilog.IndexOf("end else", start)
     let resetBranch = verilog.Substring(start, stop - start)
@@ -2522,7 +2501,7 @@ let private holdsThroughReset () =
 /// barrel shifter wired to the wrong bit still produces plausible numbers, and
 /// only the full sweep says otherwise.
 let private dynamicShiftsShift () =
-    let sim = Sim dynamicShifts
+    let sim = Sim dynamicShifts.def
 
     [ for value in [ 1UL; 0xA5UL; 0xFFUL ] do
         for amount in 0UL..7UL do
@@ -2552,7 +2531,7 @@ let private dynamicShiftsShift () =
 /// check is most likely to try, and a parity tree missing one bit is right half
 /// the time.
 let private reductionsReduce () =
-    let sim = Sim bitReductions
+    let sim = Sim bitReductions.def
 
     [ for value in 0UL..255UL do
         sim.Poke("value", value)
@@ -2576,7 +2555,7 @@ let private reductionsReduce () =
 /// cannot be broken: `divideBy` takes an `int`, so a signal divisor does not
 /// compile.
 let private divisionDivides () =
-    let sim = Sim constantDivision
+    let sim = Sim constantDivision.def
 
     [ for value in 0UL..255UL do
         sim.Poke("value", value)
@@ -2605,7 +2584,7 @@ let private divisionDivides () =
 /// knowing how long it takes, which is the entire reason it is a stream stage
 /// and not a fixed-latency core.
 let private dividerDivides () =
-    let sim = Sim streamDivider
+    let sim = Sim streamDivider.def
 
     let divide (a: uint64) (b: uint64) =
         sim.Poke("dividend", a)
@@ -2720,7 +2699,7 @@ let private fifoModel design depth =
 /// strobe applied to the wrong lane swaps two bytes that the whole-word read
 /// puts side by side.
 let private strobeSparesUntouchedLanes () =
-    let sim = Sim maskedWrite
+    let sim = Sim maskedWrite.def
     let rng = System.Random 606
     let model = Array.zeroCreate<uint64> 8
 
@@ -2773,7 +2752,7 @@ let private strobeSparesUntouchedLanes () =
 /// lane landing in the wrong 32-bit slot of the wide word is visible, not just
 /// a lane that failed to land.
 let private strobeSparesWideLanes () =
-    let sim = Sim maskedWriteWide
+    let sim = Sim maskedWriteWide.def
     let rng = System.Random 128128
     let model = Array.create 8 BigInteger.Zero
     let laneMask = (BigInteger.One <<< 32) - BigInteger.One
@@ -2835,14 +2814,14 @@ let private strobeSparesWideLanes () =
 /// merged them by hand would have had to reason about.
 let private lastWriteSiteWins () =
     let onlyOneWriteSite =
-        let verilog = emitDesign priorityWrite
+        let verilog = emitDesign priorityWrite.def
         let sites = verilog.Split("store[").Length - 1
         // One in the declaration's read path and one in the always block would
         // be two; the read is `memRead`, which emits `store[raddr]` — so the
         // write site is the other one.
         sites = 2
 
-    let sim = Sim priorityWrite
+    let sim = Sim priorityWrite.def
     let rng = System.Random 3131
     let model = Array.zeroCreate<uint64> 8
 
@@ -2891,7 +2870,7 @@ let private lastWriteSiteWins () =
 /// The model states that directly rather than deriving it, so a change to the
 /// fold's direction fails here instead of quietly redefining the rule.
 let private masksDoNotMergeAcrossSites () =
-    let sim = Sim maskedWritePriority
+    let sim = Sim maskedWritePriority.def
     let rng = System.Random 7272
     let model = Array.zeroCreate<uint64> 8
 
@@ -2951,7 +2930,7 @@ let private romsHoldTheirContents () =
         [| 2UL; 3UL; 5UL; 7UL; 11UL; 13UL; 17UL; 19UL; 23UL; 29UL; 31UL; 37UL; 41UL; 43UL; 47UL; 53UL |]
 
     let lutWalks =
-        let sim = Sim romLookup
+        let sim = Sim romLookup.def
 
         squares
         |> Array.indexed
@@ -2961,7 +2940,7 @@ let private romsHoldTheirContents () =
             sim.Peek "square" = expected)
 
     let blockWalks =
-        let sim = Sim blockRomLookup
+        let sim = Sim blockRomLookup.def
         let mutable ok = true
 
         // A cycle behind, so the address goes in and the answer is read after
@@ -2976,7 +2955,7 @@ let private romsHoldTheirContents () =
     // And the contents reach the Verilog, which is the half a simulator cannot
     // speak for: an initial block Vivado turns into a BRAM INIT.
     let contentsAreEmitted =
-        let verilog = emitDesign blockRomLookup
+        let verilog = emitDesign blockRomLookup.def
         verilog.Contains "primes[15] = 16'd53" && verilog.Contains "(* ram_style = \"block\" *)"
 
     lutWalks && blockWalks && contentsAreEmitted
@@ -2992,7 +2971,7 @@ let private romsHoldTheirContents () =
 /// that folded them would produce a design that answers one address twice, and
 /// the random stimulus drives the two apart in seven cycles out of eight.
 let private readsDoNotFold () =
-    let sim = Sim dualRead
+    let sim = Sim dualRead.def
     let rng = System.Random 4242
     let model = Array.zeroCreate<uint64> 8
 
@@ -3097,13 +3076,13 @@ let private oneKernelThreeStorages () =
 
         got, cycles
 
-    let lutGot, lutCycles = onChip sumOverLut
-    let blockGot, blockCycles = onChip sumOverBlock
-    let ultraGot, ultraCycles = onChip sumOverUltra
+    let lutGot, lutCycles = onChip sumOverLut.def
+    let blockGot, blockCycles = onChip sumOverBlock.def
+    let ultraGot, ultraCycles = onChip sumOverUltra.def
 
     // ---- and the one that leaves the chip ----------------------------------
     let ddrGot, ddrCycles =
-        let sim = Sim sumOverDdr
+        let sim = Sim sumOverDdr.def
         // Paced, not free. An unthrottled model answers every read the cycle
         // it is asked, which would make the DDR mapping look exactly like the
         // LUT one and prove nothing.
@@ -3158,19 +3137,19 @@ let private oneKernelThreeStorages () =
         |> Array.map (fun l -> l.Trim())
 
     let sameDeclarations =
-        let a = declarations sumOverLut
+        let a = declarations sumOverLut.def
 
-        a = declarations sumOverBlock
-        && a = declarations sumOverUltra
-        && a = declarations sumOverDdr
+        a = declarations sumOverBlock.def
+        && a = declarations sumOverUltra.def
+        && a = declarations sumOverDdr.def
         && a.Length = 5
 
     let sameGenerator =
-        let a = indexUpdate sumOverLut
+        let a = indexUpdate sumOverLut.def
         // Two lines: the reset value and the update. Both must match.
-        a = indexUpdate sumOverBlock
-        && a = indexUpdate sumOverUltra
-        && a = indexUpdate sumOverDdr
+        a = indexUpdate sumOverBlock.def
+        && a = indexUpdate sumOverUltra.def
+        && a = indexUpdate sumOverDdr.def
         && a.Length = 2
 
     // 64 words, so the floor is 64 cycles. LUTs and both skidded sync storages
@@ -3244,24 +3223,24 @@ let private busAndWindowLevels () =
             && clientOwned |> List.exists (fun n -> t.EndsWith $"{n};"))
         |> Array.sort
 
-    let designs = [ oneOwnerOnePort; twoOwnersOnePort; twoOwnersTwoPorts; sumWhollyOnChip ]
+    let designs = [ oneOwnerOnePort.def; twoOwnersOnePort.def; twoOwnersTwoPorts.def; sumWhollyOnChip.def ]
 
     let sameClient =
         let first = clientDeclarations (List.head designs)
         first.Length = 8 && designs |> List.forall (fun d -> clientDeclarations d = first)
 
-    let noBusAtAll = axiPortsIn sumWhollyOnChip = 0 && arbitrationIn sumWhollyOnChip = 0
-    let oneRegionIsFree = arbitrationIn oneOwnerOnePort = 0 && axiPortsIn oneOwnerOnePort = 16
-    let twoRegionsArbitrate = arbitrationIn twoOwnersOnePort > 0 && axiPortsIn twoOwnersOnePort = 16
+    let noBusAtAll = axiPortsIn sumWhollyOnChip.def = 0 && arbitrationIn sumWhollyOnChip.def = 0
+    let oneRegionIsFree = arbitrationIn oneOwnerOnePort.def = 0 && axiPortsIn oneOwnerOnePort.def = 16
+    let twoRegionsArbitrate = arbitrationIn twoOwnersOnePort.def > 0 && axiPortsIn twoOwnersOnePort.def = 16
 
     let twoPortsDoNot =
-        arbitrationIn twoOwnersTwoPorts = 0
-        && axiPortsIn twoOwnersTwoPorts = 32
-        && (emitDesign twoOwnersTwoPorts).Contains "m_axi_hp1_awvalid"
+        arbitrationIn twoOwnersTwoPorts.def = 0
+        && axiPortsIn twoOwnersTwoPorts.def = 32
+        && (emitDesign twoOwnersTwoPorts.def).Contains "m_axi_hp1_awvalid"
 
     let refusesASecondOwner =
         try
-            emitDesign (onBusWithTwoOwners ()) |> ignore
+            emitDesign (onBusWithTwoOwners ()).def |> ignore
             false
         with ex ->
             ex.Message.Contains "already has an owner"
@@ -3271,7 +3250,7 @@ let private busAndWindowLevels () =
     // net is, which is why each window's valid is registered as one.
     let refusesAnOpenWindow =
         try
-            emitDesign (onWindowNeverWritten ()) |> ignore
+            emitDesign (onWindowNeverWritten ()).def |> ignore
             false
         with ex ->
             ex.Message.Contains "b_window_valid" && ex.Message.Contains "driven 0 times"
@@ -3321,7 +3300,7 @@ let private busAndWindowLevels () =
             ||| (uint64 memory[0x103 + i * 4] <<< 24) ]
 
     let onChip () =
-        let sim = Sim sumWhollyOnChip
+        let sim = Sim sumWhollyOnChip.def
         stage sim sim.Tick [ "a" ]
 
         [ for i in 0..15 ->
@@ -3330,9 +3309,9 @@ let private busAndWindowLevels () =
             sim.Peek "probe_data" ]
 
     let sumsAgree =
-        overBus oneOwnerOnePort [ "a" ] [ "m_axi" ] = expected
-        && overBus twoOwnersOnePort [ "a"; "b" ] [ "m_axi" ] = expected
-        && overBus twoOwnersTwoPorts [ "a"; "b" ] [ "m_axi_hp0"; "m_axi_hp1" ] = expected
+        overBus oneOwnerOnePort.def [ "a" ] [ "m_axi" ] = expected
+        && overBus twoOwnersOnePort.def [ "a"; "b" ] [ "m_axi" ] = expected
+        && overBus twoOwnersTwoPorts.def [ "a"; "b" ] [ "m_axi_hp0"; "m_axi_hp1" ] = expected
         && onChip () = expected
 
     sameClient
@@ -3373,7 +3352,7 @@ let private doneMeansLanded () =
     /// Run until `watch` rises, then read the model *that cycle* — the point of
     /// the check is the instant, so nothing is allowed to happen after it.
     let landedWhen (watch: string) =
-        let sim = Sim sumReportsDone
+        let sim = Sim sumReportsDone.def
         let ddr = SimAxiWriteSlave(sim, 4096, dataBytes = 4, awEvery = 8, bDelay = 6)
         sim.Poke("run", 0UL)
 
@@ -3409,7 +3388,7 @@ let private doneMeansLanded () =
     // the `&&&` folds away: the sink is an array, so the two signals are the
     // same signal and both are right.
     let onChipAgrees =
-        let sim = Sim sumWhollyOnChip
+        let sim = Sim sumWhollyOnChip.def
         sim.Poke("run", 0UL)
 
         for i in 0..15 do
@@ -3452,7 +3431,7 @@ let private doneMeansLanded () =
 /// responses, exactly `maxOutstanding` accepts happen and ARREADY holds off
 /// the fifth; releasing the host drains all four, still in order.
 let private pipelinedChannelPipelines () =
-    let sim = Sim pipelinedReadSlave
+    let sim = Sim pipelinedReadSlave.def
     let axi = SimAxi.client sim
 
     axi.write32 0x00UL 0xAAAA5555UL // scratch, word 0
@@ -3535,7 +3514,7 @@ let private pipelinedChannelPipelines () =
 /// passes — so a check that only read values back would call a broken channel
 /// working.
 let private busyFlagHoldsArOff () =
-    let sim = Sim deepChannelSlave
+    let sim = Sim deepChannelSlave.def
     let answersAfter = 3
 
     // A word to read back, so the check is about a real answer and not only
@@ -3582,7 +3561,7 @@ let private busyFlagHoldsArOff () =
 /// against "some plausible word" would pass a slave whose windows were swapped,
 /// or one where the later window shadowed the earlier one entirely.
 let private windowsAnswerTheirOwnRange () =
-    let sim = Sim twoWindowSlave
+    let sim = Sim twoWindowSlave.def
 
     // Let the writer fill both arrays; after four ticks every slot holds its
     // own value and keeps being rewritten with it.
@@ -3618,7 +3597,7 @@ let private windowsAnswerTheirOwnRange () =
 /// same order the hardware sees them — which is what makes read-first vs
 /// write-first observable rather than theoretical.
 let private carriedReadPairsUp () =
-    let sim = Sim carriedRead
+    let sim = Sim carriedRead.def
     let rng = System.Random 20250818
     let store = Array.zeroCreate<uint64> 16
     let inFlight = System.Collections.Generic.Queue<uint64 * uint64>()
@@ -3663,7 +3642,7 @@ let private carriedReadPairsUp () =
 /// Both storages, one model. The LUTRAM form and the block form are different
 /// circuits, and this is the assertion that a caller cannot tell.
 let private fifoBuffers () =
-    fifoModel bufferedStream 8 && fifoModel deepBufferedStream 128
+    fifoModel bufferedStream.def 8 && fifoModel deepBufferedStream.def 128
 
 /// The two claims a model check does not make, and the two a storage swap would
 /// break quietly.
@@ -3713,10 +3692,10 @@ let private fifoStorageIsInvisible () =
 
         moved
 
-    capacityOf bufferedStream = 8
-    && capacityOf deepBufferedStream = 128
-    && sustainedRate bufferedStream = 1000
-    && sustainedRate deepBufferedStream = 1000
+    capacityOf bufferedStream.def = 8
+    && capacityOf deepBufferedStream.def = 128
+    && sustainedRate bufferedStream.def = 1000
+    && sustainedRate deepBufferedStream.def = 1000
 
 /// `withContext`'s defining property: **the caller's data comes back attached to
 /// its own result**, across a stage that takes eight cycles and has never heard
@@ -3728,7 +3707,7 @@ let private fifoStorageIsInvisible () =
 /// the queue depths vary; with a consumer that always takes, the FIFO holds one
 /// beat and the bug hides.
 let private contextRidesAlong () =
-    let sim = Sim taggedDivide
+    let sim = Sim taggedDivide.def
     let rng = System.Random 99
     let pending = System.Collections.Generic.Queue<uint64 * uint64 * uint64>()
 
@@ -3778,7 +3757,7 @@ let private contextRidesAlong () =
 /// case it exists for is a test that passes for the wrong reason. The design
 /// gives lane `i` `i` extra stages for exactly this.
 let private farmCarriesContext () =
-    let sim = Sim farmedDivide
+    let sim = Sim farmedDivide.def
     let rng = System.Random 7
     let expected = System.Collections.Generic.Dictionary<uint64, uint64 * uint64>()
 
@@ -3890,11 +3869,10 @@ let private ramStyleRule () =
     // distributed emits the attribute that makes it legal.
     let refusesAsyncOnBlock =
         try
-            design "AsyncOnBlock" (fun () ->
-                let addr = input "addr" 3
-                let out = output "out" 8
+            (defModule "AsyncOnBlock" (fun p -> (p.inPort "addr" 3, p.outPort "out" 8)) (fun (addr, out) ->
                 let m = blockMem "blocked" 3 8
-                memRead m addr ==> out)
+                memRead m addr ==> out))
+                .def
             |> emitDesign
             |> ignore
 
@@ -3906,24 +3884,20 @@ let private ramStyleRule () =
     // work — the error only stops the wrong design being written.
     let attributeIsEmitted =
         let d =
-            design "AsyncOnDistributed" (fun () ->
-                let addr = input "addr" 3
-                let out = output "out" 8
+            defModule "AsyncOnDistributed" (fun p -> (p.inPort "addr" 3, p.outPort "out" 8)) (fun (addr, out) ->
                 let m = distributedMem "lutram" 3 8
                 memRead m addr ==> out)
 
-        (emitDesign d).Contains "(* ram_style = \"distributed\" *) reg [7:0] lutram"
+        (emitDesign d.def).Contains "(* ram_style = \"distributed\" *) reg [7:0] lutram"
 
     // A sync read is legal on any of them: block RAM's whole point.
     let syncIsAlwaysFine =
         let d =
-            design "SyncOnBlock" (fun () ->
-                let addr = input "addr" 3
-                let out = output "out" 8
+            defModule "SyncOnBlock" (fun p -> (p.inPort "addr" 3, p.outPort "out" 8)) (fun (addr, out) ->
                 let m = blockMem "blocked" 3 8
                 (memReadPort m addr).data ==> out)
 
-        (emitDesign d).Contains "(* ram_style = \"block\" *)"
+        (emitDesign d.def).Contains "(* ram_style = \"block\" *)"
 
     refusesAsyncOnBlock && attributeIsEmitted && syncIsAlwaysFine
 
@@ -4006,9 +3980,9 @@ let private dividersAreStallIndependent () =
     let pairs = [ for _ in 1..24 -> [ uint64 (rand.Next(1, 256)); uint64 (rand.Next(1, 256)) ] ]
     let tagged = pairs |> List.mapi (fun i b -> b @ [ uint64 (i % 16) ])
 
-    [ streamAgreesUnderStalls true "divider" streamDivider ignore [ "dividend"; "divisor" ] [ "quotient"; "remainder" ] pairs
-      streamAgreesUnderStalls true "divider+context" taggedDivide ignore [ "dividend"; "divisor"; "tag" ] [ "quotient"; "remainder"; "tag_out" ] tagged
-      streamAgreesUnderStalls false "divider farm" farmedDivide ignore [ "dividend"; "divisor"; "tag" ] [ "quotient"; "remainder"; "tag_out" ] tagged ]
+    [ streamAgreesUnderStalls true "divider" streamDivider.def ignore [ "dividend"; "divisor" ] [ "quotient"; "remainder" ] pairs
+      streamAgreesUnderStalls true "divider+context" taggedDivide.def ignore [ "dividend"; "divisor"; "tag" ] [ "quotient"; "remainder"; "tag_out" ] tagged
+      streamAgreesUnderStalls false "divider farm" farmedDivide.def ignore [ "dividend"; "divisor"; "tag" ] [ "quotient"; "remainder"; "tag_out" ] tagged ]
     |> List.forall id
 
 let private mainDemo () =
@@ -4016,61 +3990,61 @@ let private mainDemo () =
         [ add3
           dot2
           dot2Auto
-          dot2Ambient
-          dot2Inline
-          pipelinedDot
-          gatedCounter
-          streamPipe
-          coordPipe
-          onCounter
-          onPriority
-          loopPipeline
-          treeSum
-          ramTest
-          cmdProcessor
-          unionRoundTrip
-          forkJoin
-          signedOps
-          xorOps
-          satOps
-          escapeStep
-          escapeStepFixed
-          escapeStep28
-          wideBeat
-          widenOps
-          dispatchRoundTrip
-          clusteredRoundTrip
-          twoStreamSplit
-          twoStreamSplitReplicateJoin
-          framePipeline
-          sweepPipeline 2
-          windowSweep
-          pixelBlur
-          movingAverage
-          sparseDot
-          indirectGather
-          indexSweep
+          dot2Ambient.def
+          dot2Inline.def
+          pipelinedDot.def
+          gatedCounter.def
+          streamPipe.def
+          coordPipe.def
+          onCounter.def
+          onPriority.def
+          loopPipeline.def
+          treeSum.def
+          ramTest.def
+          cmdProcessor.def
+          unionRoundTrip.def
+          forkJoin.def
+          signedOps.def
+          xorOps.def
+          satOps.def
+          escapeStep.def
+          escapeStepFixed.def
+          escapeStep28.def
+          wideBeat.def
+          widenOps.def
+          dispatchRoundTrip.def
+          clusteredRoundTrip.def
+          twoStreamSplit.def
+          twoStreamSplitReplicateJoin.def
+          framePipeline.def
+          (sweepPipeline 2).def
+          windowSweep.def
+          pixelBlur.def
+          movingAverage.def
+          sparseDot.def
+          indirectGather.def
+          indexSweep.def
           maxPoolDilate.def
           maxPool2x2.def
           maxPoolCombinational.def
-          typedPipeline
-          probedPipe
-          axiWriteMaster
-          axiWriteMasterSingle
-          axiReadMaster
-          axiReadMasterSingle
-          axiReadMasterBurst
-          axiPulse
-          axiScratch
-          neighborCount
-          regMapScratch
-          snapshotConflate
-          snapshotDdr
-          audioOps
-          audioChain
-          audioTone
-          i2sLoopback
-          multibandStage ] do
+          typedPipeline.def
+          probedPipe.def
+          axiWriteMaster.def
+          axiWriteMasterSingle.def
+          axiReadMaster.def
+          axiReadMasterSingle.def
+          axiReadMasterBurst.def
+          axiPulse.def
+          axiScratch.def
+          neighborCount.def
+          regMapScratch.def
+          snapshotConflate.def
+          snapshotDdr.def
+          audioOps.def
+          audioChain.def
+          audioTone.def
+          i2sLoopback.def
+          multibandStage.def ] do
         printfn "%s" (emitDesign d)
         printfn ""
 
@@ -4093,13 +4067,13 @@ let private mainDemo () =
               if not (line.StartsWith "module " || line.Contains "assign escape") then
                   yield line ]
 
-    printfn $"Fixed layer compiles away:    %b{minusEscape (emitDesign escapeStep) = minusEscape (emitDesign escapeStepFixed)}"
+    printfn $"Fixed layer compiles away:    %b{minusEscape (emitDesign escapeStep.def) = minusEscape (emitDesign escapeStepFixed.def)}"
 
     // saturate/saturateS/shl/shr against their software meanings, on the
     // boundary patterns (clamp points, sign flips) plus a spread of ordinary
     // values.
     let satOk =
-        let sim = Sim(satOps)
+        let sim = Sim(satOps.def)
 
         let clampS (v: uint64) =
             let signed = if v >= 128UL then int64 v - 256L else int64 v
@@ -4167,7 +4141,7 @@ let private mainDemo () =
             && Seq.forall2 (fun r (a: int) -> r = word slave.Memory a) results addrs
 
         let runBurst (arEvery: int, rDelay: int, respEvery: int) =
-            let sim = Sim(axiReadMasterBurst)
+            let sim = Sim(axiReadMasterBurst.def)
             let slave = SimAxiReadSlave(sim, 4096, dataBytes = 4, arEvery = arEvery, rDelay = rDelay)
             fill slave.Memory
             let bursts = [| 0, 16; 512, 1; 1024, 8; 2048, 4; 64, 16; 3000, 2 |]
@@ -4208,21 +4182,21 @@ let private mainDemo () =
 
         List.forall
             (fun pacing ->
-                runSingleWord axiReadMaster pacing
-                && runSingleWord axiReadMasterSingle pacing
+                runSingleWord axiReadMaster.def pacing
+                && runSingleWord axiReadMasterSingle.def pacing
                 && runBurst pacing)
             matrix
 
     printfn $"axi read rehearsal (3 paths x 4 pacings): %b{axiReadOk}"
 
     try
-        emitDesign nameCollision |> ignore
+        emitDesign nameCollision.def |> ignore
         printfn "name collision:               NOT detected — emitDesign is broken"
     with ex ->
         printfn $"emitDesign refused:           {ex.Message}"
 
     try
-        emitDesign widthViolation |> ignore
+        emitDesign widthViolation.def |> ignore
         printfn "width violation:              NOT detected — emitDesign is broken"
     with ex ->
         printfn $"emitDesign refused:           {ex.Message}"
@@ -4234,7 +4208,7 @@ let private mainDemo () =
         printfn $"elaboration refused:          {ex.Message}"
 
     try
-        emitDesign danglingStream |> ignore
+        emitDesign danglingStream.def |> ignore
         printfn "dangling stream:              NOT detected — checkStreams is broken"
     with ex ->
         printfn $"emitDesign refused:           {ex.Message}"
@@ -4266,7 +4240,7 @@ let private mainDemo () =
     // The transporter round trip: dematerialize four ragged-width fields onto
     // one bus, materialize them back, assert every field survives untouched.
     let transporterOk =
-        let sim = Sim(transporterRoundTrip)
+        let sim = Sim(transporterRoundTrip.def)
         let vectors = [ 0UL, 0UL, 0UL, 0UL; 31UL, 0xFFFFFFFFUL, 127UL, 0xFFFFFFFFUL; 21UL, 0xDEADBEEFUL, 85UL, 0xCAFEF00DUL ]
 
         vectors
@@ -4288,9 +4262,7 @@ let private mainDemo () =
     // default plus a conditional override, which lands in a child scope.
     let overrideOk =
         try
-            design "OverrideIdiom" (fun () ->
-                let enable = inputBit "enable"
-                let out = output "out" 8
+            defModule "OverrideIdiom" (fun p -> (p.inPort "enable" 1, p.outPort "out" 8)) (fun (enable, out) ->
                 lit 0UL 8 ==> out
                 If enable (fun () -> lit 1UL 8 ==> out))
             |> ignore
@@ -4302,7 +4274,7 @@ let private mainDemo () =
     printfn $"default + If override still ok: %b{overrideOk}"
 
     try
-        design "KeywordCheck" (fun () -> wireBit "matches" |> ignore) |> ignore
+        moduleDef "KeywordCheck" (fun _ -> wireBit "matches" |> ignore) |> ignore
         printfn "reserved-word name:           NOT detected — the keyword check is broken"
     with ex ->
         printfn $"elaboration refused:          {ex.Message}"
@@ -4385,75 +4357,75 @@ let private mainDemo () =
         [ add3
           dot2
           dot2Auto
-          dot2Ambient
-          dot2Inline
-          pipelinedDot
-          gatedCounter
-          streamPipe
-          coordPipe
-          onCounter
-          onPriority
-          loopPipeline
-          treeSum
-          ramTest
-          cmdProcessor
-          unionRoundTrip
-          forkJoin
-          signedOps
-          xorOps
-          satOps
-          escapeStep
-          escapeStepFixed
-          escapeStep28
-          wideBeat
-          widenOps
-          dispatchRoundTrip
-          clusteredRoundTrip
-          twoStreamSplit
-          twoStreamSplitReplicateJoin
-          framePipeline
-          sweepPipeline 2
-          windowSweep
-          pixelBlur
-          movingAverage
-          sparseDot
-          indirectGather
-          indexSweep
+          dot2Ambient.def
+          dot2Inline.def
+          pipelinedDot.def
+          gatedCounter.def
+          streamPipe.def
+          coordPipe.def
+          onCounter.def
+          onPriority.def
+          loopPipeline.def
+          treeSum.def
+          ramTest.def
+          cmdProcessor.def
+          unionRoundTrip.def
+          forkJoin.def
+          signedOps.def
+          xorOps.def
+          satOps.def
+          escapeStep.def
+          escapeStepFixed.def
+          escapeStep28.def
+          wideBeat.def
+          widenOps.def
+          dispatchRoundTrip.def
+          clusteredRoundTrip.def
+          twoStreamSplit.def
+          twoStreamSplitReplicateJoin.def
+          framePipeline.def
+          (sweepPipeline 2).def
+          windowSweep.def
+          pixelBlur.def
+          movingAverage.def
+          sparseDot.def
+          indirectGather.def
+          indexSweep.def
           maxPoolDilate.def
           maxPool2x2.def
           maxPoolCombinational.def
-          typedPipeline
-          probedPipe
-          axiWriteMaster
-          axiWriteMasterSingle
-          axiReadMaster
-          axiReadMasterSingle
-          axiReadMasterBurst
-          axiPulse
-          axiScratch
-          neighborCount
-          regMapScratch
-          snapshotConflate
-          snapshotDdr ] do
+          typedPipeline.def
+          probedPipe.def
+          axiWriteMaster.def
+          axiWriteMasterSingle.def
+          axiReadMaster.def
+          axiReadMasterSingle.def
+          axiReadMasterBurst.def
+          axiPulse.def
+          axiScratch.def
+          neighborCount.def
+          regMapScratch.def
+          snapshotConflate.def
+          snapshotDdr.def ] do
         match checkWidths m with
         | [] -> printfn $"{m.name}: widths ok"
         | problems -> problems |> List.iter (printfn "%s")
 
     // The telemetry workflow: a stalled ProbedPipe read by streamReport —
     // learning where a design stalls costs a tick and a peek, not a build.
-    let reportSim = Sim(probedPipe)
+    let reportSim = Sim(probedPipe.def)
     reportSim.Poke("in_valid", 1UL)
     reportSim.Poke("out_ready", 0UL)
 
     for _ in 1..10 do
         reportSim.Tick()
 
-    for name, blocked, starved in streamReport reportSim.Peek probedPipe do
+    for name, blocked, starved in streamReport reportSim.Peek probedPipe.def do
         printfn $"stream '{name}':             blocked %d{blocked} starved %d{starved}"
 
     // The master against the fake DDR: four distinctly-patterned 128-bit beats
     // land at their byte addresses — the path a full-frame render reads back.
-    let axiSim = Sim(axiWriteMaster)
+    let axiSim = Sim(axiWriteMaster.def)
     let ddr = SimAxiWriteSlave(axiSim, 256)
     let mutable sent = 0
 
@@ -4479,7 +4451,7 @@ let private mainDemo () =
     // The neighborhood gather on a known checkerboard-ish grid — one value per
     // stencil/edge policy, computed by hand in the comment of each expectation.
     let neighborOk =
-        let sim = Sim(neighborCount)
+        let sim = Sim(neighborCount.def)
         let pattern = [ [ 1; 0; 1 ]; [ 0; 1; 0 ]; [ 1; 0; 1 ] ]
 
         for y in 0..2 do
@@ -4501,7 +4473,7 @@ let private mainDemo () =
     // w1c + irq path through a genuine 8-bit wrap, and a window word written
     // by the host and sync-read back out by the fabric.
     let regMapOk =
-        let sim = Sim(regMapScratch)
+        let sim = Sim(regMapScratch.def)
 
         // The handshakes live in `SimAxi`, asserted step by step.
         let axi = SimAxi.client sim
@@ -4542,7 +4514,7 @@ let private mainDemo () =
     // returns to the design when the host is idle — patLow tracks a changed
     // word without another host read of the window in between.
     let windowReadbackOk =
-        let sim = Sim(regMapScratch)
+        let sim = Sim(regMapScratch.def)
         let axi = SimAxi.client sim
         let read32, write32 = axi.read32, axi.write32
 
@@ -4572,7 +4544,7 @@ let private mainDemo () =
     // a neighbour. No arbitration exists on this path — the claim is that the
     // design's write port and the host's read port address the same words.
     let designWindowOk =
-        let sim = Sim(regMapScratch)
+        let sim = Sim(regMapScratch.def)
         let axi = SimAxi.client sim
         let read32, write32 = axi.read32, axi.write32
 
@@ -4592,7 +4564,7 @@ let private mainDemo () =
     // A frame is coherent iff its rows share one latch instant T (row i reads
     // i*16 + T), which is exactly what the one-cycle shadow latch promises.
     let snapshotOk =
-        let sim = Sim(snapshotDdr)
+        let sim = Sim(snapshotDdr.def)
         let ddr = SimAxiWriteSlave(sim, 64, dataBytes = 4)
 
         let captureFrame () =
@@ -4698,7 +4670,7 @@ let private mainDemo () =
     printfn ""
 
     for nWorkers in [ 1; 2; 4; 8 ] do
-        let d = sweepPipeline nWorkers
+        let d = (sweepPipeline nWorkers).def
         let sim = Sim(d)
         sim.Poke("cmd_valid", 1UL)
         sim.Poke("cmd_data", 1UL)
@@ -4727,7 +4699,7 @@ let main argv =
         let input = readWavFile inPath
         printfn $"in:  {input.FrameCount} frames, {input.sampleRate} Hz, {input.channels} ch"
 
-        let sim = Sim(multibandStage)
+        let sim = Sim(multibandStage.def)
         sim.Poke("threshold", 200_000UL)
         sim.Poke("ratio", 4UL)
         sim.Poke("attack", 1UL <<< 14)

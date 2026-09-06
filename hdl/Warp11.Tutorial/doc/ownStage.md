@@ -103,9 +103,9 @@ you forget to wire at all fails when the enclosing module finalizes.
 Third, the design — which is now one line per hop:
 
 ```fsharp
-Stream.input "in" beatLayout
+streamSource inPorts
 |> slowWorkerOf 3 "worker"
-|> Stream.out "out"
+|> streamSink outPorts
 ```
 
 ## Why a wrapper and not something built in

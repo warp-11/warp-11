@@ -5,18 +5,18 @@ module Warp11.Effects.Main
 open Warp11
 
 let private designs =
-    [ "AudioToneAxi", audioToneAxi
-      "AudioPassthruAxi", audioPassthruAxi
-      "AudioGainAxi", audioGainAxi
-      "AudioEffectsAxi", audioEffectsAxi
-      "AudioBatchAxi", Batch.audioBatchAxi ]
+    [ "AudioToneAxi", audioToneAxi.def
+      "AudioPassthruAxi", audioPassthruAxi.def
+      "AudioGainAxi", audioGainAxi.def
+      "AudioEffectsAxi", audioEffectsAxi.def
+      "AudioBatchAxi", Batch.audioBatchAxi.def ]
 
 /// Every register's reset value must be a no-op, because these bitstreams ship
 /// without a host daemon: load one and it has to pass audio (or, for the tone,
 /// make a sound) with nothing written to it. A default that clamps, mutes or
 /// zeroes would look exactly like broken hardware on a bench.
 let private defaultsArePassthrough () : bool =
-    let sim = Sim(audioEffectsAxi)
+    let sim = Sim audioEffectsAxi.def
     // No AXI writes at all — read the reset state straight out of the slave.
     sim.Tick()
 
@@ -82,7 +82,7 @@ let private stageFrames (ddr: SimAxiDdr) (at: int) (n: int) (seed: int) =
 /// pulse start, wait for busy to clear, read the results back out of the same
 /// behavioural DDR.
 let private runBatchPaced (flat: bool) (frames: int) (seed: int) (jitter: int option) =
-    let sim = Sim(Batch.audioBatchAxi)
+    let sim = Sim Batch.audioBatchAxi.def
     let src = 0x1000
     let dst = 0x9000
     let ddr = SimAxiDdr(sim, 0x20000, ?jitter = jitter)
@@ -137,7 +137,7 @@ let private batchCopiesWhenFlat () =
 let private batchMatchesTheStage () =
     let _, input, out, spins = runBatch false 64 11
 
-    let sim = Sim(Batch.multibandStageRef)
+    let sim = Sim Batch.multibandStageRef.def
     sim.Poke("threshold", 200_000UL)
     sim.Poke("ratio", 4UL)
     sim.Poke("attack", 1UL <<< 14)
@@ -273,7 +273,7 @@ let private stageIsStallIndependent (d: ModuleDef) (setup: Sim -> unit) =
 /// one.
 let private unitySettingsPassAudioThrough () =
     let samples = stereoSamples 64 5
-    let got = runStageStalled Batch.multibandStageRef (fun s ->
+    let got = runStageStalled Batch.multibandStageRef.def (fun s ->
         s.Poke("threshold", (1UL <<< sampleWidth) - 1UL)
         s.Poke("ratio", 0UL)
         s.Poke("attack", 0UL)
@@ -297,28 +297,28 @@ let private multibandSetup (sim: Sim) =
         sim.Poke($"rg{i}", gainUnity)
 
 let private multibandIsStallIndependent () =
-    stageIsStallIndependent Batch.multibandStageRef multibandSetup
+    stageIsStallIndependent Batch.multibandStageRef.def multibandSetup
 
 /// The same question of each stage on its own, so a failure names one entry in
 /// the audio stdlib rather than "somewhere in the chain".
 let private stageStallReport () =
     let stages =
-        [ "gain", Batch.gainStage, (fun (sim: Sim) ->
+        [ "gain", Batch.gainStage.def, (fun (sim: Sim) ->
             sim.Poke("volume", gainUnity)
             sim.Poke("mute", 0UL))
-          "eq (biquad)", Batch.eqStage, (fun (sim: Sim) ->
+          "eq (biquad)", Batch.eqStage.def, (fun (sim: Sim) ->
             sim.Poke("b0", biquadUnity)
             for n in [ "b1"; "b2"; "a1"; "a2" ] do sim.Poke(n, 0UL))
-          "compressor", Batch.compressorStage, (fun (sim: Sim) ->
+          "compressor", Batch.compressorStage.def, (fun (sim: Sim) ->
             sim.Poke("threshold", 200_000UL)
             sim.Poke("ratio", 4UL)
             sim.Poke("attack", 1UL <<< 14)
             sim.Poke("releaseRate", 1UL <<< 12)
             sim.Poke("makeup", gainUnity))
-          "limiter", Batch.limiterStage, (fun (sim: Sim) ->
+          "limiter", Batch.limiterStage.def, (fun (sim: Sim) ->
             sim.Poke("threshold", (1UL <<< (sampleWidth - 1)) - 1UL))
-          "fir", Batch.firStage, (fun (sim: Sim) -> sim.Poke("preset", 0UL))
-          "multiband", Batch.multibandStageRef, multibandSetup ]
+          "fir", Batch.firStage.def, (fun (sim: Sim) -> sim.Poke("preset", 0UL))
+          "multiband", Batch.multibandStageRef.def, multibandSetup ]
 
     let mutable allOk = true
 
@@ -382,7 +382,7 @@ let main argv =
     // Headless: run the drift harness and report where it breaks, so the
     // debugger's stopping point can be checked without opening a window.
     | [| "drift" |] ->
-        let sim = Sim(Batch.driftHarness, checkAsserts = true)
+        let sim = Sim(Batch.driftHarness.def, checkAsserts = true)
         sim.Poke("stallAt", 20UL)
         sim.Poke("run", 1UL)
         let mutable c = 0
@@ -416,7 +416,7 @@ let main argv =
         let frames = 512
 
         let cyclesFor (label: string) (mk: Sim -> SimAxiDdr) =
-            let sim = Sim(Batch.audioBatchAxi)
+            let sim = Sim Batch.audioBatchAxi.def
             let ddr = mk sim
             let src, dst = 0x1000, 0x9000
             let axi = SimAxi.clientWith sim ddr.Cycle
@@ -458,22 +458,22 @@ let main argv =
             Warp11.Catalog.embedded
                 (System.Reflection.Assembly.GetExecutingAssembly())
                 "Batch.fs"
-                [ Warp11.Catalog.entry "Drift (start here)" (nameof Batch.driftHarness) (fun () -> Batch.driftHarness)
+                [ Warp11.Catalog.entry "Drift (start here)" (nameof Batch.driftHarness) (fun () -> Batch.driftHarness.def)
                   |> Warp11.Catalog.watching [ "drift"; "drift_baseline_out"; "dsp_steps"; "pipe_steps"; "cycle"; "offering"; "accepted" ]
                   |> Warp11.Catalog.poking [ "run", 1UL; "stallAt", 20UL ]
-                  Warp11.Catalog.entry "Multiband stage" (nameof Batch.multibandStageRef) (fun () -> Batch.multibandStageRef)
+                  Warp11.Catalog.entry "Multiband stage" (nameof Batch.multibandStageRef) (fun () -> Batch.multibandStageRef.def)
                   |> Warp11.Catalog.poking
                       [ "bypass", 0UL; "threshold", 200_000UL; "ratio", 4UL; "attack", 1UL <<< 14; "releaseRate", 1UL <<< 12 ]
-                  Warp11.Catalog.entry "Gain" (nameof Batch.gainStage) (fun () -> Batch.gainStage)
+                  Warp11.Catalog.entry "Gain" (nameof Batch.gainStage) (fun () -> Batch.gainStage.def)
                   |> Warp11.Catalog.poking [ "volume", gainUnity; "mute", 0UL ]
-                  Warp11.Catalog.entry "EQ (biquad)" (nameof Batch.eqStage) (fun () -> Batch.eqStage)
+                  Warp11.Catalog.entry "EQ (biquad)" (nameof Batch.eqStage) (fun () -> Batch.eqStage.def)
                   |> Warp11.Catalog.poking [ "b0", biquadUnity ]
-                  Warp11.Catalog.entry "Compressor" (nameof Batch.compressorStage) (fun () -> Batch.compressorStage)
+                  Warp11.Catalog.entry "Compressor" (nameof Batch.compressorStage) (fun () -> Batch.compressorStage.def)
                   |> Warp11.Catalog.poking
                       [ "threshold", 200_000UL; "ratio", 4UL; "attack", 1UL <<< 14; "releaseRate", 1UL <<< 12; "makeup", gainUnity ]
-                  Warp11.Catalog.entry "Limiter" (nameof Batch.limiterStage) (fun () -> Batch.limiterStage)
+                  Warp11.Catalog.entry "Limiter" (nameof Batch.limiterStage) (fun () -> Batch.limiterStage.def)
                   |> Warp11.Catalog.poking [ "threshold", (1UL <<< (sampleWidth - 1)) - 1UL ]
-                  Warp11.Catalog.entry "Batch accelerator" (nameof Batch.audioBatchAxi) (fun () -> Batch.audioBatchAxi) ]
+                  Warp11.Catalog.entry "Batch accelerator" (nameof Batch.audioBatchAxi) (fun () -> Batch.audioBatchAxi.def) ]
 
         let initial = if argv.Length > 1 then Some argv[1] else None
         Warp11.SimView.Desktop.run (Warp11.SimView.View.FromCatalog(catalog, initial)) []
@@ -486,7 +486,7 @@ let main argv =
         let input = readWavFile inPath
         printfn $"in:  {input.FrameCount} frames, {input.sampleRate} Hz, {input.channels} ch"
 
-        let sim = Sim(Batch.multibandStageRef)
+        let sim = Sim Batch.multibandStageRef.def
         sim.Poke("threshold", 200_000UL)
         sim.Poke("ratio", 4UL)
         sim.Poke("attack", 1UL <<< 14)

@@ -22,66 +22,72 @@ open Warp11.NumberOperators
 /// A register that counts while `enable` is high and clears when `clear` is.
 /// The first design: ports, a register, and statements that drive them.
 let counter =
-    design "Counter" (fun () ->
-        let enable = inputBit "enable"
-        let clear = inputBit "clear"
-        let count = output "count" 64
-        let r = reg "r" 64
+    defModule
+        "Counter"
+        (fun p -> (p.inPort "enable" 1, p.inPort "clear" 1, p.outPort "count" 64))
+        (fun (enable, clear, count) ->
+            let r = reg "r" 64
 
-        ifElse [
-            (clear, fun () -> 0UL ==> r)
-            (otherwise, fun () -> If enable (fun () -> r + 1UL ==> r)) ]
+            ifElse [
+                (clear, fun () -> 0UL ==> r)
+                (otherwise, fun () -> If enable (fun () -> r + 1UL ==> r)) ]
 
-        r ==> count)
+            r ==> count)
 
 /// Unsigned compare at ports: three one-bit verdicts and the larger operand.
 /// `less`/`equal`/`greater` rather than `lt`/`eq`/`gt`, because those are the
 /// operators' own names and a port may not shadow one.
 let comparator =
-    design "Comparator" (fun () ->
-        let a = input "a" 8
-        let b = input "b" 8
-        let less = outputBit "less"
-        let equal = outputBit "equal"
-        let greater = outputBit "greater"
-        let larger = output "larger" 8
-
-        lt a b ==> less
-        eq a b ==> equal
-        lt b a ==> greater
-        mux (lt a b) b a ==> larger)
+    defModule
+        "Comparator"
+        (fun p ->
+            (p.inPort "a" 8,
+             p.inPort "b" 8,
+             p.outPort "less" 1,
+             p.outPort "equal" 1,
+             p.outPort "greater" 1,
+             p.outPort "larger" 8))
+        (fun (a, b, less, equal, greater, larger) ->
+            lt a b ==> less
+            eq a b ==> equal
+            lt b a ==> greater
+            mux (lt a b) b a ==> larger)
 
 /// A defaulted wire under two sibling `If` blocks. The later statement ends up
 /// outermost in the folded mux tree, so `sel1` outranks `sel0` — priority is
 /// the order you wrote them in.
 let priorityMux =
-    design "PriorityMux" (fun () ->
-        let sel0 = inputBit "sel0"
-        let sel1 = inputBit "sel1"
-        let a = input "a" 8
-        let b = input "b" 8
-        let c = input "c" 8
-        let out = output "out" 8
-
-        a ==> out
-        If sel0 (fun () -> b ==> out)
-        If sel1 (fun () -> c ==> out))
+    defModule
+        "PriorityMux"
+        (fun p ->
+            (p.inPort "sel0" 1,
+             p.inPort "sel1" 1,
+             p.inPort "a" 8,
+             p.inPort "b" 8,
+             p.inPort "c" 8,
+             p.outPort "out" 8))
+        (fun (sel0, sel1, a, b, c, out) ->
+            a ==> out
+            If sel0 (fun () -> b ==> out)
+            If sel1 (fun () -> c ==> out))
 
 /// `(a * b) + (satInc c * d)`, built from three stdlib entries. Each call
 /// plants its own hardware, so this design contains two multipliers.
 let dotProduct =
-    design "DotProduct" (fun () ->
-        let multiply = mulOf 8
-        let accumulate = adderOf 16
-        let bump = satIncOf 8
+    defModule
+        "DotProduct"
+        (fun p ->
+            (p.inPort "a" 8,
+             p.inPort "b" 8,
+             p.inPort "c" 8,
+             p.inPort "d" 8,
+             p.outPort "out" 16))
+        (fun (a, b, c, d, out) ->
+            let multiply = mulOf 8
+            let accumulate = adderOf 16
+            let bump = satIncOf 8
 
-        let a = input "a" 8
-        let b = input "b" 8
-        let c = input "c" 8
-        let d = input "d" 8
-        let out = output "out" 16
-
-        accumulate (multiply a b) (multiply (bump c) d) ==> out)
+            accumulate (multiply a b) (multiply (bump c) d) ==> out)
 
 /// A module of your own, defined once and instantiated twice.
 ///
@@ -131,105 +137,117 @@ let minOf8 =
     |> liftBinary
 
 let ownModules =
-    design "OwnModules" (fun () ->
-        let addLeft = input "add_left" 8
-        let addRight = input "add_right" 8
-        let en = inputBit "en"
+    defModule
+        "OwnModules"
+        (fun p ->
+            (p.inPort "add_left" 8,
+             p.inPort "add_right" 8,
+             p.inPort "en" 1,
+             p.outPort "total_left" 8,
+             p.outPort "total_right" 8,
+             p.outPort "total_both" 8,
+             p.outPort "lowest" 8))
+        (fun (addLeft, addRight, en, totalLeftOut, totalRightOut, totalBothOut, lowest) ->
+            // The named instances: the bundle over `left_*`/`right_*` staging
+            // wires, wired where it is used.
+            let totalLeft =
+                let c = satAcc.NewNamed "left"
+                addLeft ==> c.add
+                en ==> c.en
+                c.total
 
-        // The named instances: the bundle over `left_*`/`right_*` staging
-        // wires, wired where it is used.
-        let totalLeft =
-            let c = satAcc.NewNamed "left"
-            addLeft ==> c.add
-            en ==> c.en
-            c.total
+            let totalRight =
+                let c = satAcc.NewNamed "right"
+                addRight ==> c.add
+                en ==> c.en
+                c.total
 
-        let totalRight =
-            let c = satAcc.NewNamed "right"
-            addRight ==> c.add
-            en ==> c.en
-            c.total
+            // The third accumulator does not care what its instance is called —
+            // `satAccOf` is the function feel, one auto-named copy per call.
+            let totalBoth = satAccOf (addLeft + addRight) en
 
-        // The third accumulator does not care what its instance is called —
-        // `satAccOf` is the function feel, one auto-named copy per call.
-        let totalBoth = satAccOf (addLeft + addRight) en
-
-        totalLeft ==> output "total_left" 8
-        totalRight ==> output "total_right" 8
-        totalBoth ==> output "total_both" 8
-        minOf8 totalLeft totalRight ==> output "lowest" 8)
+            totalLeft ==> totalLeftOut
+            totalRight ==> totalRightOut
+            totalBoth ==> totalBothOut
+            minOf8 totalLeft totalRight ==> lowest)
 
 /// The bit utilities in one place: join, fill, reverse, count, and the one-hot
 /// round trip out to four grants and back to an index.
 let bitShapes =
-    design "BitShapes" (fun () ->
-        let a = input "a" 4
-        let b = input "b" 4
-        let flag = inputBit "flag"
-        let index = input "index" 2
+    defModule
+        "BitShapes"
+        (fun p ->
+            (p.inPort "a" 4,
+             p.inPort "b" 4,
+             p.inPort "flag" 1,
+             p.inPort "index" 2,
+             p.outPort "joined" 8,
+             p.outPort "mask" 4,
+             p.outPort "flipped" 4,
+             p.outPort "ones" 3,
+             [ for i in 0..3 -> p.outPort $"hot{i}" 1 ],
+             p.outPort "recovered" 2))
+        (fun (a, b, flag, index, joined, mask, flipped, ones, hotOuts, recovered) ->
+            catAll [ a; b ] ==> joined
 
-        let joined = output "joined" 8
-        catAll [ a; b ] ==> joined
+            fill 4 flag ==> mask
 
-        let mask = output "mask" 4
-        fill 4 flag ==> mask
+            reverse a ==> flipped
 
-        let flipped = output "flipped" 4
-        reverse a ==> flipped
+            popCount a ==> ones
 
-        let ones = output "ones" 3
-        popCount a ==> ones
+            let hot = uintToOneHot 4 index
 
-        let hot = uintToOneHot 4 index
+            for i in 0..3 do
+                hot[i] ==> hotOuts[i]
 
-        for i in 0..3 do
-            let grant = outputBit $"hot{i}"
-            hot[i] ==> grant
-
-        let recovered = output "recovered" 2
-        oneHotToUInt hot ==> recovered)
+            oneHotToUInt hot ==> recovered)
 
 /// The same bits read two ways. `diff` needs no signed form because two's
 /// complement makes one subtractor correct for both readings; compare,
 /// multiply and right-shift are three of the six that genuinely differ.
 let signedOps =
-    design "SignedOps" (fun () ->
-        let a = input "a" 8
-        let b = input "b" 8
-        let diff = output "diff" 8
-        // Signed, because a signed multiply is what drives it. The bits are the
-        // same either way; the declaration is what lets the debugger show −100
-        // rather than 65436, and it is the lesson of this design at its own port.
-        let product = output "product" (SInt 16)
-        let below = outputBit "below"
-        let belowSigned = outputBit "below_signed"
-        let shifted = output "shifted" 8
-
-        a - b ==> diff
-        // The same eight bits, read two ways. `a` and `b` are declared unsigned,
-        // so `lt` compares them that way; `asSInt` says to read them as two's
-        // complement, and the same `lt` and `mul` then do the signed thing.
-        mul (asSInt a) (asSInt b) ==> product
-        lt a b ==> below
-        lt (asSInt a) (asSInt b) ==> belowSigned
-        sra 3 a ==> shifted)
+    defModule
+        "SignedOps"
+        (fun p ->
+            (p.inPort "a" 8,
+             p.inPort "b" 8,
+             p.outPort "diff" 8,
+             // Signed, because a signed multiply is what drives it. The bits are the
+             // same either way; the declaration is what lets the debugger show −100
+             // rather than 65436, and it is the lesson of this design at its own port.
+             p.outPortAs "product" (SInt 16),
+             p.outPort "below" 1,
+             p.outPort "below_signed" 1,
+             p.outPort "shifted" 8))
+        (fun (a, b, diff, product, below, belowSigned, shifted) ->
+            a - b ==> diff
+            // The same eight bits, read two ways. `a` and `b` are declared unsigned,
+            // so `lt` compares them that way; `asSInt` says to read them as two's
+            // complement, and the same `lt` and `mul` then do the signed thing.
+            mul (asSInt a) (asSInt b) ==> product
+            lt a b ==> below
+            lt (asSInt a) (asSInt b) ==> belowSigned
+            sra 3 a ==> shifted)
 
 /// Eight words of eight bits, one write port and two read ports — one
 /// synchronous, one combinational. Reading both at the same address is the
 /// whole point: they differ by exactly one cycle.
 let ram =
-    design "Ram" (fun () ->
-        let waddr = input "waddr" 3
-        let wdata = input "wdata" 8
-        let wen = inputBit "wen"
-        let raddr = input "raddr" 3
-        let nextCycleOut = output "next_cycle_out" 8
-        let thisCycleOut = output "this_cycle_out" 8
-
-        let store = distributedMem "store" 3 8
-        If wen (fun () -> memWrite store waddr wdata (lit 1UL 1))
-        (memReadPort store raddr).data ==> nextCycleOut
-        memRead store raddr ==> thisCycleOut)
+    defModule
+        "Ram"
+        (fun p ->
+            (p.inPort "waddr" 3,
+             p.inPort "wdata" 8,
+             p.inPort "wen" 1,
+             p.inPort "raddr" 3,
+             p.outPort "next_cycle_out" 8,
+             p.outPort "this_cycle_out" 8))
+        (fun (waddr, wdata, wen, raddr, nextCycleOut, thisCycleOut) ->
+            let store = distributedMem "store" 3 8
+            If wen (fun () -> memWrite store waddr wdata (lit 1UL 1))
+            (memReadPort store raddr).data ==> nextCycleOut
+            memRead store raddr ==> thisCycleOut)
 
 type private Stage =
     | Idle
@@ -242,38 +260,40 @@ type private Stage =
 /// Six named states walking a four-pass loop. `stall` holds `Execute` by taking
 /// no transition at all, which is what waiting is in hardware.
 let fsm =
-    design "FSM" (fun () ->
-        let start = inputBit "start"
-        let stall = inputBit "stall"
-        let busy = outputBit "busy"
-        let finished = outputBit "finished"
-        let retired = output "retired" 8
+    defModule
+        "FSM"
+        (fun p ->
+            (p.inPort "start" 1,
+             p.inPort "stall" 1,
+             p.outPort "busy" 1,
+             p.outPort "finished" 1,
+             p.outPort "retired" 8))
+        (fun (start, stall, busy, finished, retired) ->
+            let stage = machine "stage" [ Idle; Fetch; Decode; Execute; Writeback; Done ]
+            let count = reg "count" 8
 
-        let stage = machine "stage" [ Idle; Fetch; Decode; Execute; Writeback; Done ]
-        let count = reg "count" 8
+            bnot (stage.Is Idle ||| stage.Is Done) ==> busy
+            stage.Is Done ==> finished
+            count ==> retired
 
-        bnot (stage.Is Idle ||| stage.Is Done) ==> busy
-        stage.Is Done ==> finished
-        count ==> retired
+            let begin' () =
+                If start (fun () ->
+                    lit 0UL 8 ==> count
+                    stage.Goto Fetch)
 
-        let begin' () =
-            If start (fun () ->
-                lit 0UL 8 ==> count
-                stage.Goto Fetch)
+            stage.Switch
+                [ Idle, begin'
+                  Done, begin'
+                  Fetch, fun () -> stage.Goto Decode
+                  Decode, fun () -> stage.Goto Execute
+                  Execute, fun () -> If (bnot stall) (fun () -> stage.Goto Writeback)
+                  Writeback,
+                  fun () ->
+                      count + lit 1UL 8 ==> count
 
-        stage.Switch
-            [ Idle, begin'
-              Done, begin'
-              Fetch, fun () -> stage.Goto Decode
-              Decode, fun () -> stage.Goto Execute
-              Execute, fun () -> If (bnot stall) (fun () -> stage.Goto Writeback)
-              Writeback,
-              fun () ->
-                  count + lit 1UL 8 ==> count
-
-                  ifElse [
-                      (eq count (lit 3UL 8), fun () -> stage.Goto Done)
-                      (otherwise, fun () -> stage.Goto Fetch) ] ])
+                      ifElse [
+                          (eq count (lit 3UL 8), fun () -> stage.Goto Done)
+                          (otherwise, fun () -> stage.Goto Fetch) ] ])
 
 /// A Q format is one line: a total width, a count of fraction bits, and a
 /// measure binding the two so the type system can carry it. Q5.3 is the same
@@ -284,61 +304,62 @@ let private q5_3 = Number.signedFixed 8 3
 /// changes format — widths add and fraction bits add — and the renormalization
 /// back is a slice the target format names.
 let fixedPoint =
-    design "FixedPoint" (fun () ->
-        let a = Number.input "a" Number.q4_4
-        let b = Number.input "b" Number.q4_4
+    defModule
+        "FixedPoint"
+        (fun p ->
+            (Number.inPort p "a" Number.q4_4,
+             Number.inPort p "b" Number.q4_4,
+             // The format says signed, so the port does too — which is how the
+             // debugger knows to read −48 rather than 208.
+             p.outPortAs "product" (Number.groundType Number.q4_4),
+             p.outPortAs "doubled" (Number.groundType q5_3),
+             p.outPort "below" 1))
+        (fun (a, b, product, doubled, below) ->
+            // Q4.4 * Q4.4 is Q8.8: sixteen bits, eight of them fractional.
+            let wide = Number.wire "wide" (a * b)
 
-        // Q4.4 * Q4.4 is Q8.8: sixteen bits, eight of them fractional.
-        let wide = Number.wire "wide" (a * b)
+            (Number.renormTo Number.q4_4 wide) ==> product
 
-        // The format says signed, so the port does too — which is how the
-        // debugger knows to read −48 rather than 208.
-        let product = output "product" (Number.groundType Number.q4_4)
-        (Number.renormTo Number.q4_4 wide) ==> product
+            // The same eight bits read as Q5.3 mean twice as much. No gates.
+            (Number.reinterpret q5_3 a) ==> doubled
 
-        // The same eight bits read as Q5.3 mean twice as much. No gates.
-        let doubled = output "doubled" (Number.groundType q5_3)
-        (Number.reinterpret q5_3 a) ==> doubled
-
-        let below = outputBit "below"
-        Number.lessThan a b ==> below)
+            Number.lessThan a b ==> below)
 
 /// Two read-only tables. Contents are fixed at elaboration and become a Verilog
 /// `initial` block, which Vivado turns into a memory the bitstream arrives
 /// pre-loaded with.
 let romTable =
-    design "RomTable" (fun () ->
-        let index = input "index" 3
+    defModule
+        "RomTable"
+        (fun p -> (p.inPort "index" 3, p.outPort "square" 8, p.outPort "prime" 8))
+        (fun (index, square, prime) ->
+            let squares = distributedRom "squares" 8 [| 0UL; 1UL; 4UL; 9UL; 16UL; 25UL; 36UL; 49UL |]
+            memRead squares index ==> square
 
-        let squares = distributedRom "squares" 8 [| 0UL; 1UL; 4UL; 9UL; 16UL; 25UL; 36UL; 49UL |]
-        let square = output "square" 8
-        memRead squares index ==> square
-
-        // Five values in a table that has to be a power of two deep: the
-        // remaining three addresses read zero.
-        let primes = distributedRom "primes" 8 [| 2UL; 3UL; 5UL; 7UL; 11UL |]
-        let prime = output "prime" 8
-        memRead primes index ==> prime)
+            // Five values in a table that has to be a power of two deep: the
+            // remaining three addresses read zero.
+            let primes = distributedRom "primes" 8 [| 2UL; 3UL; 5UL; 7UL; 11UL |]
+            memRead primes index ==> prime)
 
 /// A claim the design makes about itself, checked every cycle. The counter
 /// walks 0 to 4 and wraps, so the top three of its eight reachable values are
 /// unreachable — and it says so.
 let assertions =
-    design "Assertions" (fun () ->
-        let step = inputBit "step"
-        let phase = output "phase" 3
-        let wrapped = outputBit "wrapped"
-        let r = reg "r" 3
+    defModule
+        "Assertions"
+        (fun p -> (p.inPort "step" 1, p.outPort "phase" 3, p.outPort "wrapped" 1))
+        (fun (step, phase, wrapped) ->
+            let r = reg "r" 3
 
-        If step (fun () ->
-            ifElse [
-                (eq r (lit 4UL 3), fun () -> lit 0UL 3 ==> r)
-                (otherwise, fun () -> r + lit 1UL 3 ==> r) ])
+            If step (fun () ->
+                ifElse [
+                    (eq r (lit 4UL 3), fun () -> lit 0UL 3 ==> r)
+                    (otherwise, fun () -> r + lit 1UL 3 ==> r) ])
 
-        assertThat (bnot (lt (lit 4UL 3) r)) "phase left its range"
+            assertThat (bnot (lt (lit 4UL 3) r)) "phase left its range"
 
-        r ==> phase
-        eq r (lit 4UL 3) ==> wrapped)
+            r ==> phase
+            eq r (lit 4UL 3) ==> wrapped)
 
 // ---------------------------------------------------------------------------
 // Streams: the ready/valid layer. One payload shape for all of them, so the
@@ -355,14 +376,18 @@ let private bump (v: Expr) = v + lit 1UL 8
 /// sink. `map` costs nothing — ready and valid pass straight through — so this
 /// whole design is wires.
 let streamPipe =
-    design "StreamPipe" (fun () ->
-        Stream.input "in" beatLayout |> Stream.map bump |> Stream.out "out")
+    defModule
+        "StreamPipe"
+        (fun p -> (streamInputPorts p "in" beatLayout, streamOutputPorts p "out" beatLayout))
+        (fun (inPorts, outPorts) -> streamSource inPorts |> Stream.map bump |> streamSink outPorts)
 
 /// Three registered stages. Each buys a cycle of latency and a place for a
 /// beat to wait, which is what makes the chain elastic under backpressure.
 let streamStages =
-    design "StreamStages" (fun () ->
-        Stream.input "in" beatLayout |> Stream.stages 3 bump |> Stream.out "out")
+    defModule
+        "StreamStages"
+        (fun p -> (streamInputPorts p "in" beatLayout, streamOutputPorts p "out" beatLayout))
+        (fun (inPorts, outPorts) -> streamSource inPorts |> Stream.stages 3 bump |> streamSink outPorts)
 
 /// The worker's port bundle: one stream in, one stream out. Each `StreamPorts`
 /// group is a data word, its valid, and the ready that answers it — which side
@@ -416,44 +441,56 @@ let slowWorkerOf cycles instName (s: Stream<Expr>) : Stream<Expr> =
 /// A module with flow-control IO, dropped into a chain as if it were any
 /// library stage — because from the chain's side it is one.
 let ownStage =
-    design "OwnStage" (fun () ->
-        Stream.input "in" beatLayout
-        |> slowWorkerOf 3 "worker"
-        |> Stream.out "out")
+    defModule
+        "OwnStage"
+        (fun p -> (streamInputPorts p "in" beatLayout, streamOutputPorts p "out" beatLayout))
+        (fun (inPorts, outPorts) ->
+            streamSource inPorts
+            |> slowWorkerOf 3 "worker"
+            |> streamSink outPorts)
 
 /// One beat in, two out: broadcast copies every beat to both branches, which
 /// do different work and merge back. A broadcast beat fires only when both
 /// branches can take it — the slower branch sets the pace.
 let streamFork =
-    design "StreamFork" (fun () ->
-        let stage = streamStageFor beatLayout
-        let source = Stream.input "in" beatLayout
+    defModule
+        "StreamFork"
+        (fun p -> (streamInputPorts p "in" beatLayout, streamOutputPorts p "out" beatLayout))
+        (fun (inPorts, outPorts) ->
+            let stage = streamStageFor beatLayout
+            let source = streamSource inPorts
 
-        match streamBroadcast 2 source with
-        | [ a; b ] ->
-            let incremented = stage (Stream.map bump a)
-            let doubled = stage (Stream.map (fun v -> v + v) b)
-            Stream.out "out" (Stream.merge [ incremented; doubled ])
-        | _ -> failwith "broadcast 2 gave the wrong arity")
+            match streamBroadcast 2 source with
+            | [ a; b ] ->
+                let incremented = stage (Stream.map bump a)
+                let doubled = stage (Stream.map (fun v -> v + v) b)
+                streamSink outPorts (Stream.merge [ incremented; doubled ])
+            | _ -> failwith "broadcast 2 gave the wrong arity")
 
 /// Three workers of deliberately unequal depth — one, two and three stages.
 /// Beats leave in completion order, not issue order, so each one carries an
 /// `id` that rides through untouched: without it there is no way to tell which
 /// answer belongs to which question.
 let streamFarm =
-    design "StreamFarm" (fun () ->
-        Stream.input "in" tagged
-        |> Stream.farm 3 (fun i lane -> lane |> Stream.stages (i + 1) (fun (id, v) -> id, bump v))
-        |> Stream.out "out")
+    defModule
+        "StreamFarm"
+        (fun p -> (streamInputPorts p "in" tagged, streamOutputPorts p "out" tagged))
+        (fun (inPorts, outPorts) ->
+            streamSource inPorts
+            |> Stream.farm 3 (fun i lane -> lane |> Stream.stages (i + 1) (fun (id, v) -> id, bump v))
+            |> streamSink outPorts)
 
 /// A buffer between a producer and a consumer: the same beats, later, with room
 /// for eight of them in between. Nothing transforms the payload — the whole of
 /// what it buys is that the two ends stop having to move in lockstep.
 let streamBuffer =
-    design "StreamBuffer" (fun () ->
-        Stream.input "in" beatLayout
-        |> streamFifo "fifo" 8
-        |> Stream.out "out")
+    defModule
+        "StreamBuffer"
+        (fun p -> (streamInputPorts p "in" beatLayout, streamOutputPorts p "out" beatLayout))
+        (fun (inPorts, outPorts) ->
+            streamSource inPorts
+            |> streamFifo "fifo" 8
+            |> streamSink outPorts)
 
 /// A slow stage with the caller's data carried through it, and then the same
 /// thing replicated.
@@ -463,88 +500,109 @@ let streamBuffer =
 /// answer — so unlike **Farm**, where the payload was widened by hand to carry
 /// one, nothing about the worker changes.
 let streamContext =
-    design "StreamContext" (fun () ->
-        let operands = layout2 ("dividend", 8) ("divisor", 8)
-        let results = layout2 ("quotient", 8) ("remainder", 8)
-        let identity = layout1 ("id", 8)
+    defModule
+        "StreamContext"
+        (fun p ->
+            (p.inPort "in_dividend" 8,
+             p.inPort "in_divisor" 8,
+             p.inPort "in_id" 8,
+             p.inPort "in_valid" 1,
+             p.outPort "in_ready" 1,
+             p.outPort "out_quotient" 8,
+             p.outPort "out_remainder" 8,
+             p.outPort "out_id" 8,
+             p.outPort "out_valid" 1,
+             p.inPort "out_ready" 1))
+        (fun (inDividend, inDivisor, inId, inValid, inReady, quotientOut, remainderOut, idOut, outValid, outReady) ->
+            let operands = layout2 ("dividend", 8) ("divisor", 8)
+            let results = layout2 ("quotient", 8) ("remainder", 8)
+            let identity = layout1 ("id", 8)
 
-        let src =
-            { payload = (input "in_dividend" 8, input "in_divisor" 8), input "in_id" 8
-              valid = inputBit "in_valid"
-              ready = outputBit "in_ready"
-              layout = layoutJoin operands identity }
+            let src =
+                { payload = (inDividend, inDivisor), inId
+                  valid = inValid
+                  ready = inReady
+                  layout = layoutJoin operands identity }
 
-        // Three lanes of deliberately unequal depth, as in **Farm** — so beats
-        // really do overtake one another and the id has something to prove.
-        let out =
-            Stream.farmWith "dv" 3 2 operands results identity
-                (fun i -> divider $"dv%d{i}" 8 >> Stream.stages (i * 8) id)
-                src
+            // Three lanes of deliberately unequal depth, as in **Farm** — so beats
+            // really do overtake one another and the id has something to prove.
+            let out =
+                Stream.farmWith "dv" 3 2 operands results identity
+                    (fun i -> divider $"dv%d{i}" 8 >> Stream.stages (i * 8) id)
+                    src
 
-        let (quotient, remainder), identifier = out.payload
+            let (quotient, remainder), identifier = out.payload
 
-        quotient ==> output "out_quotient" 8
-        remainder ==> output "out_remainder" 8
-        identifier ==> output "out_id" 8
-        out.valid ==> outputBit "out_valid"
-        inputBit "out_ready" ==> out.ready)
+            quotient ==> quotientOut
+            remainder ==> remainderOut
+            identifier ==> idOut
+            out.valid ==> outValid
+            outReady ==> out.ready)
 
 /// The same chain with telemetry on both ends. The counters are ordinary
 /// registers, so finding out where a design stalls costs a peek rather than a
 /// Vivado run.
 let streamProbes =
-    design "StreamProbes" (fun () ->
-        Stream.input "in" beatLayout
-        |> Stream.probe "intake"
-        |> Stream.stages 2 bump
-        |> Stream.probe "egress"
-        |> Stream.out "out")
+    defModule
+        "StreamProbes"
+        (fun p -> (streamInputPorts p "in" beatLayout, streamOutputPorts p "out" beatLayout))
+        (fun (inPorts, outPorts) ->
+            streamSource inPorts
+            |> Stream.probe "intake"
+            |> Stream.stages 2 bump
+            |> Stream.probe "egress"
+            |> streamSink outPorts)
 
 /// A pipeline written as data: three stage descriptors in a list, one of them
 /// three lanes wide and two of them probed. The multiplicity and the telemetry
 /// are properties of the description, not calls the neighbours can see.
 let streamPipeline =
-    design "StreamPipeline" (fun () ->
-        let bumpStage = Stream.specFromFunction (Stream.stage bump)
-        let doubleStage = Stream.specFromFunction (Stream.stage (fun v -> v + v))
+    defModule
+        "StreamPipeline"
+        (fun p -> (streamInputPorts p "in" beatLayout, streamOutputPorts p "out" beatLayout))
+        (fun (inPorts, outPorts) ->
+            let bumpStage = Stream.specFromFunction (Stream.stage bump)
+            let doubleStage = Stream.specFromFunction (Stream.stage (fun v -> v + v))
 
-        Stream.input "in" beatLayout
-        |> Stream.pipeline
-            [ bumpStage |> Stream.probed "intake"
-              doubleStage |> Stream.lanes 3 |> Stream.probed "farm"
-              bumpStage ]
-        |> Stream.out "out")
+            streamSource inPorts
+            |> Stream.pipeline
+                [ bumpStage |> Stream.probed "intake"
+                  doubleStage |> Stream.lanes 3 |> Stream.probed "farm"
+                  bumpStage ]
+            |> streamSink outPorts)
 
 /// A producer that cannot be told to wait. A counter emits a beat every cycle
 /// `sample` is high; giving that a `ready` is where beats get lost, and
 /// `flowToStream` hands back exactly which cycles they were lost on.
 let flowSampler =
-    design "FlowSampler" (fun () ->
-        let sample = inputBit "sample"
-        let outReady = inputBit "out_ready"
+    defModule
+        "FlowSampler"
+        (fun p ->
+            (p.inPort "sample" 1,
+             p.inPort "out_ready" 1,
+             p.outPort "out_value" 8,
+             p.outPort "out_valid" 1,
+             p.outPort "dropped_count" 8))
+        (fun (sample, outReady, value, valid, droppedOut) ->
+            let ticks = reg "ticks" 8
+            If sample (fun () -> ticks + lit 1UL 8 ==> ticks)
 
-        let ticks = reg "ticks" 8
-        If sample (fun () -> ticks + lit 1UL 8 ==> ticks)
+            let sampled =
+                { payload = ticks
+                  valid = sample
+                  layout = beatLayout }
+                |> flowStage "staged"
 
-        let sampled =
-            { payload = ticks
-              valid = sample
-              layout = beatLayout }
-            |> flowStage "staged"
+            let stream, overflowed = flowToStream sampled
+            outReady ==> stream.ready
 
-        let stream, overflowed = flowToStream sampled
-        outReady ==> stream.ready
+            stream.payload ==> value
+            stream.valid ==> valid
 
-        let value = output "out_value" 8
-        stream.payload ==> value
-        let valid = outputBit "out_valid"
-        stream.valid ==> valid
-
-        // The one place this design loses data, counted rather than ignored.
-        let dropped = reg "dropped" 8
-        If overflowed (fun () -> dropped + lit 1UL 8 ==> dropped)
-        let droppedOut = output "dropped_count" 8
-        dropped ==> droppedOut)
+            // The one place this design loses data, counted rather than ignored.
+            let dropped = reg "dropped" 8
+            If overflowed (fun () -> dropped + lit 1UL 8 ==> dropped)
+            dropped ==> droppedOut)
 
 // ---------------------------------------------------------------------------
 // The combinators: small shapes that were each written by hand four or five
@@ -554,127 +612,138 @@ let flowSampler =
 /// same distance to still be describing the same beat. `raw_tag` is what it
 /// looks like when it does not.
 let delayAlign =
-    design "DelayAlign" (fun () ->
-        let data = input "data" 8
-        let tag = inputBit "tag"
+    defModule
+        "DelayAlign"
+        (fun p ->
+            (p.inPort "data" 8,
+             p.inPort "tag" 1,
+             p.outPort "out" 8,
+             p.outPort "aligned_tag" 1,
+             p.outPort "raw_tag" 1))
+        (fun (data, tag, out, aligned, raw) ->
+            delayChain "data" 8 3 (data + lit 1UL 8) ==> out
 
-        let out = output "out" 8
-        delayChain "data" 8 3 (data + lit 1UL 8) ==> out
+            delayChain "tag" 1 3 tag ==> aligned
 
-        let aligned = outputBit "aligned_tag"
-        delayChain "tag" 1 3 tag ==> aligned
-
-        let raw = outputBit "raw_tag"
-        tag ==> raw)
+            tag ==> raw)
 
 /// Turning a level into an event. `enable` gates only the sample, so the whole
 /// thing can detect edges in a slower domain than the clock.
 let edges =
-    design "Edges" (fun () ->
-        let signal = inputBit "signal"
-        let enable = inputBit "enable"
+    defModule
+        "Edges"
+        (fun p ->
+            (p.inPort "signal" 1,
+             p.inPort "enable" 1,
+             p.outPort "rising" 1,
+             p.outPort "falling" 1,
+             p.outPort "changed" 1,
+             p.outPort "previous" 1,
+             p.outPort "pulses" 8))
+        (fun (signal, enable, rising, falling, changed, previous, pulses) ->
+            let e = edgeDetect "sig" enable signal
 
-        let e = edgeDetect "sig" enable signal
+            e.rising ==> rising
+            e.falling ==> falling
+            e.changed ==> changed
+            e.previous ==> previous
 
-        let rising = outputBit "rising"
-        e.rising ==> rising
-        let falling = outputBit "falling"
-        e.falling ==> falling
-        let changed = outputBit "changed"
-        e.changed ==> changed
-        let previous = outputBit "previous"
-        e.previous ==> previous
-
-        // Counting edges is the usual reason to find them.
-        let seen = reg "seen" 8
-        If e.rising (fun () -> seen + lit 1UL 8 ==> seen)
-        let pulses = output "pulses" 8
-        seen ==> pulses)
+            // Counting edges is the usual reason to find them.
+            let seen = reg "seen" 8
+            If e.rising (fun () -> seen + lit 1UL 8 ==> seen)
+            seen ==> pulses)
 
 /// A maximal-length Galois LFSR: a shift and a masked xor, visiting all 255
 /// non-zero states before repeating.
 let noise =
-    design "Noise" (fun () ->
-        let step = inputBit "step"
-        let state = lfsr "state" 8 0xACUL step
+    defModule
+        "Noise"
+        (fun p -> (p.inPort "step" 1, p.outPort "value" 8, p.outPort "low_bit" 1))
+        (fun (step, value, lowBit) ->
+            let state = lfsr "state" 8 0xACUL step
 
-        let value = output "value" 8
-        state ==> value
+            state ==> value
 
-        // The reason it is not a random-number generator: consecutive states
-        // share seven of their eight bits.
-        let lowBit = outputBit "low_bit"
-        slice 0 0 state ==> lowBit)
+            // The reason it is not a random-number generator: consecutive states
+            // share seven of their eight bits.
+            slice 0 0 state ==> lowBit)
 
 /// Four requesters, one server. `oneHotLowest` turns the request bits into a
 /// grant exactly one of which is high, and `mux1H` uses that grant to select
 /// the winner's payload without a comparator anywhere.
 let arbiter =
-    design "Arbiter" (fun () ->
-        let requests = [ for i in 0..3 -> inputBit $"req{i}" ]
-        let values = [ for i in 0..3 -> input $"value{i}" 8 ]
+    defModule
+        "Arbiter"
+        (fun p ->
+            ([ for i in 0..3 -> p.inPort $"req{i}" 1 ],
+             [ for i in 0..3 -> p.inPort $"value{i}" 8 ],
+             [ for i in 0..3 -> p.outPort $"grant{i}" 1 ],
+             p.outPort "any" 1,
+             p.outPort "served" 8))
+        (fun (requests, values, grantOuts, any, served) ->
+            let grants = oneHotLowest requests
 
-        let grants = oneHotLowest requests
+            for i in 0..3 do
+                grants[i] ==> grantOuts[i]
 
-        for i in 0..3 do
-            let g = outputBit $"grant{i}"
-            grants[i] ==> g
+            reduceTree (|||) requests ==> any
 
-        let any = outputBit "any"
-        reduceTree (|||) requests ==> any
-
-        let served = output "served" 8
-        mux1H grants values ==> served)
+            mux1H grants values ==> served)
 
 /// Eight values summed two ways: a combinational balanced tree, and the same
 /// tree with every level registered. They agree — after the pipelined one has
 /// been given its cycles.
 let adderTree =
-    design "AdderTree" (fun () ->
-        let enable = inputBit "enable"
-        let inputs = [ for i in 0..7 -> input $"x{i}" 8 ]
-        let widen x = cat (lit 0UL 3) x
-        let widened = List.map widen inputs
+    defModule
+        "AdderTree"
+        (fun p ->
+            (p.inPort "enable" 1,
+             [ for i in 0..7 -> p.inPort $"x{i}" 8 ],
+             p.outPort "flat" 11,
+             p.outPort "pipelined" 11,
+             p.outPort "depth" 4))
+        (fun (enable, inputs, flat, pipelined, depth) ->
+            let widen x = cat (lit 0UL 3) x
+            let widened = List.map widen inputs
 
-        let flat = output "flat" 11
-        reduceTree (+) widened ==> flat
+            reduceTree (+) widened ==> flat
 
-        let deep, levels = adderTreePipelined "acc" 11 enable widened
+            let deep, levels = adderTreePipelined "acc" 11 enable widened
 
-        let pipelined = output "pipelined" 11
-        deep ==> pipelined
+            deep ==> pipelined
 
-        // The latency is reported, not assumed — it is however deep the tree
-        // turned out to be.
-        let depth = output "depth" 4
-        lit (uint64 levels) 4 ==> depth)
+            // The latency is reported, not assumed — it is however deep the tree
+            // turned out to be.
+            lit (uint64 levels) 4 ==> depth)
 
 /// Two wrap counters and a cascade. `columns` wraps every 5 counts and its
 /// wrap is what advances `rows` — which is how a raster scan is built, and why
 /// the wrap is a signal rather than something the caller recomputes.
 let wrapCounter =
-    design "WrapCounter" (fun () ->
-        let enable = inputBit "enable"
-        let last = input "last" 4
+    defModule
+        "WrapCounter"
+        (fun p ->
+            (p.inPort "enable" 1,
+             p.inPort "last" 4,
+             p.outPort "column" 3,
+             p.outPort "column_wrap" 1,
+             p.outPort "row" 2,
+             p.outPort "bounded_count" 4,
+             p.outPort "bounded_wrap" 1))
+        (fun (enable, last, columnOut, columnWrap, rowOut, boundedOut, boundedWrap) ->
+            // Qualified because this project's own first design is called
+            // `counter`, and it shadows the stdlib entry of the same name.
+            let columns = Warp11.Stdlib.counter "columns" 5 enable
+            columns.count ==> columnOut
+            columns.wrap ==> columnWrap
 
-        // Qualified because this project's own first design is called
-        // `counter`, and it shadows the stdlib entry of the same name.
-        let columns = Warp11.Stdlib.counter "columns" 5 enable
-        let columnOut = output "column" 3
-        columns.count ==> columnOut
-        let columnWrap = outputBit "column_wrap"
-        columns.wrap ==> columnWrap
+            let rows = Warp11.Stdlib.counter "rows" 3 columns.wrap
+            rows.count ==> rowOut
 
-        let rows = Warp11.Stdlib.counter "rows" 3 columns.wrap
-        let rowOut = output "row" 2
-        rows.count ==> rowOut
-
-        // The same shape with a bound the design does not know until it runs.
-        let bounded = counterTo "bounded" last enable
-        let boundedOut = output "bounded_count" 4
-        bounded.count ==> boundedOut
-        let boundedWrap = outputBit "bounded_wrap"
-        bounded.wrap ==> boundedWrap)
+            // The same shape with a bound the design does not know until it runs.
+            let bounded = counterTo "bounded" last enable
+            bounded.count ==> boundedOut
+            bounded.wrap ==> boundedWrap)
 
 // ---------------------------------------------------------------------------
 // The substrates: the shapes the accelerators in this repository are built out
@@ -685,201 +754,229 @@ let wrapCounter =
 /// its running total at issue and writes it back two cycles later, which is
 /// only correct because its next turn is four cycles away.
 let barrelLane =
-    design "BarrelLane" (fun () ->
-        let x = input "x" 8
+    defModule
+        "BarrelLane"
+        (fun p ->
+            (p.inPort "x" 8,
+             [ for t in 0..3 -> p.outPort $"thread{t}" 16 ],
+             p.outPort "turn_now" 2,
+             p.outPort "latency" 4,
+             p.outPort "threads" 4))
+        (fun (x, threadOuts, slot, latencyOut, threadsOut) ->
+            // Two cycles from issue to writeback, four threads to cover them.
+            let lane = barrel 2 4
 
-        // Two cycles from issue to writeback, four threads to cover them.
-        let lane = barrel 2 4
+            let turn = reg "turn" 2
+            turn + lit 1UL 2 ==> turn
 
-        let turn = reg "turn" 2
-        turn + lit 1UL 2 ==> turn
+            let acc = distributedMem "acc" 2 16
 
-        let acc = distributedMem "acc" 2 16
+            // Issue: this thread's running total, and a weight that says which
+            // thread it is — thread t adds t+1 times the sample, so the four are
+            // told apart at a glance.
+            let current = wire "current" 16
+            memRead acc turn ==> current
+            let weight = wire "weight" 8
+            cat (lit 0UL 6) turn + lit 1UL 8 ==> weight
 
-        // Issue: this thread's running total, and a weight that says which
-        // thread it is — thread t adds t+1 times the sample, so the four are
-        // told apart at a glance.
-        let current = wire "current" 16
-        memRead acc turn ==> current
-        let weight = wire "weight" 8
-        cat (lit 0UL 6) turn + lit 1UL 8 ==> weight
+            // The cone: multiply, register, add, register. Two cycles deep, and
+            // the total read at issue has to be held for one of them to meet the
+            // product it belongs with.
+            let product = delayChain "product" 16 1 (mul x weight)
+            let held = lane.CarryTo 1 "issued" 16 current
+            let sum = delayChain "sum" 16 1 (held + product)
 
-        // The cone: multiply, register, add, register. Two cycles deep, and
-        // the total read at issue has to be held for one of them to meet the
-        // product it belongs with.
-        let product = delayChain "product" 16 1 (mul x weight)
-        let held = lane.CarryTo 1 "issued" 16 current
-        let sum = delayChain "sum" 16 1 (held + product)
+            // Writeback, to whichever thread issued two cycles ago.
+            memWrite acc (lane.Carry "slot" 2 turn) sum (lit 1UL 1)
 
-        // Writeback, to whichever thread issued two cycles ago.
-        memWrite acc (lane.Carry "slot" 2 turn) sum (lit 1UL 1)
+            for t in 0..3 do
+                memRead acc (lit (uint64 t) 2) ==> threadOuts[t]
 
-        for t in 0..3 do
-            let total = output $"thread{t}" 16
-            memRead acc (lit (uint64 t) 2) ==> total
+            turn ==> slot
 
-        let slot = output "turn_now" 2
-        turn ==> slot
-
-        // Both are elaboration-time facts about the lane, not runtime state.
-        let latency = output "latency" 4
-        lit (uint64 lane.Latency) 4 ==> latency
-        let threads = output "threads" 4
-        lit (uint64 lane.Threads) 4 ==> threads)
+            // Both are elaboration-time facts about the lane, not runtime state.
+            lit (uint64 lane.Latency) 4 ==> latencyOut
+            lit (uint64 lane.Threads) 4 ==> threadsOut)
 
 /// xoshiro128++ in fabric: 128 bits of state, one 32-bit word per `step`, and
 /// not a multiplier in it. `load` replaces the whole state in one cycle, which
 /// is how a host seeds it.
 let prng =
-    design "Prng" (fun () ->
-        let step = inputBit "step"
-        let load = inputBit "load"
-        let seed = [ for i in 0..3 -> input $"seed{i}" 32 ]
+    defModule
+        "Prng"
+        (fun p ->
+            (p.inPort "step" 1,
+             p.inPort "load" 1,
+             [ for i in 0..3 -> p.inPort $"seed{i}" 32 ],
+             p.outPort "value" 32,
+             p.outPort "roll" 3,
+             p.outPort "drawn" 16))
+        (fun (step, load, seed, value, roll, count) ->
+            let word = xoshiro128pp "Xoshiro128pp" "rng" load seed step
 
-        let word = xoshiro128pp "Xoshiro128pp" "rng" load seed step
+            word ==> value
 
-        let value = output "value" 32
-        word ==> value
+            // The usual reason to want one: a bounded draw. Every bit of a
+            // xoshiro word is equally good, so a mask is a fair die.
+            slice 2 0 word ==> roll
 
-        // The usual reason to want one: a bounded draw. Every bit of a
-        // xoshiro word is equally good, so a mask is a fair die.
-        let roll = output "roll" 3
-        slice 2 0 word ==> roll
-
-        let draws = reg "draws" 16
-        If step (fun () -> draws + lit 1UL 16 ==> draws)
-        let count = output "drawn" 16
-        draws ==> count)
+            let draws = reg "draws" 16
+            If step (fun () -> draws + lit 1UL 16 ==> draws)
+            draws ==> count)
 
 /// Two four-tap filters over one sample stream: a [1,2,2,1] low-pass and a
 /// boxcar average. Same hardware shape, different constants — which is the
 /// whole of what a FIR is.
 let firFilter =
-    design "FirFilter" (fun () ->
-        let sample = input "sample" 8
+    defModule
+        "FirFilter"
+        (fun p ->
+            (p.inPort "sample" 8,
+             p.outPort "smoothed" 18,
+             p.outPort "averaged" 18,
+             p.outPort "raw" 8))
+        (fun (sample, smoothed, averaged, raw) ->
+            fir 8 8 [ 1UL; 2UL; 2UL; 1UL ] sample ==> smoothed
 
-        let smoothed = output "smoothed" 18
-        fir 8 8 [ 1UL; 2UL; 2UL; 1UL ] sample ==> smoothed
+            fir 8 8 [ 1UL; 1UL; 1UL; 1UL ] sample ==> averaged
 
-        let averaged = output "averaged" 18
-        fir 8 8 [ 1UL; 1UL; 1UL; 1UL ] sample ==> averaged
-
-        // The unfiltered sample, to see what the delay line cost.
-        let raw = output "raw" 8
-        sample ==> raw)
+            // The unfiltered sample, to see what the delay line cost.
+            sample ==> raw)
 
 /// One Game of Life cell, and the three things an off-grid neighbor can be.
 /// `neighborhood` gathers the eight expressions; what to do with them — count,
 /// compare, apply a rule — is the design's business, not the library's.
 let lifeCell =
-    design "LifeCell" (fun () ->
-        let grid = inputArray "g" 3 3
+    defModule
+        "LifeCell"
+        (fun p ->
+            (inPortArray p "g" 3 3 1,
+             p.outPort "live" 4,
+             p.outPort "next" 1,
+             p.outPort "corner_zero" 4,
+             p.outPort "corner_wrap" 4,
+             p.outPort "corner_clamp" 4,
+             p.outPort "orthogonal" 4))
+        (fun (grid, liveOut, next, cornerZero, cornerWrap, cornerClamp, orthogonal) ->
+            let count out stencil edge y x =
+                countWhere 4 id (neighborhood stencil edge grid y x) ==> out
+                out
 
-        let count name stencil edge y x =
-            let out = output name 4
-            countWhere 4 id (neighborhood stencil edge grid y x) ==> out
-            out
+            let live = count liveOut Stencil.Moore Edge.Zero 1 1
 
-        let live = count "live" Stencil.Moore Edge.Zero 1 1
+            // Life's rule, in the one line it actually is.
+            (eq live (lit 3UL 4) ||| (grid[1][1] &&& eq live (lit 2UL 4))) ==> next
 
-        // Life's rule, in the one line it actually is.
-        let next = outputBit "next"
-        (eq live (lit 3UL 4) ||| (grid[1][1] &&& eq live (lit 2UL 4))) ==> next
+            // The same corner cell under all three border policies. They disagree,
+            // and the page is mostly about how.
+            count cornerZero Stencil.Moore Edge.Zero 0 0 |> ignore
+            count cornerWrap Stencil.Moore Edge.Wrap 0 0 |> ignore
+            count cornerClamp Stencil.Moore Edge.Clamp 0 0 |> ignore
 
-        // The same corner cell under all three border policies. They disagree,
-        // and the page is mostly about how.
-        count "corner_zero" Stencil.Moore Edge.Zero 0 0 |> ignore
-        count "corner_wrap" Stencil.Moore Edge.Wrap 0 0 |> ignore
-        count "corner_clamp" Stencil.Moore Edge.Clamp 0 0 |> ignore
-
-        count "orthogonal" Stencil.VonNeumann Edge.Zero 1 1 |> ignore)
+            count orthogonal Stencil.VonNeumann Edge.Zero 1 1 |> ignore)
 
 /// Two clients sharing one two-cycle multiplier. Neither client knows the
 /// other exists: each offers a tagged beat and gets a tagged answer back, and
 /// everything between — arbitration, the tag delay line, the writeback demux —
 /// is `warpFu`.
 let sharedUnit =
-    design "SharedUnit" (fun () ->
-        let issue = fuLayout 4 [ "a", 8; "b", 8 ]
-        let clients = [ for i in 0..1 -> Stream.input $"c{i}" issue ]
+    defModule
+        "SharedUnit"
+        (fun p ->
+            let issue = fuLayout 4 [ "a", 8; "b", 8 ]
 
-        // The unit itself: an ordinary two-cycle multiply that has never heard
-        // of tags, clients or arbitration. It reports its own depth, so the
-        // number appears once — `warpFu` is not told a latency it would have no
-        // way to check.
-        let stages = 2
+            ([ for i in 0..1 -> streamInputPorts p $"c{i}" issue ],
+             [ for i in 0..1 -> streamOutputPorts p $"w{i}" (fuLayout 4 [ "product", 16 ]) ]))
+        (fun (clientPorts, writebackPorts) ->
+            let clients = clientPorts |> List.map streamSource
 
-        let multiply operands =
-            match operands with
-            | [ a; b ] -> [ delayChain "mul" 16 stages (mul a b) ], stages
-            | _ -> failwith "the multiplier takes two operands"
+            // The unit itself: an ordinary two-cycle multiply that has never heard
+            // of tags, clients or arbitration. It reports its own depth, so the
+            // number appears once — `warpFu` is not told a latency it would have no
+            // way to check.
+            let stages = 2
 
-        warpFu "fu" [ "product", 16 ] multiply clients
-        |> List.iteri (fun i s -> Stream.out $"w{i}" s))
+            let multiply operands =
+                match operands with
+                | [ a; b ] -> [ delayChain "mul" 16 stages (mul a b) ], stages
+                | _ -> failwith "the multiplier takes two operands"
+
+            warpFu "fu" [ "product", 16 ] multiply clients
+            |> List.iteri (fun i s -> streamSink writebackPorts[i] s))
 
 /// A register map: four words the host can reach over AXI-Lite. `control` is
 /// written by the host and read by the design, `identity` is a constant the
 /// driver checks it is talking to the right bitstream, and `ticks` is live
 /// state the host polls.
 let registerMap =
-    design "RegisterMap" (fun () ->
-        let ticks = reg "ticks" 32
+    defModule
+        "RegisterMap"
+        (fun p ->
+            // a 16-byte aperture: four words at 0x0, 0x4, 0x8, 0xC
+            (axiLiteSlavePorts p 4, p.outPort "running" 1, p.outPort "elapsed" 32))
+        (fun (slavePorts, running, elapsed) ->
+            let ticks = reg "ticks" 32
 
-        let regs =
-            axiLiteSlave
-                4 // a 16-byte aperture: four words at 0x0, 0x4, 0x8, 0xC
-                [ "control", 0x0UL, 32 ]
-                [ 0x4UL, lit 0xA57AUL 32; 0x8UL, ticks ]
-                []
+            let regs =
+                axiLiteSlaveOn
+                    slavePorts
+                    [ "control", 0x0UL, 32 ]
+                    [ 0x4UL, lit 0xA57AUL 32; 0x8UL, ticks ]
+                    []
 
-        match regs with
-        | [ control ] ->
-            let go = wireBit "go"
-            slice 0 0 control ==> go
-            If go (fun () -> ticks + lit 1UL 32 ==> ticks)
+            match regs with
+            | [ control ] ->
+                let go = wireBit "go"
+                slice 0 0 control ==> go
+                If go (fun () -> ticks + lit 1UL 32 ==> ticks)
 
-            // The same two values at ports, so the debugger can watch them
-            // without speaking AXI.
-            let running = outputBit "running"
-            go ==> running
-            let elapsed = output "elapsed" 32
-            ticks ==> elapsed
-        | _ -> failwith "expected exactly one write register")
+                // The same two values at ports, so the debugger can watch them
+                // without speaking AXI.
+                go ==> running
+                ticks ==> elapsed
+            | _ -> failwith "expected exactly one write register")
 
 /// A master on the memory bus: fabric reaching out to DDR rather than waiting
 /// to be poked. The read half takes addresses and hands back data; the write
 /// half streams words out — but only once the host has said where.
 let ddrMaster =
-    design "DdrMaster" (fun () ->
-        Stream.input "req" (layout1 ("addr", 32))
-        |> axiMasterReaderOn (axiReadBus 32 32) 4
-        |> Stream.out "resp"
+    defModule
+        "DdrMaster"
+        (fun p ->
+            (streamInputPorts p "req" (layout1 ("addr", 32)),
+             axiReadBusPorts p "m_axi" 32 32,
+             streamOutputPorts p "resp" (layout1 ("data", 32)),
+             p.inPort "base_addr" 32,
+             p.outPort "armed" 1,
+             axiWriteBusPorts p "m_axi" 32 32,
+             p.outPort "words_written" 8))
+        (fun (reqPorts, readBus, respPorts, baseAddr, armed, writeBus, written) ->
+            streamSource reqPorts
+            |> axiMasterReaderOn (axiReadBusOf readBus) 4
+            |> streamSink respPorts
 
-        // The arm gate. A master that free-runs will write to whatever its
-        // reset value points at, and tearing the design down mid-write leaves
-        // the memory path skewed until the board is rebooted.
-        let baseAddr = input "base_addr" 32
-        let armed = outputBit "armed"
-        bnot (eq baseAddr (lit 0UL 32)) ==> armed
+            // The arm gate. A master that free-runs will write to whatever its
+            // reset value points at, and tearing the design down mid-write leaves
+            // the memory path skewed until the board is rebooted.
+            bnot (eq baseAddr (lit 0UL 32)) ==> armed
 
-        let index = reg "index" 8
-        let payload = reg "payload" 32
+            let index = reg "index" 8
+            let payload = reg "payload" 32
 
-        let ready = wireBit "beat_ready"
-        registerStreamReady ready
+            let ready = wireBit "beat_ready"
+            registerStreamReady ready
 
-        If (armed &&& ready) (fun () ->
-            index + lit 1UL 8 ==> index
-            payload + lit 1UL 32 ==> payload)
+            If (armed &&& ready) (fun () ->
+                index + lit 1UL 8 ==> index
+                payload + lit 1UL 32 ==> payload)
 
-        let addr = wire "beat_addr" 32
-        baseAddr + cat (lit 0UL 22) (cat index (lit 0UL 2)) ==> addr
+            let addr = wire "beat_addr" 32
+            baseAddr + cat (lit 0UL 22) (cat index (lit 0UL 2)) ==> addr
 
-        { payload = addr, payload, lit 0xFUL 4
-          valid = armed
-          ready = ready
-          layout = axiWriteBeatLayout 32 32 }
-        |> axiMasterWriterOn (axiWriteBus 32 32) 4
+            { payload = addr, payload, lit 0xFUL 4
+              valid = armed
+              ready = ready
+              layout = axiWriteBeatLayout 32 32 }
+            |> axiMasterWriterOn (axiWriteBusOf writeBus) 4
 
-        let written = output "words_written" 8
-        index ==> written)
+            index ==> written)

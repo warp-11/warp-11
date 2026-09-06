@@ -52,9 +52,9 @@ design is not broken — you are not pushing hard enough.
 ```fsharp
 let tagged = layout2 ("id", 8) ("value", 8)
 
-Stream.input "in" tagged
+streamSource inPorts
 |> Stream.farm 3 (fun i lane -> lane |> Stream.stages (i + 1) (fun (id, v) -> id, bump v))
-|> Stream.out "out"
+|> streamSink outPorts
 ```
 
 The `id` field rides through untouched and does nothing — except make the result

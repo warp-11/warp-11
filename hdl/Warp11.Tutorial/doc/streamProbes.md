@@ -35,11 +35,11 @@ missing cycles are the pipeline filling before the stall could bite.
 ## Reading the source
 
 ```fsharp
-Stream.input "in" beatLayout
+streamSource inPorts
 |> Stream.probe "intake"
 |> Stream.stages 2 bump
 |> Stream.probe "egress"
-|> Stream.out "out"
+|> streamSink outPorts
 ```
 
 `probe` is **chainable and invisible**. It drives nothing and consumes nothing —

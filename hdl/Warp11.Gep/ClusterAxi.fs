@@ -246,13 +246,21 @@ let gepClusterMap (shape: GepClusterShape) : GepClusterMap =
 
 /// The top-level synthesis unit: the AXI-Lite control slave, the pool, and the
 /// pool's read and write master channels combined into the one `m_axi` AXI4
-/// interface an HP/HPC port takes. The pool declares those ports itself, so
-/// they land on this boundary with nothing to forward.
+/// interface an HP/HPC port takes. The io factory declares all three bundles;
+/// the pool ties and drives its two master channels through the port records
+/// it is handed.
 let gepClusterAxi (topName: string) (shape: GepClusterShape) =
     let m = gepClusterMap shape
 
-    designClocked axiClock topName (fun () ->
-        let regs = axiLiteSlaveOf m.map
+    defModuleClocked
+        axiClock
+        topName
+        (fun p ->
+            (axiLiteSlavePorts p m.map.apertureAddrWidth,
+             axiReadBusPorts p "m_axi" shape.addrWidth 128,
+             axiWriteBusPorts p "m_axi" shape.addrWidth 128))
+        (fun (slavePorts, readBusPorts, writeBusPorts) ->
+        let regs = regMapSlave slavePorts m.map
 
         let autoCfg =
             shape.auto
@@ -272,6 +280,8 @@ let gepClusterAxi (topName: string) (shape: GepClusterShape) =
             gepClusterPool
                 shape
                 "cl"
+                readBusPorts
+                writeBusPorts
                 { startQueue = regs.pulse m.startQueue
                   queueBase = regs.value m.queueBase
                   popBase = regs.value m.popBase

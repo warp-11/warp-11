@@ -50,8 +50,16 @@ electricity, which is exactly what "this design is only wires" means.
 ## Reading the source
 
 ```fsharp
-Stream.input "in" beatLayout |> Stream.map bump |> Stream.out "out"
+defModule
+    "StreamPipe"
+    (fun p -> (streamInputPorts p "in" beatLayout, streamOutputPorts p "out" beatLayout))
+    (fun (inPorts, outPorts) -> streamSource inPorts |> Stream.map bump |> streamSink outPorts)
 ```
+
+The io factory declares each boundary as a trio — one port per layout field,
+a valid, and the ready that answers it. In the body, `streamSource` turns the
+in-trio into a live `Stream`, and `streamSink` lands one on the out-trio; the
+chain between them is the design.
 
 `Stream.input` declares the ports — one per field of the layout, plus `valid`
 in and `ready` out. `Stream.out` does the mirror. `|>` is F#'s pipe operator, so

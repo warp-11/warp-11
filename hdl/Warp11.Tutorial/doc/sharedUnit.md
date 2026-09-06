@@ -26,8 +26,11 @@ look. Wires are free; steering them is not.
 ## What each side sees
 
 ```fsharp
+// in the io factory:
 let issue = fuLayout 4 [ "a", 8; "b", 8 ]
-let clients = [ for i in 0..1 -> Stream.input $"c{i}" issue ]
+[ for i in 0..1 -> streamInputPorts p $"c{i}" issue ]
+// ...and in the body:
+let clients = clientPorts |> List.map streamSource
 ```
 
 A client's view is a stream of `{ tag; fields }`. It offers operands with a

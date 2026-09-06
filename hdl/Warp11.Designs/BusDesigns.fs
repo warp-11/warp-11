@@ -44,12 +44,19 @@ open Warp11
 // The client: it sees two windows and nothing else
 // ---------------------------------------------------------------------------
 
+/// The two completion outputs `sumClient` drives — `{name}_handed_over` (the
+/// wrong answer, brought out on purpose) and `{name}_done` — declared where the
+/// boundary is; `sumClient` in the body is what drives them.
+let private sumClientPorts (p: Ports) (name: string) =
+    (p.outPort $"{name}_handed_over" 1, p.outPort $"{name}_done" 1)
+
 /// Walk `count` words of `source`, keep a running sum, write each partial sum
 /// to the matching index of `sink`.
 ///
-/// **Every parameter is a window or a scalar.** No bus, no address, no stride,
-/// no base — so the same client runs against LUTs, against a block, or against
-/// a region of a port on the far side of the chip, and cannot tell.
+/// **Every parameter is a window, a scalar or the boundary pair.** No bus, no
+/// address, no stride, no base — so the same client runs against LUTs, against
+/// a block, or against a region of a port on the far side of the chip, and
+/// cannot tell.
 ///
 /// It also raises `{name}_done` when its results are **in memory** — not when
 /// it handed the last one over. That is one `&&&` against `sink.idle`, and it
@@ -60,7 +67,14 @@ open Warp11
 /// emitted Verilog would say which (`notes/DEVICES.md` §10f).
 ///
 /// `name` prefixes every signal it owns, which is what lets a design hold two.
-let sumClient (name: string) (count: int) (run: Expr) (source: ReadWindow) (sink: WriteWindow) =
+let sumClient
+    (name: string)
+    (count: int)
+    (run: Expr)
+    (source: ReadWindow)
+    (sink: WriteWindow)
+    (handedOverPort, donePort)
+    =
     if count > source.words then
         failwith $"sumClient '{name}': asked for %d{count} words of a %d{source.words}-word source window"
 
@@ -119,8 +133,8 @@ let sumClient (name: string) (count: int) (run: Expr) (source: ReadWindow) (sink
     // `idle` term was doing anything.
     let allAccepted = wireBit $"{name}_all_accepted"
     eq outIndex (lit (uint64 count) indexWidth) ==> allAccepted
-    allAccepted ==> outputBit $"{name}_handed_over"
-    (allAccepted &&& sink.idle) ==> outputBit $"{name}_done"
+    allAccepted ==> handedOverPort
+    (allAccepted &&& sink.idle) ==> donePort
 
 // ---------------------------------------------------------------------------
 // Three topologies. The client is the same line in all of them.
@@ -130,66 +144,92 @@ let private busCount = 16
 let private busIndexWidth = 5
 let private busWordWidth = 32
 
-/// A client's own source array, with fill ports so a check can stage data.
+/// The fill ports a check stages a client's source array through — declared
+/// where the boundary is; `sourceFor` in the body puts the array behind them.
+let private sourceForPorts (p: Ports) (name: string) =
+    (p.inPort $"{name}_fill_addr" busIndexWidth,
+     p.inPort $"{name}_fill_data" busWordWidth,
+     p.inPort $"{name}_fill_enable" 1)
+
+/// A client's own source array, filled through the `sourceForPorts` trio.
 ///
 /// `distributedMem` because `lutReadWindow` reads combinationally and the DSL
 /// refuses that on a block. Nothing about the bus depends on this: a client's
 /// source and its sink are independent choices, which is the point of there
 /// being two windows rather than one memory.
-let private sourceFor (name: string) =
+let private sourceFor (name: string) (fillAddr, fillData, fillEnable) =
     let m = distributedMem $"{name}_src" busIndexWidth busWordWidth
 
-    memWrite
-        m
-        (input $"{name}_fill_addr" busIndexWidth)
-        (input $"{name}_fill_data" busWordWidth)
-        (inputBit $"{name}_fill_enable")
+    memWrite m fillAddr fillData fillEnable
 
     lutReadWindow m
 
 /// **One client, one window, one port — and no arbiter.**
 let oneOwnerOnePort =
-    design "OneOwnerOnePort" (fun () ->
-        let bus = axiWriteBusNamed "m_axi" 32 busWordWidth
-        let run = inputBit "run"
+    defModule
+        "OneOwnerOnePort"
+        (fun p ->
+            (axiWriteBusPorts p "m_axi" 32 busWordWidth,
+             p.inPort "run" 1,
+             sourceForPorts p "a",
+             sumClientPorts p "a"))
+        (fun (busPorts, run, aSrc, aClient) ->
+            let bus = axiWriteBusOf busPorts
 
-        let wa =
-            writeWindowOn bus 1 "a" (lit 0x100UL 32) busCount
+            let wa =
+                writeWindowOn bus 1 "a" (lit 0x100UL 32) busCount
 
-        sumClient "a" busCount run (sourceFor "a") wa)
+            sumClient "a" busCount run (sourceFor "a" aSrc) wa aClient)
 
 /// **Two clients, two windows, one port.** The client lines are unchanged; the
 /// body opened a second window and a round-robin merge appeared behind it.
 let twoOwnersOnePort =
-    design "TwoOwnersOnePort" (fun () ->
-        let bus = axiWriteBusNamed "m_axi" 32 busWordWidth
-        let run = inputBit "run"
+    defModule
+        "TwoOwnersOnePort"
+        (fun p ->
+            (axiWriteBusPorts p "m_axi" 32 busWordWidth,
+             p.inPort "run" 1,
+             sourceForPorts p "a",
+             sumClientPorts p "a",
+             sourceForPorts p "b",
+             sumClientPorts p "b"))
+        (fun (busPorts, run, aSrc, aClient, bSrc, bClient) ->
+            let bus = axiWriteBusOf busPorts
 
-        let wa, wb =
-            defineWriteWindows bus 1 (fun windows ->
-                createWriteWindow windows "a" (lit 0x100UL 32) busCount,
-                createWriteWindow windows "b" (lit 0x200UL 32) busCount)
+            let wa, wb =
+                defineWriteWindows bus 1 (fun windows ->
+                    createWriteWindow windows "a" (lit 0x100UL 32) busCount,
+                    createWriteWindow windows "b" (lit 0x200UL 32) busCount)
 
-        sumClient "a" busCount run (sourceFor "a") wa
-        sumClient "b" busCount run (sourceFor "b") wb)
+            sumClient "a" busCount run (sourceFor "a" aSrc) wa aClient
+            sumClient "b" busCount run (sourceFor "b" bSrc) wb bClient)
 
 /// **Two clients, two windows, two ports.** Same two client lines again, each
 /// window now on a bus of its own — `m_axi_hp0` and `m_axi_hp1`, two of the
 /// independent paths into DDR this repo has never used two of at once.
 let twoOwnersTwoPorts =
-    design "TwoOwnersTwoPorts" (fun () ->
-        let busA = axiWriteBusNamed "m_axi_hp0" 32 busWordWidth
-        let busB = axiWriteBusNamed "m_axi_hp1" 32 busWordWidth
-        let run = inputBit "run"
+    defModule
+        "TwoOwnersTwoPorts"
+        (fun p ->
+            (axiWriteBusPorts p "m_axi_hp0" 32 busWordWidth,
+             axiWriteBusPorts p "m_axi_hp1" 32 busWordWidth,
+             p.inPort "run" 1,
+             sourceForPorts p "a",
+             sumClientPorts p "a",
+             sourceForPorts p "b",
+             sumClientPorts p "b"))
+        (fun (busPortsA, busPortsB, run, aSrc, aClient, bSrc, bClient) ->
+            let busA = axiWriteBusOf busPortsA
+            let busB = axiWriteBusOf busPortsB
 
-        let wa =
-            writeWindowOn busA 1 "a" (lit 0x100UL 32) busCount
+            let wa =
+                writeWindowOn busA 1 "a" (lit 0x100UL 32) busCount
 
-        let wb =
-            writeWindowOn busB 1 "b" (lit 0x100UL 32) busCount
+            let wb =
+                writeWindowOn busB 1 "b" (lit 0x100UL 32) busCount
 
-        sumClient "a" busCount run (sourceFor "a") wa
-        sumClient "b" busCount run (sourceFor "b") wb)
+            sumClient "a" busCount run (sourceFor "a" aSrc) wa aClient
+            sumClient "b" busCount run (sourceFor "b" bSrc) wb bClient)
 
 /// **A window eight writes deep, so "handed over" and "in memory" come apart.**
 ///
@@ -200,25 +240,38 @@ let twoOwnersTwoPorts =
 /// accepted with up to seven still in flight — which is the situation a real
 /// accelerator is always in, and the one `idle` exists for.
 let sumReportsDone =
-    design "SumReportsDone" (fun () ->
-        let bus = axiWriteBusNamed "m_axi" 32 busWordWidth
-        let run = inputBit "run"
+    defModule
+        "SumReportsDone"
+        (fun p ->
+            (axiWriteBusPorts p "m_axi" 32 busWordWidth,
+             p.inPort "run" 1,
+             sourceForPorts p "a",
+             sumClientPorts p "a"))
+        (fun (busPorts, run, aSrc, aClient) ->
+            let bus = axiWriteBusOf busPorts
 
-        let wa =
-            writeWindowOn bus 8 "a" (lit 0x100UL 32) busCount
+            let wa =
+                writeWindowOn bus 8 "a" (lit 0x100UL 32) busCount
 
-        sumClient "a" busCount run (sourceFor "a") wa)
+            sumClient "a" busCount run (sourceFor "a" aSrc) wa aClient)
 
 /// Entirely on chip: the same client with an array for a sink instead of a
 /// window onto a port. No bus in the design at all, and the client is the same
 /// line it is above.
 let sumWhollyOnChip =
-    design "SumWhollyOnChip" (fun () ->
-        let results = distributedMem "dst" busIndexWidth busWordWidth
-        let probe = input "probe_addr" busIndexWidth
-        memRead results probe ==> output "probe_data" busWordWidth
+    defModule
+        "SumWhollyOnChip"
+        (fun p ->
+            (p.inPort "probe_addr" busIndexWidth,
+             p.outPort "probe_data" busWordWidth,
+             p.inPort "run" 1,
+             sourceForPorts p "a",
+             sumClientPorts p "a"))
+        (fun (probe, probeData, run, aSrc, aClient) ->
+            let results = distributedMem "dst" busIndexWidth busWordWidth
+            memRead results probe ==> probeData
 
-        sumClient "a" busCount (inputBit "run") (sourceFor "a") (memWriteWindow results))
+            sumClient "a" busCount run (sourceFor "a" aSrc) (memWriteWindow results) aClient)
 
 /// Two masters on one bus with no arbiter between them. A function, not a
 /// value: elaboration refuses, and refuses *naming the bus*.
@@ -227,45 +280,64 @@ let sumWhollyOnChip =
 /// which is itself the finding — `defineWriteWindows` cannot produce it,
 /// because a bus with two windows builds one master over a merge.
 let onBusWithTwoOwners () =
-    design "OnBusWithTwoOwners" (fun () ->
-        let bus = axiWriteBusNamed "m_axi" 32 busWordWidth
+    defModule
+        "OnBusWithTwoOwners"
+        (fun p ->
+            let beatsPorts name =
+                (p.inPort $"{name}_addr" 32, p.inPort $"{name}_data" busWordWidth, p.inPort $"{name}_valid" 1)
 
-        let beats name =
-            { payload = input $"{name}_addr" 32, input $"{name}_data" busWordWidth, lit 0xFUL 4
-              valid = inputBit $"{name}_valid"
-              ready =
-                (let r = wireBit $"{name}_ready" in
-                 registerStreamReady r
-                 r)
-              layout = axiWriteBeatLayout 32 busWordWidth }
+            (axiWriteBusPorts p "m_axi" 32 busWordWidth, beatsPorts "a", beatsPorts "b"))
+        (fun (busPorts, aPorts, bPorts) ->
+            let bus = axiWriteBusOf busPorts
 
-        axiMasterWriterOn bus 1 (beats "a")
-        axiMasterWriterOn bus 1 (beats "b"))
+            let beats name (addr, data, valid) =
+                { payload = addr, data, lit 0xFUL 4
+                  valid = valid
+                  ready =
+                    (let r = wireBit $"{name}_ready" in
+                     registerStreamReady r
+                     r)
+                  layout = axiWriteBeatLayout 32 busWordWidth }
+
+            axiMasterWriterOn bus 1 (beats "a" aPorts)
+            axiMasterWriterOn bus 1 (beats "b" bPorts))
 
 /// A window opened and never written to. A function, not a value: the merge
 /// would otherwise take a floating input, and nothing about the emitted Verilog
 /// would say so — `checkStreams` is what turns it into an error.
 let onWindowNeverWritten () =
-    design "OnWindowNeverWritten" (fun () ->
-        let bus = axiWriteBusNamed "m_axi" 32 busWordWidth
-        let run = inputBit "run"
+    defModule
+        "OnWindowNeverWritten"
+        (fun p ->
+            (axiWriteBusPorts p "m_axi" 32 busWordWidth,
+             p.inPort "run" 1,
+             sourceForPorts p "a",
+             sumClientPorts p "a"))
+        (fun (busPorts, run, aSrc, aClient) ->
+            let bus = axiWriteBusOf busPorts
 
-        let wa, _unused =
-            defineWriteWindows bus 1 (fun windows ->
-                createWriteWindow windows "a" (lit 0x100UL 32) busCount,
-                createWriteWindow windows "b" (lit 0x200UL 32) busCount)
+            let wa, _unused =
+                defineWriteWindows bus 1 (fun windows ->
+                    createWriteWindow windows "a" (lit 0x100UL 32) busCount,
+                    createWriteWindow windows "b" (lit 0x200UL 32) busCount)
 
-        sumClient "a" busCount run (sourceFor "a") wa)
+            sumClient "a" busCount run (sourceFor "a" aSrc) wa aClient)
 
 /// A read window put to work, so the read half is exercised: the same client,
 /// its source now a region of a port rather than an array.
 let sumFromReadWindow =
-    design "SumFromReadWindow" (fun () ->
-        let readBus = axiReadBusNamed "m_axi_hp0" 32 busWordWidth
-        let writeBus = axiWriteBusNamed "m_axi_hp1" 32 busWordWidth
-        let run = inputBit "run"
+    defModule
+        "SumFromReadWindow"
+        (fun p ->
+            (axiReadBusPorts p "m_axi_hp0" 32 busWordWidth,
+             axiWriteBusPorts p "m_axi_hp1" 32 busWordWidth,
+             p.inPort "run" 1,
+             sumClientPorts p "a"))
+        (fun (readBusPorts, writeBusPorts, run, aClient) ->
+            let readBus = axiReadBusOf readBusPorts
+            let writeBus = axiWriteBusOf writeBusPorts
 
-        let wa =
-            writeWindowOn writeBus 1 "a" (lit 0x1000UL 32) busCount
+            let wa =
+                writeWindowOn writeBus 1 "a" (lit 0x1000UL 32) busCount
 
-        sumClient "a" busCount run (readWindowOn readBus 1 (lit 0x0UL 32) busCount) wa)
+            sumClient "a" busCount run (readWindowOn readBus 1 (lit 0x0UL 32) busCount) wa aClient)

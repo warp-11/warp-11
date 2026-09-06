@@ -50,9 +50,9 @@ So the protocol is three things, all of them:
 ## The read half
 
 ```fsharp
-Stream.input "req" (layout1 ("addr", 32))
-|> axiMasterReader 32 32 4
-|> Stream.out "resp"
+streamSource reqPorts
+|> axiMasterReaderOn (axiReadBusOf readBus) 4
+|> streamSink respPorts
 ```
 
 Addresses in, data out, and the `4` is how many reads may be in flight at once.
@@ -97,7 +97,7 @@ port, which is what an internal producer looks like:
   valid = armed
   ready = ready
   layout = axiWriteBeatLayout 32 32 }
-|> axiMasterWriter 32 32 4
+|> axiMasterWriterOn (axiWriteBusOf writeBus) 4
 ```
 
 `valid` is the arm gate. `ready` is the wire the master drives back, and the

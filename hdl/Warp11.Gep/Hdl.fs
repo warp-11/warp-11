@@ -10,25 +10,28 @@ open Warp11.Stdlib
 /// read the word. The Sim check walks it against GepRng word-for-word; the
 /// differential walks the same design against Verilator.
 let xoshiroWalk =
-    design "XoshiroWalk" (fun () ->
-        let load = inputBit "load"
-        let sIn = List.init 4 (fun i -> input $"s{i}" 32)
-        let step = inputBit "step"
-        let word = output "word" 32
-        xoshiro128pp "Xoshiro128pp" "prng" load sIn step ==> word)
+    defModule
+        "XoshiroWalk"
+        (fun p ->
+            (p.inPort "load" 1,
+             List.init 4 (fun i -> p.inPort $"s{i}" 32),
+             p.inPort "step" 1,
+             p.outPort "word" 32))
+        (fun (load, sIn, step, word) -> xoshiro128pp "Xoshiro128pp" "prng" load sIn step ==> word)
 
 /// The 512-entry reciprocal table as the first initialized memory: contents
 /// from `Fixed.fxRecipTable` (u31 words — one BRAM18 in fabric), sync read.
 /// The Sim check reads every entry against the table; the differential proves
 /// the emitted `initial` block matches.
 let recipRomWalk =
-    design "RecipRomWalk" (fun () ->
-        let addr = input "addr" 9
-        let value = output "value" 31
-        // 512 x 31, read synchronously — Vivado already places this in block RAM
-        // (measured), and saying so keeps the decision out of the tool's hands.
-        let table = blockRom "recip_table" 31 (Array.map uint64 Fixed.fxRecipTable)
-        (memReadPort table addr).data ==> value)
+    defModule
+        "RecipRomWalk"
+        (fun p -> (p.inPort "addr" 9, p.outPort "value" 31))
+        (fun (addr, value) ->
+            // 512 x 31, read synchronously — Vivado already places this in block RAM
+            // (measured), and saying so keeps the decision out of the tool's hands.
+            let table = blockRom "recip_table" 31 (Array.map uint64 Fixed.fxRecipTable)
+            (memReadPort table addr).data ==> value)
 
 /// Registers inside `divRecipArm`: the quotient is a combinational cone off
 /// the arm's final registers, valid this many cycles after the operand
@@ -288,17 +291,17 @@ let divRecipArm (aPat: Expr) (bPat: Expr) (prefix: string) : Expr =
 /// register, `gepDivLatency` cycles total, II=1. The Sim check streams
 /// operands against `fxDivRecip`; the differential is the Verilator target.
 let gepDivRecip =
-    design "GepDivRecip32" (fun () ->
-        let a = input "a" 32
-        let b = input "b" 32
-        let q = output "q" 32
-        let s0a = reg "s0_a" 32
-        let s0b = reg "s0_b" 32
-        a ==> s0a
-        b ==> s0b
-        let out = reg "s_out_q" 32
-        divRecipArm s0a s0b "dv" ==> out
-        out ==> q)
+    defModule
+        "GepDivRecip32"
+        (fun p -> (p.inPort "a" 32, p.inPort "b" 32, p.outPort "q" 32))
+        (fun (a, b, q) ->
+            let s0a = reg "s0_a" 32
+            let s0b = reg "s0_b" 32
+            a ==> s0a
+            b ==> s0b
+            let out = reg "s_out_q" 32
+            divRecipArm s0a s0b "dv" ==> out
+            out ==> q)
 
 /// Cycles from an operand entering the pipelined ALU to its result appearing.
 /// The barrel scheduler interleaves at least this many independent threads to
@@ -1218,100 +1221,99 @@ let gepOperatorEngine
 /// 17, 3 variables + 4 constants, the full function set. The oracle check
 /// breeds against `hwBreedOffspring` on shared seeds.
 let operatorEngineWalk =
-    design "GepOperatorEngineWalk" (fun () ->
-        let start = inputBit "start"
-        let sIn = List.init 4 (fun idx -> input $"s{idx}" 32)
+    defModule
+        "GepOperatorEngineWalk"
+        (fun p ->
+            (p.inPort "start" 1,
+             List.init 4 (fun idx -> p.inPort $"s{idx}" 32),
+             { onePoint = p.inPort "th_1p" 32
+               twoPoint = p.inPort "th_2p" 32
+               geneRecomb = p.inPort "th_gr" 32
+               mutation = p.inPort "th_mut" 32
+               constReplace = p.inPort "th_cr" 32
+               creep = p.inPort "th_creep" 32
+               inversion = p.inPort "th_inv" 32
+               isTrans = p.inPort "th_is" 32
+               risTrans = p.inPort "th_ris" 32
+               sigmaFx = p.inPort "sigma_fx" 32
+               rangeFx = p.inPort "range_fx" 32 },
+             { ldSym = p.inPort "ld_sym" 1
+               ldPar = p.inPort "ld_par" 1
+               ldAddr = p.inPort "ld_addr" 6
+               ldSdata = p.inPort "ld_sdata" 8
+               ldConst = p.inPort "ld_const" 1
+               ldCdata = p.inPort "ld_cdata" 32 },
+             p.inPort "rd_saddr" 6,
+             p.inPort "rd_caddr" 6,
+             p.outPort "child_sym" 8,
+             p.outPort "child_const" 32,
+             p.outPort "busy" 1,
+             p.outPort "done" 1))
+        (fun (start, sIn, rates, load, rdSaddr, rdCaddr, childSym, childConst, busy, doneOut) ->
+            let engine =
+                gepOperatorEngine
+                    Opcodes.functionSet
+                    [| Opcodes.variable 0; Opcodes.variable 1; Opcodes.variable 2
+                       Opcodes.constant 0; Opcodes.constant 1; Opcodes.constant 2; Opcodes.constant 3 |]
+                    17
+                    8
+                    4
+                    3
+                    "oe"
+                    start
+                    sIn
+                    rates
+                    load
+                    rdSaddr
+                    rdCaddr
 
-        let rates =
-            { onePoint = input "th_1p" 32
-              twoPoint = input "th_2p" 32
-              geneRecomb = input "th_gr" 32
-              mutation = input "th_mut" 32
-              constReplace = input "th_cr" 32
-              creep = input "th_creep" 32
-              inversion = input "th_inv" 32
-              isTrans = input "th_is" 32
-              risTrans = input "th_ris" 32
-              sigmaFx = input "sigma_fx" 32
-              rangeFx = input "range_fx" 32 }
-
-        let load =
-            { ldSym = inputBit "ld_sym"
-              ldPar = inputBit "ld_par"
-              ldAddr = input "ld_addr" 6
-              ldSdata = input "ld_sdata" 8
-              ldConst = inputBit "ld_const"
-              ldCdata = input "ld_cdata" 32 }
-
-        let rdSaddr = input "rd_saddr" 6
-        let rdCaddr = input "rd_caddr" 6
-
-        let engine =
-            gepOperatorEngine
-                Opcodes.functionSet
-                [| Opcodes.variable 0; Opcodes.variable 1; Opcodes.variable 2
-                   Opcodes.constant 0; Opcodes.constant 1; Opcodes.constant 2; Opcodes.constant 3 |]
-                17
-                8
-                4
-                3
-                "oe"
-                start
-                sIn
-                rates
-                load
-                rdSaddr
-                rdCaddr
-
-        engine.childSym ==> output "child_sym" 8
-        engine.childConst ==> output "child_const" 32
-        engine.busy ==> outputBit "busy"
-        engine.finished ==> outputBit "done")
+            engine.childSym ==> childSym
+            engine.childConst ==> childConst
+            engine.busy ==> busy
+            engine.finished ==> doneOut)
 
 /// The compiler at ports: a host-loadable gene buffer feeding the FSM, the
 /// record captured in a mem the Sim's PeekMem reads back — the walk the
 /// oracle check and the differential both drive.
 let karvaCompilerWalk =
-    design "GepKarvaCompilerWalk" (fun () ->
-        let loadEn = inputBit "load_en"
-        let loadAddr = input "load_addr" 6
-        let loadData = input "load_data" 8
-        let start = inputBit "start"
-        let busy = outputBit "busy"
-        let doneOut = outputBit "done"
-        let nInstr = output "n_instr" 6
+    defModule
+        "GepKarvaCompilerWalk"
+        (fun p ->
+            (p.inPort "load_en" 1,
+             p.inPort "load_addr" 6,
+             p.inPort "load_data" 8,
+             p.inPort "start" 1,
+             p.outPort "busy" 1,
+             p.outPort "done" 1,
+             p.outPort "n_instr" 6))
+        (fun (loadEn, loadAddr, loadData, start, busy, doneOut, nInstr) ->
+            let geneMem = distributedMem "gene_mem" 6 8
+            memWrite geneMem loadAddr loadData loadEn
 
-        let geneMem = distributedMem "gene_mem" 6 8
-        memWrite geneMem loadAddr loadData loadEn
+            let symData = wire "symData" 8
+            let compiler = gepKarvaCompiler "kc" start symData
+            memRead geneMem compiler.symAddr ==> symData
 
-        let symData = wire "symData" 8
-        let compiler = gepKarvaCompiler "kc" start symData
-        memRead geneMem compiler.symAddr ==> symData
+            let recMem = distributedMem "rec_mem" 6 32
+            memWrite recMem compiler.recAddr compiler.recData compiler.recEn
 
-        let recMem = distributedMem "rec_mem" 6 32
-        memWrite recMem compiler.recAddr compiler.recData compiler.recEn
-
-        compiler.busy ==> busy
-        compiler.finished ==> doneOut
-        compiler.nInstr ==> nInstr)
+            compiler.busy ==> busy
+            compiler.finished ==> doneOut
+            compiler.nInstr ==> nInstr)
 
 /// The plain ALU at ports — the P4 ladder's first rung.
 let gepAluPlain =
-    design "GepAluPipelined32" (fun () ->
-        let op = input "op" 8
-        let a = input "a" 32
-        let b = input "b" 32
-        let result = output "result" 32
-        gepAluPipelined false "alu" op a b ==> result)
+    defModule
+        "GepAluPipelined32"
+        (fun p -> (p.inPort "op" 8, p.inPort "a" 32, p.inPort "b" 32, p.outPort "result" 32))
+        (fun (op, a, b, result) -> gepAluPipelined false "alu" op a b ==> result)
 
 /// The withDiv ALU at ports — the divide arm beside the delay chains.
 let gepAluDiv =
-    design "GepAluPipelinedDiv32" (fun () ->
-        let op = input "op" 8
-        let a = input "a" 32
-        let b = input "b" 32
-        let result = output "result" 32
-        gepAluPipelined true "alu" op a b ==> result)
+    defModule
+        "GepAluPipelinedDiv32"
+        (fun p -> (p.inPort "op" 8, p.inPort "a" 32, p.inPort "b" 32, p.outPort "result" 32))
+        (fun (op, a, b, result) -> gepAluPipelined true "alu" op a b ==> result)
 
 /// Combinational select of variable port idx — a live vector, not a memory.
 let private varMux (vars: Expr list) (idx: Expr) =
@@ -2014,23 +2016,25 @@ let gepUnitEngine
 /// 4 variables, 8 threads, 64 cases, 512 bank words. The check fills real
 /// beats and compares emitted fitnesses against the software evaluation.
 let unitEngineWalk =
-    design "GepUnitEngineWalk" (fun () ->
-        let fill =
-            { beat = input "fill_beat" 128
-              indivEn = inputBit "fill_indiv_en"
-              indivAddr = input "fill_indiv_addr" 7
-              commit = inputBit "fill_commit"
-              unitId = input "fill_unit_id" 32 }
-
-        let caseFill =
-            QueueCases(inputBit "fill_case_en", inputBit "fill_case_sel", input "fill_case_addr" 6)
-
-        let nCases = input "n_cases" 7
-        let mCount = input "m_count" 8
-        let engine = gepUnitEngine 32 4 4 8 64 512 NoDiv "ue" fill caseFill nCases mCount
-        engine.canFill ==> outputBit "can_fill"
-        engine.idle ==> outputBit "idle"
-        streamOutput "res" engine.res)
+    defModule
+        "GepUnitEngineWalk"
+        (fun p ->
+            ({ beat = p.inPort "fill_beat" 128
+               indivEn = p.inPort "fill_indiv_en" 1
+               indivAddr = p.inPort "fill_indiv_addr" 7
+               commit = p.inPort "fill_commit" 1
+               unitId = p.inPort "fill_unit_id" 32 },
+             QueueCases(p.inPort "fill_case_en" 1, p.inPort "fill_case_sel" 1, p.inPort "fill_case_addr" 6),
+             p.inPort "n_cases" 7,
+             p.inPort "m_count" 8,
+             p.outPort "can_fill" 1,
+             p.outPort "idle" 1,
+             streamOutputPorts p "res" (layout3 ("fit", 64) ("unit", 32) ("m", 8))))
+        (fun (fill, caseFill, nCases, mCount, canFill, idle, resPorts) ->
+            let engine = gepUnitEngine 32 4 4 8 64 512 NoDiv "ue" fill caseFill nCases mCount
+            engine.canFill ==> canFill
+            engine.idle ==> idle
+            streamSink resPorts engine.res)
 
 /// The same lane with a divide, at the same ports, once per sharing ratio —
 /// `PerLane` puts the arm in the lane's ALU, `Pooled` puts it behind a
@@ -2046,20 +2050,21 @@ let unitEngineDivWalk (sharing: FuSharing) =
         | PerLane -> "GepUnitEngineDivPerLaneWalk"
         | Pooled -> "GepUnitEngineDivPooledWalk"
 
-    design name (fun () ->
-        let fill =
-            { beat = input "fill_beat" 128
-              indivEn = inputBit "fill_indiv_en"
-              indivAddr = input "fill_indiv_addr" 7
-              commit = inputBit "fill_commit"
-              unitId = input "fill_unit_id" 32 }
-
-        let caseFill =
-            QueueCases(inputBit "fill_case_en", inputBit "fill_case_sel", input "fill_case_addr" 6)
-
-        let nCases = input "n_cases" 7
-        let mCount = input "m_count" 8
-
+    defModule
+        name
+        (fun p ->
+            ({ beat = p.inPort "fill_beat" 128
+               indivEn = p.inPort "fill_indiv_en" 1
+               indivAddr = p.inPort "fill_indiv_addr" 7
+               commit = p.inPort "fill_commit" 1
+               unitId = p.inPort "fill_unit_id" 32 },
+             QueueCases(p.inPort "fill_case_en" 1, p.inPort "fill_case_sel" 1, p.inPort "fill_case_addr" 6),
+             p.inPort "n_cases" 7,
+             p.inPort "m_count" 8,
+             p.outPort "can_fill" 1,
+             p.outPort "idle" 1,
+             streamOutputPorts p "res" (layout3 ("fit", 64) ("unit", 32) ("m", 8))))
+        (fun (fill, caseFill, nCases, mCount, canFill, idle, resPorts) ->
         let laneDiv =
             match sharing with
             | PerLane -> ResidentDiv
@@ -2090,9 +2095,9 @@ let unitEngineDivWalk (sharing: FuSharing) =
         | NoDiv
         | ResidentDiv -> ()
 
-        engine.canFill ==> outputBit "can_fill"
-        engine.idle ==> outputBit "idle"
-        streamOutput "res" engine.res)
+        engine.canFill ==> canFill
+        engine.idle ==> idle
+        streamSink resPorts engine.res)
 
 /// The WarpCPU cluster's breeder block: parents + seed + thresholds →
 /// `gepOperatorEngine` breeds the child → `gepKarvaCompiler` compiles it
@@ -2241,58 +2246,60 @@ let gepBreederBlock
 /// The breeder block at ports, at the deployed geometry — the record-line
 /// stream out through the standard sink, the child readable in DONE.
 let breederBlockWalk =
-    design "GepBreederBlockWalk" (fun () ->
-        let start = inputBit "start"
-        let release = inputBit "rel"
-        let sIn = List.init 4 (fun idx -> input $"s{idx}" 32)
+    defModule
+        "GepBreederBlockWalk"
+        (fun p ->
+            (p.inPort "start" 1,
+             p.inPort "rel" 1,
+             List.init 4 (fun idx -> p.inPort $"s{idx}" 32),
+             { onePoint = p.inPort "th_1p" 32
+               twoPoint = p.inPort "th_2p" 32
+               geneRecomb = p.inPort "th_gr" 32
+               mutation = p.inPort "th_mut" 32
+               constReplace = p.inPort "th_cr" 32
+               creep = p.inPort "th_creep" 32
+               inversion = p.inPort "th_inv" 32
+               isTrans = p.inPort "th_is" 32
+               risTrans = p.inPort "th_ris" 32
+               sigmaFx = p.inPort "sigma_fx" 32
+               rangeFx = p.inPort "range_fx" 32 },
+             { ldSym = p.inPort "ld_sym" 1
+               ldPar = p.inPort "ld_par" 1
+               ldAddr = p.inPort "ld_addr" 6
+               ldSdata = p.inPort "ld_sdata" 8
+               ldConst = p.inPort "ld_const" 1
+               ldCdata = p.inPort "ld_cdata" 32 },
+             p.inPort "rd_saddr" 6,
+             p.inPort "rd_caddr" 6,
+             p.outPort "child_sym" 8,
+             p.outPort "child_const" 32,
+             p.outPort "busy" 1,
+             p.outPort "done" 1,
+             streamOutputPorts p "rec" (layout3 ("line", 128) ("line_idx", 4) ("last", 1))))
+        (fun (start, release, sIn, rates, load, rdSaddr, rdCaddr, childSym, childConst, busy, doneOut, recPorts) ->
+            let block =
+                gepBreederBlock
+                    Opcodes.functionSet
+                    [| Opcodes.variable 0; Opcodes.variable 1; Opcodes.variable 2
+                       Opcodes.constant 0; Opcodes.constant 1; Opcodes.constant 2; Opcodes.constant 3 |]
+                    17
+                    8
+                    4
+                    32
+                    "bb"
+                    start
+                    release
+                    sIn
+                    rates
+                    load
+                    rdSaddr
+                    rdCaddr
 
-        let rates =
-            { onePoint = input "th_1p" 32
-              twoPoint = input "th_2p" 32
-              geneRecomb = input "th_gr" 32
-              mutation = input "th_mut" 32
-              constReplace = input "th_cr" 32
-              creep = input "th_creep" 32
-              inversion = input "th_inv" 32
-              isTrans = input "th_is" 32
-              risTrans = input "th_ris" 32
-              sigmaFx = input "sigma_fx" 32
-              rangeFx = input "range_fx" 32 }
-
-        let load =
-            { ldSym = inputBit "ld_sym"
-              ldPar = inputBit "ld_par"
-              ldAddr = input "ld_addr" 6
-              ldSdata = input "ld_sdata" 8
-              ldConst = inputBit "ld_const"
-              ldCdata = input "ld_cdata" 32 }
-
-        let rdSaddr = input "rd_saddr" 6
-        let rdCaddr = input "rd_caddr" 6
-
-        let block =
-            gepBreederBlock
-                Opcodes.functionSet
-                [| Opcodes.variable 0; Opcodes.variable 1; Opcodes.variable 2
-                   Opcodes.constant 0; Opcodes.constant 1; Opcodes.constant 2; Opcodes.constant 3 |]
-                17
-                8
-                4
-                32
-                "bb"
-                start
-                release
-                sIn
-                rates
-                load
-                rdSaddr
-                rdCaddr
-
-        block.childSym ==> output "child_sym" 8
-        block.childConst ==> output "child_const" 32
-        block.busy ==> outputBit "busy"
-        block.finished ==> outputBit "done"
-        streamOutput "rec" block.rec_)
+            block.childSym ==> childSym
+            block.childConst ==> childConst
+            block.busy ==> busy
+            block.finished ==> doneOut
+            streamSink recPorts block.rec_)
 
 /// The WarpCPU cluster's record router: binds each breeder record stream to a
 /// free unit-engine lane and carries it point-to-point.
@@ -2421,22 +2428,37 @@ let gepRecordRouter
 /// The router at ports: two hand-driven breeder streams, two fake lanes —
 /// the binding, streaming, commit and release choreography observed directly.
 let recordRouterWalk =
-    design "GepRecordRouterWalk" (fun () ->
-        let recLayout = layout3 ("line", 128) ("line_idx", 4) ("last", 1)
-        let recs = [ streamInput "b0_rec" recLayout; streamInput "b1_rec" recLayout ]
-        let entryIds = [ input "b0_entry_id" 32; input "b1_entry_id" 32 ]
-        let canFills = [ inputBit "l0_can_fill"; inputBit "l1_can_fill" ]
-        let router = gepRecordRouter 2 4 "rr" recs entryIds canFills
+    defModule
+        "GepRecordRouterWalk"
+        (fun p ->
+            let recLayout = layout3 ("line", 128) ("line_idx", 4) ("last", 1)
 
-        router.laneFills
-        |> List.iteri (fun l fill ->
-            fill.beat ==> output $"l{l}_fill_beat" 128
-            fill.indivEn ==> outputBit $"l{l}_fill_indiv_en"
-            fill.indivAddr ==> output $"l{l}_fill_indiv_addr" 4
-            fill.commit ==> outputBit $"l{l}_fill_commit"
-            fill.unitId ==> output $"l{l}_fill_unit_id" 32)
+            ([ streamInputPorts p "b0_rec" recLayout; streamInputPorts p "b1_rec" recLayout ],
+             [ p.inPort "b0_entry_id" 32; p.inPort "b1_entry_id" 32 ],
+             [ p.inPort "l0_can_fill" 1; p.inPort "l1_can_fill" 1 ],
+             List.init 2 (fun l ->
+                 (p.outPort $"l{l}_fill_beat" 128,
+                  p.outPort $"l{l}_fill_indiv_en" 1,
+                  p.outPort $"l{l}_fill_indiv_addr" 4,
+                  p.outPort $"l{l}_fill_commit" 1,
+                  p.outPort $"l{l}_fill_unit_id" 32)),
+             p.outPort "streams_active" 2,
+             p.outPort "grant_fire" 1,
+             p.outPort "grant_b" 1,
+             p.outPort "grant_l" 1))
+        (fun (recPorts, entryIds, canFills, laneOuts, streamsActive, grantFire, grantB, grantL) ->
+            let recs = List.map streamSource recPorts
+            let router = gepRecordRouter 2 4 "rr" recs entryIds canFills
 
-        router.streamsActive ==> output "streams_active" 2
-        router.grantFire ==> outputBit "grant_fire"
-        router.grantB ==> outputBit "grant_b"
-        router.grantL ==> outputBit "grant_l")
+            List.zip router.laneFills laneOuts
+            |> List.iter (fun (fill, (beat, indivEn, indivAddr, commit, unitId)) ->
+                fill.beat ==> beat
+                fill.indivEn ==> indivEn
+                fill.indivAddr ==> indivAddr
+                fill.commit ==> commit
+                fill.unitId ==> unitId)
+
+            router.streamsActive ==> streamsActive
+            router.grantFire ==> grantFire
+            router.grantB ==> grantB
+            router.grantL ==> grantL)

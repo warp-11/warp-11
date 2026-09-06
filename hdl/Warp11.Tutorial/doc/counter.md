@@ -13,11 +13,24 @@ inputs and outputs — and inside it, statements that say what drives what. The
 tools that turn a design into a chip take Verilog, so anything you build has to
 end up as Verilog eventually.
 
-**Warp 11 is F# that writes that Verilog for you.** You get a module the same
-way you get a function: `design "Counter"` declares one, `input` and `output`
-declare its ports, and the statements in between wire it up. Every page in this
-tutorial can show you the Verilog it produced — it is the *output*, not
-something you maintain.
+**Warp 11 is F# that writes that Verilog for you.** A module is two things,
+stated separately: its **boundary** and its **contents**. `defModule` takes a
+name, an **io factory** — one function that declares every port and hands them
+back as a value you shape — and a **body**, the statements that wire them up:
+
+```fsharp
+let counter =
+    defModule
+        "Counter"
+        (fun p -> (p.inPort "enable" 1, p.inPort "clear" 1, p.outPort "count" 64))
+        (fun (enable, clear, count) ->
+            ...)
+```
+
+The factory is the *whole* interface — a port cannot appear anywhere else, so
+the box's shape is always readable in one place — and the body receives
+exactly what it declared, by name. Every page in this tutorial can show you
+the Verilog it produced — it is the *output*, not something you maintain.
 
 Two reasons to go through F# rather than write the Verilog directly:
 
