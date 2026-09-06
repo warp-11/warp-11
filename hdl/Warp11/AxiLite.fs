@@ -269,12 +269,6 @@ let axiLiteChannelOn (ports: AxiLiteSlavePorts) (answersAfter: int) : AxiLiteCha
 /// The several-in-flight channel. The write half is the classic one's; the
 /// read half is a different contract, which is why this is a different type
 /// rather than the same one with three fields sometimes meaningless.
-/// The ambient form of [axiLiteChannelOn], for `design` bodies: declares the
-/// boundary at the ambient builder, then runs the same channel. Dies with
-/// `design`.
-let axiLiteChannel (addrWidth: int) (answersAfter: int) : AxiLiteChannel =
-    axiLiteChannelOn (axiLiteSlavePorts (ambientPorts ()) addrWidth) answersAfter
-
 type AxiLiteChannelPipelined =
     { /// Width of a word index.
       wordWidth: int
@@ -386,11 +380,6 @@ let axiLiteChannelPipelinedOn
       word = word
       present = accept
       answer = answer }
-
-/// The ambient form of [axiLiteChannelPipelinedOn], for `design` bodies. Dies
-/// with `design`.
-let axiLiteChannelPipelined (addrWidth: int) (answersAfter: int) (maxOutstanding: int) : AxiLiteChannelPipelined =
-    axiLiteChannelPipelinedOn (axiLiteSlavePorts (ambientPorts ()) addrWidth) answersAfter maxOutstanding
 
 /// A read source has to have its answer by the time the channel samples RDATA.
 ///
@@ -559,10 +548,3 @@ let axiLiteSlaveOn
     (memWindows: (uint64 * Mem) list)
     : Expr list =
     axiLiteSlaveFullOn ports [] writeRegs readValues memWindows |> snd
-
-/// The ambient forms, for `design` bodies. They die with `design`.
-let axiLiteSlaveFull addrWidth pulseRegs writeRegs readValues memWindows =
-    axiLiteSlaveFullOn (axiLiteSlavePorts (ambientPorts ()) addrWidth) pulseRegs writeRegs readValues memWindows
-
-let axiLiteSlave addrWidth writeRegs readValues memWindows =
-    axiLiteSlaveOn (axiLiteSlavePorts (ambientPorts ()) addrWidth) writeRegs readValues memWindows

@@ -452,12 +452,6 @@ let regMapSlave (ports: AxiLiteSlavePorts) (m: RegMap) : SlaveRegs =
             p.port
       irq = irqLevel }
 
-/// The ambient form of [regMapSlave], for `design` bodies: declares the
-/// boundary at the ambient builder, sized by the map's aperture. Dies with
-/// `design`.
-let axiLiteSlaveOf (m: RegMap) : SlaveRegs =
-    regMapSlave (axiLiteSlavePorts (ambientPorts ()) m.apertureAddrWidth) m
-
 let private upperSnake (name: string) =
     [ for i, c in Seq.indexed name do
           if System.Char.IsUpper c && i > 0 then yield '_'

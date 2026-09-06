@@ -1446,12 +1446,6 @@ let axiReadBusOf (ports: AxiReadBusPorts) : AxiReadBus =
       rready = ports.rready
       claimed = ref false }
 
-let axiReadBusNamed (prefix: string) (addrWidth: int) (dataWidth: int) : AxiReadBus =
-    axiReadBusOf (axiReadBusPorts (ambientPorts ()) prefix addrWidth dataWidth)
-
-/// The conventional `m_axi` read boundary.
-let axiReadBus (addrWidth: int) (dataWidth: int) = axiReadBusNamed "m_axi" addrWidth dataWidth
-
 /// Every wire of a write boundary, as an io factory declares it — the AW/W/B
 /// mirror of [AxiReadBusPorts]. `axiWriteBusOf` in the body ties the
 /// constants: one beat per burst, INCR, WLAST always, cache and prot zero.
@@ -1532,12 +1526,6 @@ let axiWriteBusOf (ports: AxiWriteBusPorts) : AxiWriteBus =
       bvalid = ports.bvalid
       bready = ports.bready
       claimed = ref false }
-
-let axiWriteBusNamed (prefix: string) (addrWidth: int) (dataWidth: int) : AxiWriteBus =
-    axiWriteBusOf (axiWriteBusPorts (ambientPorts ()) prefix addrWidth dataWidth)
-
-/// The conventional `m_axi` write boundary.
-let axiWriteBus (addrWidth: int) (dataWidth: int) = axiWriteBusNamed "m_axi" addrWidth dataWidth
 
 /// The beat an AXI write master consumes: where it goes, the data, which bytes.
 let axiWriteBeatLayout (addrWidth: int) (dataWidth: int) : Layout<Expr * Expr * Expr> =

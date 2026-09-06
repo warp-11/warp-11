@@ -706,65 +706,15 @@ let defModule name (io: Ports -> 'io) (body: 'io -> unit) : TypedModule<'io> = d
 let defModuleClocked (spec: ClockSpec) name (io: Ports -> 'io) (body: 'io -> unit) : TypedModule<'io> =
     defModuleWith (Builder(name, spec)) io body
 
-let private designWith (b: Builder) (body: unit -> unit) =
-    elaborating.Value.Push b
-
-    try
-        body ()
-    finally
-        elaborating.Value.Pop() |> ignore
-
-    b.Def
-
-/// Elaborate a top-level design. The body is ordinary code with the module
-/// ambient, and the result is what the emitter, the simulator and the debugger
-/// all take.
-///
-/// **Don't use this in new code — define a `defModule` and take `.def`**
-/// (Jason, 2026-08-30). A `defModule` is everything `design` is (its `.def`
-/// is the same `ModuleDef`) plus a typed port bundle and the ability to be
-/// instantiated later, and one way of writing a top means the next reader
-/// learns one form. `design` stays for the existing catalog, which is not
-/// worth a churn sweep; convert entries as they are opened for other reasons.
-let design name (body: unit -> unit) = designWith (Builder(name)) body
-
-/// A design with named clock/reset ports — `designClocked axiClock` is how an
-/// AXI wrapper gets `s_axi_aclk`/`s_axi_aresetn` on its boundary.
-let designClocked spec name (body: unit -> unit) = designWith (Builder(name, spec)) body
-
 // The public seams, taking a type. Public because the declaration functions
 // below are `inline` — an inline body has to reach what it calls — while the
 // ambient builder itself stays internal.
-/// Declare an input port at a ground type. `input` is the spelling to reach
-/// for; this is the seam under it.
-let declareInput name (t: GroundType) = (current ()).Input(name, t)
-/// Declare an output port at a ground type.
-let declareOutput name (t: GroundType) = (current ()).Output(name, t)
-
-/// The ambient boundary as a `Ports` record — what lets a legacy `design`
-/// body hand an io-factory former the same four declaration doors the factory
-/// would get. Exists so a former written for the factory can be wrapped for
-/// `design` without duplicating a line; dies with `design`.
-let internal ambientPorts () : Ports =
-    { inPort = fun n w -> declareInput n (UInt w)
-      outPort = fun n w -> declareOutput n (UInt w)
-      inPortAs = declareInput
-      outPortAs = declareOutput }
 /// Declare a wire at a ground type.
 let declareWire name (t: GroundType) = (current ()).Wire(name, t)
 /// Declare a register at a ground type, with the value it takes under reset.
 let declareReg name (t: GroundType) init = (current ()).Reg(name, t, init)
 /// Declare a register that reset does not reach.
 let declareRegNoReset name (t: GroundType) = (current ()).RegNoReset(name, t)
-
-/// Declare a port, wire or register. The second argument is a width — meaning
-/// unsigned, as it always did — or a type:
-///
-///     let count = input "count" 8            // UInt 8
-///     let sample = input "sample" (SInt 16)  // signed, and `mul` knows it
-let inline input name spec = declareInput name (AsType $ spec)
-/// An output port, at a width or a type.
-let inline output name spec = declareOutput name (AsType $ spec)
 
 /// A port bundle's field, read: `Input` and `Output` are `Expr` — direction is
 /// enforced at elaboration (recorded when the port is declared, checked at
@@ -780,7 +730,12 @@ type Input = Expr
 
 /// The output half of the pair — see [Input].
 type Output = Expr
-/// A wire, at a width or a type.
+
+/// Declare a wire. The second argument is a width — meaning unsigned, as it
+/// always did — or a type:
+///
+///     let sum = wire "sum" 9
+///     let sample = wire "sample" (SInt 16)  // signed, and `mul` knows it
 let inline wire name spec = declareWire name (AsType $ spec)
 
 /// A register that resets to zero — which measured as 98.6% of every register
@@ -796,29 +751,16 @@ let inline regInit name spec init = declareReg name (AsType $ spec) init
 /// bit wide, and these say so in the name rather than in a trailing `1` —
 /// which also keeps "forgot the width" a compile error on the sized forms
 /// instead of a silent one-bit default.
-let inputBit name = declareInput name (UInt 1)
-/// A one-bit output port.
-let outputBit name = declareOutput name (UInt 1)
-/// A one-bit wire.
 let wireBit name = declareWire name (UInt 1)
 /// A one-bit register, resetting to zero.
 let regBit name = declareReg name (UInt 1) 0UL
 
-/// A 2D grid of one-bit input ports. `inputArray "g" 3 3` declares nine ports
-/// named `g_0_0` through `g_2_2` and returns them as `Expr list list` indexed
-/// `grid[y][x]`. The emitted Verilog is flat `input g_0_0; input g_0_1; ...` —
-/// this is sugar at the F# level, not a Verilog packed array.
-let inputArray name rows cols =
-    [ for y in 0 .. rows - 1 -> [ for x in 0 .. cols - 1 -> inputBit $"{name}_{y}_{x}" ] ]
-/// A 2D grid of one-bit output ports. Same shape as `inputArray` for the
-/// output direction.
-let outputArray name rows cols =
-    [ for y in 0 .. rows - 1 -> [ for x in 0 .. cols - 1 -> outputBit $"{name}_{y}_{x}" ] ]
-
-/// `inputArray` for a module bundle: declared through the `Ports` factory, so
-/// the grid exists in both worlds — real ports at definition, staging nets at
-/// every instantiation — and the cells carry a width, where the design-level
-/// grid is one-bit. Ports are `{name}_{y}_{x}`, the result indexed `[y][x]`.
+/// A 2D grid of ports, declared through the `Ports` factory so the grid
+/// exists in both worlds — real ports at definition, staging nets at every
+/// instantiation. `inPortArray p "g" 3 3 1` declares nine ports named
+/// `g_0_0` through `g_2_2`, returned as `Expr list list` indexed `[y][x]`;
+/// the emitted Verilog is flat `input g_0_0; ...`, sugar at the F# level
+/// rather than a packed array.
 let inPortArray (p: Ports) name rows cols width =
     [ for y in 0 .. rows - 1 -> [ for x in 0 .. cols - 1 -> p.inPort $"{name}_{y}_{x}" width ] ]
 

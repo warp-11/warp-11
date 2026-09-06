@@ -174,12 +174,9 @@ let reinterpret (target: NumberFormat) (x: Number) : Number =
 
     ofBits target x.bits
 
-/// A design input at a format. The port is declared signed or not, so the
-/// interpretation survives into the IR rather than being reapplied at each use.
-let input name (fmt: NumberFormat) : Number = ofBits fmt (Dsl.input name (groundType fmt))
-
-/// The io-factory form of [input]: the same port, declared through the
-/// factory's receiver.
+/// A module input at a format, declared through the io factory's receiver.
+/// The port is declared signed or not, so the interpretation survives into
+/// the IR rather than being reapplied at each use.
 let inPort (p: Ports) name (fmt: NumberFormat) : Number = ofBits fmt (p.inPortAs name (groundType fmt))
 
 /// Land a value in a named wire, keeping its format. This is how a computed

@@ -132,9 +132,9 @@ let private crossLinksResolve () =
 /// claim is true for every input, which is what a good assertion is, and a
 /// claim that cannot fail cannot demonstrate failing. This one can.
 let private brokenClaim =
-    design "BrokenClaim" (fun () ->
-        let x = input "x" 8
-        let y = output "y" 8
+    moduleDef "BrokenClaim" (fun m ->
+        let x = m.Input("x", 8)
+        let y = m.Output("y", 8)
         assertThat (eq x (lit 0UL 8)) "x must be zero"
         x ==> y)
 

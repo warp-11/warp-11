@@ -66,29 +66,6 @@ let rec streamMergeTree (streams: Stream<'p> list) : Stream<'p> =
             | _ -> failwith "chunkBySize 2 gave a bigger chunk")
         |> streamMergeTree
 
-/// A design-level stream source: one input port per field plus valid; ready leaves
-/// as an output port.
-let streamInput name (layout: Layout<'p>) : Stream<'p> =
-    let ready = outputBit $"{name}_ready"
-    (current ()).RegisterStreamReady ready
-
-    { payload = layout.unpack [ for n, w in layout.fields -> input $"{name}_{n}" w ]
-      valid = inputBit $"{name}_valid"
-      ready = ready
-      layout = layout }
-
-/// A design-level stream sink — the consumer of `s`, driving its ready. Port
-/// names and widths come from the stream's own layout.
-let streamOutput name (s: Stream<'p>) =
-    for (n, w), value in List.zip s.layout.fields (s.layout.pack s.payload) do
-        let o = output $"{name}_{n}" w
-        value ==> o
-
-    let valid = outputBit $"{name}_valid"
-    let ready = inputBit $"{name}_ready"
-    s.valid ==> valid
-    ready ==> s.ready
-
 /// One stream's ports on a module boundary, grouped: the payload word, its
 /// valid, and the ready that answers it. Which side of the handshake each wire
 /// is on is decided by the declaring helper, not the record — the same bundle
@@ -112,9 +89,9 @@ let streamOutPorts (p: Ports) prefix payloadWidth : StreamPorts =
       valid = p.outPort $"{prefix}_valid" 1
       ready = p.inPort $"{prefix}_ready" 1 }
 
-/// A module body's view of its input port group as a real `Stream` — the
-/// body-side twin of `streamInput`, so inside a module the stream API is the
-/// same one a design body speaks. Multi-field payloads unpack from the packed
+/// A module body's view of its input port group as a real `Stream`, so
+/// inside a module the stream API is the same one a top's body speaks.
+/// Multi-field payloads unpack from the packed
 /// data word, first field at the most significant end (the `catAll` order).
 let streamOfPorts (layout: Layout<'p>) (ports: StreamPorts) : Stream<'p> =
     (current ()).RegisterStreamReady ports.ready
@@ -132,8 +109,8 @@ let streamOfPorts (layout: Layout<'p>) (ports: StreamPorts) : Stream<'p> =
       ready = ports.ready
       layout = layout }
 
-/// The consuming end: land a `Stream` on the module's output port group — the
-/// body-side twin of `streamOutput`. Packs the payload into the one data word,
+/// The consuming end: land a `Stream` on the module's output port group.
+/// Packs the payload into the one data word,
 /// drives valid, and hands the consumer's ready back to the stream.
 let streamToPorts (ports: StreamPorts) (s: Stream<'p>) =
     match s.layout.pack s.payload with
@@ -143,9 +120,9 @@ let streamToPorts (ports: StreamPorts) (s: Stream<'p>) =
     s.valid ==> ports.valid
     ports.ready ==> s.ready
 
-/// A consumed stream's boundary at one port per layout field — the io-factory
-/// twin of the design-level `streamInput`, for tops whose payload should stay
-/// per-field at the ports rather than packed into one data word. The typed
+/// A consumed stream's boundary at one port per layout field, for tops whose
+/// payload should stay per-field at the ports rather than packed into one
+/// data word. The typed
 /// payload rides the record straight from the factory (unpacking is pure);
 /// `streamSource` in the body is what makes it a live `Stream`.
 type StreamInputPorts<'p> =
@@ -982,9 +959,6 @@ let streamExport (portPayload: 'p) (portValid: Expr) (portReady: Expr) (s: Strea
 // boundary.
 
 module Stream =
-    /// A design-level source with its layout attached.
-    let input name (l: Layout<'p>) : Stream<'p> = streamInput name l
-
     /// A combinational payload transform, zero cost — shape-preserving:
     /// names kept, widths refreshed from the mapped exprs.
     let map (f: 'p -> 'p) (s: Stream<'p>) : Stream<'p> = streamMap f s
@@ -1129,10 +1103,6 @@ module Stream =
     let pipeline3 (a: StageSpec<'a, 'b>) (b: StageSpec<'b, 'c>) (c: StageSpec<'c, 'd>) (s: Stream<'a>) : Stream<'d> =
         runSpec (runSpec (runSpec s a) b) c
 
-    /// Land the stream on named design outputs. The boundary is where a name
-    /// is created, so the name is the one thing a chain still says.
-    let out (name: string) (s: Stream<'p>) = streamOutput name s
-
 // ---------------------------------------------------------------------------
 // Flow — the valid-only half. See `Flow<'p>` in Layout.fs for when it is the
 // honest type and when it is an excuse.
@@ -1198,19 +1168,3 @@ let flowStage (name: string) (f: Flow<'p>) : Flow<'p> =
     { payload = f.layout.unpack fields
       valid = validR
       layout = f.layout }
-
-/// A design-level flow source: ports in, no ready to declare.
-let flowInput name (layout: Layout<'p>) : Flow<'p> =
-    { payload = layout.unpack [ for n, w in layout.fields -> input $"{name}_{n}" w ]
-      valid = inputBit $"{name}_valid"
-      layout = layout }
-
-/// A design-level flow sink. Nothing is driven back — which is the shape, and
-/// the reason a flow crossing a module boundary costs one direction of wires.
-let flowOutput name (f: Flow<'p>) =
-    for (n, w), value in List.zip f.layout.fields (f.layout.pack f.payload) do
-        let o = output $"{name}_{n}" w
-        value ==> o
-
-    let valid = outputBit $"{name}_valid"
-    f.valid ==> valid

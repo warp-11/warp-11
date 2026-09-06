@@ -1426,11 +1426,13 @@ let private elaborationGate () =
     //    harness included) and `moduleDef` are the unsealed legacy carriers.
     let portInBodyRefused =
         try
+            // The sneak the seal exists for: a factory stashed past its own
+            // extent, called from body depth.
             defModule
                 "GateSealed"
-                (fun p -> p.outPort "out" 8)
-                (fun out ->
-                    let a = input "a" 8
+                (fun p -> (p, p.outPort "out" 8))
+                (fun (stashed, out) ->
+                    let a = stashed.inPort "a" 8
                     a ==> out)
             |> ignore
 
@@ -1965,9 +1967,9 @@ let private ifElseLadders () =
     //    the fold changes underneath.
     let handNested =
         moduleDef "IfElseLadder" (fun m ->
-            let x = input "x" 8
-            let band = output "band" 8
-            let held = output "held" 8
+            let x = m.Input("x", 8)
+            let band = m.Output("band", 8)
+            let held = m.Output("held", 8)
 
             lit 0UL 8 ==> band
             lit 0UL 8 ==> held
@@ -2000,9 +2002,9 @@ let private ifElseLadders () =
     //    the syntax, so the shapes around it are what a fold gets wrong: an
     //    absent else, an else that is the only arm, an empty ladder, and an
     //    `otherwise` that something was written below.
-    let refuses body =
+    let refuses (body: Builder -> unit) =
         try
-            moduleDef "Refused" (fun _ -> body ()) |> ignore
+            moduleDef "Refused" body |> ignore
             false
         with _ ->
             true
@@ -2035,14 +2037,14 @@ let private ifElseLadders () =
         emitDesign viaLadder.def = emitDesign written.def
 
     // An empty ladder drives nothing, which is a bug rather than an identity.
-    let refusesEmpty = refuses (fun () -> ifElse [])
+    let refusesEmpty = refuses (fun _ -> ifElse [])
 
     // And an arm below `otherwise` can never run, so it is refused rather than
     // elaborated into silicon nothing reaches.
     let refusesUnreachableArm =
-        refuses (fun () ->
-            let c = inputBit "c"
-            let out = output "out" 8
+        refuses (fun m ->
+            let c = m.Input("c", 1)
+            let out = m.Output("out", 8)
             lit 0UL 8 ==> out
 
             ifElse [ (otherwise, fun () -> lit 1UL 8 ==> out)
