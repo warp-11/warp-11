@@ -306,6 +306,48 @@ let rec internal needsClk m =
            | _ -> false)
     || m.instances |> List.exists (fun i -> needsClk i.child)
 
+/// The silicon a design is being emitted for.
+///
+/// This exists for one reason: **a memory's storage declaration does not mean
+/// the same thing on every part.** `Distributed` says "LUT RAM" — and a
+/// Lattice iCE40 has no LUT-RAM primitive at all, so yosys refuses the design
+/// outright:
+///
+/// ```
+/// found attribute 'ram_style = distributed' on memory …, forced mapping to distributed RAM
+/// ERROR: no valid mapping found for memory …
+/// ```
+///
+/// Everything else about the emitted Verilog is target-neutral, so this is a
+/// narrow parameter rather than a backend split, and it stays that way until
+/// something measured says otherwise.
+///
+/// **`Ice40` refuses `Distributed` rather than dropping the attribute**, which
+/// is the whole point. Dropping it looks like the obvious fix and is a silent
+/// corruption: with the attribute gone, yosys maps a combinational read into
+/// sync-read EBR and the design is a cycle wrong on silicon while simulation
+/// and Verilator — which both honour the RTL — pass. That is the same class of
+/// bug the storage declarations were introduced to prevent, so throwing the
+/// declaration away to satisfy the toolchain would undo their reason for
+/// existing. A design that wants a memory on iCE40 says `blockMem` and reaches
+/// it through `memReadPort`, owning the read's cycle where it can see it.
+///
+/// `(* ram_style = "block" *)` is **not** Vivado-specific and is emitted for
+/// every target: yosys understands it and honours it, reporting *"found
+/// attribute 'ram_style = block' … forced mapping to block RAM"*. Measured, not
+/// assumed — it was the reason to check rather than to strip.
+///
+/// Deliberately not here yet: **ECP5**. It also refuses `Distributed`, but for
+/// a different reason — `TRELLIS_DPR16X4` exists and a *ROM* cannot map to it,
+/// having no write port — and whether a distributed `mem` maps is untested. A
+/// case that cannot be specified from measurement does not belong in the type.
+type Target =
+    /// Vivado, UltraScale+ and friends. What every existing call site means,
+    /// and what `emitDesign` still does.
+    | Xilinx
+    /// Lattice iCE40 through yosys.
+    | Ice40
+
 /// One module's Verilog. Instances are emitted as instantiations, not inlined,
 /// so the emitted hierarchy is the elaborated one.
 ///
@@ -319,7 +361,7 @@ let rec internal needsClk m =
 /// design — and it runs `emitDesign` first anyway, for the checks. That is why
 /// this is `internal`: there is no use for it outside this assembly, and while
 /// it was public the docs taught it by mistake.
-let internal emitVerilog m =
+let internal emitVerilogFor (target: Target) m =
     let isReg n =
         m.decls
         |> List.exists (function
@@ -394,11 +436,22 @@ let internal emitVerilog m =
               // read means on silicon what it means here.
               | Memory(n, aw, w, _, style) ->
                   let attribute =
-                      match style with
-                      | Unspecified -> ""
-                      | Distributed -> "(* ram_style = \"distributed\" *) "
-                      | Block -> "(* ram_style = \"block\" *) "
-                      | Ultra -> "(* ram_style = \"ultra\" *) "
+                      match target, style with
+                      | _, Unspecified -> ""
+                      // `block` is portable: yosys honours it too, so it is
+                      // emitted whatever the target.
+                      | _, Block -> "(* ram_style = \"block\" *) "
+                      | Xilinx, Distributed -> "(* ram_style = \"distributed\" *) "
+                      | Xilinx, Ultra -> "(* ram_style = \"ultra\" *) "
+                      // Refused, not dropped — see `Target`. Dropping the
+                      // attribute is what puts a combinational read into
+                      // sync-read block RAM without anything saying so.
+                      | Ice40, Distributed ->
+                          failwith
+                              $"memory '{n}' in '{m.name}' is a distributedMem/distributedRom, and iCE40 has no LUT-RAM primitive — yosys refuses the design. Declare it blockMem/blockRom and read it through memReadPort, which owns the extra cycle; dropping the storage declaration instead would land a combinational read in sync-read EBR, a cycle wrong on silicon while the Sim and Verilator pass"
+                      | Ice40, Ultra ->
+                          failwith
+                              $"memory '{n}' in '{m.name}' is an ultraMem, which is Xilinx UltraRAM and has no iCE40 counterpart. Declare it blockMem — an iCE40 EBR is 4 kbit, so check the array still fits"
 
                   yield $"    {attribute}reg {range w}{n} [0:%d{(1 <<< aw) - 1}];"
               | _ -> ()
@@ -699,7 +752,7 @@ let checkRomWrites m =
 ///
 /// Modules are deduplicated by name, so a definition instantiated forty times
 /// is emitted once.
-let emitDesign m =
+let emitDesignFor (target: Target) m =
     let perModule =
         [ for md in allModules m |> List.distinct do
               yield! checkWidths md
@@ -713,5 +766,13 @@ let emitDesign m =
 
     allModules m
     |> List.distinctBy (fun c -> c.name)
-    |> List.map emitVerilog
+    |> List.map (emitVerilogFor target)
     |> String.concat "\n\n"
+
+/// The design, for Xilinx — which is what every call site meant before there
+/// was a choice, and what the committed `hardware/build/*.v` are.
+///
+/// F# let-bound functions cannot take optional parameters, so the two-function
+/// shape is what keeps ~200 call sites untouched. Reach for `emitDesignFor`
+/// only when the target is not Vivado.
+let emitDesign m = emitDesignFor Xilinx m

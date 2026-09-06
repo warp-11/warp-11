@@ -135,7 +135,7 @@ let writeDiff (designs: ModuleDef list) (outDir: string) =
         designs
         |> List.collect allModules
         |> List.distinctBy (fun c -> c.name)
-        |> List.map emitVerilog
+        |> List.map (emitVerilogFor Xilinx)
         |> String.concat "\n\n"
 
     System.IO.File.WriteAllText(System.IO.Path.Combine(outDir, "modules.v"), moduleText + "\n")
