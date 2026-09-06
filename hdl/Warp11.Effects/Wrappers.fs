@@ -150,6 +150,35 @@ let private driveCodec (pins: CodecPorts) mclkPin sclkPin lrclkPin serial =
     lrclkPin ==> pins.lrclk
     serial ==> pins.sdin
 
+/// The A/D converter's own clock pins.
+///
+/// The Pmod I2S2's two converters are **separate chips on separate connector
+/// rows**, each with its own MCLK/LRCK/SCLK input — the DAC on J2.1-4, the ADC
+/// on J2.7-10. One clock generator drives both, but the pins are physically
+/// distinct and all six have to be driven.
+///
+/// A design that only transmits (`audioToneAxi`) does not declare these, and
+/// its `.xdc` binds four pins to match. Every design that *receives* does, and
+/// omitting them is what kept `audioPassthruAxi`, `audioGainAxi` and
+/// `audioEffectsAxi` from building for the board: their constraint files bind
+/// eight pins against five declared ones, so the ADC sat unclocked.
+type AdcClockPorts =
+    { mclk2: Output
+      sclk2: Output
+      lrclk2: Output }
+
+let adcClockPorts (p: Ports) : AdcClockPorts =
+    { mclk2 = p.outPort "mclk2" 1
+      sclk2 = p.outPort "sclk2" 1
+      lrclk2 = p.outPort "lrclk2" 1 }
+
+/// The same three clocks the DAC gets. Receiver and transmitter share one
+/// frame, so they must share one clock — a second generator would drift.
+let private driveAdcClocks (pins: AdcClockPorts) mclkPin sclkPin lrclkPin =
+    mclkPin ==> pins.mclk2
+    sclkPin ==> pins.sclk2
+    lrclkPin ==> pins.lrclk2
+
 /// Tone generator straight into the transmitter — no receiver, because there
 /// is nothing to receive. The smallest thing that makes noise on the board.
 let audioToneAxi =
@@ -177,8 +206,9 @@ let audioPassthruAxi =
         (fun p ->
             (axiLiteSlavePorts p passthruMap.map.apertureAddrWidth,
              p.inPort "sdout" 1,
-             codecPorts p))
-        (fun (slavePorts, sdout, pins) ->
+             codecPorts p,
+             adcClockPorts p))
+        (fun (slavePorts, sdout, pins, adcPins) ->
         let regs = regMapSlave slavePorts passthruMap.map
         let clocks = instanceNamed "clocks" (i2sMasterDefault "I2sMaster")
 
@@ -205,7 +235,8 @@ let audioPassthruAxi =
                 payload = (mux muted (lit 0UL sampleWidth) left, mux muted (lit 0UL sampleWidth) right) }
 
         let serial = i2sTx "I2sTx" "tx" clocks.sclkTxTick clocks.lrclk gated
-        driveCodec pins clocks.mclk clocks.sclk clocks.lrclk serial)
+        driveCodec pins clocks.mclk clocks.sclk clocks.lrclk serial
+        driveAdcClocks adcPins clocks.mclk clocks.sclk clocks.lrclk)
 
 /// Line in, master volume, line out.
 let audioGainAxi =
@@ -215,8 +246,9 @@ let audioGainAxi =
         (fun p ->
             (axiLiteSlavePorts p gainMap.map.apertureAddrWidth,
              p.inPort "sdout" 1,
-             codecPorts p))
-        (fun (slavePorts, sdout, pins) ->
+             codecPorts p,
+             adcClockPorts p))
+        (fun (slavePorts, sdout, pins, adcPins) ->
         let regs = regMapSlave slavePorts gainMap.map
         let clocks = instanceNamed "clocks" (i2sMasterDefault "I2sMaster")
 
@@ -228,7 +260,8 @@ let audioGainAxi =
             |> gain
             |> i2sTx "I2sTx" "tx" clocks.sclkTxTick clocks.lrclk
 
-        driveCodec pins clocks.mclk clocks.sclk clocks.lrclk serial)
+        driveCodec pins clocks.mclk clocks.sclk clocks.lrclk serial
+        driveAdcClocks adcPins clocks.mclk clocks.sclk clocks.lrclk)
 
 /// The full chain: volume, one EQ band, a compressor and a brick-wall limiter,
 /// every stage host-controlled and every default a no-op.
@@ -239,8 +272,9 @@ let audioEffectsAxi =
         (fun p ->
             (axiLiteSlavePorts p effectsMap.map.apertureAddrWidth,
              p.inPort "sdout" 1,
-             codecPorts p))
-        (fun (slavePorts, sdout, pins) ->
+             codecPorts p,
+             adcClockPorts p))
+        (fun (slavePorts, sdout, pins, adcPins) ->
         let regs = regMapSlave slavePorts effectsMap.map
         let clocks = instanceNamed "clocks" (i2sMasterDefault "I2sMaster")
 
@@ -270,4 +304,5 @@ let audioEffectsAxi =
             |> limiter
             |> i2sTx "I2sTx" "tx" clocks.sclkTxTick clocks.lrclk
 
-        driveCodec pins clocks.mclk clocks.sclk clocks.lrclk serial)
+        driveCodec pins clocks.mclk clocks.sclk clocks.lrclk serial
+        driveAdcClocks adcPins clocks.mclk clocks.sclk clocks.lrclk)

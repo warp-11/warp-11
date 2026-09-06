@@ -254,17 +254,25 @@ cd hardware/vivado && vivado -stack 2000 -mode batch -source build_audio_tone_ax
 cd ../xmutil && ./package_audio_tone.sh
 ```
 
-### The receiving designs — one real gap
+### The receiving designs — fixed 2026-09-06
 
-`audioPassthruAxi`, `audioGainAxi` and `audioEffectsAxi` still do not build, and
-it is **not** a filename this time.
+`audioPassthruAxi`, `audioGainAxi` and `audioEffectsAxi` did not build, and it
+was **not** a filename this time.
 
-**The ADC side is unclocked.** The Pmod I2S2's converters are separate chips
-with separate clock inputs, and `audio_gain_pins.xdc` / `audio_passthru_pins.xdc`
-bind eight pins — `mclk2`, `sclk2`, `lrclk2` for the ADC and `sdout` — where
-`codecPins` drives only the DAC's four and takes `sdout` as an input. The ADC's
-three clocks would be left undriven. Fixing it means `codecPins` driving all six
-clock pins, which is a change to the design rather than to a build script.
+**The ADC side was unclocked.** The Pmod I2S2's converters are separate chips on
+separate connector rows with separate clock inputs — the DAC on J2.1-4, the ADC
+on J2.7-10 — so `audio_gain_pins.xdc` / `audio_passthru_pins.xdc` bind eight
+pins, including `mclk2` / `sclk2` / `lrclk2` for the ADC. `codecPorts` declared
+only the DAC's four plus `sdout` as an input, leaving the ADC's three clocks
+undriven and the constraint files referring to ports that did not exist.
+
+Fixed by `adcClockPorts` / `driveAdcClocks` beside the existing pair: the three
+receiving designs now declare all seven output pins and drive the ADC's three
+from the same generator as the DAC's, since receiver and transmitter share one
+frame and a second generator would drift. `audioToneAxi` is untouched — it only
+transmits, its `.xdc` binds four pins, and its emitted Verilog is byte-identical
+across the change. The BD scripts already expected seven
+(`foreach p {mclk lrclk sclk sdin mclk2 lrclk2 sclk2}`), so nothing there moved.
 
 There is also no `audio-effects` xmutil app — only `audio-tone`, `audio-gain`
 and `audio-passthru` exist, and they predate this code.
