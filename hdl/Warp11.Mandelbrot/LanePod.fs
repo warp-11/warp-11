@@ -213,7 +213,11 @@ let mandelLanePod (width: int) (height: int) (maxIter: int) (fracBits: int) (nTh
 /// maxIter 8, so a whole frame renders in a couple thousand Sim cycles. The
 /// 102-bit run port also puts the wide-stimulus testbench path to work.
 let mandelLanePodHarness =
-    design "MandelLanePodHarness" (fun () ->
-        let run = streamInput "run" (layout1 ("data", lanePodRunWidth 16 4))
-        let res = mandelLanePod 16 4 8 28 8 "pod" run
-        streamOutput "res" res)
+    defModule
+        "MandelLanePodHarness"
+        (fun p ->
+            (streamInputPorts p "run" (layout1 ("data", lanePodRunWidth 16 4)),
+             streamOutputPorts p "res" (layout2 ("addr", lanePodAddrWidth 16 4) ("beat", 128))))
+        (fun (runPorts, resPorts) ->
+            let res = mandelLanePod 16 4 8 28 8 "pod" (streamSource runPorts)
+            streamSink resPorts res)

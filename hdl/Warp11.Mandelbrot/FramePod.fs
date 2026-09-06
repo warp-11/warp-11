@@ -215,49 +215,55 @@ let mandelFramePipeline
 /// live): the living check renders the whole frame bit-exact against the
 /// twin; the oracle throws random starts, views and backpressure at it.
 let mandelFramePodHarness =
-    design "MandelFramePodHarness" (fun () ->
-        let start = inputBit "start"
-        let cxOrigin = input "cxOrigin" 32
-        let cyOrigin = input "cyOrigin" 32
-        let dx = input "dx" 32
-        let dy = input "dy" 32
+    defModule
+        "MandelFramePodHarness"
+        (fun p ->
+            (p.inPort "start" 1,
+             p.inPort "cxOrigin" 32,
+             p.inPort "cyOrigin" 32,
+             p.inPort "dx" 32,
+             p.inPort "dy" 32,
+             p.outPort "busy" 1,
+             p.outPort "frameDone" 1,
+             streamOutputPorts p "beat" (frameBeatLayout 16 4)))
+        (fun (start, cxOrigin, cyOrigin, dx, dy, busyOut, doneOut, beatPorts) ->
+            let beats =
+                frameCmdStream start cxOrigin cyOrigin dx dy
+                |> mandelFramePipeline 16 4 8 28 8 2
 
-        let beats =
-            frameCmdStream start cxOrigin cyOrigin dx dy
-            |> mandelFramePipeline 16 4 8 28 8 2
+            let out, busy, frameDone =
+                mandelFrameGatherer 16 4 "gather" start beats
 
-        let out, busy, frameDone =
-            mandelFrameGatherer 16 4 "gather" start beats
-
-        let busyOut = outputBit "busy"
-        busy ==> busyOut
-        let doneOut = outputBit "frameDone"
-        frameDone ==> doneOut
-        streamOutput "beat" out)
+            busy ==> busyOut
+            frameDone ==> doneOut
+            streamSink beatPorts out)
 
 /// The degenerate scale: numLanes = 1, where dispatch and merge both shortcut
 /// to direct connections — the same frame must render through no arbiter at
 /// all.
 let mandelFramePodHarness1 =
-    design "MandelFramePodHarness1" (fun () ->
-        let start = inputBit "start"
-        let cxOrigin = input "cxOrigin" 32
-        let cyOrigin = input "cyOrigin" 32
-        let dx = input "dx" 32
-        let dy = input "dy" 32
+    defModule
+        "MandelFramePodHarness1"
+        (fun p ->
+            (p.inPort "start" 1,
+             p.inPort "cxOrigin" 32,
+             p.inPort "cyOrigin" 32,
+             p.inPort "dx" 32,
+             p.inPort "dy" 32,
+             p.outPort "busy" 1,
+             p.outPort "frameDone" 1,
+             streamOutputPorts p "beat" (frameBeatLayout 16 4)))
+        (fun (start, cxOrigin, cyOrigin, dx, dy, busyOut, doneOut, beatPorts) ->
+            let beats =
+                frameCmdStream start cxOrigin cyOrigin dx dy
+                |> mandelFramePipeline 16 4 8 28 8 1
 
-        let beats =
-            frameCmdStream start cxOrigin cyOrigin dx dy
-            |> mandelFramePipeline 16 4 8 28 8 1
+            let out, busy, frameDone =
+                mandelFrameGatherer 16 4 "gather" start beats
 
-        let out, busy, frameDone =
-            mandelFrameGatherer 16 4 "gather" start beats
-
-        let busyOut = outputBit "busy"
-        busy ==> busyOut
-        let doneOut = outputBit "frameDone"
-        frameDone ==> doneOut
-        streamOutput "beat" out)
+            busy ==> busyOut
+            frameDone ==> doneOut
+            streamSink beatPorts out)
 
 /// The near-silicon composition: the frame pod behind the AXI master with the
 /// egress link probed — everything `MandelFrameAxi` will be, minus the control
@@ -265,14 +271,19 @@ let mandelFramePodHarness1 =
 /// so the clustered dispatch/merge trees run with their register nodes live
 /// (2 clusters of 2).
 let mandelFrameDdr =
-    design "MandelFrameDdr" (fun () ->
-        let start = inputBit "start"
-        let cxOrigin = input "cxOrigin" 32
-        let cyOrigin = input "cyOrigin" 32
-        let dx = input "dx" 32
-        let dy = input "dy" 32
-        let fbBaseAddr = input "fbBaseAddr" 32
-
+    defModule
+        "MandelFrameDdr"
+        (fun p ->
+            (p.inPort "start" 1,
+             p.inPort "cxOrigin" 32,
+             p.inPort "cyOrigin" 32,
+             p.inPort "dx" 32,
+             p.inPort "dy" 32,
+             p.inPort "fbBaseAddr" 32,
+             axiWriteBusPorts p "m_axi" 32 128,
+             p.outPort "busy" 1,
+             p.outPort "frameDone" 1))
+        (fun (start, cxOrigin, cyOrigin, dx, dy, fbBaseAddr, writeBusPorts, busyOut, doneOut) ->
         let addrWidth = lanePodAddrWidth 64 48
 
         // The framebuffer as a window, as in `FrameAxi`. The index is the
@@ -280,7 +291,7 @@ let mandelFrameDdr =
         // sixteen bytes and the window shifts them straight back — so where the
         // buffer starts and how far apart beats are stay the window's business.
         let frame =
-            writeWindowOn (axiWriteBus 32 128) 16 "fb" fbBaseAddr (1 <<< (addrWidth - 4))
+            writeWindowOn (axiWriteBusOf writeBusPorts) 16 "fb" fbBaseAddr (1 <<< (addrWidth - 4))
 
         let piped =
             frameCmdStream start cxOrigin cyOrigin dx dy
@@ -289,7 +300,6 @@ let mandelFrameDdr =
         let beats, busy, frameDone =
             mandelFrameGatherer 64 48 "gather" start piped
 
-        let busyOut = outputBit "busy"
         busy ==> busyOut
 
         // The same completion as `FrameAxi`'s, because this design is that one
@@ -303,7 +313,6 @@ let mandelFrameDdr =
             (start, fun () -> lit 0UL 1 ==> allGathered)
             (otherwise, fun () -> If frameDone (fun () -> lit 1UL 1 ==> allGathered)) ]
 
-        let doneOut = outputBit "frameDone"
         (allGathered &&& frame.idle) ==> doneOut
 
         streamProbe "egress" beats

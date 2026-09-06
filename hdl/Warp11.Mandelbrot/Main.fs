@@ -13,17 +13,17 @@ open Warp11.Mandelbrot.FramePod
 open Warp11.Mandelbrot.FrameAxi
 
 let private designs () =
-    [ mandelPod
-      mandelPodAxi
-      mandelStepHarness
-      mandelLaneHarness
-      mandelCoalescerHarness
-      mandelCoalescerLoop
-      mandelLanePodHarness
-      mandelFramePodHarness
-      mandelFramePodHarness1
-      mandelFrameDdr
-      mandelFrameAxiScaled ]
+    [ mandelPod.def
+      mandelPodAxi.def
+      mandelStepHarness.def
+      mandelLaneHarness.def
+      mandelCoalescerHarness.def
+      mandelCoalescerLoop.def
+      mandelLanePodHarness.def
+      mandelFramePodHarness.def
+      mandelFramePodHarness1.def
+      mandelFrameDdr.def
+      mandelFrameAxiScaled.def ]
 
 let private mainDemo () =
     for d in designs () do
@@ -38,7 +38,7 @@ let private mainDemo () =
     // The step against its software twin: random vectors (sign bits set half
     // the time) plus the two's-complement boundary patterns, each held 4
     // cycles through the cone — bit-exact, no tolerance.
-    let stepSim = Sim(mandelStepHarness)
+    let stepSim = Sim mandelStepHarness.def
     let rand = System.Random(11)
     let randomVector () = uint64 (rand.NextInt64()) &&& 0xFFFFFFFFUL
 
@@ -70,7 +70,7 @@ let private mainDemo () =
     // the view (escapers and max-outs both), fed through the px stream with an
     // always-ready consumer; every (addr, iter) result must match `laneTwin`
     // exactly.
-    let laneSim = Sim(mandelLaneHarness)
+    let laneSim = Sim mandelLaneHarness.def
     let toQ (v: float) = uint64 (int64 (v * 268435456.0)) &&& 0xFFFFFFFFUL // Q4.28
 
     let pixels =
@@ -113,7 +113,7 @@ let private mainDemo () =
     // byte lanes must hold the value written at column base+lane, and the two
     // rows' bases must not bleed (ping-pong overlap: row 1 fills while row 0
     // drains).
-    let coalSim = Sim(mandelCoalescerHarness)
+    let coalSim = Sim mandelCoalescerHarness.def
     coalSim.Poke("beat_ready", 1UL)
     let beats = ResizeArray<uint64 * System.Numerics.BigInteger>()
 
@@ -166,7 +166,7 @@ let private mainDemo () =
     // dispatch tree will pack them, beats gathered into a framebuffer array,
     // every pixel bit-exact against the whole-pixel twin — the P2 acceptance
     // check before the frame pod exists.
-    let podSim = Sim(mandelLanePodHarness)
+    let podSim = Sim mandelLanePodHarness.def
     let dxQ = toQ 0.25
     let cx0Q = toQ (-2.0)
     let cyQ r = toQ (0.5 - 0.25 * float r)
@@ -213,7 +213,7 @@ let private mainDemo () =
     // The frame pod, two lanes: start latches the view, rows dispatch to
     // whichever lane is free, beats merge back — the whole 16×4 frame
     // bit-exact against the twin, ending on the frameDone pulse.
-    let frameSim = Sim(mandelFramePodHarness)
+    let frameSim = Sim mandelFramePodHarness.def
     frameSim.Poke("cxOrigin", cx0Q)
     frameSim.Poke("cyOrigin", cyQ 0)
     frameSim.Poke("dx", dxQ)
@@ -251,7 +251,7 @@ let private mainDemo () =
 
     // The same frame at numLanes = 1: dispatch and merge shortcut to direct
     // connections, so the degenerate scale renders through no arbiter at all.
-    let frame1Sim = Sim(mandelFramePodHarness1)
+    let frame1Sim = Sim mandelFramePodHarness1.def
     frame1Sim.Poke("cxOrigin", cx0Q)
     frame1Sim.Poke("cyOrigin", cyQ 0)
     frame1Sim.Poke("dx", dxQ)
@@ -285,12 +285,12 @@ let private mainDemo () =
 /// What `debug` will open, by label — the pod designs on this side of the
 /// debugger's registry dependency.
 let private debuggable =
-    [ "coalescer", fun () -> mandelCoalescerHarness
-      "coalescer-loop", fun () -> mandelCoalescerLoop
-      "lane", fun () -> mandelLaneHarness
-      "lane-pod", fun () -> mandelLanePodHarness
-      "frame-pod", fun () -> mandelFramePodHarness
-      "pod", fun () -> mandelPod ]
+    [ "coalescer", fun () -> mandelCoalescerHarness.def
+      "coalescer-loop", fun () -> mandelCoalescerLoop.def
+      "lane", fun () -> mandelLaneHarness.def
+      "lane-pod", fun () -> mandelLanePodHarness.def
+      "frame-pod", fun () -> mandelFramePodHarness.def
+      "pod", fun () -> mandelPod.def ]
 
 [<EntryPoint>]
 let main argv =

@@ -201,18 +201,20 @@ let private mandelPodParts () : PodParts =
       valid = merged.valid }
 
 let mandelPod =
-    design "MandelPod" (fun () ->
-        let parts = mandelPodParts ()
+    defModule
+        "MandelPod"
+        (fun p ->
+            (p.outPort "done" 1,
+             p.outPort "result_pixel" 12,
+             p.outPort "result_iter" 8,
+             p.outPort "result_valid" 1))
+        (fun (finished, resultPixel, resultIter, resultValid) ->
+            let parts = mandelPodParts ()
 
-        let finished = outputBit "done"
-        parts.donePredicate ==> finished
-
-        let resultPixel = output "result_pixel" 12
-        let resultIter = output "result_iter" 8
-        let resultValid = outputBit "result_valid"
-        parts.pixel ==> resultPixel
-        parts.iter ==> resultIter
-        parts.valid ==> resultValid)
+            parts.donePredicate ==> finished
+            parts.pixel ==> resultPixel
+            parts.iter ==> resultIter
+            parts.valid ==> resultValid)
 
 // ---------------------------------------------------------------------------
 // The AXI wrapper and the register-map seam. The map is defined once, here,
@@ -236,18 +238,22 @@ let internal apertureAddrWidth = 15
 /// starts at reset release and runs once — the seam, notes/FINDINGS.md; start/soft
 /// reset is the named fast-follow.
 let mandelPodAxi =
-    designClocked axiClock "MandelPodAxi" (fun () ->
-        let parts = mandelPodParts ()
+    defModuleClocked
+        axiClock
+        "MandelPodAxi"
+        (fun p -> axiLiteSlavePorts p apertureAddrWidth)
+        (fun slavePorts ->
+            let parts = mandelPodParts ()
 
-        let frameCycles = reg "frame_cycles" 32
-        If (bnot parts.donePredicate) (fun () -> frameCycles + lit 1UL 32 ==> frameCycles)
+            let frameCycles = reg "frame_cycles" 32
+            If (bnot parts.donePredicate) (fun () -> frameCycles + lit 1UL 32 ==> frameCycles)
 
-        axiLiteSlave
-            apertureAddrWidth
-            [ "scratch", scratchOffset, 32 ]
-            [ idOffset, lit idMagic 32
-              doneOffset, parts.donePredicate
-              resultCountOffset, parts.resultCount
-              frameCyclesOffset, frameCycles ]
-            [ fbOffset, parts.fb ]
-        |> ignore)
+            axiLiteSlaveOn
+                slavePorts
+                [ "scratch", scratchOffset, 32 ]
+                [ idOffset, lit idMagic 32
+                  doneOffset, parts.donePredicate
+                  resultCountOffset, parts.resultCount
+                  frameCyclesOffset, frameCycles ]
+                [ fbOffset, parts.fb ]
+            |> ignore)

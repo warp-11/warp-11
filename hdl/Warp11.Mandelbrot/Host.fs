@@ -18,7 +18,7 @@ open Warp11.Mandelbrot.Pod
 /// only while transactions tick it; it ignores the bus, so its cycle count to
 /// done is the same as standalone.
 let simserve () =
-    SimAxi.serve (SimAxi.client (Sim mandelPodAxi))
+    SimAxi.serve (SimAxi.client (Sim mandelPodAxi.def))
 
 let private litValue expr =
     match expr with
@@ -60,7 +60,7 @@ let private mandelTwin () =
 /// the PPM (interior black, escapes shaded by iteration) and print an ASCII
 /// preview. This is the Mandelbrot path's acceptance artifact end to end.
 let runMandel (outPath: string) =
-    let sim = Sim(mandelPod)
+    let sim = Sim mandelPod.def
     let mutable cycles = 0
 
     while sim.Peek "done" <> 1UL && cycles < 200000 do

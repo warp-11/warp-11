@@ -31,7 +31,7 @@ type HdlSimBus(gridWidth: int, gridHeight: int) =
     let browser = System.OperatingSystem.IsBrowser()
 
     let session =
-        new DebugSession(golLiveHarness gridWidth gridHeight, ownThread = not browser)
+        new DebugSession((golLiveHarness gridWidth gridHeight).def, ownThread = not browser)
 
     let live = session :> IDebugSession
 

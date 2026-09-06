@@ -148,16 +148,18 @@ let stepTwin (fracBits: int) (zx: uint64) (zy: uint64) (cx: uint64) (cy: uint64)
 /// every cycle and checks every cycle, so II=1 is differentially exercised,
 /// not asserted.
 let mandelStepHarness =
-    design "MandelStepHarness" (fun () ->
-        let zx = input "zx" 32
-        let zy = input "zy" 32
-        let cx = input "cx" 32
-        let cy = input "cy" 32
-        let zxNextOut = output "zx_next" 32
-        let zyNextOut = output "zy_next" 32
-        let escapedOut = outputBit "escaped"
-
-        let zxn, zyn, esc = mandelStep 28 "step" zx zy cx cy
-        zxn ==> zxNextOut
-        zyn ==> zyNextOut
-        esc ==> escapedOut)
+    defModule
+        "MandelStepHarness"
+        (fun p ->
+            (p.inPort "zx" 32,
+             p.inPort "zy" 32,
+             p.inPort "cx" 32,
+             p.inPort "cy" 32,
+             p.outPort "zx_next" 32,
+             p.outPort "zy_next" 32,
+             p.outPort "escaped" 1))
+        (fun (zx, zy, cx, cy, zxNextOut, zyNextOut, escapedOut) ->
+            let zxn, zyn, esc = mandelStep 28 "step" zx zy cx cy
+            zxn ==> zxNextOut
+            zyn ==> zyNextOut
+            esc ==> escapedOut)

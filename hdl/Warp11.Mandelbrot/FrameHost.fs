@@ -19,7 +19,7 @@ let frameMaxIter = 48
 /// the fake DDR until `frameDone`, flush the master's outstanding writes,
 /// verify, render, report.
 let renderFrame (outPath: string) =
-    let sim = Sim(mandelFrameDdr)
+    let sim = Sim mandelFrameDdr.def
     let fbBase = 0x100 // off zero, so the rebase onto fbBaseAddr is proven
     // Paced, not always-ready. A slave that pairs AW and W the cycle they are
     // offered never leaves anything in the master's ring, which would make the
@@ -96,7 +96,7 @@ let renderFrame (outPath: string) =
     printfn $"rendered %d{frameWidth}x%d{frameHeight} @ max %d{frameMaxIter}, 4 lanes x 8 threads, in %d{cycles} cycles -> {outPath}"
     printfn $"twin mismatches:              %d{List.length mismatches} of %d{frameWidth * frameHeight} pixels"
 
-    for name, blocked, starved in streamReport sim.Peek mandelFrameDdr do
+    for name, blocked, starved in streamReport sim.Peek mandelFrameDdr.def do
         printfn $"stream '{name}': blocked %d{blocked} starved %d{starved} of %d{cycles} cycles"
 
     if not (List.isEmpty mismatches) then
@@ -109,7 +109,7 @@ let renderFrame (outPath: string) =
 /// and reported. Every handshake step is asserted, so a protocol bug is a
 /// failure here, not a hang on silicon.
 let runFrameAxiWith (jitter: int option) (outPath: string) =
-    let sim = Sim(mandelFrameAxiScaled)
+    let sim = Sim mandelFrameAxiScaled.def
     let fbBase = 0x100
     // Paced for the same reason as `renderFrame`'s: an always-ready slave never
     // leaves a write in the ring, so it cannot tell a correct done from a
@@ -182,7 +182,7 @@ let runFrameAxiWith (jitter: int option) (outPath: string) =
     printfn $"MandelFrameAxiScaled: ID ok, busy=%d{busyNow}, lastFrameCycles=%d{lastFrameCycles} -> {outPath}"
     printfn $"twin mismatches:              %d{List.length mismatches} of %d{frameWidth * frameHeight} pixels"
 
-    for name, blocked, starved in streamReport sim.Peek mandelFrameAxiScaled do
+    for name, blocked, starved in streamReport sim.Peek mandelFrameAxiScaled.def do
         printfn $"stream '{name}': blocked %d{blocked} starved %d{starved}"
 
     if not (List.isEmpty mismatches) then
@@ -195,7 +195,7 @@ let runFrameAxiWith (jitter: int option) (outPath: string) =
 /// bytes as hex — the framebuffer readback the register aperture cannot carry,
 /// standing in for the board's mmap of PS DDR.
 let frameserve () =
-    let sim = Sim(mandelFrameAxiScaled)
+    let sim = Sim mandelFrameAxiScaled.def
     let ddr = SimAxiWriteSlave(sim, 65536)
     let cycle () = ddr.Cycle()
     let axi = SimAxi.clientWith sim cycle
@@ -240,13 +240,18 @@ let cycleSweep () =
 
     let run (w: int) (h: int) (maxIter: int) (lanes: int) =
         let harness =
-            design $"Sweep_%d{w}x%d{h}_m%d{maxIter}_l%d{lanes}" (fun () ->
-                let start = inputBit "start"
-                let cxOrigin = input "cxOrigin" 32
-                let cyOrigin = input "cyOrigin" 32
-                let dx = input "dx" 32
-                let dy = input "dy" 32
-
+            defModule
+                $"Sweep_%d{w}x%d{h}_m%d{maxIter}_l%d{lanes}"
+                (fun p ->
+                    (p.inPort "start" 1,
+                     p.inPort "cxOrigin" 32,
+                     p.inPort "cyOrigin" 32,
+                     p.inPort "dx" 32,
+                     p.inPort "dy" 32,
+                     p.outPort "busy" 1,
+                     p.outPort "frameDone" 1,
+                     streamOutputPorts p "beat" (frameBeatLayout w h)))
+                (fun (start, cxOrigin, cyOrigin, dx, dy, busyOut, doneOut, beatPorts) ->
                 let beats =
                     frameCmdStream start cxOrigin cyOrigin dx dy
                     |> mandelFramePipeline w h maxIter 28 8 lanes
@@ -254,13 +259,11 @@ let cycleSweep () =
                 let out, busy, frameDone =
                     mandelFrameGatherer w h "gather" start beats
 
-                let busyOut = outputBit "busy"
                 busy ==> busyOut
-                let doneOut = outputBit "frameDone"
                 frameDone ==> doneOut
-                streamOutput "beat" out)
+                streamSink beatPorts out)
 
-        let sim = Sim(harness)
+        let sim = Sim harness.def
         sim.Poke("cxOrigin", toQ (-2.25))
         sim.Poke("cyOrigin", toQ (-1.125))
         sim.Poke("dx", toQ (3.0 / float w))
@@ -313,13 +316,18 @@ let laneScale (configs: (int * int * int * int) list) =
         let sw = System.Diagnostics.Stopwatch.StartNew()
 
         let harness =
-            design $"LaneScale_%d{w}x%d{h}_%d{maxIter}_%d{lanes}" (fun () ->
-                let start = inputBit "start"
-                let cxOrigin = input "cxOrigin" 32
-                let cyOrigin = input "cyOrigin" 32
-                let dx = input "dx" 32
-                let dy = input "dy" 32
-
+            defModule
+                $"LaneScale_%d{w}x%d{h}_%d{maxIter}_%d{lanes}"
+                (fun p ->
+                    (p.inPort "start" 1,
+                     p.inPort "cxOrigin" 32,
+                     p.inPort "cyOrigin" 32,
+                     p.inPort "dx" 32,
+                     p.inPort "dy" 32,
+                     p.outPort "busy" 1,
+                     p.outPort "frameDone" 1,
+                     streamOutputPorts p "beat" (frameBeatLayout w h)))
+                (fun (start, cxOrigin, cyOrigin, dx, dy, busyOut, doneOut, beatPorts) ->
                 let beats =
                     frameCmdStream start cxOrigin cyOrigin dx dy
                     |> mandelFramePipeline w h maxIter 28 8 lanes
@@ -327,13 +335,11 @@ let laneScale (configs: (int * int * int * int) list) =
                 let out, busy, frameDone =
                     mandelFrameGatherer w h "gather" start beats
 
-                let busyOut = outputBit "busy"
                 busy ==> busyOut
-                let doneOut = outputBit "frameDone"
                 frameDone ==> doneOut
-                streamOutput "beat" out)
+                streamSink beatPorts out)
 
-        let sim = Sim(harness)
+        let sim = Sim harness.def
         let elabMs = sw.ElapsedMilliseconds
         sim.Poke("cxOrigin", toQ (-2.25))
         sim.Poke("cyOrigin", toQ (-1.125))

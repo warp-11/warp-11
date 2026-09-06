@@ -9,9 +9,9 @@ open Warp11.GoL.Twin
 open Warp11.GoL.Wrapper
 
 let private diffDesigns () =
-    [ golHarness 8 8
-      golLiveHarness 8 8
-      golAxiScaled ]
+    [ (golHarness 8 8).def
+      (golLiveHarness 8 8).def
+      golAxiScaled.def ]
 
 /// Drive the harness and the twin through the same generations and demand
 /// row-for-row, population-for-population equality every cycle. An unrolled
@@ -61,7 +61,7 @@ let private runAgainstTwin
     loaded && generationsOk
 
 let private demoChecks () =
-    for d in [ golHarness 8 8 ] do
+    for d in [ (golHarness 8 8).def ] do
         match checkWidths d with
         | [] -> printfn $"{d.name}: widths ok"
         | problems -> problems |> List.iter (printfn "%s")
@@ -72,7 +72,7 @@ let private demoChecks () =
     let glider =
         [| 0b010UL; 0b100UL; 0b111UL; 0UL; 0UL; 0UL; 0UL; 0UL |]
 
-    let gliderOk = runAgainstTwin (Sim(golHarness 8 8)) 8 8 1 glider 16
+    let gliderOk = runAgainstTwin (Sim (golHarness 8 8).def) 8 8 1 glider 16
     printfn $"glider vs twin (16 gens):     %b{gliderOk}"
 
     // Random soups: dense chaos exercises every birth/survive/die case at
@@ -83,14 +83,14 @@ let private demoChecks () =
         [ 1..3 ]
         |> List.forall (fun _ ->
             let soup = [| for _ in 0..7 -> uint64 (rand.Next(0, 256)) |]
-            runAgainstTwin (Sim(golHarness 8 8)) 8 8 1 soup 30)
+            runAgainstTwin (Sim (golHarness 8 8).def) 8 8 1 soup 30)
 
     printfn $"random soups vs twin (3x30):  %b{soupsOk}"
 
     // A load must win over a same-cycle tick — the wrapper's pacing FSM may
     // be mid-burst when the host reloads.
     let loadWinsOk =
-        let sim = Sim(golHarness 8 8)
+        let sim = Sim (golHarness 8 8).def
         let blinker = [| 0UL; 0b111UL; 0UL; 0UL; 0UL; 0UL; 0UL; 0UL |]
 
         for y in 0..7 do
@@ -110,7 +110,7 @@ let private demoChecks () =
 let private perfProbe () =
     for gridWidth, gridHeight, ticks in [ 16, 16, 500; 32, 32, 200; 64, 64, 50 ] do
         let clock = System.Diagnostics.Stopwatch.StartNew()
-        let d = golHarness gridWidth gridHeight
+        let d = (golHarness gridWidth gridHeight).def
         let elaborateMs = clock.Elapsed.TotalMilliseconds
 
         clock.Restart()
@@ -453,7 +453,7 @@ let private writeHardware (repoRoot: string) =
 
     let verilogPath = System.IO.Path.Combine(buildDir, "GolAxi.v")
     let layoutPath = System.IO.Path.Combine(runtimeSrc, "gol_layout.rs")
-    System.IO.File.WriteAllText(verilogPath, emitDesign golAxiFull.Value + "\n")
+    System.IO.File.WriteAllText(verilogPath, emitDesign golAxiFull.Value.def + "\n")
     System.IO.File.WriteAllText(layoutPath, String.concat "\n" layout)
     printfn $"wrote {verilogPath}"
     printfn $"wrote {layoutPath}"
@@ -467,19 +467,19 @@ let main argv =
         0
     | [| "perf" |] -> perfProbe ()
     | [| "bench" |] -> benchTwin ()
-    | [| "axi" |] -> axiRehearsalAt golAxiScaled 1 16 16 1 1 0 None
+    | [| "axi" |] -> axiRehearsalAt golAxiScaled.def 1 16 16 1 1 0 None
     // The same rehearsal with the DDR answering after a random 0-3 cycle delay
     // and stalling AW and W independently. A design whose frame depends on when
     // memory answered passes the always-ready model and corrupts on a board.
     | [| "axi-jitter" |] ->
         [ 1..6 ]
-        |> List.map (fun seed -> axiRehearsalAt golAxiScaled 1 16 16 1 1 0 (Some seed) = 0)
+        |> List.map (fun seed -> axiRehearsalAt golAxiScaled.def 1 16 16 1 1 0 (Some seed) = 0)
         |> List.forall id
         |> fun ok ->
             printfn $"axi rehearsal under random memory timing (6 seeds): %b{ok}"
             if ok then 0 else 1
     | [| "axi-full"; awEvery; wEvery; bDelay |] ->
-        axiRehearsalAt golAxiFull.Value 1 64 64 (int awEvery) (int wEvery) (int bDelay) None
+        axiRehearsalAt golAxiFull.Value.def 1 64 64 (int awEvery) (int wEvery) (int bDelay) None
     | [| "axi-full" |] ->
         // The pacing matrix: always-ready, then each channel throttled
         // against the other, then both with a lagging B — the skews a real
@@ -487,11 +487,11 @@ let main argv =
         [ 1, 1, 0; 2, 1, 0; 1, 2, 0; 3, 1, 6; 1, 3, 6 ]
         |> List.map (fun (awEvery, wEvery, bDelay) ->
             printfn $"--- pacing aw/%d{awEvery} w/%d{wEvery} b+%d{bDelay} ---"
-            axiRehearsalAt golAxiFull.Value 1 64 64 awEvery wEvery bDelay None)
+            axiRehearsalAt golAxiFull.Value.def 1 64 64 awEvery wEvery bDelay None)
         |> List.max
     | [| "hardware"; repoRoot |] -> writeHardware repoRoot
     | [| "emit"; gridWidth; gridHeight; path |] ->
-        System.IO.File.WriteAllText(path, emitDesign (golHarness (int gridWidth) (int gridHeight)) + "\n")
+        System.IO.File.WriteAllText(path, emitDesign (golHarness (int gridWidth) (int gridHeight)).def + "\n")
         printfn $"wrote {path}"
         0
     | _ -> demoChecks ()

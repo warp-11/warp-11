@@ -149,8 +149,15 @@ let golAxi (topName: string) (gridWidth: int) (gridHeight: int) =
     let beatIndexBits = indexBits beatCount
     let slotShift = golSlotShift gridWidth gridHeight
 
-    designClocked axiClock topName (fun () ->
-        let regs = axiLiteSlaveOf m.map
+    defModuleClocked
+        axiClock
+        topName
+        (fun p ->
+            (axiLiteSlavePorts p m.map.apertureAddrWidth,
+             axiWriteBusPorts p "m_axi" 32 128,
+             p.outPort "irq" 1))
+        (fun (slavePorts, writeBusPorts, irqOut) ->
+        let regs = regMapSlave slavePorts m.map
 
         let loadPulse = regs.pulse m.load
         let tickPulse = regs.pulse m.tick
@@ -344,7 +351,7 @@ let golAxi (topName: string) (gridWidth: int) (gridHeight: int) =
                  armedReady &&& armed ==> s.ready
 
                  axiMasterWriterWithIdleOn
-                     (axiWriteBus 32 128)
+                     (axiWriteBusOf writeBusPorts)
                      16
                      { s with
                          valid = s.valid &&& armed
@@ -387,7 +394,6 @@ let golAxi (topName: string) (gridWidth: int) (gridHeight: int) =
         regs.setBit m.burstIrq burstDoneQ
         regs.setBit m.snapIrq snapStatus.irq
 
-        let irqOut = outputBit "irq"
         regs.irq ==> irqOut)
 
 /// The rehearsal config: every mechanism live at a size the Sim walks in

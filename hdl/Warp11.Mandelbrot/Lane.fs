@@ -215,9 +215,14 @@ let laneTwin (fracBits: int) (maxIter: int) (cx: uint64) (cy: uint64) =
 /// random res_ready — pull, refill-at-issue, the delay chains, DONE-PENDING
 /// holds and the emit arbitration all under the differential.
 let mandelLaneHarness =
-    design "MandelLaneHarness" (fun () ->
-        let px = streamInput "px" (layout3 ("cx", 32) ("cy", 32) ("addr", 8))
-        let res, allIdle = mandelBarrelLane 8 28 8 8 "lane" px
-        streamOutput "res" res
-        let idle = outputBit "all_idle"
-        allIdle ==> idle)
+    defModule
+        "MandelLaneHarness"
+        (fun p ->
+            (streamInputPorts p "px" (layout3 ("cx", 32) ("cy", 32) ("addr", 8)),
+             streamOutputPorts p "res" (layout2 ("addr", 8) ("iter", laneIterWidth 8)),
+             p.outPort "all_idle" 1))
+        (fun (pxPorts, resPorts, idle) ->
+            let px = streamSource pxPorts
+            let res, allIdle = mandelBarrelLane 8 28 8 8 "lane" px
+            streamSink resPorts res
+            allIdle ==> idle)

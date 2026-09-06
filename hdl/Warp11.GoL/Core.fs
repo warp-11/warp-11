@@ -74,22 +74,22 @@ let gameOfLifeGrid (gridWidth: int) (gridHeight: int) (loadEnable: Expr) (tickEn
 /// packed rows and the population out. The tutorial walks this at a small
 /// grid; the silicon config only ever exists inside the AXI wrapper.
 let golHarness (gridWidth: int) (gridHeight: int) =
-    design $"GameOfLife%d{gridWidth}x%d{gridHeight}" (fun () ->
-        let loadEnable = inputBit "load_enable"
-        let tickEnable = inputBit "tick_enable"
+    defModule
+        $"GameOfLife%d{gridWidth}x%d{gridHeight}"
+        (fun p ->
+            (p.inPort "load_enable" 1,
+             p.inPort "tick_enable" 1,
+             [ for y in 0 .. gridHeight - 1 -> p.inPort $"load_row_%d{y}" gridWidth ],
+             [ for y in 0 .. gridHeight - 1 -> p.outPort $"row_%d{y}" gridWidth ],
+             p.outPort "population" (bitsNeeded (gridWidth * gridHeight))))
+        (fun (loadEnable, tickEnable, loadRows, rowOuts, populationOut) ->
+            let rows, population =
+                gameOfLifeGrid gridWidth gridHeight loadEnable tickEnable loadRows
 
-        let loadRows =
-            [ for y in 0 .. gridHeight - 1 -> input $"load_row_%d{y}" gridWidth ]
+            for rowOut, row in List.zip rowOuts rows do
+                row ==> rowOut
 
-        let rows, population =
-            gameOfLifeGrid gridWidth gridHeight loadEnable tickEnable loadRows
-
-        for y, row in List.indexed rows do
-            let rowOut = output $"row_%d{y}" gridWidth
-            row ==> rowOut
-
-        let populationOut = output "population" (width population)
-        population ==> populationOut)
+            population ==> populationOut)
 
 /// The harness a live view drives: the same grid at ports, plus the generation
 /// counter the board's wrapper already keeps in fabric. A host could count its
@@ -98,27 +98,27 @@ let golHarness (gridWidth: int) (gridHeight: int) =
 /// of stepping a design is to ask questions about the design. A load restarts
 /// the count, as it does on the board.
 let golLiveHarness (gridWidth: int) (gridHeight: int) =
-    design $"GameOfLifeLive%d{gridWidth}x%d{gridHeight}" (fun () ->
-        let loadEnable = inputBit "load_enable"
-        let tickEnable = inputBit "tick_enable"
+    defModule
+        $"GameOfLifeLive%d{gridWidth}x%d{gridHeight}"
+        (fun p ->
+            (p.inPort "load_enable" 1,
+             p.inPort "tick_enable" 1,
+             [ for y in 0 .. gridHeight - 1 -> p.inPort $"load_row_%d{y}" gridWidth ],
+             [ for y in 0 .. gridHeight - 1 -> p.outPort $"row_%d{y}" gridWidth ],
+             p.outPort "population" (bitsNeeded (gridWidth * gridHeight)),
+             p.outPort "generation" 32))
+        (fun (loadEnable, tickEnable, loadRows, rowOuts, populationOut, generation) ->
+            let rows, population =
+                gameOfLifeGrid gridWidth gridHeight loadEnable tickEnable loadRows
 
-        let loadRows =
-            [ for y in 0 .. gridHeight - 1 -> input $"load_row_%d{y}" gridWidth ]
+            for rowOut, row in List.zip rowOuts rows do
+                row ==> rowOut
 
-        let rows, population =
-            gameOfLifeGrid gridWidth gridHeight loadEnable tickEnable loadRows
+            population ==> populationOut
 
-        for y, row in List.indexed rows do
-            let rowOut = output $"row_%d{y}" gridWidth
-            row ==> rowOut
+            let genCount = reg "gen_count" 32
+            ifElse [
+                (loadEnable, fun () -> lit 0UL 32 ==> genCount)
+                (otherwise, fun () -> If tickEnable (fun () -> genCount + lit 1UL 32 ==> genCount)) ]
 
-        let populationOut = output "population" (width population)
-        population ==> populationOut
-
-        let genCount = reg "gen_count" 32
-        ifElse [
-            (loadEnable, fun () -> lit 0UL 32 ==> genCount)
-            (otherwise, fun () -> If tickEnable (fun () -> genCount + lit 1UL 32 ==> genCount)) ]
-
-        let generation = output "generation" 32
-        genCount ==> generation)
+            genCount ==> generation)

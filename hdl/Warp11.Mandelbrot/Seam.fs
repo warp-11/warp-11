@@ -81,5 +81,5 @@ let writeHardware (repoRoot: string) =
         printfn $"wrote {verilogPath}"
         printfn $"wrote {layoutPath}"
 
-    emitPair "MandelPodAxi.v" mandelPodAxi "mandel_layout.rs" (mandelLayoutRs ())
-    emitPair "MandelFrameAxi.v" mandelFrameAxiFull.Value "mandel_frame_layout.rs" (mandelFrameLayoutRs ())
+    emitPair "MandelPodAxi.v" mandelPodAxi.def "mandel_layout.rs" (mandelLayoutRs ())
+    emitPair "MandelFrameAxi.v" mandelFrameAxiFull.Value.def "mandel_frame_layout.rs" (mandelFrameLayoutRs ())

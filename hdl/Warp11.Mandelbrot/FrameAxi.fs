@@ -34,7 +34,11 @@ let mandelFrameAxi
     (nThreads: int)
     (numLanes: int)
     =
-    designClocked axiClock topName (fun () ->
+    defModuleClocked
+        axiClock
+        topName
+        (fun p -> axiLiteSlavePorts p frameApertureAddrWidth, axiWriteBusPorts p "m_axi" 32 128)
+        (fun (slavePorts, writeBusPorts) ->
         let addrWidth = lanePodAddrWidth width height
 
         // Status sources feed the slave through wires/regs declared first —
@@ -44,8 +48,8 @@ let mandelFrameAxi
         let cycles = reg "cycles" 32 // cleared on start, counts while busy, freezes at done
 
         let pulses, viewRegs =
-            axiLiteSlaveFull
-                frameApertureAddrWidth
+            axiLiteSlaveFullOn
+                slavePorts
                 [ "start", frameStartOffset ]
                 [ "cxOrigin", frameCxOffset, 32
                   "cyOrigin", frameCyOffset, 32
@@ -78,7 +82,7 @@ let mandelFrameAxi
         // is what the done register is gated on, and that is stated before the
         // pipeline exists.
         let frame =
-            writeWindowOn (axiWriteBus 32 128) 16 "fb" fbBaseAddr (1 <<< (addrWidth - 4))
+            writeWindowOn (axiWriteBusOf writeBusPorts) 16 "fb" fbBaseAddr (1 <<< (addrWidth - 4))
 
         let piped =
             frameCmdStream startPulse cxOrigin cyOrigin dx dy

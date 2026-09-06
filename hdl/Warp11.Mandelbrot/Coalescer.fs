@@ -199,18 +199,21 @@ let mandelRowCoalescer (widthPadded: int) (addrWidth: int) instName (rowBase: Ex
 /// feeds shuffled columns and asserts byte placement; the oracle's random
 /// fill-side stimulus rides the same design.
 let mandelCoalescerHarness =
-    design "MandelCoalescerHarness" (fun () ->
-        let rowBase = input "row_base" 8
-        let inp = streamInput "px" (layout2 ("col", 5) ("value", 8))
+    defModule
+        "MandelCoalescerHarness"
+        (fun p ->
+            (p.inPort "row_base" 8,
+             streamInputPorts p "px" (layout2 ("col", 5) ("value", 8)),
+             streamOutputPorts p "beat" (layout2 ("addr", 8) ("beat", 128)),
+             p.outPort "row_gathered" 1,
+             p.outPort "row_done" 1))
+        (fun (rowBase, pxPorts, beatPorts, g, d) ->
+            let out, rowGathered, rowDone =
+                mandelRowCoalescer 32 8 "coal" rowBase (streamSource pxPorts)
 
-        let out, rowGathered, rowDone =
-            mandelRowCoalescer 32 8 "coal" rowBase inp
-
-        streamOutput "beat" out
-        let g = outputBit "row_gathered"
-        rowGathered ==> g
-        let d = outputBit "row_done"
-        rowDone ==> d)
+            streamSink beatPorts out
+            rowGathered ==> g
+            rowDone ==> d)
 
 /// Self-feeding coalescer (widthPadded 16): an internal raster feeder offers a
 /// pixel every cycle, so complete fill → 17-cycle assembly → emit → ping-pong
@@ -218,24 +221,27 @@ let mandelCoalescerHarness =
 /// random `beat_ready` throttling the drain — the sync-read assembly timing
 /// differentially verified, not just asserted.
 let mandelCoalescerLoop =
-    design "MandelCoalescerLoop" (fun () ->
-        let feedCol = reg "feed_col" 4
-        let feedRow = reg "feed_row" 3
-        let feedReady = wireBit "feed_ready"
-        let feedValue = wire "feed_value" 8
-        cat (lit 0UL 1) (cat feedRow feedCol) ==> feedValue
-        let rowBase = wire "row_base_w" 8
-        cat (lit 0UL 1) (cat feedRow (lit 0UL 4)) ==> rowBase
+    defModule
+        "MandelCoalescerLoop"
+        (fun p -> streamOutputPorts p "beat" (layout2 ("addr", 8) ("beat", 128)))
+        (fun beatPorts ->
+            let feedCol = reg "feed_col" 4
+            let feedRow = reg "feed_row" 3
+            let feedReady = wireBit "feed_ready"
+            let feedValue = wire "feed_value" 8
+            cat (lit 0UL 1) (cat feedRow feedCol) ==> feedValue
+            let rowBase = wire "row_base_w" 8
+            cat (lit 0UL 1) (cat feedRow (lit 0UL 4)) ==> rowBase
 
-        let feed =
-            { payload = (feedCol, feedValue)
-              valid = lit 1UL 1
-              ready = feedReady
-              layout = layout2 ("col", 4) ("value", 8) }
+            let feed =
+                { payload = (feedCol, feedValue)
+                  valid = lit 1UL 1
+                  ready = feedReady
+                  layout = layout2 ("col", 4) ("value", 8) }
 
-        let out, rowGathered, _ =
-            mandelRowCoalescer 16 8 "coal" rowBase feed
+            let out, rowGathered, _ =
+                mandelRowCoalescer 16 8 "coal" rowBase feed
 
-        If feedReady (fun () -> feedCol + lit 1UL 4 ==> feedCol)
-        If rowGathered (fun () -> feedRow + lit 1UL 3 ==> feedRow)
-        streamOutput "beat" out)
+            If feedReady (fun () -> feedCol + lit 1UL 4 ==> feedCol)
+            If rowGathered (fun () -> feedRow + lit 1UL 3 ==> feedRow)
+            streamSink beatPorts out)
