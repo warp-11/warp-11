@@ -183,7 +183,7 @@ fn main() {
         .expect("open register file");
     let offset = if reg_path == "/dev/mem" { AXI_BASE } else { 0 };
     let window = MmapWindow::open(&reg_file, offset, layout::APERTURE_BYTES).expect("mmap registers");
-    let mut device = GepClusterDevice::new(window);
+    let mut device = GepClusterDevice::open(window).expect("the cluster answers with its identity");
 
     println!("cluster: {} breeders x {} lanes, {} entries, {} cases",
         layout::N_BREEDERS, layout::N_LANES, entries, n_cases);

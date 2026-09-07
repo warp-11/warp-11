@@ -33,6 +33,16 @@ pub enum GepError<E> {
     Timeout,
     /// The window itself failed.
     Window(E),
+    /// The identity register did not answer with this design's magic. Almost
+    /// always a stale bitstream or a wrong base address — both of which
+    /// otherwise present as plausible rubbish at every other offset, since an
+    /// unmapped read inside the aperture returns zero rather than faulting.
+    WrongId { found: u32 },
+    /// The right design, built from a different revision of the register map.
+    /// Every offset in this driver would be off, and each read would succeed —
+    /// which is why this is checked rather than trusted. Rebuild the bitstream,
+    /// or rebuild the driver against the layout the bitstream was made from.
+    WrongLayout { found: u32, expected: u32 },
 }
 
 impl<E> From<E> for GepError<E> {
@@ -199,6 +209,36 @@ pub struct GepClusterDevice<W> {
 }
 
 impl<W: RegisterWindow> GepClusterDevice<W> {
+    /// Open the device, checking it is the design this driver was generated
+    /// against. Offsets in the cluster map are allocated rather than fixed, so
+    /// a driver meeting a bitstream built from a different revision of the map
+    /// would read every register at the wrong address — and read it
+    /// successfully. This is the one read that says so.
+    pub fn open(mut window: W) -> Result<Self, GepError<W::Error>> {
+        let found = window.read32(layout::ID_OFFSET)?;
+
+        if found != layout::ID_VALUE {
+            return Err(GepError::WrongId { found });
+        }
+
+        // The identity says this is the right design; the fingerprint says it
+        // is the right revision of its register map. Offsets here are
+        // allocated, so a map that gained a register moved every address after
+        // it — and the reads would all still succeed.
+        let found = window.read32(layout::LAYOUT_HASH_OFFSET)?;
+
+        if found != layout::LAYOUT_HASH_VALUE {
+            return Err(GepError::WrongLayout {
+                found,
+                expected: layout::LAYOUT_HASH_VALUE,
+            });
+        }
+
+        Ok(GepClusterDevice { window })
+    }
+
+    /// Without the identity check — for a bring-up window that is not answering
+    /// yet, or a test harness standing in for the fabric.
     pub fn new(window: W) -> Self {
         GepClusterDevice { window }
     }
