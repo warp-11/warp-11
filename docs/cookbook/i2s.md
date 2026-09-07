@@ -9,12 +9,75 @@ serial line into a stereo stream, one turns a stereo stream back into a serial
 line. Everything between them is a [stream](../streams.md), so a filter, a gain
 stage or a compressor drops in as a `|>`.
 
-## Overview
+## What I2S is, in one section
 
-**Your design is the I2S master.** It generates MCLK, SCLK and LRCLK and the
-converters follow. Nothing recovers a clock, so there is no PLL and no
-synchroniser — which is why the receiver needs to be told when to sample rather
-than working it out.
+**Inter-IC Sound** — a three-wire serial bus for moving PCM audio between chips,
+from Philips in 1986 and still what almost every audio converter speaks. It
+carries one stereo pair continuously, forever; there are no packets, no
+addresses and no acknowledgement. If you are clocking, audio is flowing.
+
+| wire | also called | what it does |
+|---|---|---|
+| **bit clock** | SCK, SCLK, BCLK | one pulse per bit. Data changes on its falling edge and is sampled on its rising edge |
+| **word select** | WS, LRCLK, LRCK | which channel is on the wire right now. **Low is left, high is right** |
+| **serial data** | SD, SDIN/SDOUT | the bits, MSB first, two's complement. One line *per direction* |
+
+One device is the **master** and generates the two clocks; everything else
+follows them. Data lines are driven by whoever is sourcing — a converter drives
+its own output line, a DAC only listens. In Warp 11 your design is always the
+master, which is why nothing here recovers a clock.
+
+The sample rate is just the word-select rate: **one full cycle of WS is one
+stereo frame**, so Fs is however often WS repeats.
+
+### The one quirk worth knowing
+
+Data starts **one bit clock after WS changes**. That single bit of delay is the
+difference between I2S and the otherwise identical "left-justified" format, and
+it is the source of most interoperability confusion in the field.
+
+```
+        ┌──┐  ┌──┐  ┌──┐  ┌──┐  ┌──┐  ┌──┐  ┌──┐
+SCK  ───┘  └──┘  └──┘  └──┘  └──┘  └──┘  └──┘  └──
+           ▲                     ▲
+           │ falling: driver changes the line
+           └────────── rising: receiver samples it
+
+WS   ──────┐
+   (right) └──────────────── left slot ────────────
+
+SD   ──pad─┼──────┬─────┬─────┬─────┬─────┬─────┬──
+           │  ×   │ b23 │ b22 │ b21 │ b20 │ b19 │
+           │  ▲   │  ▲
+           │  │   └─ MSB, one bit clock late
+           └──┴───── this bit time carries nothing
+```
+
+That empty bit time is exactly what `i2sRx` treats as its no-data transition
+tick, and it is why a fabric loopback shows `output = input << 1` further down
+this page.
+
+### Slots are usually wider than samples
+
+A slot is a fixed number of bit clocks — 32 here — and the sample need not fill
+it. Warp 11 carries **24-bit samples in 32-bit slots**, so eight zero bits pad
+the tail of each channel. Receivers take the leading bits they want and ignore
+the rest, which is why a 24-bit design and a 16-bit converter can share a wire.
+
+### MCLK is not part of I2S
+
+Many codecs additionally want a **master clock** — a much faster oversampling
+clock, conventionally 256 × Fs — to run their internal converters and digital
+filters. It is a separate signal that the I2S standard says nothing about.
+`i2sMaster` generates one because the Pmod codecs need it; MEMS microphones and
+self-clocking DACs do not, and there `mclk` simply goes unread.
+
+## How Warp 11 does it
+
+Because the design is the master, nothing has to recover a clock — there is no
+PLL and no synchroniser anywhere in this. The consequence shows up in the module
+boundaries: the framers are *told* when to sample and when to drive, by the
+generator that owns both edges, rather than working it out from the line.
 
 ```
                     ┌──────────────────────────────────────────┐
@@ -49,7 +112,63 @@ falling edge, where the DAC latches and LRCLK turns. Splitting them is what lets
 receive and transmit share one frame without either sampling the other's
 transition.
 
-## The three pieces
+## The link — pins in, streams out
+
+**Reach for this first.** `i2sLink` is the whole front end as one thing: it
+declares the board's pins, builds the clock generator and both framers, routes
+the edge ticks and drives every clock pin. What a design sees is two streams.
+
+It is the same split as the register map — a declarer for the io factory, a
+builder for the body:
+
+```fsharp
+defModuleClocked
+    axiClock
+    "AudioWdrcMems_axi"
+    (fun p -> (axiLiteSlavePorts p aidMap.apertureAddrWidth, i2sPins p SharedBus))
+    (fun (slavePorts, pins) ->
+        let regs = regMapSlave slavePorts aidMap
+        let i2s = i2sLink "i2s" pins kv260.fabricHz 48_828 32
+
+        i2s.input
+        |> audioGain "AudioGain" "gain" (regs.value aidRegs.volume) (regs.value aidRegs.mute)
+        |> i2s.send)
+```
+
+That is a complete board design. No clock, no tick, no pin appears in it.
+
+| you get | |
+|---|---|
+| `i2s.input` | the stereo stream off the converter |
+| `i2s.send` | the other end. Call it exactly once |
+
+Both are ordinary stream values, so a design reads as a pipeline from the
+converter to the converter — `i2s.input |> … |> i2s.send` — and adding a stage
+is adding a line in the middle.
+
+**The reason to prefer it is not brevity.** The two edge ticks never reach the
+caller, so the one mistake that this interface can otherwise invite — routing
+`sclkTxTick` to the receiver — stops being expressible. That bug passes
+elaboration, passes every stream check, and **cannot be caught in simulation at
+all**, because it moves the receiver from the edge where the line is stable to
+the edge where it changes and a zero-delay model has no opinion about that. It
+is a bench failure. Here it cannot be written.
+
+### The three pinouts
+
+A design must declare exactly the pins its `.xdc` binds, so the pin set is a
+board fact rather than a preference:
+
+| | pins | for |
+|---|---|---|
+| `i2sPins p SharedBus` | `sd_in` `bclk` `ws` `sd_out` | MEMS microphones and a self-clocking DAC on one shared bus, no MCLK |
+| `i2sPins p SeparateCodecs` | `sdout` `mclk` `sclk` `lrclk` `sdin` `mclk2` `sclk2` `lrclk2` | a Pmod I2S2 — two chips on two rows, each with its own clock trio |
+| `i2sTxPins p <pinout>` | the same, minus the input | a DAC with nothing to listen to. The link type has no `input` field, so there is nothing to leave dangling |
+
+For a transmit-only link the builder is `i2sTxLink` and the one field is
+`sendOnly`.
+
+## Underneath: the three modules
 
 | you call | you hand it | you get back |
 |---|---|---|
@@ -61,10 +180,15 @@ Two names at each call: the **module** name, then the **instance** name. The
 clock generator takes only the first, because it is a bare `TypedModule` with no
 call wrapper — hence `instanceNamed`.
 
-## The shortest thing that works
+## Hand-wiring it
 
-A pass-through: everything the converter hears, straight back out. No register
-map, no host, no DSP.
+`i2sLink` is these three modules and nothing else — the living check asserts the
+two emit **byte-identical** Verilog, so choosing one over the other is invisible
+below the call site. Reach for the pieces directly when you need something the
+link does not offer: two links in one design at different rates, a receiver with
+no transmitter, or a pin set neither pinout describes.
+
+A hand-wired pass-through, for comparison:
 
 ```fsharp
 type CodecPins =
@@ -104,6 +228,8 @@ audio designs use, and it is what lets one bundle serve both halves.
 
 ## Receiving
 
+This is what `i2s.input` is, and everything here applies to it equally.
+
 `i2sRx` hands you a `Stream<Expr * Expr>`: the payload is `(left, right)`, each
 `sampleWidth` = **24 bits, two's complement**, and `valid` pulses for one fabric
 cycle when a stereo pair completes.
@@ -134,7 +260,8 @@ the receiver rather than expecting the framer to wait.
 ## Sending
 
 `i2sTx` takes a `Stream<Expr * Expr>` and hands back the serial line as an
-`Expr` you drive onto a pin.
+`Expr` you drive onto a pin. Through a link this is `i2s.send`, which does the
+driving for you.
 
 Unlike the receiver, **the transmitter does honour backpressure**: a one-slot
 pending buffer holds the next sample, `ready` is high whenever that slot is
@@ -178,15 +305,63 @@ so a stream you build by hand is `{ payload = (l, r); valid = v; ready = r; layo
 
 ## Putting something in between
 
-Because both ends are streams, a processing stage is a pipe:
+Because both ends are streams, a processing stage is a pipe. Stages from the
+library chain directly:
 
 ```fsharp
-let serial =
-    i2sRx "I2sRx" "rx" clocks.sclkRxTick clocks.lrclk sdout
-    |> audioGain "AudioGain" "gain" volume mute
-    |> audioLimiter "AudioLimiter" "limiter" threshold
-    |> i2sTx "I2sTx" "tx" clocks.sclkTxTick clocks.lrclk
+let i2s = i2sLink "i2s" pins kv260.fabricHz 48_828 32
+
+i2s.input
+|> audioGain "AudioGain" "gain" volume mute
+|> audioLimiter "AudioLimiter" "limiter" threshold
+|> i2s.send
 ```
+
+### Writing your own stage
+
+A stage is a function from a stream to a stream. Here is one that halves the
+volume:
+
+```fsharp
+let reduceVolume (s: Stream<Expr * Expr>) : Stream<Expr * Expr> =
+    let left, right = s.payload
+    { s with payload = (sra 1 left, sra 1 right) }
+```
+
+and here it is in a complete design:
+
+```fsharp
+defModule
+    "I2sLinkHalfVolume"
+    (fun p -> i2sPins p SharedBus)
+    (fun pins ->
+        let i2s = i2sLink "i2s" pins kv260.fabricHz 48_828 32
+        i2s.input |> reduceVolume |> i2s.send)
+```
+
+Two things in those four lines are worth pulling out, because both generalise
+to every stage you will write.
+
+**Rebuild the record; do not construct a new stream.** The handshake travels
+*inside* the stream value — `ready` flows backwards through the same record
+that carries `payload` and `valid` forwards. So `{ s with payload = … }` keeps
+the handshake correct by construction, and it is why a stage can be a plain
+function rather than something that has to be wired.
+
+**`sra`, not `shr`.** Halving a sample is an *arithmetic* shift: the sign bit
+must fill from the top. A logical shift halves every positive sample correctly
+and turns every negative one into a large positive one — which destroys the
+audio while still looking plausible on a peak meter. `sra` reads its operand as
+signed whatever it was declared as, so this needs no cast.
+
+It also floors rather than truncating toward zero, so -1 halves to -1. That is
+correct, and it is the value worth putting in a test: it is the one that tells
+you which shift the emitter chose.
+
+Anything heavier than this — a filter, a compressor, something that takes
+cycles — is a module rather than a function, and it presents a `Stream` for the
+same reason everything else here does. `Warp11.Designs` has `i2sLinkHalfVolume`
+registered in the debugger if you want to step through this one.
 
 The values `volume`, `mute` and `threshold` are ordinary `Expr`s, which in a
 board design come from a [register map](register-map.md) — `regs.value
@@ -231,14 +406,17 @@ divisors, and checks what it actually achieved:
 
 ```fsharp
 // the stock case — picks 4 / 16 / 32, byte-identical to i2sMasterDefault
-instanceNamed "clocks" (i2sMasterAt kv260 48_828 32 "I2sMaster")
+instanceNamed "clocks" (i2sMasterHz kv260.fabricHz 48_828 32 "I2sMaster")
 ```
 
-`kv260` is a `Board`: a fabric frequency and a host bus binding, passed rather
-than ambient. `i2sMasterHz` is the same thing with the frequency stated
-directly, for a clock that is not a board's default. **Prefer the board form** —
-it is the one that cannot go stale, because moving the design to a board with a
-different clock re-derives the divisors instead of keeping the old ones.
+`kv260` is a `Board` — a fabric frequency plus a host bus binding, and the
+record an application holds per target. **The constructors take the frequency,
+not the board**, so a fact about targets stays out of the signature of
+everything that divides a clock; a call site with a board in hand writes
+`kv260.fabricHz` and one without writes the number.
+
+Either way it is the rate that is named rather than the divisors, which is what
+stops the design going stale on a board with a different clock.
 
 A rate the clock cannot make within 1% is an **elaboration error**, naming the
 divisor it tried and how far out it landed:
@@ -360,7 +538,8 @@ and it is what pins the frame convention itself.
 
 | | |
 |---|---|
-| `sclkRxTick` and `sclkTxTick` swapped | passes elaboration and every gate; first appears as garbage on a bench. Worth one check of your own — upstream's loopback cannot catch it, being correctly wired itself |
+| `sclkRxTick` and `sclkTxTick` swapped | passes elaboration and every gate, and **is not detectable in simulation** — it is a setup/hold property and there is no timing model. Only a bench or a fabric loopback shows it. **Use `i2sLink` and it is not expressible** |
+| two links in one design sharing a prefix | instance names collide. Give each its own `prefix` |
 | two clock generators | drift. One generator, driven to every clock pin, always |
 | asserting equality in a software loopback | fails for a correct design — see above |
 | a pin in the `.xdc` that no port declares | will not build for the board |

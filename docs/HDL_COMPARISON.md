@@ -789,18 +789,32 @@ A divider is arithmetic on the fabric clock, so anything that generates a baud r
 | Clash | In the *type* — a domain carries its period, so connecting logic from mismatched domains is a type error rather than a runtime one |
 | Amaranth | On the board object — `platform.default_clk_frequency`, which the platform supplies and a design reads during elaboration |
 | Chisel / HardCaml / Bluespec / Veryl | No built-in notion; the frequency is an ordinary parameter threaded by the designer |
-| Warp 11 | A `Board` value, passed explicitly. It carries the fabric frequency and the host bus binding; `ClockSpec` still names the clock and reset *ports* only, and nothing is ambient |
+| Warp 11 | A plain frequency, passed to whatever divides it. A `Board` record holds one per target alongside the host bus binding, but it is the application's to hold — constructors take the number, not the record. `ClockSpec` still names the clock and reset *ports* only, and nothing is ambient |
 
 Warp 11's position is the last row deliberately, and the interesting part is what it does at the point of use instead. A constructor that needs a rate takes the fabric frequency and the rate, derives the divisors, and then **checks the rate it actually achieved against the one requested**:
 
 ```fsharp
-i2sMasterAt kv260 48_828 32 "I2sMaster"         // picks 4 / 16 / 32
-i2sMasterHz 100_000_000 48_000 32 "I2sMaster"   // elaboration error
+i2sMasterHz kv260.fabricHz 48_828 32 "I2sMaster"   // picks 4 / 16 / 32
+i2sMasterHz 100_000_000 48_000 32 "I2sMaster"      // elaboration error
 ```
 
 The second line fails because 100 MHz does not divide into 48 kHz — the nearest divisor gives 48.828 kHz, 1.7% out. That is the case the pattern exists for: divisors chosen by hand are silently wrong on a board with a different clock, and the failure is inaudible in simulation because a cycle-accurate model has no opinion about what a converter expects. Naming the rate turns a comment into a build failure.
 
-The honest limit is that a `Board` is passed rather than implied, so nothing stops two modules in one design from being handed different ones — which the ambient and type-level answers above both rule out by construction. That is a deliberate trade: an ambient board would be a second piece of hidden elaboration state beside the builder's, and the set of things that genuinely need a frequency is small. The same value carries the host bus binding (`AxiLiteAt 0xB0000000`, or `SpiBus` on a part with no bus), which is what a per-board build-script generator reads.
+The honest limit is that the frequency is passed rather than implied, so nothing stops two modules in one design from being handed different ones — which the ambient and type-level answers above both rule out by construction. That is a deliberate trade twice over. An ambient clock domain would be a second piece of hidden elaboration state beside the builder's; and threading a `Board` record through instead would put a fact about *targets* into the signature of everything that divides a clock, which is a different kind of leak rather than a fix. A stage that needs a number asks for the number. The `Board` record still exists — it carries the frequency and the host bus binding (`AxiLiteAt 0xB0000000`, or `SpiBus` on a part with no bus) for a per-board build-script generator to read — but it is the application's to hold, and call sites that have one write `kv260.fabricHz`.
+
+### Peripheral links as one call
+
+An I2S front end is a clock generator, two framers, a set of pins and a rule about which clock edge each framer uses. Every HDL here can express that; the question is whether a design has to.
+
+| HDL | What a design writes to get audio in and out |
+|---|---|
+| Chisel / SpinalHDL / HardCaml / Clash / Veryl / Bluespec | Community or in-house IP, instantiated and wired by the design: the generator, each framer, the tick or edge logic between them, and the pins. SpinalHDL ships the largest peripheral library of these (`spinal.lib.com`), though I2S specifically is usually project-local |
+| Amaranth | `amaranth-soc` and LiteX both offer peripheral cores with generated CSR wiring; audio front ends are typically project-local |
+| Warp 11 | `i2sPins p SharedBus` in the io factory, `i2sLink "i2s" pins kv260.fabricHz 48_828 32` in the body, and the design is a pipeline: `i2s.input |> reduceVolume |> i2s.send` |
+
+The interesting property is not the line count. **The edge ticks never reach the caller**, so routing the transmit tick to the receiver — a bug that elaborates cleanly, passes every stream check, and cannot be caught in simulation at all, because it is a setup/hold question and there is no timing model — is not expressible through the interface. The pin sets are a closed set of variants for the same reason: a design must declare exactly what its constraint file binds, so `SharedBus` and `SeparateCodecs` are board facts the type system enumerates rather than free-form port declarations a design gets right by convention.
+
+What keeps that from being an abstraction that costs something: the emitted Verilog is **byte-identical** to the hand-wiring, asserted as a living check over both pinouts, so the choice is invisible below the call site. The underlying `i2sMaster` / `i2sRx` / `i2sTx` remain public for the cases the link does not cover — two links at different rates, a receiver with no transmitter, an undescribed pin set.
 
 ### Board and host integration
 

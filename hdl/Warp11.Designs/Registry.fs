@@ -87,6 +87,10 @@ let catalog =
           entry "Index sweep (rangeStream)" (nameof indexSweep) (fun () -> indexSweep.def)
           entry "Max-pool dilation (banded world)" (nameof maxPoolDilate) (fun () -> maxPoolDilate.def)
           entry "Max pool 2x2, stride 2 (CNN layer)" (nameof maxPool2x2) (fun () -> maxPool2x2.def)
+          entry "I2S link (MEMS pins)" (nameof i2sLinkPassthru) (fun () -> i2sLinkPassthru.def)
+          entry "I2S link (codec pins)" (nameof i2sLinkCodec) (fun () -> i2sLinkCodec.def)
+          entry "I2S link (transmit only)" (nameof i2sLinkTone) (fun () -> i2sLinkTone.def)
+          entry "I2S link + half volume" (nameof i2sLinkHalfVolume) (fun () -> i2sLinkHalfVolume.def)
           entry "Max pool, combinational" (nameof maxPoolCombinational) (fun () -> maxPoolCombinational.def) ]
 
 let designs = catalog.entries

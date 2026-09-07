@@ -1108,16 +1108,6 @@ let i2sMasterHz (fabricHz: int) (targetFs: int) (bitsPerSlot: int) (name: string
 
     i2sMaster name mclkHalfDiv sclkHalfDiv bitsPerSlot
 
-/// The clock generator for a board: the same as `i2sMasterHz`, with the fabric
-/// frequency read off the target instead of restated at the call.
-///
-/// This is the form to reach for in a design, because it is the one that cannot
-/// go stale — moving the design to a board with a different clock changes the
-/// divisors, and a rate the new clock cannot make fails the build rather than
-/// shipping.
-let i2sMasterAt (board: Board) (targetFs: int) (bitsPerSlot: int) (name: string) : TypedModule<I2sMasterPorts> =
-    i2sMasterHz board.fabricHz targetFs bitsPerSlot name
-
 /// The sample rate a given set of divisors produces, for a check or a comment.
 /// The same arithmetic `i2sMasterHz` verifies against, exposed so a test can
 /// state the rate it expects rather than restating the formula.
@@ -1298,6 +1288,178 @@ let i2sTx (name: string) instName =
         lrclk ==> io.lrclk
         stereoSink io.s s
         io.sdin
+
+// ---------------------------------------------------------------------------
+// The link: the whole I2S front end as one thing, so a design that wants audio
+// in and audio out never touches a clock generator, a tick or a pin.
+//
+// This is the `axiLiteSlavePorts` / `regMapSlave` split applied to the codec:
+// `i2sPins` declares the boundary in the io factory (where it must, since the
+// boundary seals when that factory returns), `i2sLink` builds the machinery in
+// the body and hands back streams. Everything the caller can get wrong by hand
+// — which tick reaches which framer, which clock pin goes undriven, whether
+// receive and transmit share one generator — is settled inside.
+
+/// Which physical pin set a board presents. The two shapes are not a
+/// preference: both appear in this repository with constraint files that bind
+/// exactly these names, and a design must declare exactly what its `.xdc`
+/// binds or it will not build for the board.
+type I2sPinout =
+    /// One clock bus shared by every chip on it, and no MCLK — the MEMS shape:
+    /// `bclk`, `ws`, `sd_in`, `sd_out`. Digital microphones want no master
+    /// clock and a DAC like the UDA1334A makes its own.
+    | SharedBus
+    /// Separate converters on separate connector rows, each with its own clock
+    /// trio — the Pmod I2S2 shape: `mclk`/`sclk`/`lrclk` and `sdin` for the
+    /// DAC, `mclk2`/`sclk2`/`lrclk2` and `sdout` for the ADC.
+    | SeparateCodecs
+
+/// The clock pins a pinout presents, as lists because *how many* is the thing
+/// that varies: a shared bus has one of each and no MCLK at all, separate
+/// converters have two of each. A list also makes "this board has no MCLK" an
+/// empty list rather than a special case someone has to remember.
+type I2sClockPins =
+    { mclkPins: Output list
+      sclkPins: Output list
+      lrclkPins: Output list }
+
+/// The pins of a transmit-only link — a design with a DAC and nothing to
+/// listen to. `audioToneAxi` is the shape: four pins, and its `.xdc` binds
+/// four.
+type I2sTxPins =
+    { txClocks: I2sClockPins
+      dataOut: Output }
+
+/// The pins of a duplex link: the same clocks, plus a line each way.
+type I2sPins =
+    { clocks: I2sClockPins
+      txDataOut: Output
+      dataIn: Input }
+
+/// Declare a duplex link's pins. Call from a module's io factory.
+///
+/// **The declaration order is deliberate and is not cosmetic.** It reproduces
+/// the order the hand-wired designs this replaces declare their ports in, so
+/// converting one of them to this function is a byte-identical change to the
+/// emitted Verilog rather than a header reshuffle that has to be read to be
+/// dismissed. That is why the two pinouts spell their declarations out
+/// separately instead of sharing a helper: the interleaving of the data pin
+/// with the clock pins is the part that has to match.
+let i2sPins (p: Ports) (pinout: I2sPinout) : I2sPins =
+    match pinout with
+    | SharedBus ->
+        let sdIn = p.inPort "sd_in" 1
+        let bclk = p.outPort "bclk" 1
+        let ws = p.outPort "ws" 1
+        let sdOut = p.outPort "sd_out" 1
+
+        { clocks =
+            { mclkPins = []
+              sclkPins = [ bclk ]
+              lrclkPins = [ ws ] }
+          txDataOut = sdOut
+          dataIn = sdIn }
+    | SeparateCodecs ->
+        let sdout = p.inPort "sdout" 1
+        let mclk = p.outPort "mclk" 1
+        let sclk = p.outPort "sclk" 1
+        let lrclk = p.outPort "lrclk" 1
+        let sdin = p.outPort "sdin" 1
+        // The ADC is a second chip on a second connector row and needs the same
+        // three clocks on its own pins. One generator drives both: a second
+        // would drift against the first.
+        let mclk2 = p.outPort "mclk2" 1
+        let sclk2 = p.outPort "sclk2" 1
+        let lrclk2 = p.outPort "lrclk2" 1
+
+        { clocks =
+            { mclkPins = [ mclk; mclk2 ]
+              sclkPins = [ sclk; sclk2 ]
+              lrclkPins = [ lrclk; lrclk2 ] }
+          txDataOut = sdin
+          dataIn = sdout }
+
+/// Declare a transmit-only link's pins. Call from a module's io factory.
+let i2sTxPins (p: Ports) (pinout: I2sPinout) : I2sTxPins =
+    match pinout with
+    | SharedBus ->
+        let bclk = p.outPort "bclk" 1
+        let ws = p.outPort "ws" 1
+        let sdOut = p.outPort "sd_out" 1
+
+        { txClocks =
+            { mclkPins = []
+              sclkPins = [ bclk ]
+              lrclkPins = [ ws ] }
+          dataOut = sdOut }
+    | SeparateCodecs ->
+        let mclk = p.outPort "mclk" 1
+        let sclk = p.outPort "sclk" 1
+        let lrclk = p.outPort "lrclk" 1
+        let sdin = p.outPort "sdin" 1
+
+        { txClocks =
+            { mclkPins = [ mclk ]
+              sclkPins = [ sclk ]
+              lrclkPins = [ lrclk ] }
+          dataOut = sdin }
+
+/// A duplex link, as the body sees it: samples arriving, and somewhere to put
+/// samples going out.
+type I2sLink =
+    { /// The stereo stream off the converter. `valid` pulses once per pair.
+      input: Stream<Expr * Expr>
+      /// Hand it the stream to transmit. Call exactly once — the data pin takes
+      /// one driver, and never calling it leaves the pin undriven, which fails
+      /// at emission.
+      send: Stream<Expr * Expr> -> unit }
+
+/// A transmit-only link.
+type I2sTxLink =
+    { sendOnly: Stream<Expr * Expr> -> unit }
+
+let private driveClocks (pins: I2sClockPins) (m: I2sMasterPorts) =
+    for pin in pins.mclkPins do
+        m.mclk ==> pin
+
+    for pin in pins.sclkPins do
+        m.sclk ==> pin
+
+    for pin in pins.lrclkPins do
+        m.lrclk ==> pin
+
+/// The whole front end: one clock generator at the board's rate, a receiver on
+/// the sampling edge, a transmitter on the driving edge, every clock pin
+/// driven.
+///
+/// **The two edge ticks never reach the caller**, which is the point. Wiring
+/// `sclkTxTick` to the receiver is a bug that passes elaboration, passes every
+/// stream check, and cannot be caught in simulation at all — it moves the
+/// receiver from the edge where the line is stable to the edge where it
+/// changes, and a zero-delay model has no opinion about that. Here it is not
+/// expressible.
+///
+/// `prefix` names the instances (`{prefix}_clocks`, `{prefix}_rx`,
+/// `{prefix}_tx`), so a design may hold more than one link.
+///
+/// **`fabricHz` is a frequency, not a `Board`.** A `Board` is a thing an
+/// application holds; threading it through the hardware constructors would put
+/// a record about *targets* into the signature of everything that divides a
+/// clock, and a stage that needs a number should ask for the number. Callers
+/// that have one write `kv260.fabricHz`, which reads as what it is.
+let i2sLink (prefix: string) (pins: I2sPins) (fabricHz: int) (targetFs: int) (bitsPerSlot: int) : I2sLink =
+    let clocks = instanceNamed $"{prefix}_clocks" (i2sMasterHz fabricHz targetFs bitsPerSlot "I2sMaster")
+    driveClocks pins.clocks clocks
+
+    { input = i2sRx "I2sRx" $"{prefix}_rx" clocks.sclkRxTick clocks.lrclk pins.dataIn
+      send = fun s -> i2sTx "I2sTx" $"{prefix}_tx" clocks.sclkTxTick clocks.lrclk s ==> pins.txDataOut }
+
+/// The transmit half alone, for a design with nothing to listen to.
+let i2sTxLink (prefix: string) (pins: I2sTxPins) (fabricHz: int) (targetFs: int) (bitsPerSlot: int) : I2sTxLink =
+    let clocks = instanceNamed $"{prefix}_clocks" (i2sMasterHz fabricHz targetFs bitsPerSlot "I2sMaster")
+    driveClocks pins.txClocks clocks
+
+    { sendOnly = fun s -> i2sTx "I2sTx" $"{prefix}_tx" clocks.sclkTxTick clocks.lrclk s ==> pins.dataOut }
 
 // ---------------------------------------------------------------------------
 // Multiband compression. Generic DSP: an 8-band crossover feeding a compressor

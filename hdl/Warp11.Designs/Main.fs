@@ -106,6 +106,10 @@ let private diffDesigns () =
       audioChain.def
       audioTone.def
       i2sLoopback.def
+      i2sLinkPassthru.def
+      i2sLinkCodec.def
+      i2sLinkTone.def
+      i2sLinkHalfVolume.def
       multibandStage.def ]
 
 /// Unity settings must be audibly transparent: gain at 1.0x unmuted,
@@ -470,6 +474,113 @@ let private i2sTxEmits () : bool =
 /// The third is the iCEBreaker case §1.5 of the hearing-aid plan is about — a
 /// 12 MHz crystal cannot make 48 kHz at 32 bits per slot either, and the rate
 /// it *can* make is accepted.
+/// The same shared-bus link, hand-wired: a clock generator, both framers, the
+/// ticks routed by hand, the pins driven by hand. Named identically to the
+/// abstraction's design so the two emissions can be compared directly.
+let private i2sHandWiredShared =
+    defModule
+        "I2sLinkPassthru"
+        (fun p -> (p.inPort "sd_in" 1, p.outPort "bclk" 1, p.outPort "ws" 1, p.outPort "sd_out" 1))
+        (fun (sdIn, bclk, ws, sdOut) ->
+            let clocks = instanceNamed "i2s_clocks" (i2sMasterHz kv260.fabricHz 48_828 32 "I2sMaster")
+
+            clocks.sclk ==> bclk
+            clocks.lrclk ==> ws
+
+            let received = i2sRx "I2sRx" "i2s_rx" clocks.sclkRxTick clocks.lrclk sdIn
+            i2sTx "I2sTx" "i2s_tx" clocks.sclkTxTick clocks.lrclk received ==> sdOut)
+
+/// And the separate-converter one, where the ADC's three extra clock pins are
+/// the thing most easily left undriven by hand — which is exactly the defect
+/// that once kept three shipped designs from building for the board.
+let private i2sHandWiredCodec =
+    defModule
+        "I2sLinkCodec"
+        (fun p ->
+            (p.inPort "sdout" 1,
+             p.outPort "mclk" 1,
+             p.outPort "sclk" 1,
+             p.outPort "lrclk" 1,
+             p.outPort "sdin" 1,
+             p.outPort "mclk2" 1,
+             p.outPort "sclk2" 1,
+             p.outPort "lrclk2" 1))
+        (fun (sdout, mclk, sclk, lrclk, sdin, mclk2, sclk2, lrclk2) ->
+            let clocks = instanceNamed "i2s_clocks" (i2sMasterHz kv260.fabricHz 48_828 32 "I2sMaster")
+
+            clocks.mclk ==> mclk
+            clocks.mclk ==> mclk2
+            clocks.sclk ==> sclk
+            clocks.sclk ==> sclk2
+            clocks.lrclk ==> lrclk
+            clocks.lrclk ==> lrclk2
+
+            let received = i2sRx "I2sRx" "i2s_rx" clocks.sclkRxTick clocks.lrclk sdout
+            i2sTx "I2sTx" "i2s_tx" clocks.sclkTxTick clocks.lrclk received ==> sdin)
+
+/// `reduceVolume` on the bare stream boundary, so a sample can be poked in and
+/// read out without 2,048 cycles of framing in the way.
+let private halfStage =
+    defModule
+        "HalfStage"
+        (fun p -> (streamInputPorts p "in" sampleLayout, streamOutputPorts p "out" sampleLayout))
+        (fun (inPorts, outPorts) -> streamSource inPorts |> reduceVolume |> streamSink outPorts)
+
+/// The halving stage's defining property, and it is specifically the one a
+/// golden vector would miss: **negative samples must stay negative**.
+///
+/// A logical shift right halves every positive sample correctly and turns every
+/// negative one into a large positive one. Captured output from a sine sweep
+/// would look plausible either way in a peak meter; only asking what happens to
+/// a negative number says which shift was emitted. The full-scale endpoints are
+/// in the set because they are where a sign error is largest, and -1 is there
+/// because arithmetic shift floors rather than truncating toward zero — -1
+/// halves to -1, which is correct and looks wrong.
+let private reduceVolumeHalvesSigned () : bool =
+    let sim = Sim halfStage.def
+    sim.Poke("in_valid", 1UL)
+    sim.Poke("out_ready", 1UL)
+
+    let mask = (1UL <<< sampleWidth) - 1UL
+
+    let asSigned (v: uint64) =
+        if v >= (1UL <<< (sampleWidth - 1)) then
+            int64 v - (1L <<< sampleWidth)
+        else
+            int64 v
+
+    let halved (x: int64) =
+        // Arithmetic shift right by one: floor(x / 2), not truncation.
+        if x >= 0L then x / 2L
+        elif x % 2L = 0L then x / 2L
+        else x / 2L - 1L
+
+    [ 1000L; -1000L; -1L; 1L; 0L; 8388607L; -8388608L ]
+    |> List.forall (fun sample ->
+        let raw = uint64 sample &&& mask
+        sim.Poke("in_left", raw)
+        sim.Poke("in_right", raw)
+        sim.Tick()
+
+        asSigned (sim.Peek "out_left") = halved sample
+        && asSigned (sim.Peek "out_right") = halved sample)
+
+/// `i2sLink`'s defining property: it is the hand-wiring and nothing else.
+///
+/// Byte-identical emitted Verilog is the assertion, which is stronger than any
+/// behavioural check could be here — it says the abstraction adds no logic, no
+/// register and no renaming, so choosing it over hand-wiring is invisible below
+/// the call site. That is the call-site invariance rule stated as a
+/// measurement.
+///
+/// It also pins the thing the abstraction exists to make unwriteable. A link
+/// that routed `sclkTxTick` to the receiver would still elaborate and still
+/// pass every stream check; here it would fail this comparison immediately,
+/// because the hand-wired side spells the correct routing out.
+let private i2sLinkIsTheHandWiring () : bool =
+    emitDesign i2sLinkPassthru.def = emitDesign i2sHandWiredShared.def
+    && emitDesign i2sLinkCodec.def = emitDesign i2sHandWiredCodec.def
+
 let private i2sMasterHzPicksDivisors () : bool =
     let refuses fabricHz fs bits =
         try
@@ -481,9 +592,9 @@ let private i2sMasterHzPicksDivisors () : bool =
     let stock = emitDesign (i2sMasterDefault "I2sMaster").def
     let named = emitDesign (i2sMasterHz 100_000_000 48_828 32 "I2sMaster").def
 
-    // The board form is the same hardware again: `kv260` carries the same
-    // 100 MHz, so naming the board and naming the frequency cannot diverge.
-    let byBoard = emitDesign (i2sMasterAt kv260 48_828 32 "I2sMaster").def
+    // Reading the frequency off a board is the same hardware again: `kv260`
+    // carries the same 100 MHz, so the record and the literal cannot diverge.
+    let byBoard = emitDesign (i2sMasterHz kv260.fabricHz 48_828 32 "I2sMaster").def
 
     stock = named
     && stock = byBoard
@@ -4106,6 +4217,8 @@ let private mainDemo () =
     printfn $"I2S tx emits ideal frame:     %b{i2sTxEmits ()}"
     printfn $"I2S loopback round trip:      %b{i2sLoopbackRoundTrip ()}"
     printfn $"I2S master by sample rate:    %b{i2sMasterHzPicksDivisors ()}"
+    printfn $"I2S link is the hand wiring: %b{i2sLinkIsTheHandWiring ()}"
+    printfn $"reduceVolume halves signed:   %b{reduceVolumeHalvesSigned ()}"
 
     // The Fixed layer compiles away: every line except the module header and the
     // escape compare (Number.lessThan is signed; the hand-written design chose the unsigned

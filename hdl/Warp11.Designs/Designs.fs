@@ -2609,6 +2609,68 @@ let i2sTxStage =
         (fun (sclkTick, lrclk, sdin, inPorts) ->
             i2sTx "I2sTx" "tx" sclkTick lrclk (streamSource inPorts) ==> sdin)
 
+// ---------------------------------------------------------------------------
+// The link abstraction, one design per pinout. Together they are what says the
+// three port sets come out with the names the constraint files bind, and the
+// byte-identity check next door says the machinery inside is the hand-wiring.
+
+/// A shared-bus duplex link — the MEMS shape. Four pins, no MCLK, and a body
+/// that mentions no clock at all: pins in, streams out, straight through.
+let i2sLinkPassthru =
+    defModule
+        "I2sLinkPassthru"
+        (fun p -> i2sPins p SharedBus)
+        (fun pins ->
+            let i2s = i2sLink "i2s" pins kv260.fabricHz 48_828 32
+            i2s.input |> i2s.send)
+
+/// The same, on separate converters — the Pmod I2S2 shape. Eight pins, and the
+/// ADC's three clocks driven from the one generator.
+let i2sLinkCodec =
+    defModule
+        "I2sLinkCodec"
+        (fun p -> i2sPins p SeparateCodecs)
+        (fun pins ->
+            let i2s = i2sLink "i2s" pins kv260.fabricHz 48_828 32
+            i2s.input |> i2s.send)
+
+/// A stage of your own, in the middle of a link.
+///
+/// Halving a sample is an **arithmetic** shift right: the sign bit has to fill
+/// from the top, or every negative sample becomes a large positive one and the
+/// audio is destroyed in a way that a peak meter will not show. `sra` reads its
+/// operand as signed whatever the operand was declared as, which is why this is
+/// one line rather than a cast and a shift.
+///
+/// Rebuilding the record rather than constructing a new stream is the idiom:
+/// the handshake travels *inside* the value, so keeping it and replacing the
+/// payload is the whole edit.
+let reduceVolume (s: Stream<Expr * Expr>) : Stream<Expr * Expr> =
+    let left, right = s.payload
+    { s with payload = (sra 1 left, sra 1 right) }
+
+/// The link with that stage spliced in: audio in, half as loud, audio out.
+/// This is the shape every real design has — the only thing that grows is what
+/// sits between `input` and `send`.
+let i2sLinkHalfVolume =
+    defModule
+        "I2sLinkHalfVolume"
+        (fun p -> i2sPins p SharedBus)
+        (fun pins ->
+            let i2s = i2sLink "i2s" pins kv260.fabricHz 48_828 32
+            i2s.input |> reduceVolume |> i2s.send)
+
+/// Transmit only: a tone into a DAC with nothing to listen to. Four pins, and
+/// no `input` on the link because the type does not have one.
+let i2sLinkTone =
+    defModule
+        "I2sLinkTone"
+        (fun p -> (i2sTxPins p SeparateCodecs, p.inPort "enable" 1))
+        (fun (pins, enable) ->
+            let link = i2sTxLink "i2s" pins kv260.fabricHz 48_828 32
+            toneGenerator "ToneGenerator" "tone" enable (lit toneStep440 tonePhaseWidth)
+            |> link.sendOnly)
+
 /// The 8-band multiband compressor as a stream stage.
 let multibandStage =
     defModule
