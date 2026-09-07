@@ -2320,8 +2320,8 @@ let scratchRegs, scratchMap =
           high = high
           wrapIrq = wrapIrq
           patLow = patLow
-          pattern = r.RwWindow("pattern", 16)
-          trace = r.RoWindow("trace", 16) })
+          pattern = r.RwArray("pattern", 16)
+          trace = r.RoArray("trace", 16) })
 
 let regMapScratch =
     defModuleClocked
@@ -2346,14 +2346,14 @@ let regMapScratch =
             // read-only field, so the one-cycle glitch during a host readback is
             // observable only by the very host doing the read — mid-transaction,
             // on a different offset.
-            let patternWord = (regs.window scratchRegs.pattern (slice 3 0 count)).data
+            let patternWord = (regs.readArray scratchRegs.pattern (slice 3 0 count)).read.data
             regs.drive scratchRegs.patLow (slice 7 0 patternWord)
 
             // The mirror window: the design writes, the host reads. Each bump
             // leaves a marked word at the count it happened on, so a host read of
             // trace[i] proves the design's write port and the host's read port are
             // the same array.
-            let trace = regs.driveWindow scratchRegs.trace
+            let trace = regs.driveArray scratchRegs.trace
             memWrite trace (slice 3 0 count) (cat (lit 0xC5UL 24) count) bump
 
             regs.irq ==> irqOut)

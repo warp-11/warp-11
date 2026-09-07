@@ -4490,8 +4490,8 @@ let private mainDemo () =
               roField "high" 0x008UL 8 1
               w1cBit "wrapIrq" 0x00CUL 0
               roField "patLow" 0x010UL 0 8
-              rwWindow "pattern" 0x040UL 16
-              roWindow "trace" 0x080UL 16 ]
+              rwArray "pattern" 0x040UL 16
+              roArray "trace" 0x080UL 16 ]
 
         let allocated = scratchMap.entries
 

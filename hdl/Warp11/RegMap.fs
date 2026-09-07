@@ -25,13 +25,13 @@ type RegKind =
     /// A constant word — the ID pattern. Owns the read side of its word.
     | RoConst of value: uint64
     /// A window of 32-bit words the *design* writes and the host reads — the
-    /// mirror of `RwWindow`, and the declarative map's version of the list
+    /// mirror of `RwArray`, and the declarative map's version of the list
     /// slave's `memWindows` (a result buffer, a trace, a small frame). No
     /// arbitration is needed in this direction: the design's write port and
     /// the host's read port are exactly a block RAM's two ports. Host writes
     /// in the range are ignored, as they are on any read-only entry. `words`
     /// must be a power of two and the window aligned to its own size.
-    | RoWindow of words: int
+    | RoArray of words: int
     /// A host-writable window of 32-bit words backed by a mem the hardware
     /// reads. Host reads in the window return its contents, through the same
     /// single read port the design uses — a second port would cost the BRAM
@@ -39,7 +39,7 @@ type RegKind =
     /// cycles a readback is in flight, and the design's side of the port says
     /// so (`hostTurn`). `words` must be a power of two and the window aligned
     /// to its own size.
-    | RwWindow of words: int
+    | RwArray of words: int
 
 /// One register in a map: what it is called, where the host finds it, and what
 /// kind of thing it is. Built by the constructors below and then held on to —
@@ -76,13 +76,13 @@ let roConst name offset value =
 
 /// A block of words the host writes and the design reads. `words` must be a
 /// power of two, and the window aligned to its own size.
-let rwWindow name offset words =
-    { name = name; offset = offset; kind = RwWindow words }
+let rwArray name offset words =
+    { name = name; offset = offset; kind = RwArray words }
 
 /// A block of words the design writes and the host reads, on the same
 /// alignment rule.
-let roWindow name offset words =
-    { name = name; offset = offset; kind = RoWindow words }
+let roArray name offset words =
+    { name = name; offset = offset; kind = RoArray words }
 
 /// A whole register map: its aperture, and the entries in it. One definition
 /// elaborates the slave *and* emits the Rust layout, so host and fabric cannot
@@ -120,8 +120,8 @@ let private layoutFingerprint (apertureAddrWidth: int) (entries: RegEntry list) 
         | RoField (bo, w) -> $"rf{bo},{w}"
         | W1cBit b -> $"w1c{b}"
         | RoConst v -> $"c{v}"
-        | RoWindow w -> $"row{w}"
-        | RwWindow w -> $"rww{w}"
+        | RoArray w -> $"row{w}"
+        | RwArray w -> $"rww{w}"
 
     let canonical =
         entries
@@ -309,7 +309,7 @@ type RegBuilder internal () =
     member this.Word(build: WordBuilder -> 'r) : 'r =
         build (WordBuilder(this.Take(), entries))
 
-    member private _.TakeWindow(words: int) =
+    member private _.TakeArray(words: int) =
         // A window is aligned to its own size, so the cursor rounds up first.
         // Doing it here rather than making the caller do it is most of why
         // windows were fiddly to place by hand.
@@ -320,14 +320,14 @@ type RegBuilder internal () =
         offset
 
     /// A block of words the host writes and the design reads.
-    member this.RwWindow(name: string, words: int) =
-        let e = rwWindow name (this.TakeWindow words) words
+    member this.RwArray(name: string, words: int) =
+        let e = rwArray name (this.TakeArray words) words
         entries.Add e
         e
 
     /// A block of words the design writes and the host reads.
-    member this.RoWindow(name: string, words: int) =
-        let e = roWindow name (this.TakeWindow words) words
+    member this.RoArray(name: string, words: int) =
+        let e = roArray name (this.TakeArray words) words
         entries.Add e
         e
 
@@ -363,17 +363,21 @@ let buildRegMap (build: RegBuilder -> 'a) : 'a * RegMap =
 /// plus the one thing that is different here: the port is shared with the
 /// host, so a design consuming the window statefully has to know whose cycle
 /// it is.
-type WindowPort =
-    { /// The word, `depth` cycles after the address was presented.
-      data: Expr
-      /// How many cycles late `data` is.
-      depth: int
-      /// Carry a signal across the read so it arrives beside `data`.
-      through: string -> Expr -> Expr
-      /// High on the cycles the host has borrowed the port. A design that
-      /// consumes the window statefully gates on this; one that only derives
-      /// combinational values from it may ignore a one-cycle glitch only the
-      /// reading host could observe.
+/// The design's side of a host-writable array (`rwArray`).
+///
+/// It **is** an ordinary `MemReadPort` — the word, how late it is, and
+/// `through` to carry a caller's signals across the same distance — plus the
+/// one thing that genuinely differs here: the read port is shared with the
+/// host, so a design consuming the array statefully has to know whose cycle it
+/// is. Restating the port's three fields would have been a second type saying
+/// the same thing.
+type HostArrayPort =
+    { /// The read itself, identical in shape and meaning to any other.
+      read: MemReadPort
+      /// High on the cycles the host has borrowed the port for a readback.
+      /// A design that consumes the array statefully gates on this; one that
+      /// only derives combinational values from it may ignore a one-cycle
+      /// glitch that only the reading host could ever observe.
       hostTurn: Expr }
 
 /// The elaborated slave, handed back as typed access keyed by entry — the one
@@ -384,7 +388,7 @@ type SlaveRegs =
       value: RegEntry -> Expr
       drive: RegEntry -> Expr -> unit
       setBit: RegEntry -> Expr -> unit
-      /// The arbitrated read port onto a `RwWindow`: the design hands over its
+      /// The arbitrated read port onto a `RwArray`: the design hands over its
       /// address and gets a `memReadPort`-shaped record back — `data`,
       /// `through` — plus `hostTurn`, the cycles the port is serving a host
       /// readback instead. During those cycles `data` is the host's word.
@@ -401,13 +405,13 @@ type SlaveRegs =
       /// second call is the one-driver error, and never calling it leaves the
       /// wire undriven, which fails at emission — a window nobody reads is a
       /// bug, not a default.
-      window: RegEntry -> Expr -> WindowPort
-      /// The backing mem of a `RoWindow`, for the design to `memWrite` — its
+      readArray: RegEntry -> Expr -> HostArrayPort
+      /// The backing mem of a `RoArray`, for the design to `memWrite` — its
       /// write port is exclusively the design's, so the raw mem is the honest
       /// interface and several writes fold as they do anywhere. Reading it
       /// from the design costs a second read port; the host's readback rides
       /// the read channel for free.
-      driveWindow: RegEntry -> Mem
+      driveArray: RegEntry -> Mem
       irq: Expr }
 
 let private log2 n =
@@ -452,8 +456,8 @@ let private validate (m: RegMap) =
             if bo < 0 || w < 1 || bo + w > 32 then
                 failwith $"regMap '{e.name}': field [%d{bo + w - 1}:%d{bo}] does not fit a 32-bit word"
         | RoConst _ -> ()
-        | RwWindow words
-        | RoWindow words ->
+        | RwArray words
+        | RoArray words ->
             if words < 2 || words &&& (words - 1) <> 0 then
                 failwith $"regMap '{e.name}': window words must be a power of two >= 2, got %d{words}"
 
@@ -462,8 +466,8 @@ let private validate (m: RegMap) =
 
     let windowRange (e: RegEntry) =
         match e.kind with
-        | RwWindow words
-        | RoWindow words -> Some(wordOf e, wordOf e + uint64 words - 1UL)
+        | RwArray words
+        | RoArray words -> Some(wordOf e, wordOf e + uint64 words - 1UL)
         | _ -> None
 
     for e in m.entries do
@@ -489,8 +493,8 @@ let private validate (m: RegMap) =
         m.entries
         |> List.filter (fun e ->
             match e.kind with
-            | RwWindow _
-            | RoWindow _ -> false
+            | RwArray _
+            | RoArray _ -> false
             | _ -> true)
         |> List.groupBy wordOf
 
@@ -585,7 +589,7 @@ let regMapSlave (ports: AxiLiteSlavePorts) (m: RegMap) : SlaveRegs =
             w1cState[e.name] <- r
             w1cSets[e.name] <- setWire
         | RoConst _ -> ()
-        | RwWindow words ->
+        | RwArray words ->
             let aw = log2 words
             let backing = distributedMem e.name aw 32
             let inWrite = wireBit $"{e.name}_write_hit"
@@ -602,7 +606,7 @@ let regMapSlave (ports: AxiLiteSlavePorts) (m: RegMap) : SlaveRegs =
             (writeFire &&& below) ==> inWrite
             memWrite backing (slice (aw - 1) 0 awWord) wdata inWrite
             windows[e.name] <- (backing, aw, baseWord, uint64 words)
-        | RoWindow words ->
+        | RoArray words ->
             // The design's to write, the host's to read: two exclusive ports,
             // which is exactly what a block RAM has, so no arbitration and no
             // host-write decode — writes landing here are ignored like writes
@@ -623,8 +627,8 @@ let regMapSlave (ports: AxiLiteSlavePorts) (m: RegMap) : SlaveRegs =
             | W1cBit b -> Some(wordOf e, positioned b w1cState[e.name])
             | RoConst v -> Some(wordOf e, lit v 32)
             | PulseBit _
-            | RwWindow _
-            | RoWindow _ -> None)
+            | RwArray _
+            | RoArray _ -> None)
         |> List.groupBy fst
         |> List.map (fun (word, contributions) ->
             word, contributions |> List.map snd |> List.reduce (|||))
@@ -637,7 +641,7 @@ let regMapSlave (ports: AxiLiteSlavePorts) (m: RegMap) : SlaveRegs =
     // needs the held read word — and the design plugs its address in later
     // through the `window` accessor, which drives the wire declared for it.
     let windowPorts =
-        System.Collections.Generic.Dictionary<string, {| designAddr: Expr; port: WindowPort |}>()
+        System.Collections.Generic.Dictionary<string, {| designAddr: Expr; port: HostArrayPort |}>()
 
     // Deterministic on purpose: the fold walks the map's own entry order, not
     // a dictionary's, so two elaborations of one map emit identical Verilog.
@@ -659,7 +663,7 @@ let regMapSlave (ports: AxiLiteSlavePorts) (m: RegMap) : SlaveRegs =
                 windowHit
 
             match e.kind with
-            | RwWindow _ ->
+            | RwArray _ ->
                 let name = e.name
                 let backing, aw, _, _ = windows[name]
                 let windowHit = hit ()
@@ -673,14 +677,10 @@ let regMapSlave (ports: AxiLiteSlavePorts) (m: RegMap) : SlaveRegs =
 
                 windowPorts[name] <-
                     {| designAddr = designAddr
-                       port =
-                        { data = port.data
-                          depth = port.depth
-                          through = port.through
-                          hostTurn = hostTurn } |}
+                       port = { read = port; hostTurn = hostTurn } |}
 
                 mux windowHit (zeroExtend32 port.data) below
-            | RoWindow _ ->
+            | RoArray _ ->
                 let name = e.name
                 let backing, aw, _, _ = outWindows[name]
                 let windowHit = hit ()
@@ -712,10 +712,10 @@ let regMapSlave (ports: AxiLiteSlavePorts) (m: RegMap) : SlaveRegs =
       value = find "an rw register" rwRegs
       drive = fun e v -> v ==> (find "a read-only field" roWires e)
       setBit = fun e v -> v ==> (find "a w1c bit" w1cSets e)
-      driveWindow = (fun e -> let m, _, _, _ = find "a design-written window" outWindows e in m)
-      window =
+      driveArray = (fun e -> let m, _, _, _ = find "a design-written array" outWindows e in m)
+      readArray =
         fun e designAddr ->
-            let p = find "a window" windowPorts e
+            let p = find "a host-written array" windowPorts e
             designAddr ==> p.designAddr
             p.port
       irq = irqLevel }
@@ -743,6 +743,6 @@ let regMapRsLines (m: RegMap) : string list =
               yield $"pub const {s}_SHIFT: u32 = %d{bo};"
               yield $"pub const {s}_MASK: u32 = 0x%x{((1UL <<< w) - 1UL) <<< bo};"
           | RoConst v -> yield $"pub const {s}_VALUE: u32 = 0x%08x{v};"
-          | RwWindow words
-          | RoWindow words -> yield $"pub const {s}_WORDS: usize = %d{words};"
+          | RwArray words
+          | RoArray words -> yield $"pub const {s}_WORDS: usize = %d{words};"
           | RwReg _ -> () ]

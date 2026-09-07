@@ -125,36 +125,36 @@ let runFrameAxiWith (jitter: int option) (outPath: string) =
     let cx0 = toQ (-2.25)
     let cy0 = toQ (-1.125)
 
-    let idValue = read32 frameStartOffset
+    let idValue = read32 frameRegs.start.offset
 
     if idValue <> frameIdMagic then
         failwith $"ID read 0x%08x{idValue}, expected 0x%08x{frameIdMagic}"
 
-    write32 frameCxOffset cx0
-    write32 frameCyOffset cy0
-    write32 frameDxOffset stepQ
-    write32 frameDyOffset stepQ
-    write32 frameFbBaseOffset (uint64 fbBase)
-    write32 frameStartOffset 1UL
+    write32 frameRegs.cxOrigin.offset cx0
+    write32 frameRegs.cyOrigin.offset cy0
+    write32 frameRegs.dx.offset stepQ
+    write32 frameRegs.dy.offset stepQ
+    write32 frameRegs.fbBaseAddr.offset (uint64 fbBase)
+    write32 frameRegs.start.offset 1UL
 
     // Poll done through real reads, with free-run gaps between polls so the
     // pod is not transaction-paced.
     let mutable polls = 0
 
-    while read32 frameDoneOffset <> 1UL && polls < 2000 do
+    while read32 frameRegs.doneSticky.offset <> 1UL && polls < 2000 do
         for _ in 1..50 do
             cycle ()
 
         polls <- polls + 1
 
-    if read32 frameDoneOffset <> 1UL then
+    if read32 frameRegs.doneSticky.offset <> 1UL then
         failwith "frameDone never rose"
 
     // No flush, as in `renderFrame`: the done register is gated on the
     // framebuffer window's `idle`, so reading it as 1 is the statement that
     // every word is in DDR.
-    let lastFrameCycles = read32 frameCyclesOffset
-    let busyNow = read32 frameBusyOffset
+    let lastFrameCycles = read32 frameRegs.cycles.offset
+    let busyNow = read32 frameRegs.busy.offset
 
     let expected r c =
         let cx = (cx0 + uint64 c * stepQ) &&& 0xFFFFFFFFUL

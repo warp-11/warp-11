@@ -109,7 +109,7 @@ let golMap (gridWidth: int) (gridHeight: int) : GolMap * RegMap =
           fbBaseAddr = r.RwReg("fbBaseAddr", 32, 0UL)
           // The window rounds the cursor up to its own size, which is what the
           // hand-written `max 64 windowWords` was doing by arithmetic.
-          loadRow = r.RwWindow("loadRow", windowWords)
+          loadRow = r.RwArray("loadRow", windowWords)
           windowWords = windowWords
           wordsPerRow = wordsPerRow })
 
@@ -235,10 +235,11 @@ let golAxi (topName: string) (gridWidth: int) (gridHeight: int) =
         // The port is the window's — shared with the host's readback — so a
         // cycle can be stolen mid-prefetch: `hostTurn` says so, the beat is not
         // marked valid, and the address holds to retry the same word.
-        let read = regs.window m.loadRow prefetchAddr
+        let loadPort = regs.readArray m.loadRow prefetchAddr
+        let read = loadPort.read
         let readData = read.data
         let dataIndex = read.through "prefetch_addr" prefetchAddr
-        let dataValid = read.through "prefetch_state" (prefetcher.Is Prefetch.PWalking &&& bnot read.hostTurn)
+        let dataValid = read.through "prefetch_state" (prefetcher.Is Prefetch.PWalking &&& bnot loadPort.hostTurn)
 
         let staging =
             [ for y in 0 .. gridHeight - 1 ->
@@ -262,7 +263,7 @@ let golAxi (topName: string) (gridWidth: int) (gridHeight: int) =
                 prefetcher.Goto Prefetch.PWalking))
 
           Prefetch.PWalking, (fun () ->
-            If (bnot read.hostTurn) (fun () ->
+            If (bnot loadPort.hostTurn) (fun () ->
                 ifElse [(eq prefetchAddr (lit (uint64 (prefetchTotal - 1)) prefetchAddrWidth), fun () ->
                     prefetcher.Goto Prefetch.PIdle); (otherwise, fun () -> prefetchAddr + lit 1UL prefetchAddrWidth ==> prefetchAddr) ])) ]
 

@@ -43,7 +43,7 @@ would be correct only while it happened to be written last.
 | `r.RwReg(name, width, init)` | host writes, design reads. **Owns its word**, whatever its width |
 | `r.RoField(name, width)` | design drives, host reads. Owns a word; pack several with `Word` |
 | `r.RoConst(name, value)` | a fixed identifying pattern |
-| `r.RwWindow(name, words)` / `r.RoWindow(name, words)` | a block of words. **Rounds the cursor up** to the window's own size — the alignment rule that made windows fiddly to place by hand |
+| `r.RwArray(name, words)` / `r.RoArray(name, words)` | a block of words. **Rounds the cursor up** to the window's own size — the alignment rule that made windows fiddly to place by hand |
 | `r.Word(fun w -> …)` | one word shared by several small entries — below |
 | `r.LayoutHash(name)` | a word answering a fingerprint of the map — which *revision* the fabric was built from |
 | `buildRegMapPinned n (fun r -> …)` | the same, with the aperture stated rather than derived |
@@ -249,7 +249,7 @@ read mux and the interrupt OR.
 `SlaveRegs`, and that type is bus-neutral by construction:
 
 ```fsharp
-{ pulse; value; drive; setBit; window; driveWindow; irq }
+{ pulse; value; drive; setBit; window; driveArray; irq }
 ```
 
 Not one of those mentions AXI. The body only ever calls `regs.value`,
@@ -272,7 +272,7 @@ What survives the move: the map, the design body, and **the generated Rust
 layout** — 32-bit words and `% 4` alignment are kept deliberately so the layout
 file is unchanged across buses, which means the host driver is too.
 
-The part that does not survive for free: `RwWindow` arbitration assumes a bus
+The part that does not survive for free: `RwArray` arbitration assumes a bus
 with a read-address handshake to borrow the port during. A map with no windows
 sidesteps it entirely.
 
@@ -285,8 +285,8 @@ sidesteps it entirely.
 | `r.RoConst(name, value)` / `w.Const` | host reads | a fixed identifying pattern. Read it first in the driver — see below. |
 | `w.Pulse(name)` | host writes | a **one-cycle strobe**, not a level. This is what `start` wants. |
 | `w.W1c(name)` | design sets, host clears | an interrupt-status bit. Every one joins the map's `irq` line. |
-| `r.RwWindow(name, words)` | host writes, design reads | a block of words backed by a mem — a coefficient table, a program. |
-| `r.RoWindow(name, words)` | design writes, host reads | a block the design fills — a result buffer, a trace. |
+| `r.RwArray(name, words)` | host writes, design reads | a block of words backed by a mem — a coefficient table, a program. |
+| `r.RoArray(name, words)` | design writes, host reads | a block the design fills — a result buffer, a trace. |
 
 The bare `rwReg` / `roField` / `pulseBit` / … constructors still exist and take
 an explicit offset. The builder calls them; reach for them directly only if you
@@ -311,8 +311,8 @@ this board needs a power cycle.
 | `regs.drive entry expr` | drive a `roField`. **Exactly once**; never driving it fails at emission |
 | `regs.pulse entry` | the one-cycle strobe from a `pulseBit` |
 | `regs.setBit entry expr` | set a `w1cBit` from hardware. Set wins over a same-cycle host clear |
-| `regs.window entry addr` | the arbitrated read port onto a `rwWindow` — call it **once** |
-| `regs.driveWindow entry` | the `Mem` behind a `roWindow`, for the design to write |
+| `regs.window entry addr` | the arbitrated read port onto a `rwArray` — call it **once** |
+| `regs.driveArray entry` | the `Mem` behind a `roArray`, for the design to write |
 | `regs.irq` | the OR of every `w1cBit`, for the board's interrupt line |
 
 ## Generating the Rust seam

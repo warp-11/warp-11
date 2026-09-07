@@ -9,21 +9,52 @@ open Warp11
 open Warp11.Mandelbrot.LanePod
 open Warp11.Mandelbrot.FramePod
 
-/// The register map, one definition consumed twice: the slave elaboration
-/// below and the generated Rust layout (the seam). Offsets mirror the original
-/// map; 0x000 reads as the ID and writes as the start pulse (a pulse register
-/// never joins the read mux, so both live at one word).
+/// The register map, one definition consumed twice: the slave elaboration below
+/// and the generated Rust layout. Written with the builder, so no offset
+/// appears here — declaration order is the layout, and the addresses it
+/// produces are the ones the hand-written map had.
+///
+/// 0x000 reads as the ID and writes as the start pulse: a constant owns a
+/// word's read side and a pulse bit owns its write side, so both live at one
+/// word.
 let internal frameIdMagic = 0xF5B0D002UL // "F# pod v2" — the frame successor to the mini pod's ...001
-let internal frameStartOffset = 0x000UL
-let internal frameBusyOffset = 0x004UL
-let internal frameDoneOffset = 0x008UL
-let internal frameCxOffset = 0x00CUL
-let internal frameCyOffset = 0x010UL
-let internal frameDxOffset = 0x014UL
-let internal frameDyOffset = 0x018UL
-let internal frameCyclesOffset = 0x01CUL
-let internal frameFbBaseOffset = 0x020UL
 let internal frameApertureAddrWidth = 12
+
+type FrameRegs =
+    { id: RegEntry
+      start: RegEntry
+      busy: RegEntry
+      doneSticky: RegEntry
+      cxOrigin: RegEntry
+      cyOrigin: RegEntry
+      dx: RegEntry
+      dy: RegEntry
+      cycles: RegEntry
+      fbBaseAddr: RegEntry }
+
+let frameRegs, frameMap =
+    buildRegMapPinned frameApertureAddrWidth (fun r ->
+        let id, start = r.Word(fun w -> w.Const("id", frameIdMagic), w.Pulse "start")
+
+        let regs =
+            { id = id
+              start = start
+              busy = r.RoField("busy", 1)
+              doneSticky = r.RoField("done", 1)
+              cxOrigin = r.RwReg("cxOrigin", 32, 0UL)
+              cyOrigin = r.RwReg("cyOrigin", 32, 0UL)
+              dx = r.RwReg("dx", 32, 0UL)
+              dy = r.RwReg("dy", 32, 0UL)
+              cycles = r.RoField("frameCycles", 32)
+              fbBaseAddr = r.RwReg("fbBaseAddr", 32, 0UL) }
+
+        // Which revision of this map the fabric was built from. Allocated
+        // AFTER every existing register, so the migration keeps the addresses
+        // the hand-written map had and only adds a word at the end — the
+        // identity says which design, this says whether the host's offsets
+        // still mean what they meant.
+        r.LayoutHash "layoutHash"
+        regs)
 
 let mandelFrameAxi
     (topName: string)
@@ -47,25 +78,22 @@ let mandelFrameAxi
         let doneSticky = regBit "done_sticky" // latched frameDone, cleared on start (poll-friendly)
         let cycles = reg "cycles" 32 // cleared on start, counts while busy, freezes at done
 
-        let pulses, viewRegs =
-            axiLiteSlaveFullOn
-                slavePorts
-                [ "start", frameStartOffset ]
-                [ "cxOrigin", frameCxOffset, 32
-                  "cyOrigin", frameCyOffset, 32
-                  "dx", frameDxOffset, 32
-                  "dy", frameDyOffset, 32
-                  "fbBaseAddr", frameFbBaseOffset, 32 ]
-                [ frameStartOffset, lit frameIdMagic 32 // 0x000 reads as ID
-                  frameBusyOffset, busyW
-                  frameDoneOffset, doneSticky
-                  frameCyclesOffset, cycles ]
-                []
+        // Keyed by entry rather than by position: the list slave handed back
+        // two lists that had to be destructured in the right order, with a
+        // `failwith` guarding the shape. That guard is gone because the shape
+        // cannot be wrong.
+        let regs = regMapSlave slavePorts frameMap
 
-        let startPulse, cxOrigin, cyOrigin, dx, dy, fbBaseAddr =
-            match pulses, viewRegs with
-            | [ p ], [ cx; cy; dx; dy; fb ] -> p, cx, cy, dx, dy, fb
-            | _ -> failwith "unexpected slave register shape"
+        regs.drive frameRegs.busy busyW
+        regs.drive frameRegs.doneSticky doneSticky
+        regs.drive frameRegs.cycles cycles
+
+        let startPulse = regs.pulse frameRegs.start
+        let cxOrigin = regs.value frameRegs.cxOrigin
+        let cyOrigin = regs.value frameRegs.cyOrigin
+        let dx = regs.value frameRegs.dx
+        let dy = regs.value frameRegs.dy
+        let fbBaseAddr = regs.value frameRegs.fbBaseAddr
 
         // The framebuffer as a window. The design hands over beat indices and
         // the pixels in them; where index zero lives, how far apart beats are

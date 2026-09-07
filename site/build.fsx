@@ -90,6 +90,7 @@ let pages =
       // knows what a register map is and wants to write one should not have to
       // find that out from a page about the AXI-Lite handshake.
       page "Cookbook" "Create a register map" "cookbook/register-map" "docs/cookbook/register-map.md"
+      page "Cookbook" "Store and move data" "cookbook/memory" "docs/cookbook/memory.md"
 
       page "Guides" "How it fits together" "guides/architecture" "docs/architecture.md"
       page "Guides" "Start your own project" "guides/start-a-project" "docs/start-a-project.md"

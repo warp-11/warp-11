@@ -14,6 +14,10 @@ pub enum MandelFrameError<E> {
     /// The window worked but the ID register is not the accelerator's magic —
     /// a wrong base address fails here rather than by producing nonsense.
     WrongId { found: u32 },
+    /// The right design, built from a different revision of the register map.
+    /// Every offset here would be stale and every read would still succeed,
+    /// which is why it is checked rather than assumed.
+    WrongLayout { found: u32, expected: u32 },
     /// `frameDone` did not rise within the poll budget. Against the Sim
     /// bridge each read advances the fabric a couple of cycles, so the budget
     /// is also a cycle budget; on hardware it is just patience.
@@ -48,7 +52,7 @@ pub struct MandelFrameDevice<W> {
 impl<W: RegisterWindow> MandelFrameDevice<W> {
     pub fn open(mut window: W) -> Result<Self, MandelFrameError<W::Error>> {
         let found = window.read32(layout::ID_OFFSET)?;
-        if found != layout::ID_MAGIC {
+        if found != layout::ID_VALUE {
             return Err(MandelFrameError::WrongId { found });
         }
         Ok(MandelFrameDevice { window })
@@ -82,7 +86,7 @@ impl<W: RegisterWindow> MandelFrameDevice<W> {
     /// Fabric cycles from start to `frameDone` — frozen until the next start,
     /// so this is the measured render time.
     pub fn last_frame_cycles(&mut self) -> Result<u32, W::Error> {
-        self.window.read32(layout::LAST_FRAME_CYCLES_OFFSET)
+        self.window.read32(layout::FRAME_CYCLES_OFFSET)
     }
 
     /// The backend underneath, for what the register aperture cannot carry —

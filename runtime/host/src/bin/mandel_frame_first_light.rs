@@ -107,7 +107,7 @@ fn main() {
         eprintln!("device open failed: {e:?} — wrong bitstream loaded, or wrong base?");
         exit(1);
     });
-    println!("ID ok (0x{:08X}), fb base 0x{fb_base:08X}", layout::ID_MAGIC);
+    println!("ID ok (0x{:08X}), fb base 0x{fb_base:08X}", layout::ID_VALUE);
 
     println!("view: cx0={cx0} cy0={cy0} xspan={xspan} yspan={yspan}");
     let view = View {
