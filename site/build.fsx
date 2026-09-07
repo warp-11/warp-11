@@ -407,6 +407,14 @@ let copyImages () =
 /// link. Nothing is left pointing at a `.md` that the site does not serve,
 /// which is what the first cut got wrong: a relative link that was correct in
 /// the repo shipped as a 404.
+///
+/// **A `#fragment` rides along.** `guide.md#some-heading` is a link the repo
+/// resolves and both renderers honour — headings get GitHub-style ids here
+/// (Markdig's `UseAdvancedExtensions`) and on GitHub — so the fragment is
+/// carried onto whichever target the path resolves to rather than being what
+/// makes the link ineligible. It was: the path pattern excluded `#`, so an
+/// anchored link matched nothing, shipped unrewritten, and 404'd — the same
+/// failure the rewriter exists to prevent, in the one shape it did not cover.
 let private githubBlob = "https://github.com/warp-11/warp-11/blob/main/"
 
 let private publishedBySource =
@@ -439,16 +447,17 @@ let rewriteLinks (html: string) (current: Page) =
 
     Regex.Replace(
         html,
-        "href=\"([^\":#?]+\\.md)\"",
+        "href=\"([^\":#?]+\\.md)(#[^\"?]*)?\"",
         fun m ->
             let relative = m.Groups[1].Value
+            let fragment = m.Groups[2].Value
             let full = Path.GetFullPath(Path.Combine(sourceDir, relative))
 
             match publishedBySource.TryGetValue full with
-            | true, slug -> $"href=\"{up}{href slug}\""
+            | true, slug -> $"href=\"{up}{href slug}{fragment}\""
             | _ ->
                 let repoRelative = Path.GetRelativePath(root, full).Replace('\\', '/')
-                $"href=\"{githubBlob}{repoRelative}\"")
+                $"href=\"{githubBlob}{repoRelative}{fragment}\"")
 
 // ---- "open this in the debugger" ------------------------------------------
 //
