@@ -2281,54 +2281,79 @@ let neighborCount =
 /// `count` and `high` pack one read word; `wrapIrq` is the w1c + irq path;
 /// `pattern` is a host-written window the hardware sync-reads back out
 /// through `patLow`.
-module ScratchMap =
-    let id = roConst "id" 0x000UL 0xF5C0FFEEUL
-    let bump = pulseBit "bump" 0x000UL 0
-    let clear = pulseBit "clear" 0x000UL 1
-    let threshold = rwReg "threshold" 0x004UL 16 0UL
-    let count = roField "count" 0x008UL 0 8
-    let high = roField "high" 0x008UL 8 1
-    let wrapIrq = w1cBit "wrapIrq" 0x00CUL 0
-    let patLow = roField "patLow" 0x010UL 0 8
+/// Built with `buildRegMapPinned`, which is also this map's second job: it is
+/// the registered demonstration of the builder, and `regMapBuilderMatchesByHand`
+/// asserts it is entry-for-entry the same map as the hand-written version.
+///
+/// No offset appears here. The two windows still land at 0x040 and 0x080 —
+/// `RwWindow`/`RoWindow` round the cursor up to the window's own size, which is
+/// the alignment rule that made them fiddly to place by hand.
+type ScratchRegs =
+    { id: RegEntry
+      bump: RegEntry
+      clear: RegEntry
+      threshold: RegEntry
+      count: RegEntry
+      high: RegEntry
+      wrapIrq: RegEntry
+      patLow: RegEntry
+      pattern: RegEntry
+      trace: RegEntry }
 
-    let pattern = rwWindow "pattern" 0x040UL 16
-    let trace = roWindow "trace" 0x080UL 16
+let scratchRegs, scratchMap =
+    buildRegMapPinned 8 (fun r ->
+        // The overlay word: the identity answers reads, two pulse bits take
+        // the write side.
+        let id, bump, clear =
+            r.Word(fun w -> w.Const("id", 0xF5C0FFEEUL), w.Pulse "bump", w.Pulse "clear")
 
-    let map =
-        { apertureAddrWidth = 8
-          entries = [ id; bump; clear; threshold; count; high; wrapIrq; patLow; pattern; trace ] }
+        let threshold = r.RwReg("threshold", 16, 0UL)
+        let count, high = r.Word(fun w -> w.Field("count", 8), w.Field("high", 1))
+        let wrapIrq = r.Word(fun w -> w.W1c "wrapIrq")
+        let patLow = r.RoField("patLow", 8)
+
+        { id = id
+          bump = bump
+          clear = clear
+          threshold = threshold
+          count = count
+          high = high
+          wrapIrq = wrapIrq
+          patLow = patLow
+          pattern = r.RwWindow("pattern", 16)
+          trace = r.RoWindow("trace", 16) })
 
 let regMapScratch =
     defModuleClocked
         axiClock
         "RegMapScratch"
-        (fun p -> (axiLiteSlavePorts p ScratchMap.map.apertureAddrWidth, p.outPort "irq" 1))
+        (fun p -> (axiLiteSlavePorts p scratchMap.apertureAddrWidth, p.outPort "irq" 1))
         (fun (slavePorts, irqOut) ->
-            let regs = regMapSlave slavePorts ScratchMap.map
+            let regs = regMapSlave slavePorts scratchMap
 
             let count = reg "count_reg" 8
-            let bump = regs.pulse ScratchMap.bump
+            let bump = regs.pulse scratchRegs.bump
 
             ifElse [
-                (regs.pulse ScratchMap.clear, fun () -> lit 0UL 8 ==> count)
+                (regs.pulse scratchRegs.clear, fun () -> lit 0UL 8 ==> count)
                 (otherwise, fun () -> If bump (fun () -> count + lit 1UL 8 ==> count)) ]
 
-            regs.drive ScratchMap.count count
-            regs.drive ScratchMap.high (bnot (lt count (slice 7 0 (regs.value ScratchMap.threshold))))
-            regs.setBit ScratchMap.wrapIrq (bump &&& eq count (lit 255UL 8))
+            regs.drive scratchRegs.count count
+            regs.drive scratchRegs.high (bnot (lt count (slice 7 0 (regs.value scratchRegs.threshold))))
+            regs.setBit scratchRegs.wrapIrq (bump &&& eq count (lit 255UL 8))
 
             // `hostTurn` is ignored on purpose: patternWord only drives a
             // read-only field, so the one-cycle glitch during a host readback is
             // observable only by the very host doing the read — mid-transaction,
             // on a different offset.
-            let patternWord = (regs.window ScratchMap.pattern (slice 3 0 count)).data
-            regs.drive ScratchMap.patLow (slice 7 0 patternWord)
+            let patternWord = (regs.window scratchRegs.pattern (slice 3 0 count)).data
+            regs.drive scratchRegs.patLow (slice 7 0 patternWord)
 
             // The mirror window: the design writes, the host reads. Each bump
             // leaves a marked word at the count it happened on, so a host read of
             // trace[i] proves the design's write port and the host's read port are
             // the same array.
-            let trace = regs.driveWindow ScratchMap.trace
+            let trace = regs.driveWindow scratchRegs.trace
             memWrite trace (slice 3 0 count) (cat (lit 0xC5UL 24) count) bump
 
             regs.irq ==> irqOut)

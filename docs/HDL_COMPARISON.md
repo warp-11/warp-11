@@ -551,7 +551,7 @@ A tag is needed only to route results *back* to independent clients, which is
 | SpinalHDL | AXI4, AXI4-Lite, AXI4-Stream, AHB-Lite, APB3, Wishbone, TileLink — all built-in |
 | HardCaml | `hardcaml_axi` |
 | Amaranth | `amaranth-soc` for SoC interconnect (CSR bus etc.); AXI via separate libs |
-| Warp 11 | A **declarative register map** — a list of `pulseBit` / `rwReg` / `roField` / `w1cBit` / `roConst` / `rwWindow` entries — from which `regMapSlave` synthesizes the W/R FSMs, register storage, multi-source IRQ OR and read mux, *and* `regMapRsLines` emits the Rust layout the driver imports. `axiMasterReader` (multi-beat INCR bursts, `maxOutstanding`), `axiMasterReaderBurst`, `axiMasterWriter` (single- and multi-outstanding ring-buffer modes) |
+| Warp 11 | A **declarative register map** — a list of `pulseBit` / `rwReg` / `roField` / `w1cBit` / `roConst` / `rwWindow` entries — from which `regMapSlave` synthesizes the W/R FSMs, register storage, multi-source IRQ OR and read mux, *and* `regMapRsLines` emits the Rust layout the driver imports. Written with `buildRegMap`, which **allocates the offsets**: registers are declared in order, packed words are a scope, and windows round the cursor up to their own alignment, so a map states widths and nothing states an address. `axiMasterReader` (multi-beat INCR bursts, `maxOutstanding`), `axiMasterReaderBurst`, `axiMasterWriter` (single- and multi-outstanding ring-buffer modes) |
 
 Warp 11 doesn't ship higher-level fabrics (TileLink, Wishbone, etc.) or an AXI4 *slave* beyond AXI-Lite, but the AXI-Lite + AXI4-master pair covers KV260 deployments and is what every demo runs on — including GEP's sustained burst feed and Mandelbrot's 16-px-per-beat framebuffer egress.
 

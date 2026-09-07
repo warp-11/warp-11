@@ -1742,7 +1742,7 @@ let private clusterOpListVsMirror () : bool =
 let private clusterAxiSeamParts (jitter: int option) : bool * bool =
     let config = Cluster.clusterConfig
     let shape = Cluster.clusterShape 1 false
-    let m = ClusterAxi.gepClusterMap shape
+    let m, _ = ClusterAxi.gepClusterMap shape
     let recordWords = Cluster.gepRecordWords
     let recordBytes = recordWords * 4
     let nCases = 16
@@ -1820,6 +1820,15 @@ let private clusterAxiSeamParts (jitter: int option) : bool * bool =
         match e.kind with
         | RoField (shift, w) -> (read32 e.offset >>> shift) &&& ((1UL <<< w) - 1UL)
         | _ -> failwith $"'{e.name}' is not a read-only field"
+
+    // The identity, first, exactly as the driver does on open. The cluster's
+    // offsets are allocated rather than fixed, so a host meeting a bitstream
+    // built from a different revision of the map reads every register at the
+    // wrong address and reads it successfully — this is the one read that says
+    // so, and it is worth asserting here because nothing else in this check
+    // would notice the whole map having shifted.
+    if read32 m.id.offset <> ClusterAxi.clusterIdMagic then
+        protocolOk <- false
 
     write32 m.queueBase.offset (uint64 queueOff)
     write32 m.popBase.offset (uint64 popOff)

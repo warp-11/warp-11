@@ -91,6 +91,274 @@ type RegMap =
     { apertureAddrWidth: int
       entries: RegEntry list }
 
+// ---------------------------------------------------------------------------
+// Building a map: the registers, in order, with the offsets allocated rather
+// than written.
+//
+// The constructors above take an offset because an offset is sometimes an ABI —
+// a layout something outside this repository already agreed to. Most of the
+// time it is arithmetic nobody wanted to do, and it is written three times per
+// register (the binding, the record field, the entries list) with nothing
+// checking that the three agree. This is the same map, allocated.
+
+/// FNV-1a over a canonical rendering of the map, folded to 16 bits.
+///
+/// Rolled by hand rather than reached for, because **.NET's own hashing is not
+/// deterministic**: `String.GetHashCode` is randomized per process, so the same
+/// map would hash differently on two runs. This value is emitted into committed
+/// Rust, so it has to be stable forever, not merely within one process.
+///
+/// The rendering is **sorted by address**, which makes this a hash of the
+/// *layout* rather than of the source. Declaring the same registers in a
+/// different order with the same offsets is the same ABI and hashes the same;
+/// moving, resizing, adding, removing or renaming one does not.
+let private layoutFingerprint (apertureAddrWidth: int) (entries: RegEntry list) : uint64 =
+    let kindTag (k: RegKind) =
+        match k with
+        | PulseBit b -> $"p{b}"
+        | RwReg (w, init) -> $"rw{w},{init}"
+        | RoField (bo, w) -> $"rf{bo},{w}"
+        | W1cBit b -> $"w1c{b}"
+        | RoConst v -> $"c{v}"
+        | RoWindow w -> $"row{w}"
+        | RwWindow w -> $"rww{w}"
+
+    let canonical =
+        entries
+        |> List.sortBy (fun e -> e.offset, e.name)
+        |> List.map (fun e -> $"{e.name}:{e.offset}:{kindTag e.kind}")
+        |> String.concat ";"
+        |> sprintf "a%d|%s" apertureAddrWidth
+
+    let mutable h = 2166136261u
+
+    for c in canonical do
+        h <- (h ^^^ uint32 c) * 16777619u
+
+    // Folded to sixteen bits: the value shares a word with nothing and the
+    // population of revisions a design goes through is small, so the extra
+    // bits would buy nothing a reader could use.
+    uint64 ((h >>> 16) ^^^ (h &&& 0xFFFFu))
+
+/// One 32-bit word being packed — several small fields, or a constant and a
+/// pulse, sharing an address. Handed to `RegBuilder.Word`.
+///
+/// Packing is deliberate rather than incidental: a host reading `running` and
+/// `allIdle` out of one word gets a coherent snapshot, where two reads could
+/// straddle a change. That is why it is a scope you enter rather than
+/// something the allocator does when things happen to fit.
+type WordBuilder internal (offset: uint64, entries: ResizeArray<RegEntry>) =
+    let mutable bit = 0
+
+    let take width =
+        let at = bit
+        bit <- bit + width
+        at
+
+    /// A hardware-driven field, at the next free bit of this word.
+    member _.Field(name: string, width: int) =
+        let e = roField name offset (take width) width
+        entries.Add e
+        e
+
+    /// A write-1-pulse bit, at the next free bit.
+    member _.Pulse(name: string) =
+        let e = pulseBit name offset (take 1)
+        entries.Add e
+        e
+
+    /// An interrupt-status bit, at the next free bit.
+    member _.W1c(name: string) =
+        let e = w1cBit name offset (take 1)
+        entries.Add e
+        e
+
+    /// A constant sharing this word. It owns the word's **read** side, so it
+    /// composes with `Pulse` — which owns only the write side — and that pair
+    /// is the ID-overlay: reads answer the identity, writes start the design.
+    /// It does not compose with `Field`, and the map's validation says so.
+    member _.Const(name: string, value: uint64) =
+        let e = roConst name offset value
+        entries.Add e
+        e
+
+    // The explicit-bit forms — `RegBuilder.At` at bit granularity, and unused
+    // here for the same reason. An outside layout that fixes a word's address
+    // usually fixes the bits inside it too, so a compat story that could place
+    // a word but not a bit would be half a story.
+
+    /// A hardware-driven field at a stated bit.
+    member _.FieldAt(name: string, bitOffset: int, width: int) =
+        let e = roField name offset bitOffset width
+        entries.Add e
+        e
+
+    /// A write-1-pulse bit at a stated bit.
+    member _.PulseAt(name: string, bitOffset: int) =
+        let e = pulseBit name offset bitOffset
+        entries.Add e
+        e
+
+    /// An interrupt-status bit at a stated bit.
+    member _.W1cAt(name: string, bitOffset: int) =
+        let e = w1cBit name offset bitOffset
+        entries.Add e
+        e
+
+/// Allocates offsets as registers are declared. Reached through `buildRegMap`,
+/// which reads it once the registers have been built — so there is no way to
+/// observe a half-filled map.
+type RegBuilder internal () =
+    let entries = ResizeArray<RegEntry>()
+    let mutable cursor = 0UL
+    let mutable hashEntryName : string option = None
+
+    member private _.Take() =
+        let offset = cursor
+        cursor <- cursor + 4UL
+        offset
+
+    /// The entries, with any `LayoutHash` word's value computed over the rest.
+    /// Done here rather than in the member because a fingerprint of a map that
+    /// is still being written would be a fingerprint of nothing.
+    member internal _.EntriesFingerprinted(apertureAddrWidth: int) =
+        let all = List.ofSeq entries
+
+        match hashEntryName with
+        | None -> all
+        | Some name ->
+            let others = all |> List.filter (fun e -> e.name <> name)
+            let value = layoutFingerprint apertureAddrWidth others
+
+            all
+            |> List.map (fun e ->
+                if e.name = name then
+                    { e with kind = RoConst value }
+                else
+                    e)
+
+    /// The byte after the last one allocated — what the derived aperture is
+    /// computed from.
+    member _.HighWater = cursor
+
+    /// Move the cursor, pinning what comes next to a stated address.
+    ///
+    /// **No map in this repository calls this, deliberately.** It is here for
+    /// one situation: a layout something *outside* the F# already agreed to and
+    /// cannot be regenerated with — a shipped host binary, a board script that
+    /// pokes offsets by hand, a device tree. Everything inside this repository
+    /// reads its offsets from the generated Rust layout, which comes off this
+    /// same map, so moving a register moves the host with it and nothing needs
+    /// pinning.
+    ///
+    /// It nearly went in for a reason that did not survive checking. GEP's map
+    /// has conditional sections, and it looked as though their addresses had to
+    /// hold steady so one driver could serve a build with the auto engine and a
+    /// build without. They do not: only one shape is ever elaborated to
+    /// hardware, and the layout is generated from that same shape, so the two
+    /// cannot disagree. The hand-written offsets it used to carry were a
+    /// property of that code, not a requirement on it.
+    ///
+    /// So: reaching for this means naming the outside thing whose addresses you
+    /// are matching. If you cannot name one, do not call it — allocation in
+    /// declaration order is the point.
+    member _.At(offset: uint64) = cursor <- offset
+
+    /// A host-written register, reading back what was written. Owns its word.
+    member this.RwReg(name: string, width: int, init: uint64) =
+        let e = rwReg name (this.Take()) width init
+        entries.Add e
+        e
+
+    /// A hardware-driven field owning a whole word. Pack several into one with
+    /// `Word` instead.
+    member this.RoField(name: string, width: int) =
+        let e = roField name (this.Take()) 0 width
+        entries.Add e
+        e
+
+    /// A constant owning a whole word. To overlay one with a pulse, use `Word`.
+    member this.RoConst(name: string, value: uint64) =
+        let e = roConst name (this.Take()) value
+        entries.Add e
+        e
+
+    /// A word answering a fingerprint of this map's layout — **which revision**
+    /// of the map the fabric was built from, where an identity constant says
+    /// only which design it is.
+    ///
+    /// That distinction is the whole reason it exists. Offsets here are
+    /// allocated, so adding a register moves everything after it; a driver
+    /// compiled against the newer layout and talking to the older bitstream
+    /// passes an identity check and then reads every register at the wrong
+    /// address — successfully, because an unmapped read inside the aperture
+    /// answers zero rather than faulting. This is the read that says so.
+    ///
+    /// **Returns nothing on purpose.** Nothing in a design body has any use for
+    /// the value, and not handing it back keeps the entry from being one the
+    /// caller holds — which matters, because the value is not known until the
+    /// map is closed, and a caller holding the pre-patched entry would be
+    /// holding a key that no longer matches anything.
+    member this.LayoutHash(name: string) : unit =
+        // A placeholder value, replaced by `buildRegMap` once every other entry
+        // is known. It cannot hash itself.
+        entries.Add(roConst name (this.Take()) 0UL)
+        hashEntryName <- Some name
+
+    /// A word shared by several small entries — see `WordBuilder`.
+    member this.Word(build: WordBuilder -> 'r) : 'r =
+        build (WordBuilder(this.Take(), entries))
+
+    member private _.TakeWindow(words: int) =
+        // A window is aligned to its own size, so the cursor rounds up first.
+        // Doing it here rather than making the caller do it is most of why
+        // windows were fiddly to place by hand.
+        let bytes = uint64 words * 4UL
+        cursor <- (cursor + bytes - 1UL) / bytes * bytes
+        let offset = cursor
+        cursor <- cursor + bytes
+        offset
+
+    /// A block of words the host writes and the design reads.
+    member this.RwWindow(name: string, words: int) =
+        let e = rwWindow name (this.TakeWindow words) words
+        entries.Add e
+        e
+
+    /// A block of words the design writes and the host reads.
+    member this.RoWindow(name: string, words: int) =
+        let e = roWindow name (this.TakeWindow words) words
+        entries.Add e
+        e
+
+/// Build a map whose aperture is stated. Pin it when the aperture is itself an
+/// ABI — the block design's address segment and the device tree both name it,
+/// and both are written outside F#.
+///
+/// The builder is handed to `build` and read after it returns, so the map
+/// cannot be captured half-filled. That matters: were the map a field of the
+/// record being built, it would be correct only while it was written last.
+let buildRegMapPinned (apertureAddrWidth: int) (build: RegBuilder -> 'a) : 'a * RegMap =
+    let b = RegBuilder()
+    let value = build b
+
+    value,
+    { apertureAddrWidth = apertureAddrWidth
+      entries = b.EntriesFingerprinted apertureAddrWidth }
+
+/// Build a map, deriving the smallest aperture that holds it — a 16-byte floor,
+/// then the next power of two. Reach for `buildRegMapPinned` where the aperture
+/// is fixed by something outside this repository, or where a map should have
+/// room to grow without the boundary moving.
+let buildRegMap (build: RegBuilder -> 'a) : 'a * RegMap =
+    let b = RegBuilder()
+    let value = build b
+    let aperture = max 4 (ceilLog2 (int b.HighWater))
+
+    value,
+    { apertureAddrWidth = aperture
+      entries = b.EntriesFingerprinted aperture }
+
 /// A host-writable window's read port, as the design sees it. `MemReadPort`
 /// plus the one thing that is different here: the port is shared with the
 /// host, so a design consuming the window statefully has to know whose cycle

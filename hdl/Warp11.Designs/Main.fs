@@ -4470,6 +4470,120 @@ let private mainDemo () =
 
     printfn $"neighborhood policies:        %b{neighborOk}"
 
+    // The builder's defining property: a map built by allocating offsets is
+    // the same map as one built by writing them. Entry for entry — name,
+    // offset and kind — against the hand-written `ScratchMap` this design used
+    // to carry, which survives here as the reference precisely so the claim
+    // has something to be true against.
+    //
+    // A golden vector would not do: it would pass a builder that allocated
+    // *consistently wrong*, since the emitted Verilog would still be
+    // self-consistent. What has to hold is agreement with the offsets a person
+    // computed by hand, including the two windows' alignment.
+    let builderMatchesByHand =
+        let byHand =
+            [ roConst "id" 0x000UL 0xF5C0FFEEUL
+              pulseBit "bump" 0x000UL 0
+              pulseBit "clear" 0x000UL 1
+              rwReg "threshold" 0x004UL 16 0UL
+              roField "count" 0x008UL 0 8
+              roField "high" 0x008UL 8 1
+              w1cBit "wrapIrq" 0x00CUL 0
+              roField "patLow" 0x010UL 0 8
+              rwWindow "pattern" 0x040UL 16
+              roWindow "trace" 0x080UL 16 ]
+
+        let allocated = scratchMap.entries
+
+        let same =
+            List.length byHand = List.length allocated
+            && List.forall2 (fun (a: RegEntry) (b: RegEntry) -> a = b) byHand allocated
+
+        if not same then
+            let show (es: RegEntry list) =
+                es |> List.map (fun e -> $"{e.name}@0x%03x{e.offset}") |> String.concat " "
+
+            printfn $"      by hand:   {show byHand}"
+            printfn $"      allocated: {show allocated}"
+
+        same
+
+    // The aperture the builder derives when it is not told one: the smallest
+    // power of two that holds the high-water mark, floored at 16 bytes.
+    let builderDerivesAperture =
+        let _, tiny = buildRegMap (fun r -> r.RwReg("a", 8, 0UL), r.RoField("b", 8))
+        let _, wide = buildRegMap (fun r -> [ for i in 0..7 -> r.RwReg($"r{i}", 32, 0UL) ])
+        tiny.apertureAddrWidth = 4 && wide.apertureAddrWidth = 5
+
+    // The layout fingerprint's defining property: it tracks the LAYOUT, not the
+    // source text. Two maps with the same addresses hash the same however they
+    // were written; any change to an address, a width, a name or a default
+    // changes it. That is what makes it usable as a build stamp — a driver
+    // comparing it is asking "were we made from the same map", and a reordering
+    // that moved nothing must not raise a false alarm.
+    let fingerprintTracksLayout =
+        let hashOf (m: RegMap) =
+            m.entries
+            |> List.pick (fun e ->
+                match e.name, e.kind with
+                | "layout", RoConst v -> Some v
+                | _ -> None)
+
+        // Same addresses, written in a different order — `At` earning its keep
+        // in the one place it is used, which is a test that needs to defeat
+        // declaration order on purpose.
+        let _, inOrder =
+            buildRegMapPinned 5 (fun r ->
+                r.LayoutHash "layout"
+                r.RwReg("a", 8, 0UL) |> ignore
+                r.RwReg("b", 16, 0UL) |> ignore)
+
+        let _, reordered =
+            buildRegMapPinned 5 (fun r ->
+                r.At 0x08UL
+                r.RwReg("b", 16, 0UL) |> ignore
+                r.At 0x00UL
+                r.LayoutHash "layout"
+                r.RwReg("a", 8, 0UL) |> ignore)
+
+        let _, widened =
+            buildRegMapPinned 5 (fun r ->
+                r.LayoutHash "layout"
+                r.RwReg("a", 8, 0UL) |> ignore
+                r.RwReg("b", 17, 0UL) |> ignore)
+
+        let _, renamed =
+            buildRegMapPinned 5 (fun r ->
+                r.LayoutHash "layout"
+                r.RwReg("a", 8, 0UL) |> ignore
+                r.RwReg("c", 16, 0UL) |> ignore)
+
+        let _, added =
+            buildRegMapPinned 5 (fun r ->
+                r.LayoutHash "layout"
+                r.RwReg("a", 8, 0UL) |> ignore
+                r.RwReg("b", 16, 0UL) |> ignore
+                r.RwReg("d", 8, 0UL) |> ignore)
+
+        let base_ = hashOf inOrder
+
+        hashOf reordered = base_
+        && hashOf widened <> base_
+        && hashOf renamed <> base_
+        && hashOf added <> base_
+        && base_ <= 0xFFFFUL
+
+    // `At` is unused by every map in this repository, so its behaviour is
+    // asserted here rather than by a caller: it seeks, and what follows is
+    // allocated from where it seeks to.
+    let builderAtSeeks =
+        let regs, _ = buildRegMap (fun r ->
+            let first = r.RwReg("first", 32, 0UL)
+            r.At 0x40UL
+            first, r.RwReg("second", 32, 0UL))
+
+        (fst regs).offset = 0x00UL && (snd regs).offset = 0x40UL
+
     // The declarative reg map, driven by real five-channel transactions: the
     // ID overlay, a pulse pair, packed ro fields against an rw threshold, the
     // w1c + irq path through a genuine 8-bit wrap, and a window word written
@@ -4503,6 +4617,10 @@ let private mainDemo () =
 
         idOk && thresholdOk && lowOk && highOk && windowOk && irqSet && irqClear
 
+    printfn $"reg map builder = by hand:    %b{builderMatchesByHand}"
+    printfn $"reg map builder derives width:%b{builderDerivesAperture}"
+    printfn $"reg map builder At seeks:     %b{builderAtSeeks}"
+    printfn $"layout hash tracks layout:    %b{fingerprintTracksLayout}"
     printfn $"declarative reg map:          %b{regMapOk}"
 
     // The arbitrated window readback: the host reads back what it wrote,

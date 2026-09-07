@@ -19,7 +19,9 @@ open Warp11.Gep.Cluster
 /// once per geometry, because the case-address width and the counter blocks
 /// depend on it.
 type GepClusterMap =
-    { startQueue: RegEntry
+    { /// Reads the identity at offset 0; the same word's writes are the pulses.
+      id: RegEntry
+      startQueue: RegEntry
       ldCase: RegEntry
       queueBase: RegEntry
       popBase: RegEntry
@@ -62,21 +64,34 @@ type GepClusterMap =
       rngContinue: RegEntry option
       oplistDone: RegEntry option
       breederBusy: RegEntry list
-      laneBusy: RegEntry list
-      map: RegMap }
+      laneBusy: RegEntry list }
 
 /// Bit positions inside the two packed status words.
 let ctrlOffset = 0x00UL
-let statusOffset = 0x2CUL
-let autoStatusOffset = 0x9CUL
-
-/// The per-instance counter blocks. Fixed bases so a driver's stride arithmetic
-/// does not depend on how many breeders a build happens to carry.
-let breederBusyBase = 0x100UL
-let laneBusyBase = 0x180UL
+/// The counter blocks are allocated consecutively, so the driver's stride
+/// arithmetic — `BREEDER0_BUSY_CYCLES_OFFSET + 4 * breeder` — holds without a
+/// base constant to keep in step: the generated layout carries index zero and
+/// the rest follow it.
 let clusterApertureAddrWidth = 10
 
-let gepClusterMap (shape: GepClusterShape) : GepClusterMap =
+/// Read at offset 0, where the control word's write side lives — a `roConst`
+/// owns a word's read side and pulse bits own its write side, so the identity
+/// costs no address space. Continues the `F5B0D00n` family: 001 is the mini
+/// Mandelbrot pod, 002 the frame accelerator, 003 this.
+///
+/// It answers **which design**, and only that: a driver pointed at the wrong
+/// bitstream or the wrong base address stops here rather than reading plausible
+/// rubbish at every offset, since an unmapped read inside the aperture returns
+/// zero instead of faulting.
+///
+/// It does **not** answer which revision of the map. An older bitstream of this
+/// same design answers this constant happily and then serves every register
+/// from the wrong address, because the offsets here are allocated and adding a
+/// register moves everything after it. That is what `layoutHash` is for, and
+/// the two are checked together.
+let clusterIdMagic = 0xF5B0D003UL
+
+let gepClusterMap (shape: GepClusterShape) : GepClusterMap * RegMap =
     let caseAddrW =
         let mutable w = 0
         while (1 <<< w) < shape.caseCapacity do w <- w + 1
@@ -97,152 +112,147 @@ let gepClusterMap (shape: GepClusterShape) : GepClusterMap =
         | Some a -> a.opList
         | None -> false
 
-    let whenAuto entry = if shape.auto.IsSome then Some entry else None
-    let whenOpList entry = if opList then Some entry else None
+    let hasAuto = shape.auto.IsSome
 
-    let startQueue = pulseBit "startQueue" ctrlOffset 0
-    let ldCase = pulseBit "ldCase" ctrlOffset 1
-    let queueBase = rwReg "queueBase" 0x04UL 32 0UL
-    let popBase = rwReg "popBase" 0x08UL 32 0UL
-    let ringBase = rwReg "ringBase" 0x0CUL 32 0UL
-    let queueMask = rwReg "queueMask" 0x10UL 32 0UL
-    let ringMask = rwReg "ringMask" 0x14UL 32 0UL
-    let entriesPublished = rwReg "entriesPublished" 0x18UL 32 0UL
-    let nCases = rwReg "nCases" 0x1CUL (caseAddrW + 1) 0UL
-    let caseAddr = rwReg "caseAddr" 0x20UL caseAddrW 0UL
-    let caseField = rwReg "caseField" 0x24UL 8 0UL
-    let caseData = rwReg "caseData" 0x28UL 32 0UL
-    let running = roField "running" statusOffset 0 1
-    let allIdle = roField "allIdle" statusOffset 1 1
-    let resultsDone = roField "resultsDone" 0x30UL 0 32
-    let entriesTaken = roField "entriesTaken" 0x34UL 0 32
-    let cycleCount = roField "cycleCount" 0x38UL 0 32
-    let feedStallCycles = roField "feedStallCycles" 0x3CUL 0 32
-    let breederStallCycles = roField "breederStallCycles" 0x40UL 0 32
-    let fillBusyCycles = roField "fillBusyCycles" 0x44UL 0 32
-    let packBusyCycles = roField "packBusyCycles" 0x48UL 0 32
-    let emitBusyCycles = roField "emitBusyCycles" 0x4CUL 0 32
-    let busyBreederCycles = roField "busyBreederCycles" 0x50UL 0 32
-    let busyLaneCycles = roField "busyLaneCycles" 0x54UL 0 32
-    let streamsActive = roField "streamsActive" 0x58UL 0 (bW + 1)
+    // Allocated rather than numbered, in declaration order, with no offsets
+    // stated anywhere. Several blocks here are conditional, so a cluster built
+    // without the auto engine lays out differently from one with it — which is
+    // sound because the Rust layout is generated from this same map and only
+    // `clusterSiliconShape` ever reaches hardware. Nothing pins an address, and
+    // nothing needs to.
+    let regs, builtMap =
+        buildRegMapPinned clusterApertureAddrWidth (fun r ->
+            let id, startQueue, ldCase =
+                r.Word(fun w ->
+                    w.Const("id", clusterIdMagic), w.Pulse "startQueue", w.Pulse "ldCase")
 
-    let autoMode = whenAuto (rwReg "autoMode" 0x60UL 1 0UL)
-    let autoPop = whenAuto (rwReg "autoPop" 0x64UL 16 0UL)
-    let autoGens = whenAuto (rwReg "autoGens" 0x68UL 32 0UL)
+            // Which revision of this map the fabric was built from. The word is
+            // its own because a `roConst` owns a whole read side; the value is
+            // computed once the map is closed, over every entry but this one.
+            r.LayoutHash "layoutHash"
 
-    let autoRates =
-        if shape.auto.IsSome then
-            [ for i in 0..4 -> rwReg $"autoR{i}" (0x6CUL + 4UL * uint64 i) 32 0UL ]
-        else
-            []
+            let queueBase = r.RwReg("queueBase", 32, 0UL)
+            let popBase = r.RwReg("popBase", 32, 0UL)
+            let ringBase = r.RwReg("ringBase", 32, 0UL)
+            let queueMask = r.RwReg("queueMask", 32, 0UL)
+            let ringMask = r.RwReg("ringMask", 32, 0UL)
+            let entriesPublished = r.RwReg("entriesPublished", 32, 0UL)
+            let nCases = r.RwReg("nCases", caseAddrW + 1, 0UL)
+            let caseAddr = r.RwReg("caseAddr", caseAddrW, 0UL)
+            let caseField = r.RwReg("caseField", 8, 0UL)
+            let caseData = r.RwReg("caseData", 32, 0UL)
 
-    let autoSigma = whenAuto (rwReg "autoSigma" 0x80UL 32 0UL)
-    let autoRange = whenAuto (rwReg "autoRange" 0x84UL 32 0UL)
+            let running, allIdle =
+                r.Word(fun w -> w.Field("running", 1), w.Field("allIdle", 1))
 
-    let autoSeeds =
-        if shape.auto.IsSome then
-            [ for i in 0..3 -> rwReg $"autoS{i}" (0x88UL + 4UL * uint64 i) 32 0UL ]
-        else
-            []
+            let resultsDone = r.RoField("resultsDone", 32)
+            let entriesTaken = r.RoField("entriesTaken", 32)
+            let cycleCount = r.RoField("cycleCount", 32)
+            let feedStallCycles = r.RoField("feedStallCycles", 32)
+            let breederStallCycles = r.RoField("breederStallCycles", 32)
+            let fillBusyCycles = r.RoField("fillBusyCycles", 32)
+            let packBusyCycles = r.RoField("packBusyCycles", 32)
+            let emitBusyCycles = r.RoField("emitBusyCycles", 32)
+            let busyBreederCycles = r.RoField("busyBreederCycles", 32)
+            let busyLaneCycles = r.RoField("busyLaneCycles", 32)
+            let streamsActive = r.RoField("streamsActive", bW + 1)
 
-    let autoRound = whenAuto (roField "autoRound" 0x98UL 0 32)
-    let autoDone = whenAuto (roField "autoDone" autoStatusOffset 0 1)
-    let autoBase = whenAuto (roField "autoBase" autoStatusOffset 1 1)
-    let bestIdx = whenAuto (roField "bestIdx" 0xA0UL 0 16)
-    let bestFitLo = whenAuto (roField "bestFitLo" 0xA4UL 0 32)
-    let bestFitHi = whenAuto (roField "bestFitHi" 0xA8UL 0 32)
-    let oplistDone = whenOpList (roField "oplistDone" autoStatusOffset 2 1)
-    let oplistBase = whenOpList (rwReg "oplistBase" 0xB4UL 32 0UL)
-    let skipScore = whenOpList (rwReg "skipScore" 0xB8UL 1 0UL)
-    let rngContinue = whenOpList (rwReg "rngContinue" 0xBCUL 1 0UL)
+            // The auto engine's block, absent entirely on a cluster built
+            // without it — and the blocks after it simply move up.
+            let autoMode = if hasAuto then Some(r.RwReg("autoMode", 1, 0UL)) else None
+            let autoPop = if hasAuto then Some(r.RwReg("autoPop", 16, 0UL)) else None
+            let autoGens = if hasAuto then Some(r.RwReg("autoGens", 32, 0UL)) else None
 
-    let breederBusy =
-        [ for b in 0 .. shape.nBreeders - 1 ->
-            roField $"breeder{b}BusyCycles" (breederBusyBase + 4UL * uint64 b) 0 32 ]
+            let autoRates =
+                if hasAuto then
+                    [ for i in 0..4 -> r.RwReg($"autoR{i}", 32, 0UL) ]
+                else
+                    []
 
-    let laneBusy =
-        [ for l in 0 .. shape.nLanes - 1 ->
-            roField $"lane{l}BusyCycles" (laneBusyBase + 4UL * uint64 l) 0 32 ]
+            let autoSigma = if hasAuto then Some(r.RwReg("autoSigma", 32, 0UL)) else None
+            let autoRange = if hasAuto then Some(r.RwReg("autoRange", 32, 0UL)) else None
 
-    { startQueue = startQueue
-      ldCase = ldCase
-      queueBase = queueBase
-      popBase = popBase
-      ringBase = ringBase
-      queueMask = queueMask
-      ringMask = ringMask
-      entriesPublished = entriesPublished
-      nCases = nCases
-      caseAddr = caseAddr
-      caseField = caseField
-      caseData = caseData
-      running = running
-      allIdle = allIdle
-      resultsDone = resultsDone
-      entriesTaken = entriesTaken
-      cycleCount = cycleCount
-      feedStallCycles = feedStallCycles
-      breederStallCycles = breederStallCycles
-      fillBusyCycles = fillBusyCycles
-      packBusyCycles = packBusyCycles
-      emitBusyCycles = emitBusyCycles
-      busyBreederCycles = busyBreederCycles
-      busyLaneCycles = busyLaneCycles
-      streamsActive = streamsActive
-      autoMode = autoMode
-      autoPop = autoPop
-      autoGens = autoGens
-      autoRates = autoRates
-      autoSigma = autoSigma
-      autoRange = autoRange
-      autoSeeds = autoSeeds
-      autoRound = autoRound
-      autoDone = autoDone
-      autoBase = autoBase
-      bestIdx = bestIdx
-      bestFitLo = bestFitLo
-      bestFitHi = bestFitHi
-      oplistBase = oplistBase
-      skipScore = skipScore
-      rngContinue = rngContinue
-      oplistDone = oplistDone
-      breederBusy = breederBusy
-      laneBusy = laneBusy
-      map =
-        { apertureAddrWidth = clusterApertureAddrWidth
-          entries =
-            [ yield startQueue
-              yield ldCase
-              yield queueBase
-              yield popBase
-              yield ringBase
-              yield queueMask
-              yield ringMask
-              yield entriesPublished
-              yield nCases
-              yield caseAddr
-              yield caseField
-              yield caseData
-              yield running
-              yield allIdle
-              yield resultsDone
-              yield entriesTaken
-              yield cycleCount
-              yield feedStallCycles
-              yield breederStallCycles
-              yield fillBusyCycles
-              yield packBusyCycles
-              yield emitBusyCycles
-              yield busyBreederCycles
-              yield busyLaneCycles
-              yield streamsActive
-              yield! List.choose id [ autoMode; autoPop; autoGens; autoSigma; autoRange ]
-              yield! autoRates
-              yield! autoSeeds
-              yield! List.choose id [ autoRound; autoDone; autoBase; bestIdx; bestFitLo; bestFitHi ]
-              yield! List.choose id [ oplistDone; oplistBase; skipScore; rngContinue ]
-              yield! breederBusy
-              yield! laneBusy ] } }
+            let autoSeeds =
+                if hasAuto then
+                    [ for i in 0..3 -> r.RwReg($"autoS{i}", 32, 0UL) ]
+                else
+                    []
+
+            let autoRound = if hasAuto then Some(r.RoField("autoRound", 32)) else None
+
+            // Three conditional bits in one word, on two different conditions.
+            // Each takes the next free bit, so a build without the auto engine
+            // puts the op-list's bit at 0 rather than leaving a hole — the
+            // layout follows, because it is generated from this.
+            let autoDone, autoBase, oplistDone =
+                r.Word(fun w ->
+                    (if hasAuto then Some(w.Field("autoDone", 1)) else None),
+                    (if hasAuto then Some(w.Field("autoBase", 1)) else None),
+                    (if opList then Some(w.Field("oplistDone", 1)) else None))
+
+            let bestIdx = if hasAuto then Some(r.RoField("bestIdx", 16)) else None
+            let bestFitLo = if hasAuto then Some(r.RoField("bestFitLo", 32)) else None
+            let bestFitHi = if hasAuto then Some(r.RoField("bestFitHi", 32)) else None
+
+            let oplistBase = if opList then Some(r.RwReg("oplistBase", 32, 0UL)) else None
+            let skipScore = if opList then Some(r.RwReg("skipScore", 1, 0UL)) else None
+            let rngContinue = if opList then Some(r.RwReg("rngContinue", 1, 0UL)) else None
+
+            let breederBusy =
+                [ for b in 0 .. shape.nBreeders - 1 -> r.RoField($"breeder{b}BusyCycles", 32) ]
+
+            let laneBusy =
+                [ for l in 0 .. shape.nLanes - 1 -> r.RoField($"lane{l}BusyCycles", 32) ]
+
+            { id = id
+              startQueue = startQueue
+              ldCase = ldCase
+              queueBase = queueBase
+              popBase = popBase
+              ringBase = ringBase
+              queueMask = queueMask
+              ringMask = ringMask
+              entriesPublished = entriesPublished
+              nCases = nCases
+              caseAddr = caseAddr
+              caseField = caseField
+              caseData = caseData
+              running = running
+              allIdle = allIdle
+              resultsDone = resultsDone
+              entriesTaken = entriesTaken
+              cycleCount = cycleCount
+              feedStallCycles = feedStallCycles
+              breederStallCycles = breederStallCycles
+              fillBusyCycles = fillBusyCycles
+              packBusyCycles = packBusyCycles
+              emitBusyCycles = emitBusyCycles
+              busyBreederCycles = busyBreederCycles
+              busyLaneCycles = busyLaneCycles
+              streamsActive = streamsActive
+              autoMode = autoMode
+              autoPop = autoPop
+              autoGens = autoGens
+              autoRates = autoRates
+              autoSigma = autoSigma
+              autoRange = autoRange
+              autoSeeds = autoSeeds
+              autoRound = autoRound
+              autoDone = autoDone
+              autoBase = autoBase
+              oplistDone = oplistDone
+              bestIdx = bestIdx
+              bestFitLo = bestFitLo
+              bestFitHi = bestFitHi
+              oplistBase = oplistBase
+              skipScore = skipScore
+              rngContinue = rngContinue
+              breederBusy = breederBusy
+              laneBusy = laneBusy })
+
+    // The record and the map, both from the builder above — every register
+    // named once, and the entries list gone along with the arithmetic.
+    regs, builtMap
 
 /// The top-level synthesis unit: the AXI-Lite control slave, the pool, and the
 /// pool's read and write master channels combined into the one `m_axi` AXI4
@@ -250,17 +260,17 @@ let gepClusterMap (shape: GepClusterShape) : GepClusterMap =
 /// the pool ties and drives its two master channels through the port records
 /// it is handed.
 let gepClusterAxi (topName: string) (shape: GepClusterShape) =
-    let m = gepClusterMap shape
+    let m, mMap = gepClusterMap shape
 
     defModuleClocked
         axiClock
         topName
         (fun p ->
-            (axiLiteSlavePorts p m.map.apertureAddrWidth,
+            (axiLiteSlavePorts p mMap.apertureAddrWidth,
              axiReadBusPorts p "m_axi" shape.addrWidth 128,
              axiWriteBusPorts p "m_axi" shape.addrWidth 128))
         (fun (slavePorts, readBusPorts, writeBusPorts) ->
-        let regs = regMapSlave slavePorts m.map
+        let regs = regMapSlave slavePorts mMap
 
         let autoCfg =
             shape.auto
@@ -376,7 +386,7 @@ let clusterAxiSilicon = lazy (gepClusterAxi "GepClusterAxi" clusterSiliconShape)
 /// The Rust half of the seam: the map's offsets, plus the geometry a driver
 /// needs to lay out DDR and size its transfers.
 let clusterLayoutRs (shape: GepClusterShape) =
-    let m = gepClusterMap shape
+    let m, mMap = gepClusterMap shape
     let indivWords = gepUnitIndivWords shape.capacity shape.constCount
 
     let autoCapacity =
@@ -391,7 +401,7 @@ let clusterLayoutRs (shape: GepClusterShape) =
       "//! Generated by `dotnet run -- hardware <repo-root>` in hdl/Warp11.Gep."
       "//! Do not edit by hand — changes will be overwritten on next emit."
       "" ]
-    @ regMapRsLines m.map
+    @ regMapRsLines mMap
     @ [ ""
         $"pub const N_BREEDERS: usize = %d{shape.nBreeders};"
         $"pub const N_LANES: usize = %d{shape.nLanes};"

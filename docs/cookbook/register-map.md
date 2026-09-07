@@ -15,39 +15,168 @@ there is no second place for it to be written down.
 ```fsharp
 open Warp11
 
-module BlinkerMap =
-    let id = roConst "id" 0x0UL 0xB11EDUL
-    let enable = rwReg "enable" 0x4UL 1 0UL
-    let count = roField "count" 0x8UL 0 24
+type BlinkerRegs =
+    { id: RegEntry
+      enable: RegEntry
+      count: RegEntry }
 
-    let map =
-        { apertureAddrWidth = 4
-          entries = [ id; enable; count ] }
+let blinkerRegs, blinkerMap =
+    buildRegMap (fun r ->
+        { id = r.RoConst("id", 0xB11EDUL)     // 0x000
+          enable = r.RwReg("enable", 1, 0UL)  // 0x004
+          count = r.RoField("count", 24) })   // 0x008
 ```
 
-The entries are **values you hold on to**: every later access is keyed by the
-entry itself, never by its name spelled a second time.
+**No offsets.** `buildRegMap` allocates a word per register in declaration
+order and derives the aperture from what it ends up holding. The entries are
+**values you hold on to**: every later access is keyed by the entry itself,
+never by its name spelled a second time.
 
-### Why you declare the aperture rather than have it computed
+The builder is handed to your function and read *after* it returns, which is
+why the map comes back beside the record rather than inside it — a `map` field
+would be correct only while it happened to be written last.
 
-`apertureAddrWidth = 4` means a 16-byte window — four words, which is what these
-three entries need. It looks derivable, and it deliberately is not, because
-**the aperture is a port width**:
+### The other constructors
+
+| | |
+|---|---|
+| `r.RwReg(name, width, init)` | host writes, design reads. **Owns its word**, whatever its width |
+| `r.RoField(name, width)` | design drives, host reads. Owns a word; pack several with `Word` |
+| `r.RoConst(name, value)` | a fixed identifying pattern |
+| `r.RwWindow(name, words)` / `r.RoWindow(name, words)` | a block of words. **Rounds the cursor up** to the window's own size — the alignment rule that made windows fiddly to place by hand |
+| `r.Word(fun w -> …)` | one word shared by several small entries — below |
+| `r.LayoutHash(name)` | a word answering a fingerprint of the map — which *revision* the fabric was built from |
+| `buildRegMapPinned n (fun r -> …)` | the same, with the aperture stated rather than derived |
+
+### Packing several entries into one word
+
+```fsharp
+let running, allIdle =
+    r.Word(fun w -> w.Field("running", 1), w.Field("allIdle", 1))
+```
+
+Bits are assigned in order and the word advances once at the end. `w.Pulse`,
+`w.W1c` and `w.Const` share the scope.
+
+Packing is deliberate rather than incidental: a host reading `running` and
+`allIdle` from **one** word gets a coherent snapshot, where two reads could
+straddle a change. That is why it is a scope you enter, not something the
+allocator does when things happen to fit.
+
+**The ID-overlay falls out of it.** A `Const` owns the word's *read* side and a
+`Pulse` owns only the *write* side, so they compose:
+
+```fsharp
+let id, start = r.Word(fun w -> w.Const("id", 0xB11EDUL), w.Pulse "start")
+```
+
+Reads answer the identity; writes pulse start. That is why Mandelbrot's layout
+has `ID_OFFSET` and `START_OFFSET` at the same address.
+
+### Widths: what packs and what does not
+
+- **Read-only fields pack**, up to 32 bits per word, via `Word`.
+- **Read-write registers do not.** An 8-bit `rwReg` still consumes a whole
+  32-bit word, and the map refuses to put two in one: *"rw register 'x' must own
+  word 0x1c alone"*. The reason is not address space — the slave ignores
+  byte-enables and trusts whole-word writes, so changing one field of a packed
+  *writable* word would mean read-modify-write on the host, and that races
+  another writer or the hardware. Owning the word makes every host write atomic
+  and independent.
+- **32 bits is the maximum** for any single entry, and the bus is 32 bits wide.
+  A 64-bit value is two entries:
+
+  ```fsharp
+  let bestFitLo = r.RoField("bestFitLo", 32)
+  let bestFitHi = r.RoField("bestFitHi", 32)
+  ```
+
+  **Reading that pair is not atomic** — the value can change between the two
+  reads and tear. Live with it where the value moves slowly, or latch `_HI` into
+  a shadow register when `_LO` is read.
+
+### Pinning an address — and why you almost certainly should not
+
+`r.At 0xNNN` moves the cursor. **No map in this repository calls it**, and that
+is deliberate: everything here reads its offsets from the generated Rust
+layout, which comes off this same map, so moving a register moves the host with
+it. `w.FieldAt` / `w.PulseAt` / `w.W1cAt` are the same escape at bit
+granularity, and equally unused.
+
+Reach for them only when you can *name the outside thing* whose addresses you
+are matching — a shipped host binary, a board script poking offsets by hand, a
+device tree. If you cannot name one, allocation in declaration order is the
+point.
+
+### Two constants worth having: identity and layout hash
+
+They answer different questions, and each is silent about the other's failure.
+
+```fsharp
+let id, start = r.Word(fun w -> w.Const("id", 0xB11EDUL), w.Pulse "start")
+r.LayoutHash "layoutHash"
+```
+
+```rust
+pub const ID_VALUE: u32 = 0x000b11ed;        // which design
+pub const LAYOUT_HASH_VALUE: u32 = 0x3939;   // which revision of its map
+```
+
+**The identity** catches the wrong bitstream or the wrong base address — the
+cases where you are not talking to this design at all.
+
+**The layout hash** catches the case the identity cannot: the *right* design,
+built from an *older revision of the map*. Offsets are allocated, so adding one
+register moves every address after it. That bitstream answers the identity
+happily and then serves every register from the wrong place — and each read
+**succeeds**, because an unmapped read inside the aperture returns zero rather
+than faulting. Without the hash, that is a driver quietly reading rubbish.
+
+Check both when you open the device:
+
+```rust
+if window.read32(layout::ID_OFFSET)? != layout::ID_VALUE { … }
+if window.read32(layout::LAYOUT_HASH_OFFSET)? != layout::LAYOUT_HASH_VALUE { … }
+```
+
+Three things about the hash worth knowing:
+
+- **It tracks the layout, not the source.** The fingerprint is taken over an
+  address-sorted rendering, so declaring the same registers in a different order
+  with the same offsets hashes the same. Moving, resizing, renaming, adding or
+  removing one does not.
+- **It is 16 bits and deterministic.** FNV-1a, rolled by hand rather than
+  reached for, because .NET's `String.GetHashCode` is randomized per process —
+  the same map would hash differently on two runs, and this value is committed.
+- **`LayoutHash` returns nothing**, on purpose. Its value is not known until the
+  map is closed, so there is no entry for a caller to hold; nothing in a design
+  body has any use for it anyway.
+
+It costs one word — a `roConst` owns a whole read side, so it cannot share with
+the identity.
+
+### The aperture: derived, but pinnable
+
+`buildRegMap` derives it — the smallest power of two holding what you declared,
+floored at 16 bytes. For a new design that is the right answer and you never
+think about it.
+
+`buildRegMapPinned 8` states it instead, and the reason it exists is that **the
+aperture is a port width**:
 
 ```verilog
-input [3:0] s_axi_awaddr, ... input [3:0] s_axi_araddr
+input [7:0] s_axi_awaddr, ... input [7:0] s_axi_araddr
 ```
 
-That makes it a contract with two things written outside F# — the Vivado block
-design's address segment, and the device tree's `reg = <… 0x1000>`. If it were
-computed from the entry list, adding one status field would silently widen
-`s_axi_awaddr`, the block-design wrapper would quietly stop matching, and
-nothing would say so. Because you declare it, a register that does not fit is an
-elaboration error naming the register: **the declaration is the check.**
+That makes it a contract with two things written outside the F# — the Vivado
+block design's address segment, and the device tree's `reg = <… 0x1000>`. Under
+a *derived* aperture, adding one status field past a power of two silently
+widens the boundary and those two quietly stop matching. So pin it once a design
+has a block design or a device tree, and a register that no longer fits becomes
+an elaboration error naming the register rather than a boundary that moved.
 
-It is also a decode *window*, not a packing problem. A round 256 bytes with room
-to grow is usually what you want, rather than the tightest fit that changes
-shape every time you add a counter.
+It is also a decode *window*, not a packing problem: a round 256 bytes with room
+to grow beats the tightest fit that changes shape every time you add a counter.
 
 ### Why the `id` register
 
@@ -91,14 +220,14 @@ let blinkerAxi =
     defModuleClocked
         axiClock
         "BlinkerAxi"
-        (fun p -> (axiLiteSlavePorts p BlinkerMap.map.apertureAddrWidth, p.outPort "led" 1))
+        (fun p -> (axiLiteSlavePorts p blinkerMap.apertureAddrWidth, p.outPort "led" 1))
         (fun (slavePorts, led) ->
-            let regs = regMapSlave slavePorts BlinkerMap.map
+            let regs = regMapSlave slavePorts blinkerMap
 
             let counter = reg "counter" 24
-            If (regs.value BlinkerMap.enable) (fun () -> counter + 1UL ==> counter)
+            If (regs.value blinkerRegs.enable) (fun () -> counter + 1UL ==> counter)
 
-            regs.drive BlinkerMap.count counter
+            regs.drive blinkerRegs.count counter
             slice 23 23 counter ==> led)
 ```
 
@@ -147,19 +276,23 @@ The part that does not survive for free: `RwWindow` arbitration assumes a bus
 with a read-address handshake to borrow the port during. A map with no windows
 sidesteps it entirely.
 
-## The entry kinds
+## Which kind to reach for
 
-| constructor | direction | what it is |
+| builder call | direction | what it is |
 |---|---|---|
-| `rwReg name offset width init` | host writes, design reads | a setting. Reads back what was written. **Owns its whole word.** |
-| `roField name offset bitOffset width` | design drives, host reads | a status field. Several pack into one word at different bit offsets. |
-| `roConst name offset value` | host reads | a fixed identifying pattern. Read it first in the driver — see below. |
-| `pulseBit name offset bit` | host writes | a **one-cycle strobe**, not a level. This is what `start` wants. |
-| `w1cBit name offset bit` | design sets, host clears | an interrupt-status bit. Every one joins the map's `irq` line. |
-| `rwWindow name offset words` | host writes, design reads | a block of words backed by a mem — a coefficient table, a program. |
-| `roWindow name offset words` | design writes, host reads | a block the design fills — a result buffer, a trace. |
+| `r.RwReg(name, width, init)` | host writes, design reads | a setting. Reads back what was written. **Owns its whole word.** |
+| `r.RoField(name, width)` / `w.Field` | design drives, host reads | a status field. Pack several with `Word`. |
+| `r.RoConst(name, value)` / `w.Const` | host reads | a fixed identifying pattern. Read it first in the driver — see below. |
+| `w.Pulse(name)` | host writes | a **one-cycle strobe**, not a level. This is what `start` wants. |
+| `w.W1c(name)` | design sets, host clears | an interrupt-status bit. Every one joins the map's `irq` line. |
+| `r.RwWindow(name, words)` | host writes, design reads | a block of words backed by a mem — a coefficient table, a program. |
+| `r.RoWindow(name, words)` | design writes, host reads | a block the design fills — a result buffer, a trace. |
 
-**Use `pulseBit` for anything the host *does* rather than *sets*.** A level
+The bare `rwReg` / `roField` / `pulseBit` / … constructors still exist and take
+an explicit offset. The builder calls them; reach for them directly only if you
+are assembling entries some other way.
+
+**Use a pulse bit for anything the host *does* rather than *sets*.** A level
 `start` needs the host to write it back to zero, and a design that misses the
 clear runs twice.
 
@@ -188,7 +321,7 @@ this board needs a power cycle.
 crate and commit the result, so a layout change shows up in the driver's diff:
 
 ```fsharp
-let layout = regMapRsLines BlinkerMap.map
+let layout = regMapRsLines blinkerMap
 System.IO.File.WriteAllLines(path, layout)
 ```
 
