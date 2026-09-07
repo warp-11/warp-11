@@ -1114,6 +1114,14 @@ let i2sMasterHz (fabricHz: int) (targetFs: int) (bitsPerSlot: int) (name: string
 let sampleRateOf (fabricHz: int) (sclkHalfDiv: int) (bitsPerSlot: int) : float =
     float fabricHz / (4.0 * float sclkHalfDiv * float bitsPerSlot)
 
+/// The rate `i2sMasterDefault`'s divisors produce on a 100 MHz fabric clock,
+/// which is what every board design in this repository runs at: 48 828.125 Hz.
+///
+/// Derived rather than written down, so it cannot drift from the divisors it
+/// comes from — and stated once, so the designs that need a rate do not each
+/// restate it. A design on any other clock passes its own.
+let stockSampleRate = sampleRateOf 100_000_000 16 32
+
 /// The I2S receiver's ports. Clocking arrives from `i2sMaster` rather than
 /// being recovered, which is what FPGA-master operation means.
 type I2sRxPorts =
@@ -1945,6 +1953,27 @@ let multibandCompressor8 (name: string) (crossovers: float list) (q: float) (sam
         List.iter2 (fun port g -> g ==> port) io.rightGains rightGains
         stereoSplice io.s s, io.envelope
 
-/// The stock 8-band compressor: the default crossovers, Butterworth Q, 48 kHz.
-let multibandCompressor name =
-    multibandCompressor8 name defaultCrossovers 0.707 48_000.0
+/// The stock 8-band compressor: the default crossovers and Butterworth Q, at
+/// **the rate the design actually runs**.
+///
+/// The sample rate is an argument rather than a constant because a filter's
+/// coefficients fix a frequency in cycles per *sample*, so designing at one
+/// rate and running at another moves every crossover by the ratio between them
+/// — coefficients designed for 320 Hz at 48 000 are the same coefficients as
+/// 325.5 Hz at 48 828.125, the way a tape played fast is sharp.
+///
+/// This used to be `48_000.0`, which was wrong by +1.73 % on the one board it
+/// ran on. Substituting that board's 48 828.125 would have been a different
+/// bug: this is generic stdlib, and a rate is a fact about a target, so it is
+/// asked for rather than assumed. `sampleRateOf` computes it from the divisors
+/// if the caller has those instead.
+///
+/// **The error it replaced was nearly harmless, and the reason is worth
+/// keeping**: every crossover came from the same constant, so all seven moved
+/// by the same ratio, and a subtractive crossover's reconstruction depends on
+/// the filters' relationship to each other rather than their absolute
+/// placement. A uniformly wrong rate costs almost nothing; a *mixed* rate —
+/// one filter redesigned and the rest left alone — puts a real dip at that
+/// crossover. If this ever gains a per-band override, that is the trap.
+let multibandCompressor name (sampleRate: float) =
+    multibandCompressor8 name defaultCrossovers 0.707 sampleRate

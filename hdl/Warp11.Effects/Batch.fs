@@ -205,6 +205,7 @@ let audioBatchAxi =
         let processed, _envelope =
             multibandCompressor
                 "MultibandCompressor8"
+                stockSampleRate
                 "mb"
                 (regs.value batchRegs.threshold)
                 (regs.value batchRegs.ratio)
@@ -286,7 +287,7 @@ let multibandStageRef =
              streamOutputPorts p "out" sampleLayout))
         (fun (threshold, ratio, attack, releaseRate, leftGains, rightGains, inPorts, outPorts) ->
             let stage, _envelope =
-                multibandCompressor "MultibandCompressor8" "mb" threshold ratio attack releaseRate leftGains rightGains
+                multibandCompressor "MultibandCompressor8" stockSampleRate "mb" threshold ratio attack releaseRate leftGains rightGains
                 |> fun apply -> apply (streamSource inPorts)
 
             streamSink outPorts stage)
@@ -408,6 +409,7 @@ let driftHarness =
         let out, envelope =
             multibandCompressor
                 "MultibandCompressor8"
+                stockSampleRate
                 "mb"
                 (lit 200_000UL sampleWidth)
                 (lit 4UL 8)

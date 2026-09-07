@@ -2718,7 +2718,7 @@ let multibandStage =
              p.outPort "envelope" sampleWidth))
         (fun (threshold, ratio, attack, releaseRate, leftGains, rightGains, inPorts, outPorts, envOut) ->
             let stage, envelope =
-                multibandCompressor "MultibandCompressor8" "mb" threshold ratio attack releaseRate leftGains rightGains
+                multibandCompressor "MultibandCompressor8" stockSampleRate "mb" threshold ratio attack releaseRate leftGains rightGains
                 |> fun apply -> apply (streamSource inPorts)
 
             streamSink outPorts stage
