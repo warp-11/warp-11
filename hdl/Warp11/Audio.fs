@@ -1059,6 +1059,71 @@ let i2sMaster (name: string) (mclkHalfDiv: int) (sclkHalfDiv: int) (bitsPerSlot:
 /// The stock clock generator: Fs ~= 48.8 kHz from a 100 MHz fabric clock.
 let i2sMasterDefault name = i2sMaster name 4 16 32
 
+/// How far the achieved sample rate may sit from the requested one before
+/// `i2sMasterHz` refuses to build. One percent: converters tolerate several,
+/// and a rate that is out by more than this is a divisor that was never going
+/// to work rather than a rounding artifact.
+let i2sRateTolerance = 0.01
+
+/// The nominal MCLK a converter expects, as a multiple of the sample rate.
+/// 256x is what the CS5343/CS4344 want and what the stock divisors produce; a
+/// MEMS front end ignores MCLK entirely.
+let private i2sMclkRatio = 256
+
+/// The clock generator asked for a **sample rate** rather than for divisors.
+///
+/// `i2sMaster` takes the three dividers directly, which is honest and is what
+/// the emitted hardware is, but it means every caller does the same arithmetic
+/// by hand and the fabric clock frequency appears nowhere — so a design moved
+/// to a board with a different clock keeps its old divisors and silently runs
+/// at the wrong rate. Naming the rate makes that a build failure instead.
+///
+/// The divisors are chosen by rounding, then the rate they actually produce is
+/// checked back against the request. **A rate outside `i2sRateTolerance` is an
+/// error, not a warning** — 100 MHz cannot make exactly 48 kHz, and the gap
+/// between "cannot, by 0.0003%" and "cannot, by 1.7%" is the whole question.
+///
+/// The achieved rate is deliberately not returned. A caller that has to thread
+/// it onward is a caller re-deriving the frame timing, which is the
+/// transmitter's and receiver's business; `sampleRateOf` computes it for a
+/// check or a comment without a value crossing a module boundary.
+let i2sMasterHz (fabricHz: int) (targetFs: int) (bitsPerSlot: int) (name: string) : TypedModule<I2sMasterPorts> =
+    if fabricHz < 1 then failwith $"i2sMasterHz '{name}': fabricHz must be >= 1, got {fabricHz}"
+    if targetFs < 1 then failwith $"i2sMasterHz '{name}': targetFs must be >= 1, got {targetFs}"
+    if bitsPerSlot < 1 then failwith $"i2sMasterHz '{name}': bitsPerSlot must be >= 1, got {bitsPerSlot}"
+
+    let divide (a: int) (b: float) = max 1 (int (round (float a / b)))
+
+    let sclkHalfDiv = divide fabricHz (4.0 * float targetFs * float bitsPerSlot)
+    let mclkHalfDiv = divide fabricHz (2.0 * float i2sMclkRatio * float targetFs)
+
+    let achieved = float fabricHz / (4.0 * float sclkHalfDiv * float bitsPerSlot)
+    let error = abs (achieved - float targetFs) / float targetFs
+
+    if error > i2sRateTolerance then
+        failwith (
+            $"i2sMasterHz '{name}': %d{fabricHz} Hz cannot make %d{targetFs} Hz at %d{bitsPerSlot} bits per slot — "
+            + $"the nearest divisor (%d{sclkHalfDiv}) gives %.3f{achieved} Hz, off by %.2f{error * 100.0}%%. "
+            + $"Either pick a rate this clock divides into, or drive the design from a clock that divides into this one.")
+
+    i2sMaster name mclkHalfDiv sclkHalfDiv bitsPerSlot
+
+/// The clock generator for a board: the same as `i2sMasterHz`, with the fabric
+/// frequency read off the target instead of restated at the call.
+///
+/// This is the form to reach for in a design, because it is the one that cannot
+/// go stale — moving the design to a board with a different clock changes the
+/// divisors, and a rate the new clock cannot make fails the build rather than
+/// shipping.
+let i2sMasterAt (board: Board) (targetFs: int) (bitsPerSlot: int) (name: string) : TypedModule<I2sMasterPorts> =
+    i2sMasterHz board.fabricHz targetFs bitsPerSlot name
+
+/// The sample rate a given set of divisors produces, for a check or a comment.
+/// The same arithmetic `i2sMasterHz` verifies against, exposed so a test can
+/// state the rate it expects rather than restating the formula.
+let sampleRateOf (fabricHz: int) (sclkHalfDiv: int) (bitsPerSlot: int) : float =
+    float fabricHz / (4.0 * float sclkHalfDiv * float bitsPerSlot)
+
 /// The I2S receiver's ports. Clocking arrives from `i2sMaster` rather than
 /// being recovered, which is what FPGA-master operation means.
 type I2sRxPorts =

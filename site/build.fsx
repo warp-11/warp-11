@@ -91,6 +91,7 @@ let pages =
       // find that out from a page about the AXI-Lite handshake.
       page "Cookbook" "Create a register map" "cookbook/register-map" "docs/cookbook/register-map.md"
       page "Cookbook" "Store and move data" "cookbook/memory" "docs/cookbook/memory.md"
+      page "Cookbook" "Send and receive over I2S" "cookbook/i2s" "docs/cookbook/i2s.md"
 
       page "Guides" "How it fits together" "guides/architecture" "docs/architecture.md"
       page "Guides" "Start your own project" "guides/start-a-project" "docs/start-a-project.md"

@@ -452,6 +452,51 @@ let private i2sTxEmits () : bool =
 ///
 /// Asserted as the measured relationship, so the check still fails if the link
 /// breaks in some *other* way.
+/// `i2sMasterHz`'s defining property: naming a sample rate picks the same
+/// hardware that naming the divisors does, and a rate the clock cannot make is
+/// refused rather than approximated.
+///
+/// The first leg is the one that matters. `i2sMasterDefault` is
+/// `i2sMaster n 4 16 32` and documents Fs = 48.828 kHz on a 100 MHz fabric
+/// clock, so asking for that rate must land on exactly those divisors — checked
+/// by emitting both and comparing the Verilog, which is stronger than comparing
+/// the numbers because it also catches the rate wrapper reaching the module
+/// differently.
+///
+/// The second leg is what the wrapper exists for. 100 MHz cannot make 48 kHz:
+/// the nearest divisor gives 48.828 kHz, 1.7% out. Before this function that
+/// was a comment; now it is a failure.
+///
+/// The third is the iCEBreaker case §1.5 of the hearing-aid plan is about — a
+/// 12 MHz crystal cannot make 48 kHz at 32 bits per slot either, and the rate
+/// it *can* make is accepted.
+let private i2sMasterHzPicksDivisors () : bool =
+    let refuses fabricHz fs bits =
+        try
+            i2sMasterHz fabricHz fs bits "I2sMaster" |> ignore
+            false
+        with _ ->
+            true
+
+    let stock = emitDesign (i2sMasterDefault "I2sMaster").def
+    let named = emitDesign (i2sMasterHz 100_000_000 48_828 32 "I2sMaster").def
+
+    // The board form is the same hardware again: `kv260` carries the same
+    // 100 MHz, so naming the board and naming the frequency cannot diverge.
+    let byBoard = emitDesign (i2sMasterAt kv260 48_828 32 "I2sMaster").def
+
+    stock = named
+    && stock = byBoard
+    && refuses 100_000_000 48_000 32
+    && refuses 12_000_000 48_000 32
+    && not (refuses 12_000_000 46_875 32)
+    && abs (sampleRateOf 100_000_000 16 32 - 48_828.125) < 0.001
+    // The second board is what catches a KV260 assumption baked into something
+    // generic: 12 MHz cannot make 48 kHz, and the plan's iCEBreaker step (§1.5)
+    // is exactly this failure.
+    && iceBreaker.fabricHz = 12_000_000
+    && refuses iceBreaker.fabricHz 48_000 32
+
 let private i2sLoopbackRoundTrip () : bool =
     let sim = Sim(i2sLoopback.def)
     let left = 0xA5A5A0UL
@@ -4060,6 +4105,7 @@ let private mainDemo () =
     printfn $"I2S rx decodes ideal frame:   %b{i2sRxDecodes ()}"
     printfn $"I2S tx emits ideal frame:     %b{i2sTxEmits ()}"
     printfn $"I2S loopback round trip:      %b{i2sLoopbackRoundTrip ()}"
+    printfn $"I2S master by sample rate:    %b{i2sMasterHzPicksDivisors ()}"
 
     // The Fixed layer compiles away: every line except the module header and the
     // escape compare (Number.lessThan is signed; the hand-written design chose the unsigned

@@ -779,6 +779,29 @@ The distinction from LiteScope is worth being precise about, because LiteScope i
 
 What that buys is a development loop: telemetry, not intuition, has re-ranked GEP's roadmap three times (the table in [§3 below](#3-telemetry-as-a-first-class-output-readable-in-simulation)), and the shape sweep that picks a bitstream's breeder × lane × filler counts runs entirely in simulation before Vivado starts.
 
+### Clock frequency, and rates derived from it
+
+A divider is arithmetic on the fabric clock, so anything that generates a baud rate, a sample rate or a timer interval needs to know what that clock is. Where that number lives is a real design axis, and the field answers it four different ways.
+
+| HDL | Where the fabric clock frequency lives |
+|---|---|
+| SpinalHDL | On the clock domain, and readable ambiently — `ClockDomain(frequency = FixedFrequency(100 MHz))`, then `ClockDomain.current.frequency`. The most developed answer: a module derives its own divisors without being handed the number |
+| Clash | In the *type* — a domain carries its period, so connecting logic from mismatched domains is a type error rather than a runtime one |
+| Amaranth | On the board object — `platform.default_clk_frequency`, which the platform supplies and a design reads during elaboration |
+| Chisel / HardCaml / Bluespec / Veryl | No built-in notion; the frequency is an ordinary parameter threaded by the designer |
+| Warp 11 | A `Board` value, passed explicitly. It carries the fabric frequency and the host bus binding; `ClockSpec` still names the clock and reset *ports* only, and nothing is ambient |
+
+Warp 11's position is the last row deliberately, and the interesting part is what it does at the point of use instead. A constructor that needs a rate takes the fabric frequency and the rate, derives the divisors, and then **checks the rate it actually achieved against the one requested**:
+
+```fsharp
+i2sMasterAt kv260 48_828 32 "I2sMaster"         // picks 4 / 16 / 32
+i2sMasterHz 100_000_000 48_000 32 "I2sMaster"   // elaboration error
+```
+
+The second line fails because 100 MHz does not divide into 48 kHz — the nearest divisor gives 48.828 kHz, 1.7% out. That is the case the pattern exists for: divisors chosen by hand are silently wrong on a board with a different clock, and the failure is inaudible in simulation because a cycle-accurate model has no opinion about what a converter expects. Naming the rate turns a comment into a build failure.
+
+The honest limit is that a `Board` is passed rather than implied, so nothing stops two modules in one design from being handed different ones — which the ambient and type-level answers above both rule out by construction. That is a deliberate trade: an ambient board would be a second piece of hidden elaboration state beside the builder's, and the set of things that genuinely need a frequency is small. The same value carries the host bus binding (`AxiLiteAt 0xB0000000`, or `SpiBus` on a part with no bus), which is what a per-board build-script generator reads.
+
 ### Board and host integration
 
 The part of the loop the other entries mostly consider out of scope — and, for a project whose stated goal is the distance from an idea to a thing running on a board, the part that matters most.
