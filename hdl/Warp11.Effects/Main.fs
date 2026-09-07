@@ -25,14 +25,14 @@ let private defaultsArePassthrough () : bool =
         | RwReg (_, init) -> init = expected
         | _ -> false
 
-    isUnity effectsMap.volume gainUnity
-    && isUnity effectsMap.mute 0UL
-    && isUnity effectsMap.eq[0] biquadUnity
-    && List.forall (fun e -> isUnity e 0UL) (List.skip 1 effectsMap.eq)
-    && isUnity effectsMap.compRatio 0UL
-    && isUnity effectsMap.compMakeup gainUnity
-    && isUnity effectsMap.compThreshold ((1UL <<< sampleWidth) - 1UL)
-    && isUnity effectsMap.limitThreshold ((1UL <<< (sampleWidth - 1)) - 1UL)
+    isUnity effectsRegs.volume gainUnity
+    && isUnity effectsRegs.mute 0UL
+    && isUnity effectsRegs.eq[0] biquadUnity
+    && List.forall (fun e -> isUnity e 0UL) (List.skip 1 effectsRegs.eq)
+    && isUnity effectsRegs.compRatio 0UL
+    && isUnity effectsRegs.compMakeup gainUnity
+    && isUnity effectsRegs.compThreshold ((1UL <<< sampleWidth) - 1UL)
+    && isUnity effectsRegs.limitThreshold ((1UL <<< (sampleWidth - 1)) - 1UL)
 
 /// The four slaves must not collide with each other's conventions or with
 /// themselves: every entry word-aligned and inside its aperture, and no two
@@ -41,10 +41,10 @@ let private defaultsArePassthrough () : bool =
 /// this pins the part that is a *convention* rather than a rule.
 let private mapsAreWellFormed () : bool =
     let maps =
-        [ "tone", toneMap.map
-          "passthru", passthruMap.map
-          "gain", gainMap.map
-          "effects", effectsMap.map ]
+        [ "tone", toneMap
+          "passthru", passthruMap
+          "gain", gainMap
+          "effects", effectsMap ]
 
     maps
     |> List.forall (fun (_, m) ->
@@ -89,7 +89,7 @@ let private runBatchPaced (flat: bool) (frames: int) (seed: int) (jitter: int op
     let input = stageFrames ddr src frames seed
 
     let axi = SimAxi.clientWith sim ddr.Cycle
-    let m = Batch.batchMap
+    let m = Batch.batchRegs
     let idOk = axi.read32 m.id.offset = 0xAB12C001UL
 
     axi.write32 m.srcAddr.offset (uint64 src)
@@ -362,11 +362,11 @@ let private writeHardware (repoRoot: string) =
         @ regMapRsLines m
 
     let layouts =
-        [ "audio_tone_layout.rs", "AudioToneAxi", toneMap.map
-          "audio_passthru_layout.rs", "AudioPassthruAxi", passthruMap.map
-          "audio_gain_layout.rs", "AudioGainAxi", gainMap.map
-          "audio_effects_layout.rs", "AudioEffectsAxi", effectsMap.map
-          "audio_batch_layout.rs", "AudioBatchAxi", Batch.batchMap.map ]
+        [ "audio_tone_layout.rs", "AudioToneAxi", toneMap
+          "audio_passthru_layout.rs", "AudioPassthruAxi", passthruMap
+          "audio_gain_layout.rs", "AudioGainAxi", gainMap
+          "audio_effects_layout.rs", "AudioEffectsAxi", effectsMap
+          "audio_batch_layout.rs", "AudioBatchAxi", Batch.batchMap ]
 
     for file, title, m in layouts do
         let path = System.IO.Path.Combine(runtimeSrc, file)
@@ -420,7 +420,7 @@ let main argv =
             let ddr = mk sim
             let src, dst = 0x1000, 0x9000
             let axi = SimAxi.clientWith sim ddr.Cycle
-            let m = Batch.batchMap
+            let m = Batch.batchRegs
             axi.write32 m.srcAddr.offset (uint64 src)
             axi.write32 m.dstAddr.offset (uint64 dst)
             axi.write32 m.frameCount.offset (uint64 frames)

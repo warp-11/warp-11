@@ -21,59 +21,41 @@ let private sampleMaxSigned = (1UL <<< (sampleWidth - 1)) - 1UL
 // Rust name each register exactly once and cannot drift apart. Offsets mirror
 // the original slaves so a host reading either stack finds the same words.
 
-type ToneMap =
+type ToneRegs =
     { enable: RegEntry
-      step: RegEntry
-      map: RegMap }
+      step: RegEntry }
 
-let toneMap: ToneMap =
-    // enable defaults to 1: the tone plays on bitstream load, which is the
-    // whole point of a tone test — no driver required to hear something.
-    let enable = rwReg "enable" 0x000UL 1 1UL
-    let step = rwReg "step" 0x004UL tonePhaseWidth toneStep440
+let toneRegs, toneMap =
+    buildRegMapPinned audioApertureAddrWidth (fun r ->
+        // enable defaults to 1: the tone plays on bitstream load, which is the
+        // whole point of a tone test — no driver required to hear something.
+        { enable = r.RwReg("enable", 1, 1UL)
+          step = r.RwReg("step", tonePhaseWidth, toneStep440) })
 
-    { enable = enable
-      step = step
-      map =
-        { apertureAddrWidth = audioApertureAddrWidth
-          entries = [ enable; step ] } }
-
-type PassthruMap =
+type PassthruRegs =
     { mute: RegEntry
       receivedCount: RegEntry
-      lastLeft: RegEntry
-      map: RegMap }
+      lastLeft: RegEntry }
 
-let passthruMap: PassthruMap =
-    let mute = rwReg "mute" 0x000UL 1 0UL
-    // Bring-up diagnostics: a count that moves proves the ADC is clocking, and
-    // a last-sample tap proves it is carrying something other than silence.
-    let receivedCount = roField "receivedCount" 0x004UL 0 32
-    let lastLeft = roField "lastLeft" 0x008UL 0 sampleWidth
+let passthruRegs, passthruMap =
+    buildRegMapPinned audioApertureAddrWidth (fun r ->
+        // Bring-up diagnostics: a count that moves proves the ADC is clocking,
+        // and a last-sample tap proves it is carrying something other than
+        // silence.
+        { mute = r.RwReg("mute", 1, 0UL)
+          receivedCount = r.RoField("receivedCount", 32)
+          lastLeft = r.RoField("lastLeft", sampleWidth) })
 
-    { mute = mute
-      receivedCount = receivedCount
-      lastLeft = lastLeft
-      map =
-        { apertureAddrWidth = audioApertureAddrWidth
-          entries = [ mute; receivedCount; lastLeft ] } }
-
-type GainMap =
+type GainRegs =
     { volume: RegEntry
-      mute: RegEntry
-      map: RegMap }
+      mute: RegEntry }
 
-let gainMap: GainMap =
-    let volume = rwReg "volume" 0x000UL 16 gainUnity
-    let mute = rwReg "mute" 0x004UL 1 0UL
+let gainRegs, gainMap =
+    buildRegMapPinned audioApertureAddrWidth (fun r ->
+        { volume = r.RwReg("volume", 16, gainUnity)
+          mute = r.RwReg("mute", 1, 0UL) })
 
-    { volume = volume
-      mute = mute
-      map =
-        { apertureAddrWidth = audioApertureAddrWidth
-          entries = [ volume; mute ] } }
-
-type EffectsMap =
+type EffectsRegs =
     { volume: RegEntry
       mute: RegEntry
       eq: RegEntry list
@@ -82,48 +64,30 @@ type EffectsMap =
       compAttack: RegEntry
       compRelease: RegEntry
       compMakeup: RegEntry
-      limitThreshold: RegEntry
-      map: RegMap }
+      limitThreshold: RegEntry }
 
-let effectsMap: EffectsMap =
-    let volume = rwReg "volume" 0x000UL 16 gainUnity
-    let mute = rwReg "mute" 0x004UL 1 0UL
+let effectsRegs, effectsMap =
+    buildRegMapPinned audioApertureAddrWidth (fun r ->
+        { volume = r.RwReg("volume", 16, gainUnity)
+          mute = r.RwReg("mute", 1, 0UL)
 
-    // The EQ band initialises to the identity kernel, so it is flat until a
-    // host writes RBJ-designed coefficients over it.
-    let eqNames = [ "eq_b0"; "eq_b1"; "eq_b2"; "eq_a1"; "eq_a2" ]
+          // The EQ band initialises to the identity kernel, so it is flat until
+          // a host writes RBJ-designed coefficients over it.
+          eq =
+            [ "eq_b0"; "eq_b1"; "eq_b2"; "eq_a1"; "eq_a2" ]
+            |> List.mapi (fun i n ->
+                let init = if i = 0 then biquadUnity else 0UL
+                r.RwReg(n, biquadCoeffWidth, init))
 
-    let eq =
-        eqNames
-        |> List.mapi (fun i n ->
-            let init = if i = 0 then biquadUnity else 0UL
-            rwReg n (0x008UL + uint64 (i * 4)) biquadCoeffWidth init)
-
-    // Threshold at full scale with ratio 0 is "no gain reduction whatever the
-    // signal", and unity makeup leaves the level alone.
-    let compThreshold = rwReg "comp_threshold" 0x01CUL sampleWidth sampleMaxUnsigned
-    let compRatio = rwReg "comp_ratio" 0x020UL 8 0UL
-    let compAttack = rwReg "comp_attack" 0x024UL 16 0UL
-    let compRelease = rwReg "comp_release" 0x028UL 16 0UL
-    let compMakeup = rwReg "comp_makeup" 0x02CUL 16 gainUnity
-    // Full-scale limit: never clamps until a host tightens it.
-    let limitThreshold = rwReg "limit_threshold" 0x030UL sampleWidth sampleMaxSigned
-
-    { volume = volume
-      mute = mute
-      eq = eq
-      compThreshold = compThreshold
-      compRatio = compRatio
-      compAttack = compAttack
-      compRelease = compRelease
-      compMakeup = compMakeup
-      limitThreshold = limitThreshold
-      map =
-        { apertureAddrWidth = audioApertureAddrWidth
-          entries =
-            [ volume; mute ]
-            @ eq
-            @ [ compThreshold; compRatio; compAttack; compRelease; compMakeup; limitThreshold ] } }
+          // Threshold at full scale with ratio 0 is "no gain reduction whatever
+          // the signal", and unity makeup leaves the level alone.
+          compThreshold = r.RwReg("comp_threshold", sampleWidth, sampleMaxUnsigned)
+          compRatio = r.RwReg("comp_ratio", 8, 0UL)
+          compAttack = r.RwReg("comp_attack", 16, 0UL)
+          compRelease = r.RwReg("comp_release", 16, 0UL)
+          compMakeup = r.RwReg("comp_makeup", 16, gainUnity)
+          // Full-scale limit: never clamps until a host tightens it.
+          limitThreshold = r.RwReg("limit_threshold", sampleWidth, sampleMaxSigned) })
 
 // ---------------------------------------------------------------------------
 // The designs.
@@ -185,13 +149,13 @@ let audioToneAxi =
     defModuleClocked
         axiClock
         "AudioToneAxi"
-        (fun p -> (axiLiteSlavePorts p toneMap.map.apertureAddrWidth, codecPorts p))
+        (fun p -> (axiLiteSlavePorts p toneMap.apertureAddrWidth, codecPorts p))
         (fun (slavePorts, pins) ->
-        let regs = regMapSlave slavePorts toneMap.map
+        let regs = regMapSlave slavePorts toneMap
         let clocks = instanceNamed "clocks" (i2sMasterDefault "I2sMaster")
 
         let tone =
-            toneGenerator "ToneGenerator" "tone" (regs.value toneMap.enable) (regs.value toneMap.step)
+            toneGenerator "ToneGenerator" "tone" (regs.value toneRegs.enable) (regs.value toneRegs.step)
 
         let serial = i2sTx "I2sTx" "tx" clocks.sclkTxTick clocks.lrclk tone
         driveCodec pins clocks.mclk clocks.sclk clocks.lrclk serial)
@@ -204,12 +168,12 @@ let audioPassthruAxi =
         axiClock
         "AudioPassthruAxi"
         (fun p ->
-            (axiLiteSlavePorts p passthruMap.map.apertureAddrWidth,
+            (axiLiteSlavePorts p passthruMap.apertureAddrWidth,
              p.inPort "sdout" 1,
              codecPorts p,
              adcClockPorts p))
         (fun (slavePorts, sdout, pins, adcPins) ->
-        let regs = regMapSlave slavePorts passthruMap.map
+        let regs = regMapSlave slavePorts passthruMap
         let clocks = instanceNamed "clocks" (i2sMasterDefault "I2sMaster")
 
         let received = i2sRx "I2sRx" "rx" clocks.sclkRxTick clocks.lrclk sdout
@@ -222,13 +186,13 @@ let audioPassthruAxi =
             count + lit 1UL 32 ==> count
             left ==> lastLeft)
 
-        regs.drive passthruMap.receivedCount count
-        regs.drive passthruMap.lastLeft lastLeft
+        regs.drive passthruRegs.receivedCount count
+        regs.drive passthruRegs.lastLeft lastLeft
 
         // Mute here rather than through a gain stage: this app is the
         // signal-path bring-up, so it stays as close to a wire as it can.
         let muted = wireBit "muted"
-        regs.value passthruMap.mute ==> muted
+        regs.value passthruRegs.mute ==> muted
 
         let gated =
             { received with
@@ -244,16 +208,16 @@ let audioGainAxi =
         axiClock
         "AudioGainAxi"
         (fun p ->
-            (axiLiteSlavePorts p gainMap.map.apertureAddrWidth,
+            (axiLiteSlavePorts p gainMap.apertureAddrWidth,
              p.inPort "sdout" 1,
              codecPorts p,
              adcClockPorts p))
         (fun (slavePorts, sdout, pins, adcPins) ->
-        let regs = regMapSlave slavePorts gainMap.map
+        let regs = regMapSlave slavePorts gainMap
         let clocks = instanceNamed "clocks" (i2sMasterDefault "I2sMaster")
 
         let gain =
-            audioGain "AudioGain" "gain" (regs.value gainMap.volume) (regs.value gainMap.mute)
+            audioGain "AudioGain" "gain" (regs.value gainRegs.volume) (regs.value gainRegs.mute)
 
         let serial =
             i2sRx "I2sRx" "rx" clocks.sclkRxTick clocks.lrclk sdout
@@ -270,31 +234,31 @@ let audioEffectsAxi =
         axiClock
         "AudioEffectsAxi"
         (fun p ->
-            (axiLiteSlavePorts p effectsMap.map.apertureAddrWidth,
+            (axiLiteSlavePorts p effectsMap.apertureAddrWidth,
              p.inPort "sdout" 1,
              codecPorts p,
              adcClockPorts p))
         (fun (slavePorts, sdout, pins, adcPins) ->
-        let regs = regMapSlave slavePorts effectsMap.map
+        let regs = regMapSlave slavePorts effectsMap
         let clocks = instanceNamed "clocks" (i2sMasterDefault "I2sMaster")
 
         let gain =
-            audioGain "AudioGain" "gain" (regs.value effectsMap.volume) (regs.value effectsMap.mute)
+            audioGain "AudioGain" "gain" (regs.value effectsRegs.volume) (regs.value effectsRegs.mute)
 
-        let equaliser = audioEqBand "AudioEqBand" "eq" (List.map regs.value effectsMap.eq)
+        let equaliser = audioEqBand "AudioEqBand" "eq" (List.map regs.value effectsRegs.eq)
 
         let compressor =
             audioCompressor
                 "AudioCompressor"
                 "compressor"
-                (regs.value effectsMap.compThreshold)
-                (regs.value effectsMap.compRatio)
-                (regs.value effectsMap.compAttack)
-                (regs.value effectsMap.compRelease)
-                (regs.value effectsMap.compMakeup)
+                (regs.value effectsRegs.compThreshold)
+                (regs.value effectsRegs.compRatio)
+                (regs.value effectsRegs.compAttack)
+                (regs.value effectsRegs.compRelease)
+                (regs.value effectsRegs.compMakeup)
 
         let limiter =
-            audioLimiter "AudioLimiter" "limiter" (regs.value effectsMap.limitThreshold)
+            audioLimiter "AudioLimiter" "limiter" (regs.value effectsRegs.limitThreshold)
 
         let serial =
             i2sRx "I2sRx" "rx" clocks.sclkRxTick clocks.lrclk sdout

@@ -116,7 +116,21 @@ fn main() {
         eprintln!("ID mismatch: read 0x{id:08X}, want 0x{:08X} — wrong bitstream?", layout::ID_VALUE);
         exit(1);
     }
-    println!("ID ok (0x{id:08X}), fb base 0x{fb_base:08X}");
+    // The identity says this is GoL; the fingerprint says it is the revision
+    // of the register map this binary was compiled against. Offsets are
+    // allocated, so a map that gained a register moved every address after it
+    // — and every read would still succeed.
+    let hash = rd(&mut regs, layout::LAYOUT_HASH_OFFSET);
+    if hash != layout::LAYOUT_HASH_VALUE {
+        eprintln!(
+            "layout mismatch: read 0x{hash:04X}, want 0x{:04X} — right design, \
+             wrong revision of its register map. Rebuild the bitstream, or rebuild \
+             this against the layout it was made from.",
+            layout::LAYOUT_HASH_VALUE
+        );
+        exit(1);
+    }
+    println!("ID ok (0x{id:08X}), layout ok (0x{hash:04X}), fb base 0x{fb_base:08X}");
 
     wr(&mut regs, layout::FB_BASE_ADDR_OFFSET, fb_base as u32);
 

@@ -50,82 +50,68 @@ type GolMap =
       fbBaseAddr: RegEntry
       loadRow: RegEntry
       windowWords: int
-      wordsPerRow: int
-      map: RegMap }
+      wordsPerRow: int }
 
-let golMap (gridWidth: int) (gridHeight: int) : GolMap =
+let golMap (gridWidth: int) (gridHeight: int) : GolMap * RegMap =
     let wordsPerRow = (gridWidth + 31) / 32
     let windowWords = gridHeight * wordsPerRow
 
     if windowWords &&& (windowWords - 1) <> 0 then
         failwith $"golMap: the load window wants a power-of-two word count, got %d{windowWords}"
 
-    // Aligned to its own size, and clear of the register words in every config.
-    let windowWordOffset = max 64 windowWords
+    buildRegMapPinned 10 (fun r ->
+        // The overlay word: the identity answers reads, four pulse bits take
+        // the write side.
+        let id, load, tick, reset, stop =
+            r.Word(fun w ->
+                w.Const("id", golIdMagic), w.Pulse "load", w.Pulse "tick", w.Pulse "reset", w.Pulse "stop")
 
-    let id = roConst "id" 0x000UL golIdMagic
-    let load = pulseBit "load" 0x000UL 0
-    let tick = pulseBit "tick" 0x000UL 1
-    let reset = pulseBit "reset" 0x000UL 2
-    let stop = pulseBit "stop" 0x000UL 3
-    let busy = roField "busy" 0x004UL 0 1
-    let population = roField "population" 0x004UL 1 (bitsNeeded (gridWidth * gridHeight))
-    let generation = roField "generation" 0x008UL 0 32
-    let tickCount = rwReg "tickCount" 0x00CUL 32 1UL
-    let burstIrq = w1cBit "burstIrq" 0x010UL 0
-    let snapIrq = w1cBit "snapIrq" 0x010UL 1
-    let snapCapture = pulseBit "snapCapture" 0x014UL 0
-    let snapRelease = pulseBit "snapRelease" 0x018UL 0
-    let snapReady = roField "snapReady" 0x01CUL 0 1
-    let snapOverrun = roField "snapOverrun" 0x01CUL 8 8
-    let snapSlot = roField "snapSlot" 0x01CUL 16 2
-    let intervalCycles = rwReg "intervalCycles" 0x020UL 32 1UL
-    let fbBaseAddr = rwReg "fbBaseAddr" 0x024UL 32 0UL
-    let loadRow = rwWindow "loadRow" (uint64 (windowWordOffset * 4)) windowWords
+        // Which revision of this map the fabric was built from. The identity
+        // above says which design; this says whether the host's offsets still
+        // mean what they meant when it was compiled — and since offsets here
+        // are allocated, adding one register moves everything after it.
+        r.LayoutHash "layoutHash"
 
-    { id = id
-      load = load
-      tick = tick
-      reset = reset
-      stop = stop
-      busy = busy
-      population = population
-      generation = generation
-      tickCount = tickCount
-      burstIrq = burstIrq
-      snapIrq = snapIrq
-      snapCapture = snapCapture
-      snapRelease = snapRelease
-      snapReady = snapReady
-      snapOverrun = snapOverrun
-      snapSlot = snapSlot
-      intervalCycles = intervalCycles
-      fbBaseAddr = fbBaseAddr
-      loadRow = loadRow
-      windowWords = windowWords
-      wordsPerRow = wordsPerRow
-      map =
-        { apertureAddrWidth = 10
-          entries =
-            [ id
-              load
-              tick
-              reset
-              stop
-              busy
-              population
-              generation
-              tickCount
-              burstIrq
-              snapIrq
-              snapCapture
-              snapRelease
-              snapReady
-              snapOverrun
-              snapSlot
-              intervalCycles
-              fbBaseAddr
-              loadRow ] } }
+        // Packed because a host wants one coherent read of "is it running, and
+        // how many cells are alive" rather than two that can straddle a tick.
+        let busy, population =
+            r.Word(fun w -> w.Field("busy", 1), w.Field("population", bitsNeeded (gridWidth * gridHeight)))
+
+        let generation = r.RoField("generation", 32)
+        let tickCount = r.RwReg("tickCount", 32, 1UL)
+        let burstIrq, snapIrq = r.Word(fun w -> w.W1c "burstIrq", w.W1c "snapIrq")
+        let snapCapture = r.Word(fun w -> w.Pulse "snapCapture")
+        let snapRelease = r.Word(fun w -> w.Pulse "snapRelease")
+
+        // The snapshot handshake, packed for the same reason: a slot read
+        // separately from its ready flag can be a slot the fabric has since
+        // moved on from. One read, one consistent answer.
+        let snapReady, snapOverrun, snapSlot =
+            r.Word(fun w -> w.Field("snapReady", 1), w.Field("snapOverrun", 8), w.Field("snapSlot", 2))
+
+        { id = id
+          load = load
+          tick = tick
+          reset = reset
+          stop = stop
+          busy = busy
+          population = population
+          generation = generation
+          tickCount = tickCount
+          burstIrq = burstIrq
+          snapIrq = snapIrq
+          snapCapture = snapCapture
+          snapRelease = snapRelease
+          snapReady = snapReady
+          snapOverrun = snapOverrun
+          snapSlot = snapSlot
+          intervalCycles = r.RwReg("intervalCycles", 32, 1UL)
+          fbBaseAddr = r.RwReg("fbBaseAddr", 32, 0UL)
+          // The window rounds the cursor up to its own size, which is what the
+          // hand-written `max 64 windowWords` was doing by arithmetic.
+          loadRow = r.RwWindow("loadRow", windowWords)
+          windowWords = windowWords
+          wordsPerRow = wordsPerRow })
 
 type private Pacing = Idle | Running
 type private Prefetch = PIdle | PWalking
@@ -144,7 +130,7 @@ let golAxi (topName: string) (gridWidth: int) (gridHeight: int) =
     if gridHeight % rowsPerBeat <> 0 then
         failwith $"golAxi: gridHeight %d{gridHeight} not divisible by rows-per-beat %d{rowsPerBeat}"
 
-    let m = golMap gridWidth gridHeight
+    let m, mMap = golMap gridWidth gridHeight
     let beatCount = golBeatCount gridWidth gridHeight
     let beatIndexBits = indexBits beatCount
     let slotShift = golSlotShift gridWidth gridHeight
@@ -153,11 +139,11 @@ let golAxi (topName: string) (gridWidth: int) (gridHeight: int) =
         axiClock
         topName
         (fun p ->
-            (axiLiteSlavePorts p m.map.apertureAddrWidth,
+            (axiLiteSlavePorts p mMap.apertureAddrWidth,
              axiWriteBusPorts p "m_axi" 32 128,
              p.outPort "irq" 1))
         (fun (slavePorts, writeBusPorts, irqOut) ->
-        let regs = regMapSlave slavePorts m.map
+        let regs = regMapSlave slavePorts mMap
 
         let loadPulse = regs.pulse m.load
         let tickPulse = regs.pulse m.tick

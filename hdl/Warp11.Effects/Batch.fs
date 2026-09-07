@@ -52,50 +52,42 @@ type BatchMap =
       ratio: RegEntry
       attack: RegEntry
       releaseRate: RegEntry
-      gains: RegEntry list
-      map: RegMap }
+      gains: RegEntry list }
 
-let batchMap: BatchMap =
-    let id = roConst "id" 0x000UL 0xAB12C001UL
-    let start = pulseBit "start" 0x000UL 0
-    let busy = roField "busy" 0x004UL 0 1
-    let doneIrq = w1cBit "doneIrq" 0x008UL 0
-    let srcAddr = rwReg "srcAddr" 0x00CUL 32 0UL
-    let dstAddr = rwReg "dstAddr" 0x010UL 32 0UL
-    let frameCount = rwReg "frameCount" 0x014UL 32 0UL
+let batchRegs, batchMap =
+    buildRegMapPinned apertureAddrWidth (fun r ->
+        // The overlay word: the identity answers reads, the start pulse takes
+        // the write side.
+        let id, start = r.Word(fun w -> w.Const("id", 0xAB12C001UL), w.Pulse "start")
 
-    // Every DSP default is a no-op, so a freshly loaded bitstream copies its
-    // input to its output untouched — measurably bit-exact, which is what lets
-    // "did the DDR path work" stay a separate question from "did the
-    // compressor work" now that there is no bypass mux to answer it.
-    let threshold = rwReg "threshold" 0x01CUL sampleWidth ((1UL <<< sampleWidth) - 1UL)
-    let ratio = rwReg "ratio" 0x020UL 8 0UL
-    let attack = rwReg "attack" 0x024UL 16 0UL
-    let releaseRate = rwReg "releaseRate" 0x028UL 16 0UL
+        // Which revision of this map the fabric was built from — see GoL's
+        // and GEP's, same reason: the identity says which design, this says
+        // whether the offsets still mean what the host was compiled against.
+        r.LayoutHash "layoutHash"
 
-    // Two 16-bit band gains per 32-bit word: left band i in the low half,
-    // right band i in the high half, so a host writes one word per band.
-    let gains =
-        List.init multibandBands (fun i -> rwReg $"gain{i}" (0x040UL + uint64 (i * 4)) 32 (gainUnity ||| (gainUnity <<< 16)))
+        { id = id
+          start = start
+          busy = r.Word(fun w -> w.Field("busy", 1))
+          doneIrq = r.Word(fun w -> w.W1c "doneIrq")
+          srcAddr = r.RwReg("srcAddr", 32, 0UL)
+          dstAddr = r.RwReg("dstAddr", 32, 0UL)
+          frameCount = r.RwReg("frameCount", 32, 0UL)
 
-    { id = id
-      start = start
-      busy = busy
-      doneIrq = doneIrq
-      srcAddr = srcAddr
-      dstAddr = dstAddr
-      frameCount = frameCount
-      threshold = threshold
-      ratio = ratio
-      attack = attack
-      releaseRate = releaseRate
-      gains = gains
-      map =
-        { apertureAddrWidth = apertureAddrWidth
-          entries =
-            [ id; start; busy; doneIrq; srcAddr; dstAddr; frameCount
-              threshold; ratio; attack; releaseRate ]
-            @ gains } }
+          // Every DSP default is a no-op, so a freshly loaded bitstream copies
+          // its input to its output untouched — measurably bit-exact, which is
+          // what lets "did the DDR path work" stay a separate question from
+          // "did the compressor work" now that there is no bypass mux to
+          // answer it.
+          threshold = r.RwReg("threshold", sampleWidth, (1UL <<< sampleWidth) - 1UL)
+          ratio = r.RwReg("ratio", 8, 0UL)
+          attack = r.RwReg("attack", 16, 0UL)
+          releaseRate = r.RwReg("releaseRate", 16, 0UL)
+
+          // Two 16-bit band gains per 32-bit word: left band i in the low half,
+          // right band i in the high half, so a host writes one word per band.
+          gains =
+            List.init multibandBands (fun i ->
+                r.RwReg($"gain{i}", 32, gainUnity ||| (gainUnity <<< 16))) })
 
 // ---------------------------------------------------------------------------
 // Beat ↔ frame, the two width changes this design is made of.
@@ -173,15 +165,15 @@ let audioBatchAxi =
         axiClock
         "AudioBatchAxi"
         (fun p ->
-            (axiLiteSlavePorts p batchMap.map.apertureAddrWidth,
+            (axiLiteSlavePorts p batchMap.apertureAddrWidth,
              axiReadBusPorts p "m_axi" 32 beatWidth,
              axiWriteBusPorts p "m_axi" 32 beatWidth))
         (fun (slavePorts, readBusPorts, writeBusPorts) ->
-        let regs = regMapSlave slavePorts batchMap.map
+        let regs = regMapSlave slavePorts batchMap
 
         let bursts = wire "bursts" 32
         // frameCount / framesPerBurst, and framesPerBurst is 32 — a slice.
-        pad 32 (slice 31 5 (regs.value batchMap.frameCount)) ==> bursts
+        pad 32 (slice 31 5 (regs.value batchRegs.frameCount)) ==> bursts
 
         let running = regBit "running"
         let arIssued = reg "ar_issued" 32
@@ -194,7 +186,7 @@ let audioBatchAxi =
 
         let reqAddr = wire "req_addr" 32
         // burst stride is beatsPerBurst * 16 bytes = 256, so shift by 8.
-        (regs.value batchMap.srcAddr + asUInt (shl 8 (slice 23 0 arIssued))) ==> reqAddr
+        (regs.value batchRegs.srcAddr + asUInt (shl 8 (slice 23 0 arIssued))) ==> reqAddr
 
         let requests: Stream<Expr * Expr> =
             { payload = (reqAddr, lit (uint64 (beatsPerBurst - 1)) 8)
@@ -207,17 +199,17 @@ let audioBatchAxi =
         let beats = axiMasterReaderBurstOn (axiReadBusOf readBusPorts) 4 beatsPerBurst requests
 
         // --- the DSP ---------------------------------------------------------
-        let leftGains = batchMap.gains |> List.map (fun g -> slice 15 0 (regs.value g))
-        let rightGains = batchMap.gains |> List.map (fun g -> slice 31 16 (regs.value g))
+        let leftGains = batchRegs.gains |> List.map (fun g -> slice 15 0 (regs.value g))
+        let rightGains = batchRegs.gains |> List.map (fun g -> slice 31 16 (regs.value g))
 
         let processed, _envelope =
             multibandCompressor
                 "MultibandCompressor8"
                 "mb"
-                (regs.value batchMap.threshold)
-                (regs.value batchMap.ratio)
-                (regs.value batchMap.attack)
-                (regs.value batchMap.releaseRate)
+                (regs.value batchRegs.threshold)
+                (regs.value batchRegs.ratio)
+                (regs.value batchRegs.attack)
+                (regs.value batchRegs.releaseRate)
                 leftGains
                 rightGains
             |> fun apply -> apply (beatsToFrames beats)
@@ -226,7 +218,7 @@ let audioBatchAxi =
         let outBeats = framesToBeats processed
 
         let wrAddr = wire "wr_addr" 32
-        (regs.value batchMap.dstAddr + asUInt (shl 4 (slice 27 0 beatsWritten))) ==> wrAddr
+        (regs.value batchRegs.dstAddr + asUInt (shl 4 (slice 27 0 beatsWritten))) ==> wrAddr
 
         let wrReady = wireBit "wr_ready"
 
@@ -250,14 +242,14 @@ let audioBatchAxi =
         (running &&& eq beatsWritten beatsTotal &&& writerIdle) ==> finished
 
         ifElse [
-            (regs.pulse batchMap.start, fun () ->
+            (regs.pulse batchRegs.start, fun () ->
                 lit 1UL 1 ==> running
                 lit 0UL 32 ==> arIssued
                 lit 0UL 32 ==> beatsWritten)
             (otherwise, fun () -> If finished (fun () -> lit 0UL 1 ==> running)) ]
 
-        regs.drive batchMap.busy running
-        regs.setBit batchMap.doneIrq finished
+        regs.drive batchRegs.busy running
+        regs.setBit batchRegs.doneIrq finished
 
         // A burst is 256 bytes and the stride is 256 bytes, so no burst can
         // cross AXI's 4 KB boundary *provided* the bases are 256-byte aligned.
@@ -268,13 +260,13 @@ let audioBatchAxi =
         let aligned (e: RegEntry) =
             bnot running ||| eq (slice 7 0 (regs.value e)) (lit 0UL 8)
 
-        assertThat (aligned batchMap.srcAddr) "srcAddr must be 256-byte aligned"
-        assertThat (aligned batchMap.dstAddr) "dstAddr must be 256-byte aligned"
+        assertThat (aligned batchRegs.srcAddr) "srcAddr must be 256-byte aligned"
+        assertThat (aligned batchRegs.dstAddr) "dstAddr must be 256-byte aligned"
 
         // Likewise the frame count: the fabric processes whole bursts, so a
         // remainder would be silently dropped.
         assertThat
-            (bnot running ||| eq (slice 4 0 (regs.value batchMap.frameCount)) (lit 0UL 5))
+            (bnot running ||| eq (slice 4 0 (regs.value batchRegs.frameCount)) (lit 0UL 5))
             "frameCount must be a multiple of framesPerBurst (32)")
 
 /// The same compressor as a bare stream stage, one frame per cycle. This is the

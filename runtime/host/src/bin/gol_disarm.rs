@@ -35,6 +35,26 @@ fn main() {
         .open(&uio)
         .expect("open uio");
     let mut regs = MmapWindow::open(&file, 0, layout::APERTURE_BYTES).expect("register mmap");
+
+    // Checked here of all places, because this tool's whole job is to quiesce
+    // the fabric's writer before the bitstream is unloaded — and unloading with
+    // writes in flight leaves a PS-side HP0 pairing skew that survives every
+    // app reload and clears only on a reboot. Writing STOP to an offset that
+    // moved would report success and disarm nothing.
+    let id = regs.read32(layout::ID_OFFSET).expect("read id");
+    let hash = regs.read32(layout::LAYOUT_HASH_OFFSET).expect("read layout hash");
+
+    if id != layout::ID_VALUE || hash != layout::LAYOUT_HASH_VALUE {
+        eprintln!(
+            "refusing to disarm: id {id:#010X} (want {:#010X}), layout {hash:#06X} (want {:#06X}). \
+             These offsets are not this design's — disarming would write somewhere else and \
+             report success. Do NOT unload the bitstream until this agrees.",
+            layout::ID_VALUE,
+            layout::LAYOUT_HASH_VALUE
+        );
+        exit(1);
+    }
+
     regs.write32(layout::STOP_OFFSET, 1 << layout::STOP_BIT).unwrap();
     regs.write32(layout::FB_BASE_ADDR_OFFSET, 0).unwrap();
     std::thread::sleep(std::time::Duration::from_millis(1));

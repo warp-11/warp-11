@@ -211,6 +211,18 @@ fn main() {
         exit(1);
     }
 
+    // Right design, wrong revision of its map: every offset this daemon holds
+    // would be stale, and every read and write would still succeed. Worth
+    // stopping on, because this process writes.
+    let hash = rd(&mut regs, layout::LAYOUT_HASH_OFFSET);
+    if hash != layout::LAYOUT_HASH_VALUE {
+        eprintln!(
+            "layout mismatch: 0x{hash:04X} != 0x{:04X} — rebuild the bitstream or the daemon",
+            layout::LAYOUT_HASH_VALUE
+        );
+        exit(1);
+    }
+
     let fb_base = udmabuf_phys_addr().unwrap_or_else(|| {
         eprintln!("no udmabuf0 phys_addr — is u-dma-buf loaded?");
         exit(1);

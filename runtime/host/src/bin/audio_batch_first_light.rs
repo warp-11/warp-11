@@ -247,7 +247,24 @@ fn main() {
         );
         std::process::exit(1);
     }
-    println!("ID ok ({id:#010X}), arena {arena} B at {phys:#x}");
+    // The identity answered, so this is the right design — but the scan above
+    // was written after a stale bitstream of the *same name* served somebody
+    // else's registers, and an identity alone cannot tell that from a map that
+    // simply gained a register. The fingerprint can: offsets here are
+    // allocated, so a different revision moves every address after the change
+    // and each read still succeeds.
+    let hash = regs.read32(layout::LAYOUT_HASH_OFFSET).expect("read layout hash");
+    if hash != layout::LAYOUT_HASH_VALUE {
+        eprintln!(
+            "layout mismatch: {hash:#06X} != {:#06X} — right design, wrong revision \
+             of its register map. Rebuild the bitstream, or rebuild this against the \
+             layout it was made from.",
+            layout::LAYOUT_HASH_VALUE
+        );
+        std::process::exit(1);
+    }
+
+    println!("ID ok ({id:#010X}), layout ok ({hash:#06X}), arena {arena} B at {phys:#x}");
 
     let buf_file = OpenOptions::new()
         .read(true)
