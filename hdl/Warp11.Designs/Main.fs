@@ -519,6 +519,69 @@ let private i2sHandWiredCodec =
             let received = i2sRx "I2sRx" "i2s_rx" clocks.sclkRxTick clocks.lrclk sdout
             i2sTx "I2sTx" "i2s_tx" clocks.sclkTxTick clocks.lrclk received ==> sdin)
 
+/// The software codec, on both pinouts and through a real processing stage.
+///
+/// This is the leg the audio chain never had: **realistic samples through the
+/// real framers**. The living checks drive stream ports, so `i2sRx` and `i2sTx`
+/// are not in their path; the differential drives every input with seeded
+/// noise; and `I2sLoopback` only shows the two framers agreeing with each
+/// other. `SimI2s` is written against the standard instead — data changing on
+/// the falling edge, MSB one bit-time after the word select turns — so its
+/// agreement with our framers is evidence rather than tautology.
+///
+/// Three claims:
+///
+///   * a shared-bus link returns exactly what it was given
+///   * a separate-converter link does too, which is what says the pin-name
+///     mapping is right rather than the model reading the wrong wires
+///   * `reduceVolume` in the middle comes back halved — the whole chain, pins
+///     to pins, through a stage that changes the samples
+///
+/// A fourth, cheap: a slot narrower than a sample is refused, because `32` and
+/// `24` are different numbers that look interchangeable at a call site.
+let private simI2sRoundTrips () : bool =
+    let samples =
+        [ 0xA5A5A0UL, 0x5A5A50UL
+          0x123456UL, 0x654321UL
+          0x111111UL, 0x222222UL ]
+
+    let refusesNarrowSlot =
+        try
+            defModule "NarrowSlot" (fun p -> i2sPins p SharedBus) (fun pins ->
+                let i2s = i2sLink "i2s" pins 100_000_000 48_828 16
+                i2s.input |> i2s.send)
+            |> ignore
+
+            false
+        with _ ->
+            true
+
+    let shared = i2sExchange (Sim i2sLinkPassthru.def) sharedBusSimPins samples
+    let codec = i2sExchange (Sim i2sLinkCodec.def) separateCodecSimPins samples
+
+    // `reduceVolume` is an *arithmetic* shift, and 0xA5A5A0 has bit 23 set, so
+    // it is a negative sample — halving it sign-extends rather than zero-fills.
+    // Keeping that sample here is deliberate: it is the one that tells the two
+    // shifts apart, and it is now checked through the real framers rather than
+    // at a bare stream port.
+    let halve (v: uint64) =
+        let signed =
+            if v >= (1UL <<< (sampleWidth - 1)) then
+                int64 v - (1L <<< sampleWidth)
+            else
+                int64 v
+
+        let h = if signed >= 0L || signed % 2L = 0L then signed / 2L else signed / 2L - 1L
+        uint64 h &&& ((1UL <<< sampleWidth) - 1UL)
+
+    let halved = i2sExchange (Sim i2sLinkHalfVolume.def) sharedBusSimPins samples
+    let expectedHalves = samples |> List.map (fun (l, r) -> halve l, halve r)
+
+    List.truncate samples.Length (List.distinct shared) = samples
+    && List.truncate samples.Length (List.distinct codec) = samples
+    && List.truncate samples.Length (List.distinct halved) = expectedHalves
+    && refusesNarrowSlot
+
 /// The same ladder written as a hand-nested `mux`, for the byte-identity leg.
 let private selectLadderByHand =
     defModule
@@ -595,6 +658,59 @@ let private halfStage =
         "HalfStage"
         (fun p -> (streamInputPorts p "in" sampleLayout, streamOutputPorts p "out" sampleLayout))
         (fun (inPorts, outPorts) -> streamSource inPorts |> reduceVolume |> streamSink outPorts)
+
+/// `streamThrough` and `i2sThrough`, on the two things that make a lazy driver
+/// worth having over a hand-rolled loop.
+///
+/// **It is actually lazy.** `Seq.take 1` must advance the simulation less than
+/// `Seq.take 3` does. Asserted by counting, not by timing: a stopwatch would
+/// make this a flaky check on a loaded machine, so the design under test counts
+/// its own cycles through a register the driver never touches.
+///
+/// **It honours the handshake**, which is what a hand-rolled loop gets wrong:
+/// injecting stalls must not change the sequence that comes out. A driver that
+/// offered a beat without checking `ready`, or read one without checking
+/// `valid`, would duplicate or drop under backpressure and agree with itself
+/// only when nothing ever stalled.
+let private simStreamDrivesLazily () : bool =
+    let beats = [ for i in 1UL .. 8UL -> [ i * 1000UL; i * 7UL ] ]
+    let inPins = streamPins "in" sampleLayout
+    let outPins = streamPins "out" sampleLayout
+
+    let run stallEvery take =
+        streamThroughWith (Sim halfStage.def) inPins outPins stallEvery 100_000 beats
+        |> Seq.take take
+        |> List.ofSeq
+
+    // `halfStage` is combinational, so what comes back is each beat halved.
+    let expected = beats |> List.map (List.map (fun v -> v >>> 1))
+
+    let unstalled = run 0 8
+    let stalled = [ 2; 3; 5 ] |> List.map (fun n -> run n 8)
+
+    unstalled = expected
+    && List.forall ((=) expected) stalled
+
+/// The lazy I2S pipeline, in the shape a test actually reads as.
+let private i2sThroughIsAPipeline () : bool =
+    let samples = [ 0xA5A5A0UL, 0x5A5A50UL; 0x123456UL, 0x654321UL; 0x111111UL, 0x222222UL ]
+
+    let heard =
+        samples
+        |> i2sThrough (Sim i2sLinkPassthru.def) sharedBusSimPins
+        |> Seq.skipWhile i2sSilence
+        |> Seq.take 3
+        |> List.ofSeq
+
+    // Taking one must not have to produce three: the pipeline is pulled, not run.
+    let one =
+        samples
+        |> i2sThrough (Sim i2sLinkPassthru.def) sharedBusSimPins
+        |> Seq.skipWhile i2sSilence
+        |> Seq.take 1
+        |> List.ofSeq
+
+    heard = samples && one = [ List.head samples ]
 
 /// The halving stage's defining property, and it is specifically the one a
 /// golden vector would miss: **negative samples must stay negative**.
@@ -4290,6 +4406,9 @@ let private mainDemo () =
     printfn $"I2S link is the hand wiring: %b{i2sLinkIsTheHandWiring ()}"
     printfn $"reduceVolume halves signed:   %b{reduceVolumeHalvesSigned ()}"
     printfn $"selectFirst is ordered:       %b{selectFirstIsOrdered ()}"
+    printfn $"SimI2s round trips:           %b{simI2sRoundTrips ()}"
+    printfn $"stream driver is lazy:        %b{simStreamDrivesLazily ()}"
+    printfn $"i2sThrough is a pipeline:     %b{i2sThroughIsAPipeline ()}"
 
     // The Fixed layer compiles away: every line except the module header and the
     // escape compare (Number.lessThan is signed; the hand-written design chose the unsigned

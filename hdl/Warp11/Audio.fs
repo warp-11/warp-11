@@ -1447,7 +1447,15 @@ let private driveClocks (pins: I2sClockPins) (m: I2sMasterPorts) =
 /// a record about *targets* into the signature of everything that divides a
 /// clock, and a stage that needs a number should ask for the number. Callers
 /// that have one write `kv260.fabricHz`, which reads as what it is.
+let private checkSlot (name: string) (bitsPerSlot: int) =
+    if bitsPerSlot < sampleWidth then
+        failwith
+            ($"i2sLink '{name}': bitsPerSlot is %d{bitsPerSlot}, narrower than the %d{sampleWidth}-bit sample. "
+             + "These are different numbers: the slot is how many bit-clock periods each channel occupies, "
+             + "and the sample is how many of them carry data — the rest are zero padding. 32 is the usual slot.")
+
 let i2sLink (prefix: string) (pins: I2sPins) (fabricHz: int) (targetFs: int) (bitsPerSlot: int) : I2sLink =
+    checkSlot prefix bitsPerSlot
     let clocks = instanceNamed $"{prefix}_clocks" (i2sMasterHz fabricHz targetFs bitsPerSlot "I2sMaster")
     driveClocks pins.clocks clocks
 
@@ -1456,6 +1464,7 @@ let i2sLink (prefix: string) (pins: I2sPins) (fabricHz: int) (targetFs: int) (bi
 
 /// The transmit half alone, for a design with nothing to listen to.
 let i2sTxLink (prefix: string) (pins: I2sTxPins) (fabricHz: int) (targetFs: int) (bitsPerSlot: int) : I2sTxLink =
+    checkSlot prefix bitsPerSlot
     let clocks = instanceNamed $"{prefix}_clocks" (i2sMasterHz fabricHz targetFs bitsPerSlot "I2sMaster")
     driveClocks pins.txClocks clocks
 

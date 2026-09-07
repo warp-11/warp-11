@@ -832,6 +832,46 @@ The interesting property is not the line count. **The edge ticks never reach the
 
 What keeps that from being an abstraction that costs something: the emitted Verilog is **byte-identical** to the hand-wiring, asserted as a living check over both pinouts, so the choice is invisible below the call site. The underlying `i2sMaster` / `i2sRx` / `i2sTx` remain public for the cases the link does not cover — two links at different rates, a receiver with no transmitter, an undescribed pin set.
 
+### Driving a peripheral in simulation
+
+Simulating a design is one thing; simulating the *thing on the other end of its pins* is another, and it is where an audio or sensor front end is actually verified. Most entries leave it to the user's testbench.
+
+| HDL | Driving a codec's pins in simulation |
+|---|---|
+| Chisel / SpinalHDL / HardCaml / Clash / Veryl / Bluespec | Your own testbench, in the host language or in Verilog. SpinalHDL's simulation layer makes writing one pleasant (fork/sleep/waitUntil over the DUT's pins) but ships no converter models |
+| Amaranth | `amaranth.sim` with a hand-written process per peripheral; some board models live in `amaranth-boards`, but not converters |
+| Warp 11 | `SimI2s` — a codec on the design's pins, speaking stereo samples. Eager (`i2sExchange`) or as a lazy pipeline (`i2sThrough`), over `SimStream`'s ready/valid driver |
+
+The point is not convenience, it is **what the other legs structurally cannot check**. Warp 11's living checks drive the DSP through stream ports, so the framers are not in the path. The differential drives every declared input with a seeded random value per cycle, which is exactly right for comparing two simulators and says nothing about audio. And a loopback design wires the transmitter to the receiver, which shows the two framers agreeing *with each other* — a transmitter one bit early and a receiver one bit late both pass their own inspection.
+
+So `SimI2s` is written against the **standard** rather than against `i2sRx`/`i2sTx`: it changes its line on the falling bit-clock edge, samples the design's line on the rising one, and places the MSB one bit-time after the word select turns. When a design round-trips samples through it exactly, that is an independent implementation agreeing, not a tautology — and the same run exercises whatever processing sits between the framers.
+
+The honest limit: one person can misread a datasheet twice, so a model agreeing is not a converter agreeing. This narrows what a bench session has to find; it does not remove the bench.
+
+### Testing a streaming design
+
+A design that presents a `Stream` is exercised by working its ready/valid handshake: hold `valid` while there is something to offer, watch `ready` to learn it was taken, hold `ready` on the way out, read on `valid`. Every entry here leaves that loop to the user, and it is a loop that is wrong in interesting ways when it is wrong — offering a beat that was never accepted, or reading one twice.
+
+| HDL | Driving a ready/valid port from a test |
+|---|---|
+| Chisel | `chiseltest` has `enqueueSeq` / `expectDequeueSeq` for `DecoupledIO` — the closest thing in the field to a first-class answer |
+| SpinalHDL | `StreamDriver` / `StreamMonitor` / `StreamReadyRandomizer` in the simulation library, including randomised backpressure |
+| Amaranth / HardCaml / Clash / Veryl / Bluespec | A hand-written process or testbench per design |
+| Warp 11 | `streamThrough sim inPins outPins values` — a **lazy sequence**, so `Seq.take 3` advances the simulation three beats' worth and stops |
+
+The laziness is the part with no counterpart. Elsewhere a stream test states a cycle budget — run N cycles, then look at what accumulated — and that budget is a number the test has to keep in step with the design's latency. Pulling instead means a test reads as a pipeline with no budget in it at all, values in and `take` off the end, and the input sequence may be infinite because it is pulled on demand too:
+
+```fsharp
+samples
+|> i2sThrough sim sharedBusSimPins
+|> Seq.skipWhile i2sSilence
+|> Seq.take 3
+```
+
+A background thread running the simulation freely would give the same shape and cost determinism — `Sim` is single-threaded mutable state, so it would need a lock around every poke, and a test that races is worse than one that is verbose. Suspension gets the ergonomics without the race.
+
+`streamThroughWith` adds injected backpressure, because a stage that behaves differently under stalls has a real defect — that is the shape the audio signal-shift bug lived in — and a check that only ever runs unstalled is checking the easy half.
+
 ### Board and host integration
 
 The part of the loop the other entries mostly consider out of scope — and, for a project whose stated goal is the distance from an idea to a thing running on a board, the part that matters most.

@@ -47,6 +47,7 @@
         <Compile Include="Inventory.fs"/>
         <Compile Include="Sim.fs"/>
         <Compile Include="SimAxi.fs"/>
+        <Compile Include="SimStream.fs"/>
         <Compile Include="Breakpoint.fs"/>
         <Compile Include="Debug.fs"/>
         <Compile Include="Catalog.fs"/>
@@ -56,6 +57,7 @@
         <Compile Include="Windows.fs"/>
         <Compile Include="Bands.fs"/>
         <Compile Include="Audio.fs"/>
+        <Compile Include="SimI2s.fs"/>
         <Compile Include="Wav.fs"/>
     </ItemGroup>
 
