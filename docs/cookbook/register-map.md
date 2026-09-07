@@ -249,7 +249,7 @@ read mux and the interrupt OR.
 `SlaveRegs`, and that type is bus-neutral by construction:
 
 ```fsharp
-{ pulse; value; drive; setBit; window; driveArray; irq }
+{ pulse; value; drive; setBit; readArray; driveArray; irq }
 ```
 
 Not one of those mentions AXI. The body only ever calls `regs.value`,

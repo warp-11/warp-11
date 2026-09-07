@@ -96,6 +96,46 @@ let selectIndexed (sel: Expr) (values: Expr list) =
     |> List.tail
     |> List.fold (fun acc (i, v) -> mux (eq sel (lit (uint64 i) (width sel))) v acc) (List.head values)
 
+/// A ladder of conditions as a **value**, first match wins — the expression-level
+/// sibling of `ifElse`.
+///
+/// `ifElse` is a statement: its arms are `unit -> unit` and they *drive*
+/// signals. That is the right shape when arms drive different signals, when a
+/// register should hold because nothing matched, or when an arm does something
+/// other than driving. It is the wrong shape when every arm produces the same
+/// thing, because then the caller has to declare a wire per output, drive it in
+/// every arm, and remember to — and forgetting one arm is legal, which is a
+/// latch-shaped bug the compiler cannot see.
+///
+/// This is that case written as a value. Chisel spells it `MuxCase(default,
+/// …)`; the fold here nests `mux` first-arm-outermost, so the emitted Verilog is
+/// byte-identical to writing the nest by hand and the ordering rule matches
+/// `ifElse` exactly: **an arm below a matching one never runs, however true it
+/// is.**
+///
+/// The fallback is a value rather than an `otherwise` arm because in this form
+/// it genuinely is not an arm — it is the base of the fold, and a ladder with no
+/// total case has no value to be. An empty arm list is legal and is the
+/// fallback.
+let selectFirst (fallback: Expr) (arms: (Expr * Expr) list) : Expr =
+    List.foldBack (fun (cond, value) acc -> mux cond value acc) arms fallback
+
+/// `selectFirst` over a whole payload rather than one signal: every arm supplies
+/// every field, and the fold muxes field by field.
+///
+/// The layout is what makes this possible without the caller writing a
+/// pack/unpack recipe — and a `Stream` already carries its own, so the usual
+/// call is `selectPayload s.layout (left, right) [ … ]`.
+///
+/// **Every arm produces the whole payload, and that is the point.** In the
+/// statement form an arm that forgets a field still elaborates; here it does not
+/// typecheck.
+let selectPayload (layout: Layout<'p>) (fallback: 'p) (arms: (Expr * 'p) list) : 'p =
+    let packed = arms |> List.map (fun (cond, value) -> cond, layout.pack value)
+
+    List.foldBack (fun (cond, fields) acc -> List.map2 (mux cond) fields acc) packed (layout.pack fallback)
+    |> layout.unpack
+
 /// The lowest set bit, as a one-hot vector — a priority scan, which is what a
 /// row of requesters wants when exactly one may win and index order decides.
 /// `[0; 1; 1; 0]` gives `[0; 1; 0; 0]`; all-zero gives all-zero.

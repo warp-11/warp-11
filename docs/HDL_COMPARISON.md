@@ -226,6 +226,22 @@ these `orr`/`andr`/`xorr` and `|x`/`&x`/`^x`, which say how rather than what.
 `anyBitSet` is the one designs otherwise write as `x != 0`, and it is a single
 OR gate where that is a comparator.
 
+### Choosing between values
+
+Every HDL has a statement-level conditional. The question is whether choosing *a value* has its own spelling, or whether you declare a signal and assign it from inside the branches.
+
+| HDL | A ladder of conditions as a value |
+|---|---|
+| Chisel | `MuxCase(default, Array(c1 -> v1, c2 -> v2))`, plus `MuxLookup` for a keyed table. `when/.elsewhen/.otherwise` is the statement form |
+| SpinalHDL | `Mux(cond, a, b)` for two, and a `when` block assigning a declared signal for more |
+| Amaranth | `with m.If(…)/m.Elif(…)` assigning a signal; `Mux(sel, a, b)` for the two-case value form |
+| HardCaml / Clash | Ordinary host-language expressions — `mux`, `if/then/else` and `case` are the language's own, since the circuit is a value |
+| Warp 11 | `ifElse [ … ]` for statements, `selectFirst fallback arms` for one value, `selectPayload layout fallback arms` for a whole payload |
+
+The pair matters more than either half. `ifElse` arms are `unit -> unit`: they drive signals, which is right when arms drive *different* signals, when a register should hold because nothing matched, or when an arm does something other than driving. But when every arm produces the same thing, the statement form makes the caller declare a wire per output and drive it in every arm — **and forgetting one arm is legal**, which is a latch-shaped bug nothing catches. `selectPayload` makes that unrepresentable: every arm supplies every field or it does not typecheck, and the layout riding the stream means the caller never writes a pack/unpack recipe.
+
+Both fold to the same nested `mux`, first arm outermost, so first-match-wins is the rule in either form and the emitted Verilog is byte-identical to writing the nest by hand — asserted as a living check over a ladder with deliberately overlapping conditions, which is the only configuration that tells a first-match ladder apart from a one-hot select.
+
 ### Division
 
 | HDL | what `/` gives you |

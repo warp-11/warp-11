@@ -91,6 +91,7 @@ let catalog =
           entry "I2S link (codec pins)" (nameof i2sLinkCodec) (fun () -> i2sLinkCodec.def)
           entry "I2S link (transmit only)" (nameof i2sLinkTone) (fun () -> i2sLinkTone.def)
           entry "I2S link + half volume" (nameof i2sLinkHalfVolume) (fun () -> i2sLinkHalfVolume.def)
+          entry "Select ladder (first match wins)" (nameof selectLadder) (fun () -> selectLadder.def)
           entry "Max pool, combinational" (nameof maxPoolCombinational) (fun () -> maxPoolCombinational.def) ]
 
 let designs = catalog.entries

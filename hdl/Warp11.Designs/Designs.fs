@@ -2609,6 +2609,37 @@ let i2sTxStage =
         (fun (sclkTick, lrclk, sdin, inPorts) ->
             i2sTx "I2sTx" "tx" sclkTick lrclk (streamSource inPorts) ==> sdin)
 
+/// `selectFirst` and `selectPayload`: a ladder of **overlapping** conditions,
+/// where the order is the whole meaning.
+///
+/// The conditions deliberately overlap — `a` and `b` can both be high at once —
+/// because that is the only configuration that tells a first-match ladder apart
+/// from a one-hot select. With disjoint conditions every implementation agrees.
+let selectLadder =
+    defModule
+        "SelectLadder"
+        (fun p ->
+            (p.inPort "a" 1,
+             p.inPort "b" 1,
+             p.inPort "c" 1,
+             p.outPort "scalar" 8,
+             streamInputPorts p "in" sampleLayout,
+             streamOutputPorts p "out" sampleLayout))
+        (fun (a, b, c, scalarOut, inPorts, outPorts) ->
+            selectFirst (lit 0UL 8) [ a, lit 10UL 8; b, lit 20UL 8; c, lit 30UL 8 ] ==> scalarOut
+
+            let s = streamSource inPorts
+            let left, right = s.payload
+
+            { s with
+                payload =
+                    selectPayload
+                        s.layout
+                        (left, right)
+                        [ a, (lit 1UL sampleWidth, lit 2UL sampleWidth)
+                          b, (lit 3UL sampleWidth, lit 4UL sampleWidth) ] }
+            |> streamSink outPorts)
+
 // ---------------------------------------------------------------------------
 // The link abstraction, one design per pinout. Together they are what says the
 // three port sets come out with the names the constraint files bind, and the

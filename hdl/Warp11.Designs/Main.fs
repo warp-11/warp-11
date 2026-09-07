@@ -110,6 +110,7 @@ let private diffDesigns () =
       i2sLinkCodec.def
       i2sLinkTone.def
       i2sLinkHalfVolume.def
+      selectLadder.def
       multibandStage.def ]
 
 /// Unity settings must be audibly transparent: gain at 1.0x unmuted,
@@ -517,6 +518,75 @@ let private i2sHandWiredCodec =
 
             let received = i2sRx "I2sRx" "i2s_rx" clocks.sclkRxTick clocks.lrclk sdout
             i2sTx "I2sTx" "i2s_tx" clocks.sclkTxTick clocks.lrclk received ==> sdin)
+
+/// The same ladder written as a hand-nested `mux`, for the byte-identity leg.
+let private selectLadderByHand =
+    defModule
+        "SelectLadder"
+        (fun p ->
+            (p.inPort "a" 1,
+             p.inPort "b" 1,
+             p.inPort "c" 1,
+             p.outPort "scalar" 8,
+             streamInputPorts p "in" sampleLayout,
+             streamOutputPorts p "out" sampleLayout))
+        (fun (a, b, c, scalarOut, inPorts, outPorts) ->
+            mux a (lit 10UL 8) (mux b (lit 20UL 8) (mux c (lit 30UL 8) (lit 0UL 8))) ==> scalarOut
+
+            let s = streamSource inPorts
+            let left, right = s.payload
+
+            { s with
+                payload =
+                    (mux a (lit 1UL sampleWidth) (mux b (lit 3UL sampleWidth) left),
+                     mux a (lit 2UL sampleWidth) (mux b (lit 4UL sampleWidth) right)) }
+            |> streamSink outPorts)
+
+/// `selectFirst` / `selectPayload`, on the two claims that define them.
+///
+/// **First match wins**, which only overlapping conditions can show: with `a`
+/// and `b` both high the answer must be `a`'s, and a one-hot select or a
+/// last-wins fold would say otherwise. Every combination of the three
+/// conditions is walked rather than a sample, because the property is about
+/// ordering and there are only eight.
+///
+/// **It adds nothing**: the emitted Verilog is byte-identical to the
+/// hand-nested `mux`, so reaching for the combinator is invisible below the call
+/// site — and the payload form is checked alongside the scalar one, since the
+/// pack/unpack round trip is where a field-order bug would hide.
+let private selectFirstIsOrdered () : bool =
+    let sim = Sim selectLadder.def
+    sim.Poke("in_valid", 1UL)
+    sim.Poke("out_ready", 1UL)
+    sim.Poke("in_left", 700UL)
+    sim.Poke("in_right", 800UL)
+
+    let ordered =
+        [ for a in 0UL .. 1UL do
+              for b in 0UL .. 1UL do
+                  for c in 0UL .. 1UL -> a, b, c ]
+        |> List.forall (fun (a, b, c) ->
+            sim.Poke("a", a)
+            sim.Poke("b", b)
+            sim.Poke("c", c)
+            sim.Tick()
+
+            let expectedScalar =
+                if a = 1UL then 10UL
+                elif b = 1UL then 20UL
+                elif c = 1UL then 30UL
+                else 0UL
+
+            let expectedLeft, expectedRight =
+                if a = 1UL then 1UL, 2UL
+                elif b = 1UL then 3UL, 4UL
+                else 700UL, 800UL
+
+            sim.Peek "scalar" = expectedScalar
+            && sim.Peek "out_left" = expectedLeft
+            && sim.Peek "out_right" = expectedRight)
+
+    ordered && emitDesign selectLadder.def = emitDesign selectLadderByHand.def
 
 /// `reduceVolume` on the bare stream boundary, so a sample can be poked in and
 /// read out without 2,048 cycles of framing in the way.
@@ -4219,6 +4289,7 @@ let private mainDemo () =
     printfn $"I2S master by sample rate:    %b{i2sMasterHzPicksDivisors ()}"
     printfn $"I2S link is the hand wiring: %b{i2sLinkIsTheHandWiring ()}"
     printfn $"reduceVolume halves signed:   %b{reduceVolumeHalvesSigned ()}"
+    printfn $"selectFirst is ordered:       %b{selectFirstIsOrdered ()}"
 
     // The Fixed layer compiles away: every line except the module header and the
     // escape compare (Number.lessThan is signed; the hand-written design chose the unsigned
