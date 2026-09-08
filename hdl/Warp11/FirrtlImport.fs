@@ -648,7 +648,6 @@ let private readModule (known: Map<string, ModuleDef>) (header: string) (body: L
         | "attach" :: _ -> fail "`attach` — analog nets, which warp11's IR has no type for"
         | "layerblock" :: _
         | "layer" :: _ -> fail "a layer block, which warp11's IR has no equivalent for"
-        | "connect" :: _ -> ()
         | [] -> ()
         // Anything left is a statement this reader has never heard of. Ignoring
         // it would drop circuit behaviour silently, which is the one outcome

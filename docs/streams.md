@@ -12,19 +12,64 @@ everything upstream of it stalls correctly without knowing why.
 ## The shape of it
 
 ```fsharp
-let pixels = streamInput "px" pixelLayout        // a stream arriving at a port
-
-pixels
-|> streamMap (fun p -> { p with value = p.value + lit 1UL 8 })
-|> streamStageFor pixelLayout                    // one registered pipeline slot
-|> streamProbe "after_stage"                     // stall telemetry, no behaviour
-|> streamOutput "out"
+defModule
+    "Brighten"
+    (fun p ->
+        (streamInputPorts p "px" pixelLayout,          // the boundary, declared
+         streamOutputPorts p "out" pixelLayout))
+    (fun (pxPorts, outPorts) ->
+        streamSource pxPorts                           // the boundary, as a stream
+        |> streamMap (fun (col, value) -> col, value + lit 1UL 8)
+        |> streamStageFor pixelLayout                  // one registered pipeline slot
+        |> streamProbe "after_stage"                   // stall telemetry, no behaviour
+        |> streamSink outPorts)
 ```
 
 Payloads are **named fields from a `Layout`**, not bit positions, so a stage
 reads `beat.cx` rather than `beat[47:16]`. Both ends of a link are built from
 the same `Layout` value, which is what makes it impossible for them to disagree
 about the encoding.
+
+## The boundary — five helpers, and which one you want
+
+A stream at a module boundary is three or more ports: a field per layout entry,
+a `valid`, and a `ready` going the other way. Declaring those by hand and
+wiring them one `==>` at a time is where the mistakes live — the wires are the
+same type, they sit next to each other, and a swapped pair elaborates cleanly.
+So the boundary is declared as a **group**, and the body reaches it through
+whichever of these matches what it is doing:
+
+| you are… | use |
+|---|---|
+| declaring the ports | `streamInputPorts p "px" layout` / `streamOutputPorts p "out" layout` |
+| reading your own consumed boundary as a stream | `streamSource pxPorts` |
+| landing a stream you *received* on your own produced boundary | `streamSink outPorts s` |
+| landing a stream your own logic *built* there | `streamDrive outPorts valid payload` |
+| driving an instance's consumed boundary | `streamToInputPorts inPorts s` |
+| reading an instance's produced boundary | `streamOfOutputPorts outPorts` |
+
+The split between `streamSink` and `streamDrive` is the one worth knowing.
+`streamSink` hands the consumer's `ready` **back up the chain** to whatever
+produced the stream, which is exactly right when the stream came from a stage.
+A stream a body makes out of its own logic has no such wire — its `ready` *is*
+the boundary's, read directly to gate whatever produces the beat — and handing
+the port back to itself is an elaboration error, correctly, since a module may
+not drive its own input. So:
+
+```fsharp
+// received from a stage: streamSink
+streamSource pxPorts |> compress |> streamSink outPorts
+
+// built here: read `ready`, drive the other two thirds
+let taking = outPorts.ready &&& holding
+streamDrive outPorts holding (addrOf slot, dataOf slot)
+```
+
+The last two rows are the same boundary seen from **outside**, where every
+direction is flipped: an instance's `StreamInputPorts` are wires the parent
+drives. They exist so a parent does not spell the handshake out in four `==>`
+in an order it has to get right, which is the loose-port threading the port
+group removes, reappearing one level up.
 
 ## `wormhole` — one call connects, whatever the topology
 
@@ -59,7 +104,7 @@ let stages =
       Stream.spec "clamp" clampModule
       Stream.specFromFunction saturateStage |> Stream.probed "sat" ]
 
-source |> Stream.pipeline stages |> streamOutput "out"
+source |> Stream.pipeline stages |> streamSink outPorts
 ```
 
 The pipeline vocabulary lives in the nested `Stream` module, so it is spelled

@@ -13,12 +13,13 @@
 module Warp11.Mandelbrot.FramePod
 
 open Warp11
+open Warp11.Mandelbrot.Coalescer
 open Warp11.Mandelbrot.LanePod
 
 /// The drained-beat layout a frame pod of this size emits — shared with the
 /// wrapper reading the stream.
 let frameBeatLayout width height =
-    layout2 ("addr", lanePodAddrWidth width height) ("beat", 128)
+    layout2 ("addr", lanePodAddrWidth width height) ("beat", beatBits)
 
 /// One command beat per frame: the view, latched whole at start.
 let private frameCmdLayout = layout4 ("cx", 32) ("cy", 32) ("dx", 32) ("dy", 32)
@@ -37,16 +38,11 @@ let mandelFrameProcessorDef (width: int) (height: int) =
     defModule
         $"MandelFrameProcessor_%d{width}x%d{height}"
         (fun p ->
-            (p.inPort "cmd_cx" 32,
-             p.inPort "cmd_cy" 32,
-             p.inPort "cmd_dx" 32,
-             p.inPort "cmd_dy" 32,
-             p.inPort "cmd_valid" 1,
-             p.outPort "cmd_ready" 1,
-             p.outPort "run_data" runWidth,
-             p.outPort "run_valid" 1,
-             p.inPort "run_ready" 1))
-        (fun (ccx, ccy, cdx, cdy, cvalid, cready, runData, runValid, runReady) ->
+            (streamInputPorts p "cmd" frameCmdLayout,
+             streamOutputPorts p "run" (layout1 ("data", runWidth))))
+        (fun (cmdPorts, runPorts) ->
+            let cmd = streamSource cmdPorts
+            let ccx, ccy, cdx, cdy = cmd.payload
             let startedReg = regBit "started"
             let rowReg = reg "row" rowCountWidth // 0..height
             let addr0Cur = reg "addr0" addrWidth // row byte base (py * widthPadded)
@@ -58,15 +54,18 @@ let mandelFrameProcessorDef (width: int) (height: int) =
             let moreRows = wireBit "more_rows"
             bnot (eq rowReg (lit (uint64 height) rowCountWidth)) ==> moreRows
 
-            lit 1UL 1 ==> cready
-            (startedReg &&& moreRows) ==> runValid
-            (lanePodRunTransporter width height).dematerialize (addr0Cur, cyCur, cxReg, dxReg) ==> runData
+            lit 1UL 1 ==> cmd.ready
+
+            streamDrive
+                runPorts
+                (startedReg &&& moreRows)
+                ((lanePodRunTransporter width height).dematerialize (addr0Cur, cyCur, cxReg, dxReg))
 
             let runXfer = wireBit "run_xfer"
-            (startedReg &&& moreRows &&& runReady) ==> runXfer
+            (startedReg &&& moreRows &&& runPorts.ready) ==> runXfer
 
             ifElse [
-                (cvalid, fun () ->
+                (cmd.valid, fun () ->
                     lit 1UL 1 ==> startedReg
                     lit 0UL rowCountWidth ==> rowReg
                     lit 0UL addrWidth ==> addr0Cur
@@ -83,24 +82,19 @@ let mandelFrameProcessorDef (width: int) (height: int) =
 /// One frame-processor instance under `instName`, as a stage: the command
 /// stream in, the row-run stream out.
 let mandelFrameProcessor (width: int) (height: int) instName (cmd: Stream<Expr * Expr * Expr * Expr>) =
-    let runWidth = lanePodRunWidth width height
+    let cmdPorts, runPorts = (mandelFrameProcessorDef width height).NewNamed instName
 
-    let ccx, ccy, cdx, cdy, cvalid, cready, runData, runValid, runReady =
-        (mandelFrameProcessorDef width height).NewNamed instName
+    streamToInputPorts cmdPorts cmd
+    streamOfOutputPorts runPorts
 
-    let cx, cy, dx, dy = cmd.payload
-    cx ==> ccx
-    cy ==> ccy
-    dx ==> cdx
-    dy ==> cdy
-    cmd.valid ==> cvalid
-    cready ==> cmd.ready
-    registerStreamReady runReady
-
-    { payload = runData
-      valid = runValid
-      ready = runReady
-      layout = layout1 ("data", runWidth) }
+/// What a gatherer instance hands back: the beats it passed through, and the
+/// two completion signals. Named rather than a positional triple — `busy` and
+/// `frameDone` are both one-bit and a swap would make a frame report finished
+/// the moment it started.
+type GatheredFrame =
+    { beats: Stream<Expr * Expr>
+      busy: Expr
+      frameDone: Expr }
 
 /// The frame gatherer — completion lives where the results land: the beat
 /// stream passes through untouched while the counter tracks beats EXITING
@@ -109,31 +103,25 @@ let mandelFrameProcessor (width: int) (height: int) instName (cmd: Stream<Expr *
 let mandelFrameGathererDef (width: int) (height: int) =
     let widthPadded = paddedWidth width
     let addrWidth = lanePodAddrWidth width height
-    let totalBeats = height * (widthPadded / 16)
+    let totalBeats = height * (widthPadded / pixelsPerBeat)
     let beatCountWidth = bitsToHold (totalBeats + 1)
 
     defModule
         $"MandelFrameGatherer_%d{width}x%d{height}"
         (fun p ->
             (p.inPort "start" 1,
-             p.inPort "in_addr" addrWidth,
-             p.inPort "in_beat" 128,
-             p.inPort "in_valid" 1,
-             p.outPort "in_ready" 1,
-             p.outPort "out_addr" addrWidth,
-             p.outPort "out_beat" 128,
-             p.outPort "out_valid" 1,
-             p.inPort "out_ready" 1,
+             streamInputPorts p "in" (frameBeatLayout width height),
+             streamOutputPorts p "out" (frameBeatLayout width height),
              p.outPort "busy" 1,
              p.outPort "frame_done" 1))
-        (fun (pstart, inAddr, inBeat, inValid, inReady, outAddr, outBeat, outValid, outReady, pbusy, pdone) ->
+        (fun (pstart, inPorts, outPorts, pbusy, pdone) ->
+            let inAddr, inBeat = inPorts.payload
+            let inValid, inReady, outReady = inPorts.valid, inPorts.ready, outPorts.ready
             let busyReg = regBit "busy_reg"
             let writtenCount = reg "written_count" beatCountWidth // beats out this frame
             let frameDoneReg = regBit "frame_done_reg"
 
-            inAddr ==> outAddr
-            inBeat ==> outBeat
-            inValid ==> outValid
+            streamDrive outPorts inValid (inAddr, inBeat)
             outReady ==> inReady
 
             let xfer = wireBit "egress_xfer"
@@ -157,25 +145,14 @@ let mandelFrameGathererDef (width: int) (height: int) =
 /// One gatherer instance under `instName`: the start pulse and the beat
 /// stream in, the (pass-through stream, busy, frame_done) triple out.
 let mandelFrameGatherer (width: int) (height: int) instName (start: Expr) (s: Stream<Expr * Expr>) =
-    let addrWidth = lanePodAddrWidth width height
+    let pstart, inPorts, outPorts, pbusy, pdone = (mandelFrameGathererDef width height).NewNamed instName
 
-    let pstart, inAddr, inBeat, inValid, inReady, outAddr, outBeat, outValid, outReady, pbusy, pdone =
-        (mandelFrameGathererDef width height).NewNamed instName
-
-    let addr, beat = s.payload
     start ==> pstart
-    addr ==> inAddr
-    beat ==> inBeat
-    s.valid ==> inValid
-    inReady ==> s.ready
-    registerStreamReady outReady
+    streamToInputPorts inPorts s
 
-    ({ payload = (outAddr, outBeat)
-       valid = outValid
-       ready = outReady
-       layout = layout2 ("addr", addrWidth) ("beat", 128) },
-     pbusy,
-     pdone)
+    { beats = streamOfOutputPorts outPorts
+      busy = pbusy
+      frameDone = pdone }
 
 /// A command stream from start/view ports — the boundary-side source every
 /// harness and the AXI wrapper share: one beat per start pulse, the view as
@@ -231,12 +208,11 @@ let mandelFramePodHarness =
                 frameCmdStream start cxOrigin cyOrigin dx dy
                 |> mandelFramePipeline 16 4 8 28 8 2
 
-            let out, busy, frameDone =
-                mandelFrameGatherer 16 4 "gather" start beats
+            let gathered = mandelFrameGatherer 16 4 "gather" start beats
 
-            busy ==> busyOut
-            frameDone ==> doneOut
-            streamSink beatPorts out)
+            gathered.busy ==> busyOut
+            gathered.frameDone ==> doneOut
+            streamSink beatPorts gathered.beats)
 
 /// The degenerate scale: numLanes = 1, where dispatch and merge both shortcut
 /// to direct connections — the same frame must render through no arbiter at
@@ -258,12 +234,11 @@ let mandelFramePodHarness1 =
                 frameCmdStream start cxOrigin cyOrigin dx dy
                 |> mandelFramePipeline 16 4 8 28 8 1
 
-            let out, busy, frameDone =
-                mandelFrameGatherer 16 4 "gather" start beats
+            let gathered = mandelFrameGatherer 16 4 "gather" start beats
 
-            busy ==> busyOut
-            frameDone ==> doneOut
-            streamSink beatPorts out)
+            gathered.busy ==> busyOut
+            gathered.frameDone ==> doneOut
+            streamSink beatPorts gathered.beats)
 
 /// The near-silicon composition: the frame pod behind the AXI master with the
 /// egress link probed — everything `MandelFrameAxi` will be, minus the control
@@ -297,10 +272,9 @@ let mandelFrameDdr =
             frameCmdStream start cxOrigin cyOrigin dx dy
             |> mandelFramePipeline 64 48 48 28 8 4
 
-        let beats, busy, frameDone =
-            mandelFrameGatherer 64 48 "gather" start piped
+        let gathered = mandelFrameGatherer 64 48 "gather" start piped
 
-        busy ==> busyOut
+        gathered.busy ==> busyOut
 
         // The same completion as `FrameAxi`'s, because this design is that one
         // minus the control slave — a `frameDone` meaning something weaker here
@@ -311,11 +285,11 @@ let mandelFrameDdr =
 
         ifElse [
             (start, fun () -> lit 0UL 1 ==> allGathered)
-            (otherwise, fun () -> If frameDone (fun () -> lit 1UL 1 ==> allGathered)) ]
+            (otherwise, fun () -> If gathered.frameDone (fun () -> lit 1UL 1 ==> allGathered)) ]
 
         (allGathered &&& frame.idle) ==> doneOut
 
-        streamProbe "egress" beats
+        streamProbe "egress" gathered.beats
         |> streamMapTo
             (layout2 ("index", addrWidth - 4) ("word", 128))
             (fun (addr, beat) -> slice (addrWidth - 1) 4 addr, beat)

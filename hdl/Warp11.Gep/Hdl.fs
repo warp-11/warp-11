@@ -746,12 +746,25 @@ type private Operator =
     | RootInsertionLength
     | Done
 
+/// The chromosome's geometry — what a program *is*, as against how big the
+/// machine that runs one is (`GepUnitShape`).
+///
+/// A record because the five travelled together through every constructor as
+/// positional arguments, three of them adjacent bare ints: `17 8 4` is a gene
+/// of 17 symbols with a head of 8 and four constants, and any permutation of
+/// those three elaborates, emits, and breeds a differently-shaped population
+/// that nothing here would call an error. The two sets are arrays and would
+/// have caught their own swap; the ints would not.
+[<NoEquality; NoComparison>]
+type GepGenome =
+    { functionSet: int[]
+      terminalSet: int[]
+      geneLen: int
+      headLen: int
+      constCount: int }
+
 let gepOperatorEngine
-    (functionSet: int[])
-    (terminalSet: int[])
-    (geneLen: int)
-    (headLen: int)
-    (constCount: int)
+    (genome: GepGenome)
     (maxTransposon: int)
     (prefix: string)
     (start: Expr)
@@ -761,6 +774,9 @@ let gepOperatorEngine
     (rdSaddr: Expr)
     (rdCaddr: Expr)
     =
+    let functionSet, terminalSet = genome.functionSet, genome.terminalSet
+    let geneLen, headLen, constCount = genome.geneLen, genome.headLen, genome.constCount
+
     if geneLen < 2 || geneLen > 64 then
         failwith $"geneLen must be 2..64, got %d{geneLen}"
 
@@ -1217,6 +1233,29 @@ let gepOperatorEngine
        busy = busy
        finished = finished |}
 
+/// Transposon length limit every breeder here builds its operator engine with.
+/// Three symbols, which is what the GEP literature's IS/RIS operators use and
+/// what every call in this file has always passed.
+let breederMaxTransposon = 3
+
+/// The deployed v1 geometry, written once for the three walk designs that
+/// share it: head 8 / gene 17, 3 variables + 4 constants, the full function
+/// set. Three copies of `17 8 4` beside three copies of the same terminal
+/// array was three chances for the walks to stop testing the same chromosome.
+let v1Genome =
+    { functionSet = Opcodes.functionSet
+      terminalSet =
+        [| Opcodes.variable 0
+           Opcodes.variable 1
+           Opcodes.variable 2
+           Opcodes.constant 0
+           Opcodes.constant 1
+           Opcodes.constant 2
+           Opcodes.constant 3 |]
+      geneLen = 17
+      headLen = 8
+      constCount = 4 }
+
 /// The operator engine at ports, at the deployed v1 geometry: head 8 / gene
 /// 17, 3 variables + 4 constants, the full function set. The oracle check
 /// breeds against `hwBreedOffspring` on shared seeds.
@@ -1252,13 +1291,8 @@ let operatorEngineWalk =
         (fun (start, sIn, rates, load, rdSaddr, rdCaddr, childSym, childConst, busy, doneOut) ->
             let engine =
                 gepOperatorEngine
-                    Opcodes.functionSet
-                    [| Opcodes.variable 0; Opcodes.variable 1; Opcodes.variable 2
-                       Opcodes.constant 0; Opcodes.constant 1; Opcodes.constant 2; Opcodes.constant 3 |]
-                    17
-                    8
-                    4
-                    3
+                    v1Genome
+                    breederMaxTransposon
                     "oe"
                     start
                     sIn
@@ -1462,13 +1496,31 @@ type private Wave =
     /// Pooled divide only: the wave's offloads have not all returned.
     | WaitRemote
 
+/// How big one evaluation unit is: the program it can hold, the fitness cases
+/// it can hold, how many threads share its pipeline, and how much of the
+/// individual store one record may span.
+///
+/// Six numbers that arrived positionally — `gepUnitEngine 32 4 4 8 64 512` is
+/// six adjacent bare ints and was the largest such call in this repository.
+/// Four of them are powers of two, so a transposition passes every
+/// `log2Exact` check on the way in and shows up as a lane that quietly scores
+/// the wrong thing.
+type GepUnitShape =
+    { /// Instructions one compiled program may reach.
+      capacity: int
+      /// Constants in the individual's record.
+      constCount: int
+      /// Independent variables the terminal set may name.
+      varCount: int
+      /// Threads interleaved through the one ALU cone.
+      nThreads: int
+      /// Fitness cases the unit can hold at once.
+      caseCapacity: int
+      /// Words of the individual store one record may span.
+      indivCapacity: int }
+
 let gepUnitEngine
-    (capacity: int)
-    (constCount: int)
-    (varCount: int)
-    (nThreads: int)
-    (caseCapacity: int)
-    (indivCapacity: int)
+    (shape: GepUnitShape)
     (div: GepLaneDiv)
     (prefix: string)
     (fill: GepUnitFillBus)
@@ -1479,6 +1531,9 @@ let gepUnitEngine
          canFill: Expr
          idle: Expr
          divIssue: Stream<FuBeat> option |} =
+    let capacity, constCount, varCount = shape.capacity, shape.constCount, shape.varCount
+    let nThreads, caseCapacity, indivCapacity = shape.nThreads, shape.caseCapacity, shape.indivCapacity
+
     let residentDiv =
         match div with
         | ResidentDiv -> true
@@ -2012,9 +2067,20 @@ let gepUnitEngine
        idle = idle
        divIssue = divIssue |}
 
-/// The unit engine at ports, queue mode, no div: capacity 32, 4 constants,
-/// 4 variables, 8 threads, 64 cases, 512 bank words. The check fills real
-/// beats and compares emitted fitnesses against the software evaluation.
+/// The geometry both unit-engine walks are built at, stated once: capacity 32,
+/// 4 constants, 4 variables, 8 threads, 64 cases, 512 bank words. The threaded
+/// walk overrides `nThreads` and inherits the rest, so the two walks cannot
+/// drift into testing different machines.
+let v1UnitShape =
+    { capacity = 32
+      constCount = 4
+      varCount = 4
+      nThreads = 8
+      caseCapacity = 64
+      indivCapacity = 512 }
+
+/// The unit engine at ports, queue mode, no div. The check fills real beats
+/// and compares emitted fitnesses against the software evaluation.
 let unitEngineWalk =
     defModule
         "GepUnitEngineWalk"
@@ -2031,7 +2097,7 @@ let unitEngineWalk =
              p.outPort "idle" 1,
              streamOutputPorts p "res" (layout3 ("fit", 64) ("unit", 32) ("m", 8))))
         (fun (fill, caseFill, nCases, mCount, canFill, idle, resPorts) ->
-            let engine = gepUnitEngine 32 4 4 8 64 512 NoDiv "ue" fill caseFill nCases mCount
+            let engine = gepUnitEngine v1UnitShape NoDiv "ue" fill caseFill nCases mCount
             engine.canFill ==> canFill
             engine.idle ==> idle
             streamSink resPorts engine.res)
@@ -2086,7 +2152,7 @@ let unitEngineDivWalk (sharing: FuSharing) =
                       layout = fuLayout threadW gepDivWritebackPorts }
 
         let engine =
-            gepUnitEngine 32 4 4 nThreads 64 512 laneDiv "ue" fill caseFill nCases mCount
+            gepUnitEngine { v1UnitShape with nThreads = nThreads } laneDiv "ue" fill caseFill nCases mCount
 
         match laneDiv with
         | PodDiv wb ->
@@ -2122,11 +2188,7 @@ type private Breeder =
     | Done
 
 let gepBreederBlock
-    (functionSet: int[])
-    (terminalSet: int[])
-    (geneLen: int)
-    (headLen: int)
-    (constCount: int)
+    (genome: GepGenome)
     (capacity: int)
     (prefix: string)
     (start: Expr)
@@ -2137,6 +2199,8 @@ let gepBreederBlock
     (rdSaddr: Expr)
     (rdCaddr: Expr)
     =
+    let geneLen, constCount = genome.geneLen, genome.constCount
+
     if capacity &&& (capacity - 1) <> 0 then
         failwith $"capacity must be a power of two, got %d{capacity}"
 
@@ -2158,7 +2222,7 @@ let gepBreederBlock
     let engineRdC = wire $"{prefix}_rdC" 6
 
     let engine =
-        gepOperatorEngine functionSet terminalSet geneLen headLen constCount 3 $"{prefix}_oe" accept sIn rates load engineRdS engineRdC
+        gepOperatorEngine genome breederMaxTransposon $"{prefix}_oe" accept sIn rates load engineRdS engineRdC
 
     let symData = wire $"{prefix}_symData" 8
     engine.childSym ==> symData
@@ -2279,12 +2343,7 @@ let breederBlockWalk =
         (fun (start, release, sIn, rates, load, rdSaddr, rdCaddr, childSym, childConst, busy, doneOut, recPorts) ->
             let block =
                 gepBreederBlock
-                    Opcodes.functionSet
-                    [| Opcodes.variable 0; Opcodes.variable 1; Opcodes.variable 2
-                       Opcodes.constant 0; Opcodes.constant 1; Opcodes.constant 2; Opcodes.constant 3 |]
-                    17
-                    8
-                    4
+                    v1Genome
                     32
                     "bb"
                     start

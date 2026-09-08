@@ -16,3 +16,4 @@ pub const APERTURE_BYTES: usize = 32768;
 pub const FRAME_WIDTH: usize = 64;
 pub const FRAME_HEIGHT: usize = 48;
 pub const MAX_ITER: u32 = 48;
+pub const FABRIC_HZ: u64 = 99999001;

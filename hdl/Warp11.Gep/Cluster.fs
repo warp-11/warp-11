@@ -205,6 +205,16 @@ let gepClusterPool
     let capacity = shape.capacity
     let addrWidth = shape.addrWidth
 
+    // The two records the fabric constructors take, built from the cluster's
+    // shape once. Six and five numbers respectively, and every one of them
+    // used to travel to its constructor positionally.
+    let genome =
+        { functionSet = shape.functionSet
+          terminalSet = shape.terminalSet
+          geneLen = geneLen
+          headLen = shape.headLen
+          constCount = constCount }
+
     if nBreeders < 1 then failwith $"need at least one breeder, got %d{nBreeders}"
     if nLanes < 1 then failwith $"need at least one lane, got %d{nLanes}"
     if nFillers < 1 then failwith $"need at least one filler, got %d{nFillers}"
@@ -980,11 +990,7 @@ let gepClusterPool
                     rangeFx = rangeB[b] }
 
               gepBreederBlock
-                  shape.functionSet
-                  shape.terminalSet
-                  geneLen
-                  shape.headLen
-                  constCount
+                  genome
                   capacity
                   $"{prefix}_br%d{b}"
                   (holdsD obDst Filler.StartBreeder &&& fillSel[b])
@@ -1046,12 +1052,12 @@ let gepClusterPool
 
               let engine =
                   gepUnitEngine
-                      capacity
-                      constCount
-                      shape.varCount
-                      shape.nThreads
-                      shape.caseCapacity
-                      indivCapacity
+                      { capacity = capacity
+                        constCount = constCount
+                        varCount = shape.varCount
+                        nThreads = shape.nThreads
+                        caseCapacity = shape.caseCapacity
+                        indivCapacity = indivCapacity }
                       laneDiv
                       $"{prefix}_lane%d{l}"
                       laneFillW[l]

@@ -274,6 +274,17 @@ transmits, its `.xdc` binds four pins, and its emitted Verilog is byte-identical
 across the change. The BD scripts already expected seven
 (`foreach p {mclk lrclk sclk sdin mclk2 lrclk2 sclk2}`), so nothing there moved.
 
+**Since 2026-09-08 the pin declaration is the library's**, not this file's.
+`codecPorts` and `adcClockPorts` were a duplicate of `Warp11.Audio`'s
+`I2sPins`, whose declaration order was chosen so that a hand-wired design
+converts to it byte-identically — so the four tops now take
+`i2sPins p SeparateCodecs` (`i2sTxPins` for the tone), and the defect above is
+not expressible in them: there is one pinout value and it declares all eight
+pins or none. The bodies use `i2sLink`, so the two edge ticks never appear
+here either. What moved in the emitted Verilog is internal instance names
+(`rx` → `audio_rx`) and the order the clock assigns are written; the top-level
+port lists, the module set and the generated Rust seams are byte-identical.
+
 There is also no `audio-effects` xmutil app — only `audio-tone`, `audio-gain`
 and `audio-passthru` exist, and they predate this code.
 

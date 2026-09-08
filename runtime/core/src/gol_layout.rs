@@ -56,3 +56,9 @@ pub const BEAT_COUNT: usize = 32;
 pub const FRAME_BYTES: usize = 512;
 pub const SLOT_STRIDE_BYTES: usize = 512;
 pub const SLOT_COUNT: usize = 3;
+
+// The clock the app's overlay programs, from the board this design was
+// built for. Every wall-clock figure a host quotes divides by it, and
+// a host that wrote it down separately could disagree with the fabric
+// about how fast the fabric is.
+pub const FABRIC_HZ: u64 = 166666672;

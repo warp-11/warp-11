@@ -663,17 +663,45 @@ let audioCompressorDef (name: string) : TypedModule<AudioCompressorPorts> =
             applyGain "left" leftHeld ==> io.s.outLeft
             applyGain "right" rightHeld ==> io.s.outRight)
 
+/// What a compressor is set to. Five values, four of them unsigned and two of
+/// them the same width, handed over positionally: swapping attack and release
+/// elaborates, passes every width check, and produces a compressor that pumps
+/// instead of one that breathes. Named fields make the swap unwriteable, and a
+/// host-facing register map fills the record in one place (`aidSettings` in the
+/// hearing aid, `effectsSettings` in the audio example) so the map itself stops
+/// at the top of the design.
+type CompressorSettings =
+    { threshold: Expr
+      ratio: Expr
+      attack: Expr
+      releaseRate: Expr
+      makeup: Expr }
+
+/// The five controls as a module's own ports — the io-factory half of
+/// `CompressorSettings`, so a design declares them and hands them on as one
+/// value instead of threading five same-typed inputs through its body.
+///
+/// The declaration order reproduces what the hand-written designs had, so
+/// converting one is byte-identical in the emitted Verilog and the host names
+/// its registers exactly as before.
+let compressorSettingsPorts (p: Ports) : CompressorSettings =
+    { threshold = p.inPort "threshold" sampleWidth
+      ratio = p.inPort "ratio" 8
+      attack = p.inPort "attack" 16
+      releaseRate = p.inPort "releaseRate" 16
+      makeup = p.inPort "makeup" 16 }
+
 /// One instance under `instName`, called as a function: wire the dynamics
 /// controls, splice the stream through.
 let audioCompressor (name: string) instName =
     let io = (audioCompressorDef name).NewNamed instName
 
-    fun (threshold: Expr) (ratio: Expr) (attack: Expr) (releaseRate: Expr) (makeup: Expr) (s: Stream<Expr * Expr>) ->
-        threshold ==> io.threshold
-        ratio ==> io.ratio
-        attack ==> io.attack
-        releaseRate ==> io.releaseRate
-        makeup ==> io.makeup
+    fun (settings: CompressorSettings) (s: Stream<Expr * Expr>) ->
+        settings.threshold ==> io.threshold
+        settings.ratio ==> io.ratio
+        settings.attack ==> io.attack
+        settings.releaseRate ==> io.releaseRate
+        settings.makeup ==> io.makeup
         stereoSplice io.s s
 
 // ---------------------------------------------------------------------------
@@ -852,7 +880,24 @@ type AudioFirPorts =
 /// surgical filters. The low-pass audibly dulls highs and the high-pass thins
 /// lows, which is what a tone control is for; for precision use a biquad
 /// cascade, whose slopes are far sharper for the same hardware.
-let audioFirDef (name: string) (taps: int) (sampleRate: float) (lpCutoff: float) (hpCutoff: float) : TypedModule<AudioFirPorts> =
+/// A tone control's three frequencies. All three are floats in hertz and they
+/// arrived positionally, so `sampleRate lpCutoff hpCutoff` could be given in
+/// any order and still build a filter — a wrong one, whose only symptom is
+/// that it sounds wrong. Named fields also put the rate beside the cutoffs it
+/// is relative to, which is the relationship a coefficient set actually fixes:
+/// designing at one rate and running at another moves every cutoff by the
+/// ratio between them.
+type FirBands =
+    { /// The rate the coefficients are designed for, in hertz.
+      sampleRate: float
+      /// Corner of the low-pass bank.
+      lowPass: float
+      /// Corner of the high-pass bank.
+      highPass: float }
+
+let audioFirDef (name: string) (taps: int) (bands: FirBands) : TypedModule<AudioFirPorts> =
+    let sampleRate, lpCutoff, hpCutoff = bands.sampleRate, bands.lowPass, bands.highPass
+
     if taps < 4 || taps > 64 then failwith $"audioFir taps must be 4..64, got {taps}"
 
     if lpCutoff <= 0.0 || lpCutoff >= sampleRate / 2.0 then
@@ -943,16 +988,26 @@ let audioFirDef (name: string) (taps: int) (sampleRate: float) (lpCutoff: float)
 
 /// One instance under `instName`, called as a function: wire the preset
 /// select, splice the stream through.
-let audioFir (name: string) (taps: int) (sampleRate: float) (lpCutoff: float) (hpCutoff: float) instName =
-    let io = (audioFirDef name taps sampleRate lpCutoff hpCutoff).NewNamed instName
+let audioFir (name: string) (taps: int) (bands: FirBands) instName =
+    let io = (audioFirDef name taps bands).NewNamed instName
 
     fun (preset: Expr) (s: Stream<Expr * Expr>) ->
         preset ==> io.preset
         stereoSplice io.s s
 
-/// The stock tone control: 16 taps, 4 kHz low-pass and 300 Hz high-pass at
-/// 48 kHz.
-let audioToneFilter name = audioFir name 16 48_000.0 4_000.0 300.0
+/// The stock tone control: 16 taps, 4 kHz low-pass and 300 Hz high-pass.
+///
+/// **The rate is the caller's**, for the reason `multibandCompressor` states:
+/// a filter's coefficients fix a frequency in cycles per *sample*, so a
+/// stdlib entry that assumed 48 000 would be 1.7 % wrong on every board design
+/// in this repository, which runs at `stockSampleRate`.
+let audioToneFilter name (sampleRate: float) =
+    audioFir
+        name
+        16
+        { sampleRate = sampleRate
+          lowPass = 4_000.0
+          highPass = 300.0 }
 
 // ---------------------------------------------------------------------------
 // I2S. Bit-serial clocking rather than datapath: the codec's frame is a
@@ -1057,7 +1112,20 @@ let i2sMaster (name: string) (mclkHalfDiv: int) (sclkHalfDiv: int) (bitsPerSlot:
             If slot.wrap (fun () -> bnot lrclkReg ==> lrclkReg))
 
 /// The stock clock generator: Fs ~= 48.8 kHz from a 100 MHz fabric clock.
-let i2sMasterDefault name = i2sMaster name 4 16 32
+/// The stock divisors, named once so everything derived from them derives from
+/// the same numbers: `i2sMasterDefault` builds the generator out of these, and
+/// `stockSampleRate` below is what they produce. Written down twice, the rate
+/// and the generator could disagree — which is the defect this whole family of
+/// helpers exists to make unwriteable.
+let stockMclkHalfDiv = 4
+let stockSclkHalfDiv = 16
+
+/// Bit-clock periods each channel occupies in the stock frame. The sample is
+/// narrower; the rest of the slot is zero padding.
+let stockBitsPerSlot = 32
+
+let i2sMasterDefault name =
+    i2sMaster name stockMclkHalfDiv stockSclkHalfDiv stockBitsPerSlot
 
 /// How far the achieved sample rate may sit from the requested one before
 /// `i2sMasterHz` refuses to build. One percent: converters tolerate several,
@@ -1114,13 +1182,15 @@ let i2sMasterHz (fabricHz: int) (targetFs: int) (bitsPerSlot: int) (name: string
 let sampleRateOf (fabricHz: int) (sclkHalfDiv: int) (bitsPerSlot: int) : float =
     float fabricHz / (4.0 * float sclkHalfDiv * float bitsPerSlot)
 
-/// The rate `i2sMasterDefault`'s divisors produce on a 100 MHz fabric clock,
+/// The rate `i2sMasterDefault`'s divisors produce on the KV260's fabric clock,
 /// which is what every board design in this repository runs at: 48 828.125 Hz.
 ///
 /// Derived rather than written down, so it cannot drift from the divisors it
-/// comes from — and stated once, so the designs that need a rate do not each
-/// restate it. A design on any other clock passes its own.
-let stockSampleRate = sampleRateOf 100_000_000 16 32
+/// comes from or from the board it comes from — and stated once, so the
+/// designs that need a rate do not each restate it. A design on any other
+/// clock passes its own.
+let stockSampleRate =
+    sampleRateOf kv260.fabricHz stockSclkHalfDiv stockBitsPerSlot
 
 /// The I2S receiver's ports. Clocking arrives from `i2sMaster` rather than
 /// being recovered, which is what FPGA-master operation means.
@@ -1941,16 +2011,42 @@ let multibandCompressor8Def (name: string) (crossovers: float list) (q: float) (
 /// One bank under `instName`, called as a function: wire the shared dynamics
 /// and the per-band gains, splice the stream through, and hand the metering
 /// envelope back beside it.
+/// What a multiband compressor is set to: one dynamics setting shared by every
+/// band, and a per-band makeup gain for each channel.
+///
+/// Six values that used to be six positional arguments — four adjacent `Expr`s
+/// and then **two adjacent `Expr list`s**, where swapping the last pair swaps
+/// the channels and leaves a design that still compresses, still passes every
+/// width check, and puts the left ear's band gains on the right ear.
+type MultibandSettings =
+    { threshold: Expr
+      ratio: Expr
+      attack: Expr
+      releaseRate: Expr
+      leftGains: Expr list
+      rightGains: Expr list }
+
+/// The settings as a module's own ports, in the order the designs that
+/// declared them by hand used — so converting one is byte-identical and a host
+/// finds `lg0`..`rg7` exactly where it did.
+let multibandSettingsPorts (p: Ports) : MultibandSettings =
+    { threshold = p.inPort "threshold" sampleWidth
+      ratio = p.inPort "ratio" 8
+      attack = p.inPort "attack" 16
+      releaseRate = p.inPort "releaseRate" 16
+      leftGains = List.init multibandBands (fun i -> p.inPort $"lg{i}" 16)
+      rightGains = List.init multibandBands (fun i -> p.inPort $"rg{i}" 16) }
+
 let multibandCompressor8 (name: string) (crossovers: float list) (q: float) (sampleRate: float) instName =
     let io = (multibandCompressor8Def name crossovers q sampleRate).NewNamed instName
 
-    fun (threshold: Expr) (ratio: Expr) (attack: Expr) (releaseRate: Expr) (leftGains: Expr list) (rightGains: Expr list) (s: Stream<Expr * Expr>) ->
-        threshold ==> io.threshold
-        ratio ==> io.ratio
-        attack ==> io.attack
-        releaseRate ==> io.releaseRate
-        List.iter2 (fun port g -> g ==> port) io.leftGains leftGains
-        List.iter2 (fun port g -> g ==> port) io.rightGains rightGains
+    fun (settings: MultibandSettings) (s: Stream<Expr * Expr>) ->
+        settings.threshold ==> io.threshold
+        settings.ratio ==> io.ratio
+        settings.attack ==> io.attack
+        settings.releaseRate ==> io.releaseRate
+        List.iter2 (fun port g -> g ==> port) io.leftGains settings.leftGains
+        List.iter2 (fun port g -> g ==> port) io.rightGains settings.rightGains
         stereoSplice io.s s, io.envelope
 
 /// The stock 8-band compressor: the default crossovers and Butterworth Q, at

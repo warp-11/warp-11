@@ -14,12 +14,20 @@ let private keyed (name: string) =
     | null -> failwith $"bad key expression: {name}"
     | key -> key
 
-/// The PL clock `mandelframe_bd_bd.tcl` pins, which is what turns the
-/// daemon's cycle count into milliseconds. It is the daemon's constant too;
-/// if the two ever disagree the reported fabric time is wrong while every
-/// pixel stays right, so it is named in both places rather than derived.
-[<Literal>]
-let PlClockHz = 166_666_672.0
+/// The PL clock, which is what turns the daemon's cycle count into
+/// milliseconds — **taken from the board the design was built for**, not
+/// written down here.
+///
+/// It used to be written down, with a comment saying the daemon names it too
+/// and that if the two ever disagreed the reported fabric time would be wrong
+/// while every pixel stayed right. They did disagree: the Game of Life daemon
+/// next door had 166_666_667 where the overlay programs 166_666_672. A number
+/// that only shows up in a *time* is exactly the kind that drifts unnoticed,
+/// so it now comes from `Warp11.Mandelbrot.Board.frameBoard` — the app the
+/// daemon serves — and the generated seam
+/// carries the same value to the Rust side.
+
+let PlClockHz = float Warp11.Mandelbrot.Board.frameBoard.fabricHz
 
 type ZenohBus(endpoint: string) =
     let frameReceived = Event<MandelFrame>()

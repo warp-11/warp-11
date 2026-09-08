@@ -415,6 +415,16 @@ not the board**, so a fact about targets stays out of the signature of
 everything that divides a clock; a call site with a board in hand writes
 `kv260.fabricHz` and one without writes the number.
 
+**A board is created per app, not shared.** Loading a bitstream does not
+program the PS clock registers — each app's device-tree overlay pins its own
+PL0 — so the apps in this repository run the *same KV260* at 99.999001 MHz,
+166.666672 MHz and 249.997498 MHz. `kv260At <hz>` is the constructor and a
+project writes `let board = kv260At …` once beside its design; `kv260` is the
+100 MHz binding the audio apps share because they genuinely share a clock. A
+single board value for the part would be right for one app and silently wrong
+for the rest, and silently is the problem: a wrong clock costs no samples, it
+only makes every rate and every reported time wrong.
+
 Either way it is the rate that is named rather than the divisors, which is what
 stops the design going stale on a board with a different clock.
 

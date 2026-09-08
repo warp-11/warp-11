@@ -256,12 +256,11 @@ let cycleSweep () =
                     frameCmdStream start cxOrigin cyOrigin dx dy
                     |> mandelFramePipeline w h maxIter 28 8 lanes
 
-                let out, busy, frameDone =
-                    mandelFrameGatherer w h "gather" start beats
+                let gathered = mandelFrameGatherer w h "gather" start beats
 
-                busy ==> busyOut
-                frameDone ==> doneOut
-                streamSink beatPorts out)
+                gathered.busy ==> busyOut
+                gathered.frameDone ==> doneOut
+                streamSink beatPorts gathered.beats)
 
         let sim = Sim harness.def
         sim.Poke("cxOrigin", toQ (-2.25))
@@ -332,12 +331,11 @@ let laneScale (configs: (int * int * int * int) list) =
                     frameCmdStream start cxOrigin cyOrigin dx dy
                     |> mandelFramePipeline w h maxIter 28 8 lanes
 
-                let out, busy, frameDone =
-                    mandelFrameGatherer w h "gather" start beats
+                let gathered = mandelFrameGatherer w h "gather" start beats
 
-                busy ==> busyOut
-                frameDone ==> doneOut
-                streamSink beatPorts out)
+                gathered.busy ==> busyOut
+                gathered.frameDone ==> doneOut
+                streamSink beatPorts gathered.beats)
 
         let sim = Sim harness.def
         let elabMs = sw.ElapsedMilliseconds

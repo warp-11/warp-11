@@ -176,6 +176,55 @@ let streamSink (sp: StreamOutputPorts<'p>) (s: Stream<'p>) =
     s.valid ==> sp.valid
     sp.ready ==> s.ready
 
+/// Land a stream the body BUILT ITSELF on a produced boundary: each field
+/// driven from the payload, valid driven, and nothing handed backwards.
+///
+/// The mirror of `streamSink`, and separate from it rather than a flag on it,
+/// because the difference is which side owns the ready. A stream that arrived
+/// from a stage carries a ready of its own, and `streamSink` is what hands the
+/// consumer's answer back up that chain. A stream a body makes out of its own
+/// logic has no such wire — its ready *is* the boundary's, read directly to
+/// gate whatever produces the beat — and handing the port back to itself is an
+/// elaboration error, correctly, since a module may not drive its own input.
+///
+/// So the boundary's `ready` is an ordinary value the body reads, and this
+/// drives the other two thirds:
+///
+///     let taking = sp.ready &&& holding
+///     streamDrive sp holding (addrOf slot, dataOf slot)
+let streamDrive (sp: StreamOutputPorts<'p>) (valid: Expr) (payload: 'p) =
+    for target, value in List.zip sp.targets (sp.layout.pack payload) do
+        value ==> target
+
+    valid ==> sp.valid
+
+/// The other side of `streamInputPorts`: drive an INSTANCE's consumed
+/// boundary from a stream in the parent.
+///
+/// `streamSource` and `streamSink` are what a module says about its own
+/// boundary; these two are what its caller says about the same boundary seen
+/// from outside, where every direction is flipped. Without them a parent
+/// spells the handshake out — three or four `==>` in an order it has to get
+/// right — which is the loose-port threading the port group existed to remove,
+/// reappearing one level up.
+let streamToInputPorts (sp: StreamInputPorts<'p>) (s: Stream<'p>) =
+    for target, value in List.zip (sp.layout.pack sp.payload) (s.layout.pack s.payload) do
+        value ==> target
+
+    s.valid ==> sp.valid
+    sp.ready ==> s.ready
+
+/// The mirror: read an INSTANCE's produced boundary back as a live `Stream`,
+/// registering the ready the way every other stream-producing helper does, so
+/// a boundary nobody consumes is still an elaboration error.
+let streamOfOutputPorts (sp: StreamOutputPorts<'p>) : Stream<'p> =
+    registerStreamReady sp.ready
+
+    { payload = sp.layout.unpack sp.targets
+      valid = sp.valid
+      ready = sp.ready
+      layout = sp.layout }
+
 /// `streamInputPorts` minus the backward wire — a flow boundary in, for
 /// producers that cannot be told to wait.
 type FlowInputPorts<'p> =

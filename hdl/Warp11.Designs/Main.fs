@@ -31,6 +31,7 @@ let private diffDesigns () =
       gatedCounter.def
       streamPipe.def
       coordPipe.def
+      boundaryWalk.def
       onCounter.def
       onPriority.def
       ifElseLadder.def
@@ -616,7 +617,7 @@ let private simI2sRoundTrips () : bool =
     let refusesNarrowSlot =
         try
             defModule "NarrowSlot" (fun p -> i2sPins p SharedBus) (fun pins ->
-                let i2s = i2sLink "i2s" pins 100_000_000 48_828 16
+                let i2s = i2sLink "i2s" pins kv260.fabricHz 48_828 16
                 i2s.input |> i2s.send)
             |> ignore
 
@@ -1198,9 +1199,12 @@ let private debugSessionShowsMemory () =
     session.ViewMemory("store", 0, 8)
     let showing = waitUntil (fun () -> session.Latest.memory.IsSome)
 
-    let wordsAre expected =
+    // `uint64 list` rather than the window's own `BigInteger[]`: the expected
+    // values are written as literals here, and letting each one convert
+    // implicitly is 48 warnings for a list of eight zeroes.
+    let wordsAre (expected: uint64 list) =
         match session.Latest.memory with
-        | Some view -> view.start = 0 && List.ofArray view.words = expected
+        | Some view -> view.start = 0 && List.ofArray view.words = [ for w in expected -> BigInteger w ]
         | None -> false
 
     let startsEmpty = wordsAre [ 0UL; 0UL; 0UL; 0UL; 0UL; 0UL; 0UL; 0UL ]
@@ -4051,6 +4055,43 @@ let private carriedReadPairsUp () =
 
     ok && answered > 3000
 
+/// The boundary helpers' defining property: **every beat is delivered exactly
+/// once, in order, whatever the consumer does with `ready`.**
+///
+/// A property rather than a captured trace, and the distinction matters here
+/// more than usual: the sequence 1, 2, 3 … is what a correct handshake
+/// produces, and *every* way of getting the handshake wrong shows up in it. A
+/// `ready` read a cycle late repeats a value; a `valid` driven from the wrong
+/// side skips one; a source that advances its counter on offer rather than on
+/// transfer drops beats exactly when the consumer stalls — which is why the
+/// consumer here stalls at random rather than taking everything offered.
+///
+/// `boundaryWalk` puts `streamDrive` (the source builds its own stream),
+/// `streamToInputPorts` and `streamOfOutputPorts` (the parent drives one
+/// instance's boundary from the other's) all in one path, so a mistake in any
+/// of the three breaks this sequence.
+let private boundaryDelivers () =
+    let sim = Sim boundaryWalk.def
+    let rng = System.Random 20260908
+    let seen = ResizeArray<uint64>()
+
+    for _ in 1..2000 do
+        let take = rng.Next 3 <> 0
+        sim.Poke("out_ready", (if take then 1UL else 0UL))
+
+        if take && sim.Peek "out_valid" = 1UL then
+            seen.Add(sim.Peek "out_data")
+
+        sim.Tick()
+
+    // `satIncLogic` saturates at 0xFF, so the walk's counter wrapping is not
+    // part of the claim: check the run up to the first saturated beat, which is
+    // long enough to cover many stalls.
+    let run = seen |> Seq.takeWhile (fun v -> v < 0xFFUL) |> List.ofSeq
+
+    List.length run > 60
+    && run = [ for i in 1 .. List.length run -> uint64 i ]
+
 /// Both storages, one model. The LUTRAM form and the block form are different
 /// circuits, and this is the assertion that a caller cannot tell.
 let private fifoBuffers () =
@@ -5163,6 +5204,7 @@ let private mainDemo () =
     printfn $"stream divider divides:       %b{dividerDivides ()}"
     printfn $"dividers ignore stalls:       %b{dividersAreStallIndependent ()}"
     printfn $"fifo buffers in order:        %b{fifoBuffers ()}"
+    printfn $"boundary delivers in order:   %b{boundaryDelivers ()}"
     printfn $"fifo storage is invisible:    %b{fifoStorageIsInvisible ()}"
     printfn $"carried read pairs up:        %b{carriedReadPairsUp ()}"
     printfn $"windows answer their range:   %b{windowsAnswerTheirOwnRange ()}"

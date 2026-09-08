@@ -38,6 +38,7 @@ let catalog =
           entry "Deep read channel" (nameof deepChannelSlave) (fun () -> deepChannelSlave.def)
           entry "Two-window slave" (nameof twoWindowSlave) (fun () -> twoWindowSlave.def)
           entry "Carried read" (nameof carriedRead) (fun () -> carriedRead.def)
+          entry "Boundary walk (stream ports)" (nameof boundaryWalk) (fun () -> boundaryWalk.def)
           entry "Buffered stream" (nameof bufferedStream) (fun () -> bufferedStream.def)
           entry "Buffered stream (block RAM)" (nameof deepBufferedStream) (fun () -> deepBufferedStream.def)
           entry "Tagged divide" (nameof taggedDivide) (fun () -> taggedDivide.def)

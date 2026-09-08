@@ -10,6 +10,12 @@ module Warp11.Effects.Wrappers
 
 open Warp11
 
+/// What these designs are built for: the KV260 at the clock the audio apps'
+/// overlays program. Bound here, once, the way every project binds the board
+/// it targets — `kv260` is shared by the audio apps because they genuinely
+/// share a clock, and the accelerators next door pin their own.
+let board = kv260
+
 /// Every audio slave uses a 256-byte aperture; none of them needs more.
 let private audioApertureAddrWidth = 8
 
@@ -89,59 +95,48 @@ let effectsRegs, effectsMap =
           // Full-scale limit: never clamps until a host tightens it.
           limitThreshold = r.RwReg("limit_threshold", sampleWidth, sampleMaxSigned) })
 
+/// The register map's values, pulled into ordinary values once.
+///
+/// The `aidSettings` move: `SlaveRegs` stops at the top of the design and every
+/// stage below takes values it can understand, so nothing downstream has to
+/// know there is a host at all. It also puts the five dynamics controls into
+/// the record `audioCompressor` asks for, in one place where the names are
+/// visible side by side.
+type EffectsSettings =
+    { volume: Expr
+      mute: Expr
+      eq: Expr list
+      compressor: CompressorSettings
+      limitThreshold: Expr }
+
+let effectsSettings (regs: SlaveRegs) : EffectsSettings =
+    { volume = regs.value effectsRegs.volume
+      mute = regs.value effectsRegs.mute
+      eq = List.map regs.value effectsRegs.eq
+      compressor =
+        { threshold = regs.value effectsRegs.compThreshold
+          ratio = regs.value effectsRegs.compRatio
+          attack = regs.value effectsRegs.compAttack
+          releaseRate = regs.value effectsRegs.compRelease
+          makeup = regs.value effectsRegs.compMakeup }
+      limitThreshold = regs.value effectsRegs.limitThreshold }
+
 // ---------------------------------------------------------------------------
 // The designs.
 
-/// The codec-facing pins, declared once in each top's io factory. Every audio
-/// app drives exactly these.
-type CodecPorts =
-    { mclk: Output
-      sclk: Output
-      lrclk: Output
-      sdin: Output }
-
-let codecPorts (p: Ports) : CodecPorts =
-    { mclk = p.outPort "mclk" 1
-      sclk = p.outPort "sclk" 1
-      lrclk = p.outPort "lrclk" 1
-      sdin = p.outPort "sdin" 1 }
-
-/// The body half: the clock generator's pins and the serial line onto the
-/// boundary.
-let private driveCodec (pins: CodecPorts) mclkPin sclkPin lrclkPin serial =
-    mclkPin ==> pins.mclk
-    sclkPin ==> pins.sclk
-    lrclkPin ==> pins.lrclk
-    serial ==> pins.sdin
-
-/// The A/D converter's own clock pins.
+/// The audio apps' link: the Pmod I2S2's two converters on their own connector
+/// rows, at the rate the stock divisors make on this board.
 ///
-/// The Pmod I2S2's two converters are **separate chips on separate connector
-/// rows**, each with its own MCLK/LRCK/SCLK input — the DAC on J2.1-4, the ADC
-/// on J2.7-10. One clock generator drives both, but the pins are physically
-/// distinct and all six have to be driven.
-///
-/// A design that only transmits (`audioToneAxi`) does not declare these, and
-/// its `.xdc` binds four pins to match. Every design that *receives* does, and
-/// omitting them is what kept `audioPassthruAxi`, `audioGainAxi` and
-/// `audioEffectsAxi` from building for the board: their constraint files bind
-/// eight pins against five declared ones, so the ADC sat unclocked.
-type AdcClockPorts =
-    { mclk2: Output
-      sclk2: Output
-      lrclk2: Output }
-
-let adcClockPorts (p: Ports) : AdcClockPorts =
-    { mclk2 = p.outPort "mclk2" 1
-      sclk2 = p.outPort "sclk2" 1
-      lrclk2 = p.outPort "lrclk2" 1 }
-
-/// The same three clocks the DAC gets. Receiver and transmitter share one
-/// frame, so they must share one clock — a second generator would drift.
-let private driveAdcClocks (pins: AdcClockPorts) mclkPin sclkPin lrclkPin =
-    mclkPin ==> pins.mclk2
-    sclkPin ==> pins.sclk2
-    lrclkPin ==> pins.lrclk2
+/// `i2sLink` rather than a clock generator plus a receiver plus a transmitter
+/// wired up here: the two edge ticks never reach this file, and wiring the
+/// transmit tick to the receiver is a bug that passes elaboration, passes every
+/// stream check, and cannot be caught in simulation at all — a zero-delay model
+/// has no opinion about which edge a line is sampled on. The pins come from
+/// `i2sPins` for the same reason: `mclk2`/`sclk2`/`lrclk2` were once declared
+/// separately from `mclk`/`sclk`/`lrclk`, and three designs shipped with the
+/// ADC unclocked because a top forgot the second trio.
+let private audioLink prefix pins =
+    i2sLink prefix pins board.fabricHz (int stockSampleRate) stockBitsPerSlot
 
 /// Tone generator straight into the transmitter — no receiver, because there
 /// is nothing to receive. The smallest thing that makes noise on the board.
@@ -149,16 +144,13 @@ let audioToneAxi =
     defModuleClocked
         axiClock
         "AudioToneAxi"
-        (fun p -> (axiLiteSlavePorts p toneMap.apertureAddrWidth, codecPorts p))
+        (fun p -> (axiLiteSlavePorts p toneMap.apertureAddrWidth, i2sTxPins p SeparateCodecs))
         (fun (slavePorts, pins) ->
-        let regs = regMapSlave slavePorts toneMap
-        let clocks = instanceNamed "clocks" (i2sMasterDefault "I2sMaster")
+            let regs = regMapSlave slavePorts toneMap
+            let i2s = i2sTxLink "audio" pins board.fabricHz (int stockSampleRate) stockBitsPerSlot
 
-        let tone =
             toneGenerator "ToneGenerator" "tone" (regs.value toneRegs.enable) (regs.value toneRegs.step)
-
-        let serial = i2sTx "I2sTx" "tx" clocks.sclkTxTick clocks.lrclk tone
-        driveCodec pins clocks.mclk clocks.sclk clocks.lrclk serial)
+            |> i2s.sendOnly)
 
 /// Line in to line out, with a mute and two bring-up taps. The taps exist
 /// because "no sound" has two very different causes — a silent ADC and a dead
@@ -167,65 +159,51 @@ let audioPassthruAxi =
     defModuleClocked
         axiClock
         "AudioPassthruAxi"
-        (fun p ->
-            (axiLiteSlavePorts p passthruMap.apertureAddrWidth,
-             p.inPort "sdout" 1,
-             codecPorts p,
-             adcClockPorts p))
-        (fun (slavePorts, sdout, pins, adcPins) ->
-        let regs = regMapSlave slavePorts passthruMap
-        let clocks = instanceNamed "clocks" (i2sMasterDefault "I2sMaster")
+        (fun p -> (axiLiteSlavePorts p passthruMap.apertureAddrWidth, i2sPins p SeparateCodecs))
+        (fun (slavePorts, pins) ->
+            let regs = regMapSlave slavePorts passthruMap
+            let i2s = audioLink "audio" pins
 
-        let received = i2sRx "I2sRx" "rx" clocks.sclkRxTick clocks.lrclk sdout
+            let received = i2s.input
 
-        let count = reg "received_count" 32
-        let lastLeft = reg "last_left" sampleWidth
-        let left, right = received.payload
+            let count = reg "received_count" 32
+            let lastLeft = reg "last_left" sampleWidth
+            let left, _right = received.payload
 
-        If received.valid (fun () ->
-            count + lit 1UL 32 ==> count
-            left ==> lastLeft)
+            If received.valid (fun () ->
+                count + lit 1UL 32 ==> count
+                left ==> lastLeft)
 
-        regs.drive passthruRegs.receivedCount count
-        regs.drive passthruRegs.lastLeft lastLeft
+            regs.drive passthruRegs.receivedCount count
+            regs.drive passthruRegs.lastLeft lastLeft
 
-        // Mute here rather than through a gain stage: this app is the
-        // signal-path bring-up, so it stays as close to a wire as it can.
-        let muted = wireBit "muted"
-        regs.value passthruRegs.mute ==> muted
+            // Mute here rather than through a gain stage: this app is the
+            // signal-path bring-up, so it stays as close to a wire as it can.
+            let muted = wireBit "muted"
+            regs.value passthruRegs.mute ==> muted
 
-        let gated =
-            { received with
-                payload = (mux muted (lit 0UL sampleWidth) left, mux muted (lit 0UL sampleWidth) right) }
+            let mute (s: Stream<Expr * Expr>) =
+                let left, right = s.payload
+                let silence = lit 0UL (width left)
 
-        let serial = i2sTx "I2sTx" "tx" clocks.sclkTxTick clocks.lrclk gated
-        driveCodec pins clocks.mclk clocks.sclk clocks.lrclk serial
-        driveAdcClocks adcPins clocks.mclk clocks.sclk clocks.lrclk)
+                { s with payload = (mux muted silence left, mux muted silence right) }
+
+            received |> mute |> i2s.send)
 
 /// Line in, master volume, line out.
 let audioGainAxi =
     defModuleClocked
         axiClock
         "AudioGainAxi"
-        (fun p ->
-            (axiLiteSlavePorts p gainMap.apertureAddrWidth,
-             p.inPort "sdout" 1,
-             codecPorts p,
-             adcClockPorts p))
-        (fun (slavePorts, sdout, pins, adcPins) ->
-        let regs = regMapSlave slavePorts gainMap
-        let clocks = instanceNamed "clocks" (i2sMasterDefault "I2sMaster")
+        (fun p -> (axiLiteSlavePorts p gainMap.apertureAddrWidth, i2sPins p SeparateCodecs))
+        (fun (slavePorts, pins) ->
+            let regs = regMapSlave slavePorts gainMap
+            let i2s = audioLink "audio" pins
 
-        let gain =
-            audioGain "AudioGain" "gain" (regs.value gainRegs.volume) (regs.value gainRegs.mute)
+            let gain =
+                audioGain "AudioGain" "gain" (regs.value gainRegs.volume) (regs.value gainRegs.mute)
 
-        let serial =
-            i2sRx "I2sRx" "rx" clocks.sclkRxTick clocks.lrclk sdout
-            |> gain
-            |> i2sTx "I2sTx" "tx" clocks.sclkTxTick clocks.lrclk
-
-        driveCodec pins clocks.mclk clocks.sclk clocks.lrclk serial
-        driveAdcClocks adcPins clocks.mclk clocks.sclk clocks.lrclk)
+            i2s.input |> gain |> i2s.send)
 
 /// The full chain: volume, one EQ band, a compressor and a brick-wall limiter,
 /// every stage host-controlled and every default a no-op.
@@ -233,40 +211,20 @@ let audioEffectsAxi =
     defModuleClocked
         axiClock
         "AudioEffectsAxi"
-        (fun p ->
-            (axiLiteSlavePorts p effectsMap.apertureAddrWidth,
-             p.inPort "sdout" 1,
-             codecPorts p,
-             adcClockPorts p))
-        (fun (slavePorts, sdout, pins, adcPins) ->
-        let regs = regMapSlave slavePorts effectsMap
-        let clocks = instanceNamed "clocks" (i2sMasterDefault "I2sMaster")
+        (fun p -> (axiLiteSlavePorts p effectsMap.apertureAddrWidth, i2sPins p SeparateCodecs))
+        (fun (slavePorts, pins) ->
+            let regs = regMapSlave slavePorts effectsMap
+            let settings = effectsSettings regs
+            let i2s = audioLink "audio" pins
 
-        let gain =
-            audioGain "AudioGain" "gain" (regs.value effectsRegs.volume) (regs.value effectsRegs.mute)
+            let gain = audioGain "AudioGain" "gain" settings.volume settings.mute
+            let equaliser = audioEqBand "AudioEqBand" "eq" settings.eq
+            let compressor = audioCompressor "AudioCompressor" "compressor" settings.compressor
+            let limiter = audioLimiter "AudioLimiter" "limiter" settings.limitThreshold
 
-        let equaliser = audioEqBand "AudioEqBand" "eq" (List.map regs.value effectsRegs.eq)
-
-        let compressor =
-            audioCompressor
-                "AudioCompressor"
-                "compressor"
-                (regs.value effectsRegs.compThreshold)
-                (regs.value effectsRegs.compRatio)
-                (regs.value effectsRegs.compAttack)
-                (regs.value effectsRegs.compRelease)
-                (regs.value effectsRegs.compMakeup)
-
-        let limiter =
-            audioLimiter "AudioLimiter" "limiter" (regs.value effectsRegs.limitThreshold)
-
-        let serial =
-            i2sRx "I2sRx" "rx" clocks.sclkRxTick clocks.lrclk sdout
+            i2s.input
             |> gain
             |> equaliser
             |> compressor
             |> limiter
-            |> i2sTx "I2sTx" "tx" clocks.sclkTxTick clocks.lrclk
-
-        driveCodec pins clocks.mclk clocks.sclk clocks.lrclk serial
-        driveAdcClocks adcPins clocks.mclk clocks.sclk clocks.lrclk)
+            |> i2s.send)

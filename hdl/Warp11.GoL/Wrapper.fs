@@ -16,6 +16,28 @@ open Warp11.GoL.Core
 
 let golIdMagic = 0xF5601001UL // "F5 GoL v1"
 
+/// The PS DDR beat, and everything that falls out of it.
+///
+/// The KV260's HP slave port silently drops a write narrower than one beat or
+/// one that is not aligned to it, so this number decides the grid constraint,
+/// the frame's beat count, the master's data width, the byte offset a beat's
+/// address spends and the strobe that marks every lane. Written down five
+/// times it is five chances to move the master to a different width and leave
+/// one behind — and the one left behind would be a silently dropped write on
+/// silicon that no simulation here can see.
+let private ddrBeatBits = 128
+let private ddrBeatBytes = ddrBeatBits / 8
+/// Address bits a beat's byte offset occupies — beats are aligned, so these
+/// are always zero.
+let private ddrBeatAddrBits = bitsToHold ddrBeatBytes
+/// Every lane of a beat written: the full-beat strobe.
+let private ddrFullStrobe = (1UL <<< ddrBeatBytes) - 1UL
+
+/// Writes the master may have in flight at once. Nothing to do with the beat
+/// above, and it is only coincidence that the two are the same number — which
+/// is the whole reason to name them apart.
+let private golMaxOutstandingWrites = 16
+
 /// Index width for 0..n-1.
 let private indexBits (n: int) =
     let mutable w = 1
@@ -118,14 +140,16 @@ type private Prefetch = PIdle | PWalking
 
 /// Beats per snapshot frame and the DDR slot shift: a slot is the frame
 /// rounded to its own power-of-two stride, so slot addressing is a shift.
-let golBeatCount (gridWidth: int) (gridHeight: int) = gridWidth * gridHeight / 128
-let golSlotShift (gridWidth: int) (gridHeight: int) = indexBits (golBeatCount gridWidth gridHeight) + 4
+let golBeatCount (gridWidth: int) (gridHeight: int) = gridWidth * gridHeight / ddrBeatBits
+
+let golSlotShift (gridWidth: int) (gridHeight: int) =
+    indexBits (golBeatCount gridWidth gridHeight) + ddrBeatAddrBits
 
 let golAxi (topName: string) (gridWidth: int) (gridHeight: int) =
-    if 128 % gridWidth <> 0 then
-        failwith $"golAxi: 128 %% gridWidth must be 0, got %d{gridWidth}"
+    if ddrBeatBits % gridWidth <> 0 then
+        failwith $"golAxi: %d{ddrBeatBits} %% gridWidth must be 0, got %d{gridWidth}"
 
-    let rowsPerBeat = 128 / gridWidth
+    let rowsPerBeat = ddrBeatBits / gridWidth
 
     if gridHeight % rowsPerBeat <> 0 then
         failwith $"golAxi: gridHeight %d{gridHeight} not divisible by rows-per-beat %d{rowsPerBeat}"
@@ -140,7 +164,7 @@ let golAxi (topName: string) (gridWidth: int) (gridHeight: int) =
         topName
         (fun p ->
             (axiLiteSlavePorts p mMap.apertureAddrWidth,
-             axiWriteBusPorts p "m_axi" 32 128,
+             axiWriteBusPorts p "m_axi" 32 ddrBeatBits,
              p.outPort "irq" 1))
         (fun (slavePorts, writeBusPorts, irqOut) ->
         let regs = regMapSlave slavePorts mMap
@@ -298,8 +322,8 @@ let golAxi (topName: string) (gridWidth: int) (gridHeight: int) =
         let coreTick = wireBit "core_tick_enable"
         firePulse ==> coreTick
 
-        let rows, _ =
-            gameOfLifeGrid gridWidth gridHeight coreLoad coreTick loadRows
+        // The wrapper counts population itself, pipelined — see below.
+        let rows = (gameOfLifeGrid gridWidth gridHeight { load = coreLoad; tick = coreTick } loadRows).rows
 
         // ---- the snapshot path: rows paired into 128-bit beats, conflated
         // across three DDR slots, written by the master whose drained level
@@ -330,16 +354,18 @@ let golAxi (topName: string) (gridWidth: int) (gridHeight: int) =
         bnot (eq fbBaseAddr (lit 0UL 32)) ==> armed
 
         (beats
-             |> streamMapTo (axiWriteBeatLayout 32 128) (fun (slot, index, data) ->
-                 let offset = cat (cat slot index) (lit 0UL 4)
-                 fbBaseAddr + cat (lit 0UL (32 - 2 - beatIndexBits - 4)) offset, data, lit 0xFFFFUL 16)
+             |> streamMapTo (axiWriteBeatLayout 32 ddrBeatBits) (fun (slot, index, data) ->
+                 // The offset states its own width, so the pad is whatever is
+                 // left of the 32-bit address rather than a sum restated here.
+                 let offset = cat (cat slot index) (lit 0UL ddrBeatAddrBits)
+                 fbBaseAddr + cat (lit 0UL (32 - width offset)) offset, data, lit ddrFullStrobe ddrBeatBytes)
              |> fun s ->
                  let armedReady = wireBit "armed_ready"
                  armedReady &&& armed ==> s.ready
 
                  axiMasterWriterWithIdleOn
                      (axiWriteBusOf writeBusPorts)
-                     16
+                     golMaxOutstandingWrites
                      { s with
                          valid = s.valid &&& armed
                          ready = armedReady })

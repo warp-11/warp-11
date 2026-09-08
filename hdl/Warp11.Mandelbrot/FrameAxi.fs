@@ -116,10 +116,9 @@ let mandelFrameAxi
             frameCmdStream startPulse cxOrigin cyOrigin dx dy
             |> mandelFramePipeline width height maxIter fracBits nThreads numLanes
 
-        let beats, busy, frameDone =
-            mandelFrameGatherer width height "gather" startPulse piped
+        let gathered = mandelFrameGatherer width height "gather" startPulse piped
 
-        busy ==> busyW
+        gathered.busy ==> busyW
 
         // `frameDone` is the last beat *leaving the gatherer* — one stage
         // upstream of the master, so it fires with up to sixteen writes still
@@ -134,7 +133,7 @@ let mandelFrameAxi
 
         ifElse [
             (startPulse, fun () -> lit 0UL 1 ==> allGathered)
-            (otherwise, fun () -> If frameDone (fun () -> lit 1UL 1 ==> allGathered)) ]
+            (otherwise, fun () -> If gathered.frameDone (fun () -> lit 1UL 1 ==> allGathered)) ]
 
         ifElse [
             (startPulse, fun () -> lit 0UL 1 ==> doneSticky)
@@ -145,9 +144,9 @@ let mandelFrameAxi
         // and belongs to whoever measures egress, not to this register.
         ifElse [
             (startPulse, fun () -> lit 0UL 32 ==> cycles)
-            (otherwise, fun () -> If busy (fun () -> cycles + lit 1UL 32 ==> cycles)) ]
+            (otherwise, fun () -> If gathered.busy (fun () -> cycles + lit 1UL 32 ==> cycles)) ]
 
-        beats
+        gathered.beats
         |> streamProbe "egress"
         |> streamMapTo
             (layout2 ("index", addrWidth - 4) ("word", 128))

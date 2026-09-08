@@ -29,7 +29,10 @@ use warp11_runtime::RegisterWindow;
 use zenoh::qos::CongestionControl;
 use zenoh::Wait;
 
-const PL_CLOCK_HZ: u64 = 166_666_667; // golfs_bd_bd.tcl PL0 (166.666672 MHz)
+// From the generated seam. This constant was 166_666_667 where the overlay
+// programs 166_666_672 — five hertz, invisible in any output anyone reads, and
+// unreachable by every check here because it only shows up in a *time*.
+const PL_CLOCK_HZ: u64 = layout::FABRIC_HZ;
 const FRAME_PERIOD: Duration = Duration::from_millis(33);
 
 fn find_uio(name: &str) -> Option<String> {

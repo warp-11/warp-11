@@ -15,6 +15,19 @@ open Warp11
 /// matching delay chain.
 let mandelStepLatency = 4
 
+/// One point on the complex plane, as the cone's operands travel.
+///
+/// `z` and `c` are each a pair of 32-bit signed values, so passed positionally
+/// they are four adjacent arguments of one type and a call site that swapped a
+/// pair would elaborate cleanly and render the wrong set. Named halves make
+/// that unwriteable, and `z`/`c` then read at the call site as the two things
+/// the arithmetic is about rather than as four numbers.
+type Point = { re: Expr; im: Expr }
+
+/// What one step produces: where `z` goes next, and whether the `z` that went
+/// in had already escaped.
+type StepResult = { z: Point; escaped: Expr }
+
 /// Combinational reference (bit-exact, latency aside):
 ///   zxx = (zx*zx) >> f ;  zyy = (zy*zy) >> f ;  zxy = (zx*zy) >> f
 ///   escaped = (zxx + zyy) >s (4 << f)        — signed, on the input z
@@ -115,14 +128,14 @@ let mandelStepDef (fracBits: int) =
             s4esc ==> escaped)
 
 /// One cone instance under `instName`, called as a function: drive the z and
-/// c vectors, read the (zxNext, zyNext, escaped) triple.
-let mandelStep (fracBits: int) instName (zx: Expr) (zy: Expr) (cx: Expr) (cy: Expr) =
+/// c points, read the next z and the escape flag.
+let mandelStep (fracBits: int) instName (z: Point) (c: Point) : StepResult =
     let izx, izy, icx, icy, ozxn, ozyn, oesc = (mandelStepDef fracBits).NewNamed instName
-    zx ==> izx
-    zy ==> izy
-    cx ==> icx
-    cy ==> icy
-    (ozxn, ozyn, oesc)
+    z.re ==> izx
+    z.im ==> izy
+    c.re ==> icx
+    c.im ==> icy
+    { z = { re = ozxn; im = ozyn }; escaped = oesc }
 
 /// The software twin of one step — every truncation, wrap and compare the
 /// same, in host integers, latency aside. GEP's pattern: the fabric is right
@@ -159,7 +172,7 @@ let mandelStepHarness =
              p.outPort "zy_next" 32,
              p.outPort "escaped" 1))
         (fun (zx, zy, cx, cy, zxNextOut, zyNextOut, escapedOut) ->
-            let zxn, zyn, esc = mandelStep 28 "step" zx zy cx cy
-            zxn ==> zxNextOut
-            zyn ==> zyNextOut
-            esc ==> escapedOut)
+            let stepped = mandelStep 28 "step" { re = zx; im = zy } { re = cx; im = cy }
+            stepped.z.re ==> zxNextOut
+            stepped.z.im ==> zyNextOut
+            stepped.escaped ==> escapedOut)

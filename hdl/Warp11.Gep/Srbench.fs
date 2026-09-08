@@ -202,15 +202,15 @@ type SrbenchResult =
 /// honest rather than overfit, plus the recovered expression and wall time. The
 /// GA here is the one the hardware pool accelerates: this measures solution
 /// quality, the board measures speed.
-let runProblem (p: GroundTruth) (params: RunParams) =
-    let rng = GepRng params.seed
-    let train = sample params.trainSize rng p
-    let test = sample params.testSize rng p
+let runProblem (p: GroundTruth) (settings: RunParams) =
+    let rng = GepRng settings.seed
+    let train = sample settings.trainSize rng p
+    let test = sample settings.testSize rng p
 
     // Same geometry either way, so the ADF arm differs by exactly one gene (the
     // homeotic one) rather than by a whole re-tuned configuration.
     let config =
-        match params.encoding with
+        match settings.encoding with
         | Plain -> gepConfig (geneLayout 8 2) p.vars.Length 4 4 p.functionSet ADD
         | Adf n -> adfConfig (geneLayout 8 2) p.vars.Length n 4 p.functionSet
 
@@ -218,20 +218,20 @@ let runProblem (p: GroundTruth) (params: RunParams) =
     let started = System.Diagnostics.Stopwatch.StartNew()
 
     let engine =
-        GepEngine(config, cases, rng, params.populationSize, defaultGepParams, meanSquaredError)
+        GepEngine(config, cases, rng, settings.populationSize, defaultGepParams, meanSquaredError)
 
     let mutable ran = 0
 
-    if params.earlyStopEvery <= 0 then
-        engine.Run(params.generations, ignore)
-        ran <- params.generations
+    if settings.earlyStopEvery <= 0 then
+        engine.Run(settings.generations, ignore)
+        ran <- settings.generations
     else
         // Exact on train is the stop condition, checked on a stride so the
         // check itself does not dominate a cheap generation.
         let mutable go = true
 
-        while go && ran < params.generations do
-            let chunk = min params.earlyStopEvery (params.generations - ran)
+        while go && ran < settings.generations do
+            let chunk = min settings.earlyStopEvery (settings.generations - ran)
             engine.Run(chunk, ignore)
             ran <- ran + chunk
             if rSquared config train engine.Best > 0.9999 then go <- false
@@ -247,8 +247,8 @@ let runProblem (p: GroundTruth) (params: RunParams) =
 /// One problem over many seeds. The README's Coulomb row says the solve is
 /// restart-sensitive — about half of seeds find it — so "did we solve it" is a
 /// question about a seed DISTRIBUTION, and a single run answers neither way.
-let runSeeds (p: GroundTruth) (params: RunParams) (seeds: int64 list) =
-    let results = [ for s in seeds -> runProblem p { params with seed = s } ]
+let runSeeds (p: GroundTruth) (settings: RunParams) (seeds: int64 list) =
+    let results = [ for s in seeds -> runProblem p { settings with seed = s } ]
     // Three bars, and conflating them is how a benchmark claim goes wrong.
     // 0.999 is SRBench's accuracy criterion. 0.9999 is the original README's
     // OPERATIONAL one — the hardware early-stops there and the row is then
@@ -265,7 +265,7 @@ let runSeeds (p: GroundTruth) (params: RunParams) (seeds: int64 list) =
     printfn
         "%-26s %-6s R2>0.999 %3d/%d   solved(>=0.9999) %3d/%d   1.0-to-7dp %3d/%d   best %.7f   median %.4f"
         p.name
-        (encodingName params.encoding)
+        (encodingName settings.encoding)
         accurate.Length
         seeds.Length
         solved.Length
@@ -292,9 +292,9 @@ let runSeeds (p: GroundTruth) (params: RunParams) (seeds: int64 list) =
 /// restart-sensitive: a single pair of runs cannot tell an encoding difference
 /// from a lucky seed, and that is exactly the mistake this harness exists to
 /// avoid.
-let runEncodingPair (p: GroundTruth) (params: RunParams) (adfCount: int) (seeds: int64 list) =
-    let plain = runSeeds p { params with encoding = Plain } seeds
-    let adf = runSeeds p { params with encoding = Adf adfCount } seeds
+let runEncodingPair (p: GroundTruth) (settings: RunParams) (adfCount: int) (seeds: int64 list) =
+    let plain = runSeeds p { settings with encoding = Plain } seeds
+    let adf = runSeeds p { settings with encoding = Adf adfCount } seeds
     let bestOf (rs: SrbenchResult list) = rs |> List.map (fun r -> r.testR2) |> List.max
     let solvedOf (rs: SrbenchResult list) = rs |> List.filter (fun r -> r.testR2 >= 0.9999) |> List.length
     let millisOf (rs: SrbenchResult list) = rs |> List.sumBy (fun r -> r.millis)
@@ -313,13 +313,13 @@ let runEncodingPair (p: GroundTruth) (params: RunParams) (adfCount: int) (seeds:
 
     plain, adf
 
-let runStarterSet (params: RunParams) =
+let runStarterSet (settings: RunParams) =
     printfn "SRBench ground-truth (Feynman starter set) — software GA, quality baseline"
     printfn "%s" (String.replicate 78 "=")
     let mutable solved = 0
 
     for p in feynmanStarter do
-        let r = runProblem p params
+        let r = runProblem p settings
         let hit = r.testR2 > 0.999
         if hit then solved <- solved + 1
         printfn "%-30s  R2=%7.4f  %5dms  %s" p.name r.testR2 r.millis (if hit then "SOLVED" else "")

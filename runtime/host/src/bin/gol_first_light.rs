@@ -19,7 +19,8 @@ use warp11_runtime::gol_layout as layout;
 use warp11_runtime::RegisterWindow;
 
 const AXI_BASE: i64 = 0xB000_0000;
-const PL_CLOCK_MHZ: f64 = 166.666672; // set in golfs_bd_bd.tcl (population-pipelined timing closure)
+// From the generated seam, which carries the clock the design was built for.
+const PL_CLOCK_MHZ: f64 = layout::FABRIC_HZ as f64 / 1e6;
 
 /// The software twin: B3/S23, dead border, rows as u64 bit masks.
 fn life_step(rows: &[u64; 64]) -> [u64; 64] {

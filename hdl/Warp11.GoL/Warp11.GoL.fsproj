@@ -6,6 +6,7 @@
     </PropertyGroup>
 
     <ItemGroup>
+        <Compile Include="Board.fs" />
         <Compile Include="Core.fs"/>
         <Compile Include="Twin.fs"/>
         <Compile Include="Wrapper.fs"/>

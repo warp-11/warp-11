@@ -347,23 +347,34 @@ let private karvaCompilerVsCompileGene () : bool =
 /// campaign's centerpiece check: the FSM must consume the identical word
 /// sequence, so any divergence in gate order, bound, or buffer arithmetic
 /// shows up as a wrong child. Rates are set high so every operator fires
+/// The breeding policy the two whole-block breed checks share: every operator
+/// on, at rates that make each of them fire often enough across a seed sweep
+/// to be evidence rather than coincidence.
+///
+/// One value rather than two identical copies. The checks below that carry
+/// their *own* rates differ on purpose — a different mutation rate is what
+/// they are varying — so those stay where they are; these two were the same
+/// policy written twice, which is two chances for one of them to be tuned in
+/// isolation and quietly stop testing what the other tests.
+let private checkThresholds =
+    { onePoint = thresholdOf 0.5
+      twoPoint = thresholdOf 0.5
+      geneRecomb = thresholdOf 0.4
+      mutation = thresholdOf 0.15
+      constReplace = thresholdOf 0.4
+      creep = thresholdOf 0.5
+      inversion = thresholdOf 0.5
+      isTrans = thresholdOf 0.5
+      risTrans = thresholdOf 0.5
+      geneTrans = 0
+      creepSigmaFx = fx 0.1
+      constRangeFx = fx 10.0 }
+
 /// across the seed sweep.
 let private operatorEngineVsHwBreed () : bool =
     let config = gepConfig (geneLayout 8 2) 3 1 4 functionSet ADD
 
-    let thresholds =
-        { onePoint = thresholdOf 0.5
-          twoPoint = thresholdOf 0.5
-          geneRecomb = thresholdOf 0.4
-          mutation = thresholdOf 0.15
-          constReplace = thresholdOf 0.4
-          creep = thresholdOf 0.5
-          inversion = thresholdOf 0.5
-          isTrans = thresholdOf 0.5
-          risTrans = thresholdOf 0.5
-          geneTrans = 0
-          creepSigmaFx = fx 0.1
-          constRangeFx = fx 10.0 }
+    let thresholds = checkThresholds
 
     let parentRng = GepRng(2718L)
     let rangeFx = fx defaultConstantRange
@@ -693,19 +704,7 @@ let private breederBlockVsOracle () : bool =
     let capacity = 32
     let indivWords = Hdl.gepUnitIndivWords capacity config.constantCount
 
-    let thresholds =
-        { onePoint = thresholdOf 0.5
-          twoPoint = thresholdOf 0.5
-          geneRecomb = thresholdOf 0.4
-          mutation = thresholdOf 0.15
-          constReplace = thresholdOf 0.4
-          creep = thresholdOf 0.5
-          inversion = thresholdOf 0.5
-          isTrans = thresholdOf 0.5
-          risTrans = thresholdOf 0.5
-          geneTrans = 0
-          creepSigmaFx = fx 0.1
-          constRangeFx = fx 10.0 }
+    let thresholds = checkThresholds
 
     let parentRng = GepRng(9090L)
     let rangeFx = fx defaultConstantRange

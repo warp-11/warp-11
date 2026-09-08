@@ -56,13 +56,40 @@ type Board =
       /// How the host reaches the registers.
       hostBus: HostBus }
 
-/// The KV260, as every Warp 11 app on it is configured: a 100 MHz PL clock and
-/// the AXI-Lite aperture at 0xB0000000, which is where every Warp 11 slave app
-/// on this board lives.
-let kv260 =
+/// The KV260's fixed facts, at a fabric clock **the caller pins**: the
+/// AXI-Lite aperture is at 0xB0000000, where every Warp 11 slave app on this
+/// board lives, and the clock is whatever that app's device-tree overlay
+/// programs.
+///
+/// **The clock is not one of the board's facts, and this is the reason a board
+/// is created per project rather than shared.** Loading a bitstream does not
+/// program the PS clock registers — each app's dtbo pins its own PL0 — so the
+/// apps in this repository run the same board at 99.999001 MHz (the audio
+/// apps, `gol`, `mandel`, most of GEP), 166.666672 MHz (`golfs`,
+/// `mandelframe`, `mandelpod`, `gepbarrel`) and 249.997498 MHz (`gepunit`,
+/// `gepiorig`). A single `kv260` value would be right for one of those and
+/// silently wrong for the rest — and "silently" is the whole problem: a design
+/// that keeps its old divisors on a new clock runs at the wrong rate with
+/// nothing complaining.
+///
+/// So a project writes `let board = kv260At <its own clock>` once, beside the
+/// design, and everything derived comes off that.
+let kv260At (fabricHz: int) =
     { name = "kv260"
-      fabricHz = 100_000_000
+      fabricHz = fabricHz
       hostBus = AxiLiteAt 0xB0000000UL }
+
+/// The KV260 at the clock the **audio** apps' overlays program — the one
+/// binding shared by more than one project, because `audio-tone`,
+/// `audio-gain`, `audio-passthru` and the toy I2S designs are all built for
+/// the same 100 MHz and derive their sample rate from it.
+///
+/// The overlays actually say 99.999001 MHz. The round number is kept because
+/// every rate in this repository is quoted from it and the difference is one
+/// part in a hundred thousand — well inside `i2sRateTolerance`, and it picks
+/// the same divisors. It is a rounding, not an assumption: a design that
+/// cared would pass the exact figure.
+let kv260 = kv260At 100_000_000
 
 /// The iCEBreaker's 12 MHz crystal. No AXI on this part — which is what makes
 /// it the useful second board: it is the one that catches an assumption about

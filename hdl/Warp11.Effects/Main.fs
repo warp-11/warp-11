@@ -476,8 +476,10 @@ let main argv =
                   Warp11.Catalog.entry "Batch accelerator" (nameof Batch.audioBatchAxi) (fun () -> Batch.audioBatchAxi.def) ]
 
         let initial = if argv.Length > 1 then Some argv[1] else None
+        // The window's own exit code is the process's, as in the other two
+        // debugger hosts. Discarding it and returning 0 was what the
+        // implicit-ignore warning here was pointing at.
         Warp11.SimView.Desktop.run (Warp11.SimView.View.FromCatalog(catalog, initial)) []
-        0
     // The simulator's answer for the same file the board processes, so the two
     // can be diffed byte for byte. `settleCycles = 0` because the batch design
     // does not pre-run its first frame either — the comparison is only honest

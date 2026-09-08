@@ -414,6 +414,62 @@ let coordPipe =
 
             streamSink outPorts (stage (streamMap (fun (x, lum) -> x, brighten lum) (stage (streamSource inPorts)))))
 
+/// A stream a module's own logic **builds**, rather than one it received.
+///
+/// `streamDrive` rather than `streamSink`, and the difference is not a
+/// preference: `streamSink` hands the consumer's `ready` back up the chain to
+/// whatever produced the stream, and here the producer is this body — its
+/// `ready` *is* the boundary's, read directly to gate the counter. Handing the
+/// port back to itself is a module driving its own input, which is an
+/// elaboration error, correctly. So the body reads `out.ready` and drives the
+/// other two thirds.
+let countedSourceDef =
+    defModule
+        "CountedSource"
+        (fun p -> streamOutputPorts p "out" byteLayout)
+        (fun outPorts ->
+            let count = reg "count" 8
+
+            // Always offering. The counter advances on a transfer and only on a
+            // transfer, which is the whole property: a beat the consumer did not
+            // take must still be there next cycle.
+            If outPorts.ready (fun () -> count + lit 1UL 8 ==> count)
+
+            streamDrive outPorts (lit 1UL 1) count)
+
+/// The other half: an ordinary stage, so the walk below has an instance whose
+/// boundary it must drive from outside.
+let bumpStageDef =
+    defModule
+        "BumpStage"
+        (fun p -> (streamInputPorts p "in" byteLayout, streamOutputPorts p "out" byteLayout))
+        (fun (inPorts, outPorts) ->
+            streamSource inPorts
+            |> streamMap (satIncLogic 8)
+            |> streamStageFor byteLayout
+            |> streamSink outPorts)
+
+/// Both instances wired from the parent — the same two boundaries the modules
+/// above declare, seen from **outside**, where every direction is flipped: the
+/// source's `out` ports are wires this parent reads, and the stage's `in` ports
+/// are wires it drives.
+///
+/// `streamToInputPorts` and `streamOfOutputPorts` are what say so. Written by
+/// hand this is four `==>` in an order that has to be right, and getting the
+/// `ready` backwards is a design that elaborates, passes every width check, and
+/// silently drops or repeats beats — which is the loose-port threading a port
+/// group exists to remove, reappearing one level up.
+let boundaryWalk =
+    defModule
+        "BoundaryWalk"
+        (fun p -> streamOutputPorts p "out" byteLayout)
+        (fun outPorts ->
+            let sourcePorts = countedSourceDef.NewNamed "src"
+            let bumpIn, bumpOut = bumpStageDef.NewNamed "bump"
+
+            streamOfOutputPorts sourcePorts |> streamToInputPorts bumpIn
+            streamOfOutputPorts bumpOut |> streamSink outPorts)
+
 /// On/otherwise with nesting: clear beats enable, and the reg holds when neither
 /// fires — the hold arm appears nowhere in the source, only in the folded Mux.
 let onCounter =
@@ -2501,17 +2557,13 @@ let audioChain =
         (fun p ->
             (p.inPort "volume" 16,
              p.inPort "mute" 1,
-             p.inPort "threshold" sampleWidth,
-             p.inPort "ratio" 8,
-             p.inPort "attack" 16,
-             p.inPort "releaseRate" 16,
-             p.inPort "makeup" 16,
+             compressorSettingsPorts p,
              p.inPort "limit" sampleWidth,
              streamInputPorts p "in" sampleLayout,
              streamOutputPorts p "out" sampleLayout))
-        (fun (volume, mute, threshold, ratio, attack, releaseRate, makeup, limit, inPorts, outPorts) ->
+        (fun (volume, mute, compressorSettings, limit, inPorts, outPorts) ->
             let gain = audioGain "AudioGain" "gain" volume mute
-            let compressor = audioCompressor "AudioCompressor" "compressor" threshold ratio attack releaseRate makeup
+            let compressor = audioCompressor "AudioCompressor" "compressor" compressorSettings
             let limiter = audioLimiter "AudioLimiter" "limiter" limit
 
             streamSource inPorts
@@ -2535,7 +2587,7 @@ let audioTone =
              streamOutputPorts p "out" sampleLayout))
         (fun (enable, step, preset, outPorts) ->
             let tone = toneGenerator "ToneGenerator" "tone" enable step
-            let filter = audioToneFilter "AudioToneFilter" "filter" preset
+            let filter = audioToneFilter "AudioToneFilter" 48_000.0 "filter" preset
 
             tone |> filter |> streamSink outPorts)
 
@@ -2547,7 +2599,7 @@ let audioFirStage =
         (fun p ->
             (p.inPort "preset" 2, streamInputPorts p "in" sampleLayout, streamOutputPorts p "out" sampleLayout))
         (fun (preset, inPorts, outPorts) ->
-            let filter = audioToneFilter "AudioToneFilter" "filter" preset
+            let filter = audioToneFilter "AudioToneFilter" 48_000.0 "filter" preset
             streamSource inPorts |> filter |> streamSink outPorts)
 
 /// The three I2S modules wired as a loopback: the clock generator drives both
@@ -2707,19 +2759,14 @@ let multibandStage =
     defModule
         "MultibandStage"
         (fun p ->
-            (p.inPort "threshold" sampleWidth,
-             p.inPort "ratio" 8,
-             p.inPort "attack" 16,
-             p.inPort "releaseRate" 16,
-             List.init multibandBands (fun i -> p.inPort $"lg{i}" 16),
-             List.init multibandBands (fun i -> p.inPort $"rg{i}" 16),
+            (multibandSettingsPorts p,
              streamInputPorts p "in" sampleLayout,
              streamOutputPorts p "out" sampleLayout,
              p.outPort "envelope" sampleWidth))
-        (fun (threshold, ratio, attack, releaseRate, leftGains, rightGains, inPorts, outPorts, envOut) ->
+        (fun (settings, inPorts, outPorts, envOut) ->
             let stage, envelope =
-                multibandCompressor "MultibandCompressor8" stockSampleRate "mb" threshold ratio attack releaseRate leftGains rightGains
-                |> fun apply -> apply (streamSource inPorts)
+                streamSource inPorts
+                |> multibandCompressor "MultibandCompressor8" stockSampleRate "mb" settings
 
             streamSink outPorts stage
             envelope ==> envOut)

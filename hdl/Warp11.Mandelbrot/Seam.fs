@@ -1,6 +1,7 @@
 module Warp11.Mandelbrot.Seam
 
 open Warp11
+open Warp11.Mandelbrot.Board
 open Warp11.Mandelbrot.Pod
 open Warp11.Mandelbrot.LanePod
 open Warp11.Mandelbrot.FrameAxi
@@ -29,6 +30,7 @@ let private mandelLayoutRs () =
           $"pub const FRAME_WIDTH: usize = %d{mandelWidth};"
           $"pub const FRAME_HEIGHT: usize = %d{mandelHeight};"
           $"pub const MAX_ITER: u32 = %d{mandelMaxIter};"
+          $"pub const FABRIC_HZ: u64 = %d{podBoard.fabricHz};"
           "" ]
 
 /// The full-scale wrapper's generated Rust layout — the frame seam, same
@@ -61,6 +63,12 @@ let private mandelFrameLayoutRs () =
           $"pub const MAX_ITER: u32 = %d{frameFullMaxIter};"
           $"pub const NUM_LANES: usize = %d{frameFullLanes};"
           $"pub const FRAC_BITS: u32 = %d{frameFullFracBits};"
+          ""
+          "// The clock this app's overlay programs, from the board the design was"
+          "// built for. `frame_cycles` is only a time at this frequency, so a host"
+          "// that wrote the number down separately could disagree with the fabric"
+          "// about how fast the fabric is."
+          $"pub const FABRIC_HZ: u64 = %d{frameBoard.fabricHz};"
           "" ]
 
     String.concat "\n" (header @ regMapRsLines frameMap @ geometry)

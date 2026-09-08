@@ -35,7 +35,17 @@ let private nextCell (grid: Expr list list) (y: int) (x: int) : Expr =
 /// `loadEnable` wins over `tickEnable` (a load must land regardless of the
 /// pacing FSM); with neither high every cell holds. `loadRows` must be
 /// declared signals (ports or regs) — `slice` takes named operands.
-let gameOfLifeGrid (gridWidth: int) (gridHeight: int) (loadEnable: Expr) (tickEnable: Expr) (loadRows: Expr list) : Expr list * Expr =
+/// What the grid is told to do this cycle. A record rather than two positional
+/// one-bit arguments: `load` and `tick` are the same type, sit next to each
+/// other, and a call that swapped them would elaborate, pass every width
+/// check, and quietly run the wrong universe — a design that loads when it
+/// should step is a plausible-looking picture rather than an error.
+type GridControl = { load: Expr; tick: Expr }
+
+/// The grid and what it is worth watching: the packed rows, and the live count.
+type Grid = { rows: Expr list; population: Expr }
+
+let gameOfLifeGrid (gridWidth: int) (gridHeight: int) (control: GridControl) (loadRows: Expr list) : Grid =
     if gridWidth < 3 || gridWidth > 64 || gridHeight < 3 || gridHeight > 64 then
         failwith $"gameOfLifeGrid: width/height must be 3..64, got %d{gridWidth}x%d{gridHeight}"
 
@@ -56,8 +66,8 @@ let gameOfLifeGrid (gridWidth: int) (gridHeight: int) (loadEnable: Expr) (tickEn
             let cell = List.item x (List.item y cells)
 
             ifElse [
-                (loadEnable, fun () -> slice x x loadRow ==> cell)
-                (otherwise, fun () -> If tickEnable (fun () -> nextCell cells y x ==> cell)) ]
+                (control.load, fun () -> slice x x loadRow ==> cell)
+                (otherwise, fun () -> If control.tick (fun () -> nextCell cells y x ==> cell)) ]
 
     let packedRows =
         [ for row in cells ->
@@ -65,10 +75,8 @@ let gameOfLifeGrid (gridWidth: int) (gridHeight: int) (loadEnable: Expr) (tickEn
               | low :: rest -> List.fold (fun acc c -> cat c acc) low rest
               | [] -> failwith "unreachable: width >= 3" ]
 
-    let population =
-        countWhere (bitsNeeded (gridWidth * gridHeight)) id (List.concat cells)
-
-    packedRows, population
+    { rows = packedRows
+      population = countWhere (bitsNeeded (gridWidth * gridHeight)) id (List.concat cells) }
 
 /// The grid at ports, for the Sim and the differential oracle: load rows in,
 /// packed rows and the population out. The tutorial walks this at a small
@@ -83,13 +91,12 @@ let golHarness (gridWidth: int) (gridHeight: int) =
              [ for y in 0 .. gridHeight - 1 -> p.outPort $"row_%d{y}" gridWidth ],
              p.outPort "population" (bitsNeeded (gridWidth * gridHeight))))
         (fun (loadEnable, tickEnable, loadRows, rowOuts, populationOut) ->
-            let rows, population =
-                gameOfLifeGrid gridWidth gridHeight loadEnable tickEnable loadRows
+            let grid = gameOfLifeGrid gridWidth gridHeight { load = loadEnable; tick = tickEnable } loadRows
 
-            for rowOut, row in List.zip rowOuts rows do
+            for rowOut, row in List.zip rowOuts grid.rows do
                 row ==> rowOut
 
-            population ==> populationOut)
+            grid.population ==> populationOut)
 
 /// The harness a live view drives: the same grid at ports, plus the generation
 /// counter the board's wrapper already keeps in fabric. A host could count its
@@ -108,13 +115,12 @@ let golLiveHarness (gridWidth: int) (gridHeight: int) =
              p.outPort "population" (bitsNeeded (gridWidth * gridHeight)),
              p.outPort "generation" 32))
         (fun (loadEnable, tickEnable, loadRows, rowOuts, populationOut, generation) ->
-            let rows, population =
-                gameOfLifeGrid gridWidth gridHeight loadEnable tickEnable loadRows
+            let grid = gameOfLifeGrid gridWidth gridHeight { load = loadEnable; tick = tickEnable } loadRows
 
-            for rowOut, row in List.zip rowOuts rows do
+            for rowOut, row in List.zip rowOuts grid.rows do
                 row ==> rowOut
 
-            population ==> populationOut
+            grid.population ==> populationOut
 
             let genCount = reg "gen_count" 32
             ifElse [

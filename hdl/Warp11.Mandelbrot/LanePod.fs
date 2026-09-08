@@ -154,25 +154,16 @@ let mandelLanePodDef (width: int) (height: int) (maxIter: int) (fracBits: int) (
     defModule
         $"MandelLanePod_%d{width}x%d{height}_max%d{maxIter}_n%d{nThreads}"
         (fun p ->
-            (p.inPort "run_data" runWidth,
-             p.inPort "run_valid" 1,
-             p.outPort "run_ready" 1,
-             p.outPort "res_addr" addrWidth,
-             p.outPort "res_beat" 128,
-             p.outPort "res_valid" 1,
-             p.inPort "res_ready" 1))
-        (fun (runData, runValid, runReady, resAddr, resBeat, resValid, resReady) ->
+            (streamInputPorts p "run" (layout1 ("data", runWidth)),
+             streamOutputPorts p "res" (layout2 ("addr", addrWidth) ("beat", 128))))
+        (fun (runPorts, resPorts) ->
             // The pod is just the lane pipeline: coord-gen → barrel lane →
             // widen-to-byte → row coalescer → the boundary. The stream chain
             // carries the pixels; two control edges carry what it cannot —
             // rowBase forward to the coalescer, row_gathered back to the
             // coord-gen (the double-buffer feedback). No stage knows its
             // neighbour; this composition is the only place the wiring lives.
-            let run =
-                { payload = runData
-                  valid = runValid
-                  ready = runReady
-                  layout = layout1 ("data", runWidth) }
+            let run = streamSource runPorts
 
             let rowGathered = wireBit "row_gathered_w"
             let px, rowBase = coordGen "cg" run rowGathered
@@ -186,28 +177,20 @@ let mandelLanePodDef (width: int) (height: int) (maxIter: int) (fracBits: int) (
                     (layout2 ("col", colWidth) ("value", 8))
                     (fun (col, iter) -> col, (if iterWidth = 8 then iter else cat (lit 0UL (8 - iterWidth)) iter))
 
-            let coalOut, coalGathered, _rowDone = coalescer "coal" rowBase coalIn
-            coalGathered ==> rowGathered
+            let coalesced = coalescer "coal" rowBase coalIn
+            coalesced.gathered ==> rowGathered
 
-            coalOut |> wormhole (streamExport (resAddr, resBeat) resValid resReady))
+            coalesced.beats |> wormhole (streamSink resPorts))
 
 /// One pod instance under `instName`, as a stage: the row-run stream in, the
 /// (addr, beat) result stream out.
 let mandelLanePod (width: int) (height: int) (maxIter: int) (fracBits: int) (nThreads: int) instName (run: Stream<Expr>) =
     let addrWidth = lanePodAddrWidth width height
 
-    let runData, runValid, runReady, resAddr, resBeat, resValid, resReady =
-        (mandelLanePodDef width height maxIter fracBits nThreads).NewNamed instName
+    let runPorts, resPorts = (mandelLanePodDef width height maxIter fracBits nThreads).NewNamed instName
 
-    run.payload ==> runData
-    run.valid ==> runValid
-    runReady ==> run.ready
-    registerStreamReady resReady
-
-    { payload = (resAddr, resBeat)
-      valid = resValid
-      ready = resReady
-      layout = layout2 ("addr", addrWidth) ("beat", 128) }
+    streamToInputPorts runPorts run
+    streamOfOutputPorts resPorts
 
 /// The pod at ports for the oracle and the mini-frame living check: 16×4 at
 /// maxIter 8, so a whole frame renders in a couple thousand Sim cycles. The

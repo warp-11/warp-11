@@ -203,17 +203,17 @@ let audioBatchAxi =
         let rightGains = batchRegs.gains |> List.map (fun g -> slice 31 16 (regs.value g))
 
         let processed, _envelope =
-            multibandCompressor
+            beatsToFrames beats
+            |> multibandCompressor
                 "MultibandCompressor8"
                 stockSampleRate
                 "mb"
-                (regs.value batchRegs.threshold)
-                (regs.value batchRegs.ratio)
-                (regs.value batchRegs.attack)
-                (regs.value batchRegs.releaseRate)
-                leftGains
-                rightGains
-            |> fun apply -> apply (beatsToFrames beats)
+                { threshold = regs.value batchRegs.threshold
+                  ratio = regs.value batchRegs.ratio
+                  attack = regs.value batchRegs.attack
+                  releaseRate = regs.value batchRegs.releaseRate
+                  leftGains = leftGains
+                  rightGains = rightGains }
 
         // --- the write side --------------------------------------------------
         let outBeats = framesToBeats processed
@@ -277,18 +277,13 @@ let multibandStageRef =
     defModule
         "MultibandStageRef"
         (fun p ->
-            (p.inPort "threshold" sampleWidth,
-             p.inPort "ratio" 8,
-             p.inPort "attack" 16,
-             p.inPort "releaseRate" 16,
-             List.init multibandBands (fun i -> p.inPort $"lg{i}" 16),
-             List.init multibandBands (fun i -> p.inPort $"rg{i}" 16),
+            (multibandSettingsPorts p,
              streamInputPorts p "in" sampleLayout,
              streamOutputPorts p "out" sampleLayout))
-        (fun (threshold, ratio, attack, releaseRate, leftGains, rightGains, inPorts, outPorts) ->
+        (fun (settings, inPorts, outPorts) ->
             let stage, _envelope =
-                multibandCompressor "MultibandCompressor8" stockSampleRate "mb" threshold ratio attack releaseRate leftGains rightGains
-                |> fun apply -> apply (streamSource inPorts)
+                streamSource inPorts
+                |> multibandCompressor "MultibandCompressor8" stockSampleRate "mb" settings
 
             streamSink outPorts stage)
 
@@ -326,16 +321,12 @@ let compressorStage =
     defModule
         "CompressorStage"
         (fun p ->
-            (p.inPort "threshold" sampleWidth,
-             p.inPort "ratio" 8,
-             p.inPort "attack" 16,
-             p.inPort "releaseRate" 16,
-             p.inPort "makeup" 16,
+            (compressorSettingsPorts p,
              streamInputPorts p "in" sampleLayout,
              streamOutputPorts p "out" sampleLayout))
-        (fun (threshold, ratio, attack, releaseRate, makeup, inPorts, outPorts) ->
+        (fun (settings, inPorts, outPorts) ->
             streamSource inPorts
-            |> audioCompressor "AudioCompressor" "c" threshold ratio attack releaseRate makeup
+            |> audioCompressor "AudioCompressor" "c" settings
             |> streamSink outPorts)
 
 let limiterStage =
@@ -407,17 +398,17 @@ let driftHarness =
         If accepted (fun () -> sample + lit 1UL sampleWidth ==> sample)
 
         let out, envelope =
-            multibandCompressor
+            src
+            |> multibandCompressor
                 "MultibandCompressor8"
                 stockSampleRate
                 "mb"
-                (lit 200_000UL sampleWidth)
-                (lit 4UL 8)
-                (lit (1UL <<< 14) 16)
-                (lit (1UL <<< 12) 16)
-                (List.replicate multibandBands (lit gainUnity 16))
-                (List.replicate multibandBands (lit gainUnity 16))
-            |> fun apply -> apply src
+                { threshold = lit 200_000UL sampleWidth
+                  ratio = lit 4UL 8
+                  attack = lit (1UL <<< 14) 16
+                  releaseRate = lit (1UL <<< 12) 16
+                  leftGains = List.replicate multibandBands (lit gainUnity 16)
+                  rightGains = List.replicate multibandBands (lit gainUnity 16) }
 
         // Always ready: the consumer is never the reason anything stalls, so
         // the only bubble in the run is the one above.
@@ -469,5 +460,18 @@ let firStage =
              streamOutputPorts p "out" sampleLayout))
         (fun (preset, inPorts, outPorts) ->
             streamSource inPorts
-            |> audioFir "AudioFir" 16 48_000.0 4_000.0 400.0 "fir" preset
+            |> audioFir
+                "AudioFir"
+                16
+                // The rate the design actually runs at, not a round 48 000.
+                // A filter's coefficients fix a frequency in cycles per
+                // *sample*, so designing at one rate and clocking at another
+                // moves every corner by the ratio between them — the same
+                // defect `multibandCompressor` was fixed for, and the same
+                // 1.73 % it was wrong by.
+                { sampleRate = stockSampleRate
+                  lowPass = 4_000.0
+                  highPass = 400.0 }
+                "fir"
+                preset
             |> streamSink outPorts)

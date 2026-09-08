@@ -37,7 +37,12 @@ use warp11_runtime::mandel_frame_layout as layout;
 use zenoh::qos::CongestionControl;
 use zenoh::Wait;
 
-const PL_CLOCK_HZ: f64 = 166_666_672.0; // mandelframe_bd_bd.tcl PL0
+// From the generated seam, not written down here: the design states the clock
+// it was built for, the same way it states its register offsets, so the host
+// cannot disagree with the fabric about how fast the fabric is. (The Game of
+// Life daemon next door had 166_666_667 against this file's 166_666_672 —
+// harmless, and exactly the drift a shared number is for.)
+const PL_CLOCK_HZ: f64 = layout::FABRIC_HZ as f64;
 /// Generous: a render is ~550k cycles, and each poll is one register read.
 const POLL_BUDGET: usize = 10_000_000;
 

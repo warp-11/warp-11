@@ -4,6 +4,7 @@
 module Warp11.GoL.Main
 
 open Warp11
+open Warp11.GoL.Board
 open Warp11.GoL.Core
 open Warp11.GoL.Twin
 open Warp11.GoL.Wrapper
@@ -449,6 +450,12 @@ let private writeHardware (repoRoot: string) =
             $"pub const FRAME_BYTES: usize = %d{golBeatCount gridWidth gridHeight * 16};"
             $"pub const SLOT_STRIDE_BYTES: usize = %d{1 <<< golSlotShift gridWidth gridHeight};"
             "pub const SLOT_COUNT: usize = 3;"
+            ""
+            "// The clock the app's overlay programs, from the board this design was"
+            "// built for. Every wall-clock figure a host quotes divides by it, and"
+            "// a host that wrote it down separately could disagree with the fabric"
+            "// about how fast the fabric is."
+            $"pub const FABRIC_HZ: u64 = %d{board.fabricHz};"
             "" ]
 
     let verilogPath = System.IO.Path.Combine(buildDir, "GolAxi.v")

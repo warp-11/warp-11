@@ -38,3 +38,9 @@ pub const FB_BYTES: usize = 1126400; // 1 byte/px, rows padded
 pub const MAX_ITER: u32 = 256;
 pub const NUM_LANES: usize = 104;
 pub const FRAC_BITS: u32 = 28;
+
+// The clock this app's overlay programs, from the board the design was
+// built for. `frame_cycles` is only a time at this frequency, so a host
+// that wrote the number down separately could disagree with the fabric
+// about how fast the fabric is.
+pub const FABRIC_HZ: u64 = 166666672;

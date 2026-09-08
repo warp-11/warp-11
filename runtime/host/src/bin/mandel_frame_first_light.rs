@@ -28,7 +28,8 @@ use warp11_runtime::mandel_frame::{MandelFrameDevice, View};
 use warp11_runtime::mandel_frame_layout as layout;
 
 const AXI_BASE: i64 = 0xB000_0000;
-const PL_CLOCK_MHZ: f64 = 166.666_672; // set in mandelframe_bd_bd.tcl
+// From the generated seam, which carries the clock the design was built for.
+const PL_CLOCK_MHZ: f64 = layout::FABRIC_HZ as f64 / 1e6;
 
 fn q4_28(v: f64) -> u32 {
     (v * f64::from(1u32 << 28)) as i64 as u32
