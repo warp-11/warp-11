@@ -29,9 +29,18 @@ let run (source: View.Source) (panels: View.Panel list) =
 /// catalog's embedded source file, and a design reached this way is not in one.
 /// `Pages.verilog` is the exception and so it is here — it reads the design off
 /// the session, and what a design emits is knowable from the design alone.
-let debug (title: string) (design: ModuleDef) =
-    let session = new DebugSession(design) :> IDebugSession
+/// Open a debugger with devices attached to the design's pins — a recording
+/// playing into an I2S link, a model answering a bus. They advance with the
+/// design, so stepping a cycle steps the attached world with it.
+///
+/// **Factories, not devices**: the session builds the `Sim`, so a device has to
+/// be constructed against that one. A caller that also wants to read a device
+/// afterwards holds its own handle — see `WavI2sSource`.
+let debugWith (title: string) (design: ModuleDef) (devices: (Sim -> ISimDevice) list) =
+    let session = new DebugSession(design, devices = devices) :> IDebugSession
     run (View.Attached(session, title)) [ Pages.verilog ]
+
+let debug (title: string) (design: ModuleDef) = debugWith title design []
 
 /// Open a debugger on a catalog this process owns — the call a project makes
 /// once it has designs of its own.

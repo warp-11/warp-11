@@ -82,12 +82,11 @@ type I2sCodec(sim: Sim, pins: I2sSimPins, ?width: int) =
     let mutable current = (0UL, 0UL)
     let mutable sent = 0
 
-    /// One fabric cycle: drive the line, advance the design, then read the pins
-    /// back and work out what the next bit should be.
-    member _.Tick() =
-        sim.Poke(pins.toDesign, line)
-        sim.Tick()
+    /// Put this cycle's bit on the line. Call before the tick.
+    member _.Drive() = sim.Poke(pins.toDesign, line)
 
+    /// Read the pins back and work out the next bit. Call after the tick.
+    member _.Sample() =
         let clock = sim.Peek pins.bitClock
         let select = sim.Peek pins.wordSelect
 
@@ -130,6 +129,16 @@ type I2sCodec(sim: Sim, pins: I2sSimPins, ?width: int) =
 
         previousClock <- clock
         previousSelect <- select
+
+    /// One fabric cycle, for a caller that owns no loop of its own.
+    member this.Tick() =
+        this.Drive()
+        sim.Tick()
+        this.Sample()
+
+    interface ISimDevice with
+        member this.Drive() = this.Drive()
+        member this.Sample() = this.Sample()
 
     /// Hand the model samples to transmit, in order.
     member _.Queue(samples: (uint64 * uint64) seq) = for s in samples do queue.Enqueue s

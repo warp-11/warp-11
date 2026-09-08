@@ -519,6 +519,74 @@ let private i2sHandWiredCodec =
             let received = i2sRx "I2sRx" "i2s_rx" clocks.sclkRxTick clocks.lrclk sdout
             i2sTx "I2sTx" "i2s_tx" clocks.sclkTxTick clocks.lrclk received ==> sdin)
 
+/// Real audio through the real framers, from a file — the leg
+/// `notes/DEVICES.md` UC3 exists for.
+///
+/// `runWavThroughSim` drives *stream* ports, so `i2sRx` and `i2sTx` are not in
+/// its path; this drives the pins, so the whole front end is. A tone in must
+/// come back a tone out, sample for sample, after the link's pre-roll.
+///
+/// **16 -> 24 -> 16 is lossless**, which is what makes the assertion exact
+/// rather than approximate: `toSampleBits` left-justifies into the 24-bit
+/// sample and `fromSampleBits` rounds rather than truncating on the way back.
+/// A check that allowed a tolerance here would pass a design that quietly lost
+/// a bit.
+///
+/// The halved design is checked too, because a tone that came back unchanged
+/// through a stage that should have halved it would satisfy the first claim.
+let private wavThroughI2sPins () : bool =
+    let input = toneWav 48_000 64 440.0 0.5
+    let preRoll = 2
+
+    let matches (out: WavData) (expected: int16 -> int16) =
+        out.FrameCount >= input.FrameCount + preRoll
+        && [ 0 .. input.FrameCount - 1 ]
+           |> List.forall (fun frame ->
+               out.samples[(frame + preRoll) * 2] = expected input.samples[frame * 2]
+               && out.samples[(frame + preRoll) * 2 + 1] = expected input.samples[frame * 2 + 1])
+
+    let through = runWavThroughI2s (Sim i2sLinkPassthru.def) sharedBusSimPins 4 input
+    let halved = runWavThroughI2s (Sim i2sLinkHalfVolume.def) sharedBusSimPins 4 input
+
+    matches through id
+    && matches halved (fun v -> int16 ((int v + 1) >>> 1))
+    && through.sampleRate = input.sampleRate
+    && through.channels = 2
+
+/// A device attached to a `DebugSession` really is driven by it.
+///
+/// The point of the hook is that devices ride `Run` and `Step` alike, so a
+/// cycle stepped by hand in the debugger advances the attached world with it.
+/// A check that only built a session would pass with the hook removed; this
+/// one steps a headless session and requires the recording to have come out
+/// the other side, sample for sample.
+let private debugSessionDrivesDevices () : bool =
+    let input = toneWav 48_000 8 440.0 0.5
+    let source = WavI2sSource(sharedBusSimPins, input)
+
+    use session =
+        new Debug.DebugSession(i2sLinkPassthru.def, ownThread = false, devices = [ source.Attach ])
+
+    let driven = session :> Debug.IDebugSession
+    let preRoll = 2
+
+    // A frame is 2,048 cycles; run enough for the recording plus its pre-roll.
+    driven.Step((input.FrameCount + preRoll + 2) * 2048)
+
+    let mutable guard = 0
+
+    while not (driven.Pump()) && guard < 10_000_000 do
+        guard <- guard + 1
+
+    match source.Output with
+    | None -> false
+    | Some out ->
+        out.FrameCount >= input.FrameCount + preRoll
+        && [ 0 .. input.FrameCount - 1 ]
+           |> List.forall (fun frame ->
+               out.samples[(frame + preRoll) * 2] = input.samples[frame * 2]
+               && out.samples[(frame + preRoll) * 2 + 1] = input.samples[frame * 2 + 1])
+
 /// The software codec, on both pinouts and through a real processing stage.
 ///
 /// This is the leg the audio chain never had: **realistic samples through the
@@ -4407,6 +4475,8 @@ let private mainDemo () =
     printfn $"reduceVolume halves signed:   %b{reduceVolumeHalvesSigned ()}"
     printfn $"selectFirst is ordered:       %b{selectFirstIsOrdered ()}"
     printfn $"SimI2s round trips:           %b{simI2sRoundTrips ()}"
+    printfn $"WAV through the I2S pins:     %b{wavThroughI2sPins ()}"
+    printfn $"debugger drives its devices: %b{debugSessionDrivesDevices ()}"
     printfn $"stream driver is lazy:        %b{simStreamDrivesLazily ()}"
     printfn $"i2sThrough is a pipeline:     %b{i2sThroughIsAPipeline ()}"
 

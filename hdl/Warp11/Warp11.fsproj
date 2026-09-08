@@ -46,6 +46,7 @@
         <Compile Include="FirrtlImport.fs"/>
         <Compile Include="Inventory.fs"/>
         <Compile Include="Sim.fs"/>
+        <Compile Include="SimDevice.fs"/>
         <Compile Include="SimAxi.fs"/>
         <Compile Include="SimStream.fs"/>
         <Compile Include="Breakpoint.fs"/>

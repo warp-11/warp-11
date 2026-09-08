@@ -205,3 +205,113 @@ let peaks (w: WavData) : int * int =
         |> Seq.fold (fun acc i -> max acc (abs (int w.samples[i]))) 0
 
     peakOf 0, peakOf 1
+
+// ---------------------------------------------------------------------------
+// A recording attached to a design's I2S pins.
+//
+// `runWavThroughSim` above drives a design's *stream* ports, which is right for
+// testing a DSP stage and wrong for testing a front end: `i2sRx` and `i2sTx`
+// are not in that path. This drives the pins instead, so the framers, the clock
+// generator and whatever sits between them are all exercised by real audio.
+//
+// It is an `ISimDevice`, so the same object serves a headless run and the
+// debugger — attach it to a `DebugSession` and stepping the design steps the
+// recording with it.
+
+/// A WAV playing into a design's microphone line, and what leaves its converter
+/// line collected as a new one.
+///
+/// **The output carries the link's pre-roll.** A design cannot answer before it
+/// has heard, so the first frames out are silence — two of them for a bare
+/// link, more once there is a pipeline in the middle. They are left in rather
+/// than trimmed, because trimming would need the latency declared and would
+/// silently eat a recording that genuinely starts quiet. At 48 kHz two frames
+/// is 41 µs; nothing that matters to listen to.
+type WavI2sDevice(sim: Sim, pins: I2sSimPins, input: WavData) =
+    do
+        if input.channels <> 2 then
+            failwith $"the I2S device needs a stereo recording, got {input.channels} channel(s)"
+
+    let codec = I2sCodec(sim, pins)
+
+    do
+        codec.Queue
+            [ for frame in 0 .. input.FrameCount - 1 ->
+                toSampleBits input.samples[frame * 2], toSampleBits input.samples[frame * 2 + 1] ]
+
+    /// The codec underneath, for a caller that wants to tick it directly.
+    member _.Codec = codec
+
+    /// How many frames of the recording have started playing.
+    member _.FramesPlayed = codec.Sent
+
+    /// How many frames have come back off the design's output line.
+    member _.FramesHeard = codec.Count
+
+    /// What has been heard so far, as a recording in its own right. Same rate
+    /// and channel count as the input, so it can be written straight out.
+    member _.Output : WavData =
+        let heard = codec.Received
+        let samples = Array.zeroCreate<int16> (heard.Length * 2)
+
+        heard
+        |> List.iteri (fun frame (left, right) ->
+            samples[frame * 2] <- fromSampleBits left
+            samples[frame * 2 + 1] <- fromSampleBits right)
+
+        { input with samples = samples }
+
+    interface ISimDevice with
+        member _.Drive() = codec.Drive()
+        member _.Sample() = codec.Sample()
+
+/// Play a recording through a design's I2S pins and collect what comes back —
+/// the pin-level counterpart of `runWavThroughSim`.
+///
+/// `slack` is how many frames beyond the recording to keep running, so the last
+/// samples have time to reach the output line.
+let runWavThroughI2s (sim: Sim) (pins: I2sSimPins) (slack: int) (input: WavData) : WavData =
+    let device = WavI2sDevice(sim, pins, input)
+    let target = input.FrameCount + slack
+
+    // Generous, and only here so a design that never frames fails rather than
+    // hanging: a frame is a few thousand cycles, not tens of thousands.
+    let guard = target * 16_384
+    let mutable cycles = 0
+
+    while device.FramesHeard < target && cycles < guard do
+        device.Codec.Tick()
+        cycles <- cycles + 1
+
+    if device.FramesHeard < target then
+        failwith
+            $"runWavThroughI2s: heard %d{device.FramesHeard} frames in %d{cycles} cycles, wanted %d{target} — is the design driving its word-select pin?"
+
+    device.Output
+
+/// A recording to hand a `DebugSession`, and the handle to read what came back.
+///
+/// The session builds its own `Sim`, so what it takes is a factory rather than
+/// a device. This holds both ends: `Attach` is what the session gets, `Output`
+/// is what the caller reads once the window has closed.
+///
+///     let source = WavI2sSource(sharedBusSimPins, readWavFile "speech.wav")
+///     debugWith "hearing aid" design [ source.Attach ]
+///     source.Output |> Option.iter (writeWavFile "heard.wav")
+type WavI2sSource(pins: I2sSimPins, input: WavData) =
+    let mutable device: WavI2sDevice option = None
+
+    /// Hand this to a `DebugSession`'s `devices`.
+    member _.Attach: Sim -> ISimDevice =
+        fun sim ->
+            let d = WavI2sDevice(sim, pins, input)
+            device <- Some d
+            d :> ISimDevice
+
+    /// What has been heard so far. `None` until a session has attached — which
+    /// is the honest answer rather than an empty recording, because the two
+    /// mean different things when a run produced nothing.
+    member _.Output = device |> Option.map (fun d -> d.Output)
+
+    /// How many frames of the recording have played, for a progress readout.
+    member _.FramesPlayed = device |> Option.map (fun d -> d.FramesPlayed) |> Option.defaultValue 0

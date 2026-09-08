@@ -210,14 +210,31 @@ let private publishMilliseconds = 30.0
 /// `ownThread = false` leaves the run loop unstarted, and the host drives
 /// `Pump` itself. That is not a preference — WebAssembly has one thread and
 /// `Thread.Start` throws there, so a browser host has nothing else to offer.
-type DebugSession(design: ModuleDef, ?ownThread: bool) =
+type DebugSession(design: ModuleDef, ?ownThread: bool, ?devices: (Sim -> ISimDevice) list) =
     let ownThread = defaultArg ownThread true
+
 
     // A debugger is for finding bugs, so claims the design makes about itself
     // are checked here even though the Sim's own default is off. A violation
     // stops the run exactly like a breakpoint, because that is what it is —
     // one the design carries with it.
     let sim = Sim(design, checkAsserts = true)
+
+    /// Anything attached to the design's pins, driven around every cycle this
+    /// session runs. A file feeding an I2S link, a model answering a bus — the
+    /// session owns the clock, so a device gets `Drive` before the tick and
+    /// `Sample` after it rather than ticking for itself.
+    ///
+    /// **Factories rather than devices**, because the session builds its own
+    /// `Sim` and a device needs that one, not another. A caller holding a
+    /// concrete device it also wants to read afterwards keeps its own handle —
+    /// `WavI2sSource` is the pattern.
+    ///
+    /// They ride `Run` and `Step` alike, so stepping one cycle by hand advances
+    /// the attached world by one cycle too, which is the whole point of having
+    /// them here rather than in a harness.
+    let devices = defaultArg devices [] |> List.map (fun attach -> attach sim)
+
     let inventory = Inventory.ofDesign design
 
     let commands = System.Collections.Concurrent.ConcurrentQueue<Command>()
@@ -310,7 +327,14 @@ type DebugSession(design: ModuleDef, ?ownThread: bool) =
     /// One tick and the breakpoint test, which is what makes a run a run rather
     /// than a loop. Returns the breakpoint that fired.
     let tickOnce () =
+        for device in devices do
+            device.Drive()
+
         sim.Tick()
+
+        for device in devices do
+            device.Sample()
+
         cycle <- cycle + 1
 
         // Sampled before the breakpoint test, so the cycle that stops a run is
