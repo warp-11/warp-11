@@ -839,7 +839,7 @@ let gepClusterPool
     // ---- Auto mode: the "entry" pops from the pre-generation FIFO in one
     // cycle. At most one filler is in Filler.Entry-auto per cycle (a claim is one per
     // cycle and Filler.Entry-auto lasts one), so the single pop stays coherent. ----
-    let autoTake =
+    let _autoTake =
         autoState
         |> Option.map (fun a ->
             let anyTakeE, takeFE =

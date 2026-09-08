@@ -2199,7 +2199,7 @@ let gepBreederBlock
     (rdSaddr: Expr)
     (rdCaddr: Expr)
     =
-    let geneLen, constCount = genome.geneLen, genome.constCount
+    let constCount = genome.constCount
 
     if capacity &&& (capacity - 1) <> 0 then
         failwith $"capacity must be a power of two, got %d{capacity}"

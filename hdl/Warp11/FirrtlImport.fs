@@ -115,8 +115,8 @@ let private parseType (tokens: string list) : GroundType * string list =
         | "SInt" -> SInt w, rest
         | other -> fail $"'{other}<{w}>' is not a ground type this reader accepts"
     | "Clock" :: rest -> UInt 1, rest
-    | "Reset" :: rest
-    | "AsyncReset" :: rest -> fail "AsyncReset — warp11's registers reset synchronously"
+    | "Reset" :: _
+    | "AsyncReset" :: _ -> fail "AsyncReset — warp11's registers reset synchronously"
     | "UInt" :: _
     | "SInt" :: _ -> fail "an unwidthed UInt/SInt — this reader needs low FIRRTL, where every width is known"
     | "{" :: _ -> fail "a bundle type — high FIRRTL, which needs a lowering pass this reader does not have"
@@ -163,7 +163,7 @@ let rec private parseExpr (scope: Scope) (tokens: string list) : Expr * string l
 
     | op :: "(" :: rest when isPrimOp op ->
         let args, after = parseArgs scope rest []
-        applyPrim scope op args, after
+        applyPrim op args, after
 
     // A primop's constant argument is a bare integer, with no type beside it.
     | number :: rest when number.Length > 0 && (Char.IsDigit number[0] || number[0] = '-') ->
@@ -204,7 +204,7 @@ and private isPrimOp op =
 
 /// A primitive at our IR's semantics. The interesting ones are `add`/`sub`,
 /// where FIRRTL keeps a bit we drop.
-and private applyPrim scope op (args: Expr list) : Expr =
+and private applyPrim op (args: Expr list) : Expr =
     let arg n = List.item n args
 
     let intOf (e: Expr) =

@@ -253,7 +253,7 @@ let private axiRehearsalAt
     (bDelay: int)
     (jitter: int option)
     =
-    let m, mMap = golMap gridWidth gridHeight
+    let m, _ = golMap gridWidth gridHeight
     let sim = Sim(design)
     let fbBase = 0x80
     let slotStride = 1 <<< golSlotShift gridWidth gridHeight
@@ -432,7 +432,7 @@ let private writeHardware (repoRoot: string) =
     let buildDir = System.IO.Path.Combine(repoRoot, "hardware", "build")
     let runtimeSrc = System.IO.Path.Combine(repoRoot, "runtime", "core", "src")
     System.IO.Directory.CreateDirectory buildDir |> ignore
-    let m, mMap = golMap gridWidth gridHeight
+    let _, mMap = golMap gridWidth gridHeight
 
     let layout =
         [ "//! Register map for the `GolAxi` AXI-Lite slave (Game of Life 64x64,"

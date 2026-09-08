@@ -554,12 +554,7 @@ type AudioCompressorPorts =
 /// gained*makeup — are split one per stage, which is why this stage costs
 /// cycles where the gain and limiter stages do not.
 let audioCompressorDef (name: string) : TypedModule<AudioCompressorPorts> =
-    let wideWidth = sampleWidth + 1
-    let stepWidth = wideWidth + 17
-    let envNextWidth = sampleWidth + 4
-    let gainRedWidth = sampleWidth + 8
     let gainWidth = sampleWidth + 1
-    let gainCap = 1UL <<< sampleWidth
     let boostProductWidth = sampleWidth + 17
     let boostWidth = boostProductWidth - gainFracBits
 
@@ -1717,12 +1712,7 @@ type MonoBandCompressorPorts =
 /// `envelope` is exposed for host diagnostics.
 let monoBandCompressorDef (name: string) : TypedModule<MonoBandCompressorPorts> =
     let boostProductWidth = bandWidth + 17
-    let wideWidth = sampleWidth + 1
-    let stepWidth = wideWidth + 17
-    let envNextWidth = sampleWidth + 4
-    let gainRedWidth = sampleWidth + 8
     let gainWidth = sampleWidth + 1
-    let gainCap = 1UL <<< sampleWidth
     let applyProductWidth = gainedWidth + gainWidth + 1
 
     defModule
@@ -1967,7 +1957,6 @@ let multibandCompressor8Def (name: string) (crossovers: float list) (q: float) (
 
             let outLeft, earLatency = ear "left" inLeft io.leftGains
             let outRight, _ = ear "right" inRight io.rightGains
-            let latency = 1 + earLatency
 
             // Loudest band detector across both ears — a registered max tree,
             // because a flat reduce over sixteen wide values is a deep enough

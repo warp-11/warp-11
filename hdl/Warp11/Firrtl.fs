@@ -281,12 +281,6 @@ let internal emitModule (isPublic: bool) (m: ModuleDef) =
             rs |> List.mapi (fun i (_, a) -> (mem, a), mem + "." + readerPort i))
         |> dict
 
-    let memNames =
-        [ for d in m.decls do
-            match d with
-            | Memory(n, _, _, _, _) -> yield n
-            | _ -> () ]
-
     // A lane-masked memory becomes a *vector* in FIRRTL, because that is the
     // only place FIRRTL puts a per-lane mask: a write port's mask mirrors its
     // data type, so `UInt<32>` can only carry one mask bit. The vector is the
@@ -403,16 +397,6 @@ let internal emitModule (isPublic: bool) (m: ModuleDef) =
                 match d with
                 | Memory(n, aw, w, _, _) -> yield n, (UInt aw, UInt w)
                 | _ -> () ]
-
-    /// The reads a statement's expressions reach for.
-    let readsIn stmt =
-        let exprs =
-            match stmt with
-            | Assign (_, v) -> [ v ]
-            | MemWrite (_, a, d, e, k) -> [ a; d; e ] @ Option.toList k
-            | Assert (c, _) -> [ c ]
-
-        reads |> List.filter (fun (mem, addr) -> exprs |> List.exists (usesRead mem addr))
 
     // An instance's ports are reached as fields, and the staging wires the
     // parent declared for them are what connect to those fields.

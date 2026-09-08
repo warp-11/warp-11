@@ -21,6 +21,30 @@
              2026-08-21, a full rebuild of all sixteen projects emits zero
              FS0025, so this costs nothing today and catches the next one. -->
         <WarningsAsErrors>FS0025</WarningsAsErrors>
+
+        <!-- FS1182 (an unused value) is OFF by default in F#. Turning it on
+             found 23 dead bindings across the tree in one build — four of them
+             left by a refactor the same night, and four widths in each of the
+             two compressor definitions that a moved formula had orphaned.
+             Nothing else caught any of them: FSharpLint's 1,359 findings on
+             this solution contained none, and the differential cannot see dead
+             code because dead code emits nothing.
+
+             A warning rather than an error, unlike FS0025 above. That one is a
+             correctness gate — a non-exhaustive match is a runtime exception
+             waiting to happen — where this is a tidiness one, and a binding
+             that is briefly unused is a normal state while a function is being
+             written. The baseline is zero warnings, so a new one is impossible
+             to miss anyway. Promoting it is adding FS1182 to the line above.
+
+             **In this DSL an unused binding is not always dead code.** A `let`
+             whose right-hand side declares wires and drives them changes the
+             emitted design even when nothing reads the value — `_autoTake` in
+             the GEP cluster is one. The convention there is a leading
+             underscore, which silences this and says the elaboration is
+             wanted and the value is not. Deleting such a binding is a design
+             change; check the emitted Verilog, not the compiler. -->
+        <OtherFlags>$(OtherFlags) --warnon:1182</OtherFlags>
     </PropertyGroup>
 
     <!-- Package metadata, for the three projects that ship. Harmless on the

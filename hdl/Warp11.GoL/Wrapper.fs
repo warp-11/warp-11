@@ -155,9 +155,6 @@ let golAxi (topName: string) (gridWidth: int) (gridHeight: int) =
         failwith $"golAxi: gridHeight %d{gridHeight} not divisible by rows-per-beat %d{rowsPerBeat}"
 
     let m, mMap = golMap gridWidth gridHeight
-    let beatCount = golBeatCount gridWidth gridHeight
-    let beatIndexBits = indexBits beatCount
-    let slotShift = golSlotShift gridWidth gridHeight
 
     defModuleClocked
         axiClock

@@ -102,7 +102,6 @@ type GatheredFrame =
 /// `frame_done` is the one-cycle level the wrapper makes sticky.
 let mandelFrameGathererDef (width: int) (height: int) =
     let widthPadded = paddedWidth width
-    let addrWidth = lanePodAddrWidth width height
     let totalBeats = height * (widthPadded / pixelsPerBeat)
     let beatCountWidth = bitsToHold (totalBeats + 1)
 

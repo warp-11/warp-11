@@ -34,7 +34,7 @@ fn life_step(rows: &[u64; 64]) -> [u64; 64] {
                     if dy == 0 && dx == 0 {
                         continue;
                     }
-                    let (yy, xx) = (y as i32 + dy, x as i32 + dx);
+                    let (yy, xx) = (y as i32 + dy, x + dx);
                     if (0..64).contains(&yy) && (0..64).contains(&xx) {
                         n += (rows[yy as usize] >> xx) & 1;
                     }

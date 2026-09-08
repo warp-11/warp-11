@@ -375,7 +375,7 @@ let private ringPointers name addrWidth =
 
 /// LUTRAM: the head is a combinational read, so a beat is visible the cycle it
 /// lands and the whole FIFO is two pointers and an array.
-let private distributedFifo name depth addrWidth payloadWidth (packed: Expr) (offered: Expr) (accept: Expr) =
+let private distributedFifo name _depth addrWidth payloadWidth (packed: Expr) (offered: Expr) (accept: Expr) =
     let store = distributedMem $"{name}_store" addrWidth payloadWidth
 
     let writePtr, readPtr, writeIndex, readIndex = ringPointers name addrWidth

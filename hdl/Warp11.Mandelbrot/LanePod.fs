@@ -185,8 +185,6 @@ let mandelLanePodDef (width: int) (height: int) (maxIter: int) (fracBits: int) (
 /// One pod instance under `instName`, as a stage: the row-run stream in, the
 /// (addr, beat) result stream out.
 let mandelLanePod (width: int) (height: int) (maxIter: int) (fracBits: int) (nThreads: int) instName (run: Stream<Expr>) =
-    let addrWidth = lanePodAddrWidth width height
-
     let runPorts, resPorts = (mandelLanePodDef width height maxIter fracBits nThreads).NewNamed instName
 
     streamToInputPorts runPorts run

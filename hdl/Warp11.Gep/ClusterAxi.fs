@@ -386,7 +386,7 @@ let clusterAxiSilicon = lazy (gepClusterAxi "GepClusterAxi" clusterSiliconShape)
 /// The Rust half of the seam: the map's offsets, plus the geometry a driver
 /// needs to lay out DDR and size its transfers.
 let clusterLayoutRs (shape: GepClusterShape) =
-    let m, mMap = gepClusterMap shape
+    let _, mMap = gepClusterMap shape
     let indivWords = gepUnitIndivWords shape.capacity shape.constCount
 
     let autoCapacity =
