@@ -1,7 +1,8 @@
 # Warp11.SimView
 
 A step-through debugger for [Warp 11](https://warp11.org) designs. Watch any
-signal at any depth, poke inputs, page through memories, set breakpoints written
+signal at any depth, drive inputs and registers, page through memories, set
+breakpoints written
 as expressions over your own signal names, see a per-cycle waveform, export VCD.
 
 **It is a component, not an application.** It knows how to watch a signal, window

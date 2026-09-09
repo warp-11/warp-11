@@ -315,3 +315,147 @@ type WavI2sSource(pins: I2sSimPins, input: WavData) =
 
     /// How many frames of the recording have played, for a progress readout.
     member _.FramesPlayed = device |> Option.map (fun d -> d.FramesPlayed) |> Option.defaultValue 0
+
+// ---------------------------------------------------------------------------
+// A recording attached to a design's stream ports.
+//
+// `WavI2sDevice` above plays into the *pins*, which is right for testing a
+// front end and more than a DSP stage needs: `i2sRx` and `i2sTx` are not the
+// thing under test when the question is what a filter does. This attaches to
+// the ready/valid ports instead, so a stage lifted out of a chain — the shape
+// a design is usually debugged in — takes real audio a beat at a time.
+//
+// `runWavThroughSim` answers the same question in batch and owns the loop, so
+// it cannot ride a debugger's clock. This is the device form: one file in, one
+// file out, one beat per accepted beat, and whoever owns the tick keeps it.
+
+/// A recording offered to a design's input stream and collected from its
+/// output one.
+///
+/// **The port names are derived, not spelled.** `streamPins "in" sampleLayout`
+/// is what the design itself emitted from `streamInputPorts p "in"
+/// sampleLayout`, so a stage wrapped the ordinary way needs no port map, and a
+/// layout that gains a field cannot leave a hand-written name behind.
+///
+/// **The handshake is settled in `Drive`, not in `Sample`, and that is not a
+/// liberty with the contract — it is what the contract means here.** A
+/// handshake is about the values on the wires *during* a cycle: `valid` and
+/// `ready` have to be read with the payload they agreed on. After the tick the
+/// registers have moved and a peek answers for the next cycle instead, so a
+/// beat would be credited against the wrong conditions. `Drive` therefore
+/// pokes, reads back what its own pokes produced, and records the decision;
+/// `Sample` only commits it. `I2sCodec` samples after the tick and is right to:
+/// a serial line is a level that is stable across the edge, and a handshake is
+/// not.
+type WavStreamDevice(sim: Sim, input: StreamPins, output: StreamPins, source: WavData) =
+    do
+        if source.channels <> 2 then
+            failwith $"the stream device needs a stereo recording, got {source.channels} channel(s)"
+
+        if List.length input.fields <> 2 || List.length output.fields <> 2 then
+            failwith "the stream device expects a two-field stereo layout on both ports"
+
+    let heard = ResizeArray<int16>(source.samples.Length)
+    let mutable offered = 0
+    let mutable accepted = false
+    let mutable arrival: (uint64 * uint64) option = None
+
+    /// How many frames of the recording the design has taken.
+    member _.FramesOffered = offered
+    /// How many frames have come back off the output stream.
+    member _.FramesHeard = heard.Count / 2
+    /// How many frames are still to play.
+    member _.Remaining = source.FrameCount - offered
+
+    /// What has come back so far, as a recording in its own right — same rate
+    /// and channel count as the source, so it writes straight out.
+    member _.Output: WavData = { source with samples = heard.ToArray() }
+
+    interface ISimDevice with
+        member _.Drive() =
+            let more = offered < source.FrameCount
+            sim.Poke(input.valid, (if more then 1UL else 0UL))
+
+            if more then
+                sim.Poke(input.fields[0], toSampleBits source.samples[offered * 2])
+                sim.Poke(input.fields[1], toSampleBits source.samples[offered * 2 + 1])
+
+            // Always ready: a file never pushes back. A check that wants
+            // backpressure has `streamThroughWith`'s `stallEvery`.
+            sim.Poke(output.ready, 1UL)
+
+            accepted <- more && sim.Peek input.ready = 1UL
+
+            arrival <-
+                if sim.Peek output.valid = 1UL then
+                    Some(sim.Peek output.fields[0], sim.Peek output.fields[1])
+                else
+                    None
+
+        member _.Sample() =
+            if accepted then offered <- offered + 1
+
+            match arrival with
+            | Some (left, right) ->
+                heard.Add(fromSampleBits left)
+                heard.Add(fromSampleBits right)
+            | None -> ()
+
+            accepted <- false
+            arrival <- None
+
+/// Play a recording through a design's stream ports and collect what comes
+/// back. The device form of `runWavThroughSim`: the same answer reached by
+/// stepping a device rather than by owning a loop, so the two can be compared.
+///
+/// `idleLimit` bounds how long to wait for a beat that never arrives, so a
+/// design that deadlocks fails rather than hangs.
+let runWavThroughStream (sim: Sim) (input: StreamPins) (output: StreamPins) (idleLimit: int) (source: WavData) : WavData =
+    let device = WavStreamDevice(sim, input, output, source)
+    let driven = device :> ISimDevice
+    let mutable idle = 0
+    let mutable lastHeard = 0
+
+    while device.FramesHeard < source.FrameCount && idle < idleLimit do
+        driven.Drive()
+        sim.Tick()
+        driven.Sample()
+
+        if device.FramesHeard = lastHeard then
+            idle <- idle + 1
+        else
+            idle <- 0
+            lastHeard <- device.FramesHeard
+
+    device.Output
+
+/// The stream-port `WavI2sSource`: a recording to hand a `DebugSession`, and
+/// the handle to read what came back once the window has closed.
+///
+///     let source =
+///         WavStreamSource(streamPins "in" sampleLayout, streamPins "out" sampleLayout, readWavFile "sine.wav")
+///
+///     debugWith "the equaliser" eqStage.def [ source.Attach ]
+///     source.Output |> Option.iter (writeWavFile "heard.wav")
+type WavStreamSource(input: StreamPins, output: StreamPins, source: WavData) =
+    let mutable device: WavStreamDevice option = None
+
+    /// Hand this to a `DebugSession`'s `devices`.
+    member _.Attach: Sim -> ISimDevice =
+        fun sim ->
+            let d = WavStreamDevice(sim, input, output, source)
+            device <- Some d
+            d :> ISimDevice
+
+    /// What has been heard so far. `None` until a session has attached — the
+    /// honest answer rather than an empty recording, because the two mean
+    /// different things when a run produced nothing.
+    member _.Output = device |> Option.map (fun d -> d.Output)
+
+    /// How many frames the design has taken, for a progress readout.
+    member _.FramesOffered =
+        device |> Option.map (fun d -> d.FramesOffered) |> Option.defaultValue 0
+
+    /// How many frames are still to play.
+    member _.Remaining =
+        device |> Option.map (fun d -> d.Remaining) |> Option.defaultValue source.FrameCount

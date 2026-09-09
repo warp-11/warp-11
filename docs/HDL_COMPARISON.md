@@ -709,7 +709,7 @@ What is still narrower than the field: the trace holds what you chose to record 
 | Amaranth | Python sim, so `pdb`; signal history goes to a waveform file |
 | cocotb (any HDL) | Python testbench, so `pdb` — the field's most common answer |
 | HGDB (research, Chisel/others) | The most ambitious: source-level breakpoints mapped back to *generator* variables, conditional breakpoints, signal deposit, forward/backward debugging, driven against commercial simulators |
-| Warp 11 | A **step-through debugger over the elaborated design** (Avalonia + FuncUI): filterable watch list over every signal at every hierarchy depth, editable inputs, memory windows that page, a per-cycle waveform lane with a cursor, VCD export, state-machine registers shown as their state names, and **breakpoints written as expressions over the design's own signals** — `count == 0x40 && !valid`, `store[3] == 0x55`, `signed(zx) < 0` |
+| Warp 11 | A **step-through debugger over the elaborated design** (Avalonia + FuncUI): filterable watch list over every signal at every hierarchy depth, editable inputs **and registers** — so a setting behind a register map is turned while the design runs, not only at reset — memory windows that page, a per-cycle waveform lane with a cursor, VCD export, state-machine registers shown as their state names, and **breakpoints written as expressions over the design's own signals** — `count == 0x40 && !valid`, `store[3] == 0x55`, `signed(zx) < 0` |
 
 The capability is not novel — HGDB does more of it, and "put a breakpoint in your Python testbench" is a decade old. Three things are unusual in combination:
 

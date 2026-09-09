@@ -268,6 +268,8 @@ dotnet run -c Release --project Warp11.Effects -- sample in.wav             # re
 dotnet run -c Release --project Warp11.Effects -- fx in.wav out              # clean/drive/fuzz/wah, audible
 dotnet run -c Release --project Warp11.Effects -- wav in.wav out.wav        # the DSP stage, headless
 dotnet run -c Release --project Warp11.Effects -- listen in.wav heard.wav   # the whole chain, in the debugger
+dotnet run -c Release --project Warp11.Effects -- tone sine.wav 1000        # a steady tone, or `sweep`
+dotnet run -c Release --project Warp11.Effects -- eq sine.wav heard.wav     # one stage, in the debugger
 dotnet run -c Release --project Warp11.Effects -- debug [design]            # the debugger on the catalog
 dotnet run -c Release --project Warp11.Effects -- hardware <repo-root>
 ./run_differential.sh                                       # includes these four
@@ -291,6 +293,28 @@ is why the file comes back sample-for-sample after two frames of pre-roll.
 
 The paths above are relative to `hdl/`, so the shipped sample is
 `Warp11.Effects/in.wav` from there.
+
+`eq` is the everyday shape and `listen` is the occasional one. `listen` drives
+the **codec pins**, so the clock generator and both framers are in the path —
+right when the question is whether the link works, and 2,048 cycles a frame when
+it is not. `eq` attaches the recording to a single stage's **stream ports**,
+where a frame is one beat: measured, 1.60M cycles/s against the pin design's
+153k, which is audio faster than real time instead of 1.5 ms a second.
+
+`tone` writes what you look at a filter with. `sine.wav` is a steady tone, so
+the output amplitude is the gain at that frequency, read straight off the
+waveform lane; `sweep.wav` climbs 40 Hz to 12 kHz at a flat amplitude, so the
+output envelope *is* the frequency response, drawn in the time domain. Both sit
+at −14 dBFS rather than somewhere comfortable, because a filter under test is
+usually asked for a boost and a signal near full scale hits the rail instead of
+showing one — at 0.6 amplitude a +12 dB peak measured +4.44 dB, which was the
+clipping, not the filter.
+
+The equaliser's five coefficients are ordinary input ports, so they are editable
+in the watch panel, and `eq` prints ready-made Q2.30 sets to paste in. Measured
+through it: a +12 dB peak at 1 kHz reads **+12.00 dB** on the tone, and the
+sweep traces the bell — +0.21 dB at 166 Hz, +3.93 at 521, +12.01 at 921, +7.02
+at 1630, +0.29 at 5100.
 
 `hardware` writes each design's Verilog to `hardware/build/` **and** a Rust
 register layout to `runtime/core/src/audio_*_layout.rs`, both from the same

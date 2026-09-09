@@ -656,6 +656,40 @@ let private audioEchoRepeats () : bool =
     // Zero feedback leaves exactly the impulse and nothing after it.
     && taps delay 0UL (3 * delay) = [ 0, impulse ]
 
+/// The stream device and the batch harness are the same answer.
+///
+/// `runWavThroughSim` owns its loop and takes a frame every cycle;
+/// `WavStreamDevice` rides someone else's clock and takes one per accepted
+/// beat. They are two encodings of one question, so they have to agree — and
+/// the interesting half is the bookkeeping, which is where a handshake read on
+/// the wrong side of the tick shows up as a dropped or duplicated frame rather
+/// than as an error.
+///
+/// Run through a real filter rather than a wire, so a frame landing one beat
+/// early or late is a different sample and not the same one twice.
+let private wavThroughStreamPorts () : bool =
+    let input = toneWav 48_000 512 440.0 0.6
+
+    let batch = runWavThroughSim (Sim audioChain.def) defaultWavPorts 0 input
+
+    let stepped =
+        runWavThroughStream
+            (Sim audioChain.def)
+            (streamPins "in" sampleLayout)
+            (streamPins "out" sampleLayout)
+            1_000
+            input
+
+    // The batch harness stops at the input's last frame, so the device — which
+    // keeps going until it has heard as many as it offered — may hold a few
+    // more. Agreement over the shared prefix is the claim.
+    let shared = min batch.FrameCount stepped.FrameCount
+
+    shared > input.FrameCount / 2
+    && [ 0 .. shared * 2 - 1 ] |> List.forall (fun i -> batch.samples[i] = stepped.samples[i])
+    && stepped.sampleRate = input.sampleRate
+    && stepped.channels = 2
+
 /// A device attached to a `DebugSession` really is driven by it.
 ///
 /// The point of the hook is that devices ride `Run` and `Step` alike, so a
@@ -4620,6 +4654,7 @@ let private mainDemo () =
     printfn $"SimI2s round trips:           %b{simI2sRoundTrips ()}"
     printfn $"WAV through the I2S pins:     %b{wavThroughI2sPins ()}"
     printfn $"debugger drives its devices:  %b{debugSessionDrivesDevices ()}"
+    printfn $"WAV through stream ports:     %b{wavThroughStreamPorts ()}"
     printfn $"delayBuffer counts beats:     %b{delayBufferCountsBeats ()}"
     printfn $"echo repeats and decays:      %b{audioEchoRepeats ()}"
     printfn $"stream driver is lazy:        %b{simStreamDrivesLazily ()}"

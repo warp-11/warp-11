@@ -475,6 +475,62 @@ let private sampleWav () : WavData =
       bitsPerSample = 16
       samples = samples }
 
+/// A test signal for looking at what a filter does, rather than for listening
+/// to.
+///
+/// The guitar in `in.wav` is the right input for judging an effect by ear and
+/// the wrong one for judging a filter by eye: its spectrum moves, so a change
+/// in the output could be the filter or could be the note. These do not move.
+///
+/// **A steady tone** shows one point of the response — set the equaliser and
+/// the output amplitude is the gain at that frequency, readable straight off
+/// the waveform lane.
+///
+/// **A sweep** shows the whole of it at once: the frequency climbs by octaves
+/// while the amplitude stays flat, so whatever shape the output envelope takes
+/// *is* the frequency response, drawn in the time domain. That is the picture
+/// an equaliser is usually explained with, and here it is a file rather than a
+/// diagram.
+///
+/// Both channels carry the same signal, unlike `toneWav`, which puts an octave
+/// up on the right. Two channels that differ are useful for checking a link and
+/// a nuisance when the question is what one filter did.
+let private testSignal (shape: string) (seconds: float) : WavData =
+    let rate = int stockSampleRate
+    let frames = int (float rate * seconds)
+    let samples = Array.zeroCreate<int16> (frames * 2)
+
+    // −14 dBFS, not something comfortable to listen to, and that is the point:
+    // a filter under test is usually asked for a *boost*, and a signal near
+    // full scale hits the rail instead of showing one. At 0.6 a +12 dB peak
+    // measured +4.44 dB with the output pinned at 32,768 — the clipping read as
+    // the filter's response, and on a sweep it read as a flat top three octaves
+    // wide. This leaves 14 dB of room above the tone, so a boost has somewhere
+    // to go.
+    let amplitude = 0.2
+
+    // A sweep's phase is the integral of its frequency, not the product: step
+    // the phase by the current frequency each sample. Multiplying time by an
+    // instantaneous frequency instead is the classic way to get a sweep that
+    // reads an octave low at the top.
+    let mutable phase = 0.0
+
+    let frequencyAt i =
+        match shape with
+        | "sweep" -> 40.0 * ((12_000.0 / 40.0) ** (float i / float (max 1 (frames - 1))))
+        | hz -> float (int hz)
+
+    for i in 0 .. frames - 1 do
+        phase <- phase + 2.0 * System.Math.PI * frequencyAt i / float rate
+        let v = int16 (max -32768.0 (min 32767.0 (amplitude * sin phase * 32767.0)))
+        samples[i * 2] <- v
+        samples[i * 2 + 1] <- v
+
+    { sampleRate = rate
+      channels = 2
+      bitsPerSample = 16
+      samples = samples }
+
 /// Peak over RMS, in dB. The number a clipper moves and a filter does not: a
 /// plucked string is around 18 dB, a square wave is 0, so it says how far
 /// towards square a stage has taken the signal.
@@ -505,8 +561,18 @@ let private eqCoeffNames = [ "b0"; "b1"; "b2"; "a1"; "a2" ]
 /// computes a cosine. That is the same division of labour the register map
 /// exists for, running at audio rate — and it is why the sweep costs no
 /// hardware at all.
-let private fx (inPath: string) (prefix: string) =
+let private fx (inPath: string) (givenPrefix: string) =
     let input = readWavFile inPath
+
+    // `fx in.wav out.wav` means the same as `fx in.wav out`: the second
+    // argument names a set of files, and someone who has just typed `wav
+    // in.wav out.wav` types the extension out of habit. Taking it literally
+    // spells `out.wav-clean.wav`.
+    let prefix =
+        if givenPrefix.EndsWith(".wav", System.StringComparison.OrdinalIgnoreCase) then
+            givenPrefix.Substring(0, givenPrefix.Length - 4)
+        else
+            givenPrefix
     printfn $"in:  {input.FrameCount} frames, {input.sampleRate} Hz, {input.channels} ch"
 
     let report (label: string) (path: string) (w: WavData) =
@@ -588,6 +654,69 @@ let private fx (inPath: string) (prefix: string) =
     printfn $"  %-10s{source} crest %5.1f{crestDb input} dB"
     0
 
+/// A recording playing into a *stage's* stream ports in the debugger — the
+/// everyday shape, where the thing under test is one module rather than a
+/// board's whole front end.
+///
+/// `listen` drives the codec pins, so the clock generator and both framers are
+/// in the path. That is what you want when the question is whether the link
+/// works, and it is 2,048 cycles a frame when the question is what a filter
+/// does. Here a frame is **one beat**, so the same recording runs about two
+/// thousand times faster and the waveform lane shows samples rather than bit
+/// clocks.
+///
+/// The equaliser is the stage worth opening this way: its five coefficients are
+/// ordinary input ports, so they are editable in the watch panel, and a steady
+/// tone in makes the output amplitude the filter's gain at that frequency,
+/// readable straight off the trace. A sweep makes the whole response readable
+/// at once.
+let private equaliser (inPath: string) (outPath: string option) =
+    let input = readWavFile inPath
+    printfn $"in:  {input.FrameCount} frames, {input.sampleRate} Hz, {input.channels} ch — one beat a frame"
+
+    let source =
+        WavStreamSource(streamPins "in" sampleLayout, streamPins "out" sampleLayout, input)
+
+    // The identity kernel, so the stage starts as a wire and every change you
+    // see afterwards is one you made.
+    let coefficients (design: BiquadDesign) =
+        List.zip eqCoeffNames (toQ230 design)
+
+    let show (what: string) (design: BiquadDesign) =
+        let text =
+            coefficients design
+            |> List.map (fun (name, value) -> $"{name}=0x%08X{value}")
+            |> String.concat "  "
+
+        printfn $"     {what}"
+        printfn $"       {text}"
+
+    printfn "     the five coefficients are input ports — watch them and type into the fields."
+    printfn "     Q2.30, so 0x40000000 is 1.0. Ready-made sets:"
+    show "flat (the reset kernel)" identityDesign
+    show "+12 dB peak at 1 kHz, Q 2" (rbjDesign Peaking 1_000.0 2.0 12.0 stockSampleRate)
+    show "-12 dB cut at 1 kHz, Q 2" (rbjDesign Peaking 1_000.0 2.0 -12.0 stockSampleRate)
+    show "low pass at 800 Hz, Q 0.7" (rbjDesign LowPass 800.0 0.707 0.0 stockSampleRate)
+
+    let attach (sim: Sim) =
+        coefficients identityDesign |> List.iter (fun (name, value) -> sim.Poke(name, value))
+        source.Attach sim
+
+    let code =
+        Warp11.SimView.Desktop.debugWith "a WAV through the equaliser" Batch.eqStage.def [ attach ]
+
+    match outPath, source.Output with
+    | Some path, Some heard ->
+        writeWavFile path heard
+        let inLeft, _ = peaks input
+        let outLeft, _ = peaks heard
+        printfn $"out: {heard.FrameCount} of {input.FrameCount} frames, peak {inLeft} -> {outLeft}"
+        printfn $"wrote {path}"
+    | Some path, None -> printfn $"nothing was heard, so {path} was not written"
+    | None, _ -> ()
+
+    code
+
 /// A recording playing into the codec pins of a design open in the debugger.
 ///
 /// The pin-level counterpart of the `wav` verb below, and the reason
@@ -619,12 +748,11 @@ let private listen (inPath: string) (outPath: string option) =
     if abs (float input.sampleRate - stockSampleRate) > 1.0 then
         printfn $"     note: the link frames at %.3f{stockSampleRate} Hz, not the file's {input.sampleRate}"
 
-    // The settings are AXI-Lite registers, and the debugger's watch panel drives
-    // *inputs*. So this window shows the chain running at its no-op resets and
-    // there is nothing in it to turn — worth saying rather than leaving someone
-    // hunting the watch list for a field beside `volume`.
-    printfn "     filter the signals for 'left' and watch audio_rx_out_left through limiter_out_left"
-    printfn "     to see one sample move down the chain, at the registers' no-op reset settings"
+    // The settings are AXI-Lite registers and the watch panel drives registers as
+    // well as inputs, so they are turnable here without a host on the bus.
+    printfn "     filter for 'left' and watch audio_rx_out_left through limiter_out_left"
+    printfn "     to see a sample cross the chain; filter for 'mute' or 'volume' and type"
+    printfn $"     into the field to turn it while it plays — volume is Q8.8, so {gainUnity} is 1.0x"
 
     let source = WavI2sSource(separateCodecSimPins, input)
 
@@ -774,6 +902,9 @@ let main argv =
     // can be diffed byte for byte. `settleCycles = 0` because the batch design
     // does not pre-run its first frame either — the comparison is only honest
     // if both see exactly the same sequence.
+    // The debugger on one stage, with the recording on its stream ports.
+    | [| "eq"; inPath |] -> equaliser inPath None
+    | [| "eq"; inPath; outPath |] -> equaliser inPath (Some outPath)
     // The debugger with the recording attached. `out.wav` is optional: leave it
     // off to step and look, give it to keep what came back.
     | [| "listen"; inPath |] -> listen inPath None
@@ -781,6 +912,24 @@ let main argv =
     // The audible demo: one file in, four out, nothing but settings between
     // them.
     | [| "fx"; inPath; prefix |] -> fx inPath prefix
+    // A steady tone or a sweep, for looking at a filter rather than hearing it.
+    | [| "tone"; outPath |]
+    | [| "tone"; outPath; _ |]
+    | [| "tone"; outPath; _; _ |] ->
+        let shape = if argv.Length > 2 then argv[2] else "1000"
+        let seconds = if argv.Length > 3 then float argv[3] else 2.0
+        let signal = testSignal shape seconds
+        writeWavFile outPath signal
+        let left, _ = peaks signal
+
+        let what =
+            if shape = "sweep" then
+                "40 Hz to 12 kHz, one octave-linear sweep"
+            else
+                $"a steady {shape} Hz"
+
+        printfn $"wrote {outPath}: {signal.FrameCount} frames, {signal.sampleRate} Hz, {what}, peak {left}"
+        0
     // Rewrite the shipped `in.wav`. Committed so the commands above run as
     // written, regenerable so it is not a file of unknown provenance.
     | [| "sample"; outPath |] ->

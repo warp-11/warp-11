@@ -611,14 +611,20 @@ Every register resets to a no-op, so at rest the sample arrives at the
 transmitter exactly as the converter delivered it, and the output file is
 sample-for-sample the input after two frames of pre-roll.
 
-**Two things it is not.** It is not a way to turn the knobs: the settings are
-AXI-Lite registers and the watch panel drives *inputs*, so nothing beside
-`volume` is editable — changing a setting means writing the register, and there
-is no host device to attach for that yet. And it is not a way to listen to a
-file. A frame is `fabricHz / sampleRate` cycles — 2,048 on this board — and the
-debugger runs this design at about **153k cycles/s**, so a second of wall clock
-is 75 frames: 1.5 ms of 48 kHz audio. Open a short clip, stop where it matters,
-and reach for `runWavThroughI2s` when what you want is the whole file processed.
+**Turn the knobs while it plays.** The settings are AXI-Lite registers, and the
+watch panel gives a register a field just as it gives one to an input — filter
+for `mute`, type `0x1`, and the next frame leaves as silence; filter for
+`volume` and type `0x80` against a unity of `0x100` to halve it. A register is
+state the design only writes on a tick, so a value typed there is where it
+carries on from, and one nothing else drives simply stays. It is not the same as
+writing over AXI — a field with a side effect, a `start` bit that clears itself,
+still wants a host on the bus — but for a setting it is the shorter path.
+
+**What it is not is a way to listen to a file.** A frame is
+`fabricHz / sampleRate` cycles — 2,048 on this board — and the debugger runs
+this design at about **153k cycles/s**, so a second of wall clock is 75 frames:
+1.5 ms of 48 kHz audio. Open a short clip, stop where it matters, and reach for
+`runWavThroughI2s` when what you want is the whole file processed.
 
 ## Gotchas
 

@@ -97,7 +97,8 @@ workloads, not just smoke tests. Because it reads the *same IR* as the emitter,
 what you simulate is what you synthesize.
 
 **The debugger** (`Warp11.SimView`). A desktop application over a running
-simulation: watch any signal at any depth, poke inputs, page through memories,
+simulation: watch any signal at any depth, drive inputs and registers, page
+through memories,
 set breakpoints written as expressions over the design's own signals, export
 VCD. It is also the thing you can try in a browser without installing anything.
 

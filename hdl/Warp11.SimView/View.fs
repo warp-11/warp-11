@@ -793,9 +793,26 @@ let debugger (source: Source) (panels: Panel list) =
                     TextBlock.fontSize 11.0
                     TextBlock.opacity 0.5
                     TextBlock.text $"%d{v.width}b" ]
-              (if kindOf.TryFind v.name = Some SignalKind.Input then
-                            // An input is the one thing the design does not
-                            // drive, so it is the one thing worth typing into.
+              (match kindOf.TryFind v.name with
+                        | Some SignalKind.Input
+                        | Some SignalKind.Reg ->
+                            // Two kinds are worth typing into, for different
+                            // reasons. An **input** is what the design does not
+                            // drive at all, so a value put there stays. A
+                            // **register** is state: the design writes it only
+                            // on a tick, so a value put there is where it
+                            // carries on from. That is how a host-written
+                            // setting — a volume, a mute, a threshold behind a
+                            // register map — gets turned while the design runs,
+                            // and how a counter gets moved to the case that is
+                            // wrong without waiting for it to arrive.
+                            //
+                            // **Wires and outputs are not offered, and that is
+                            // not caution.** Both are functions of other
+                            // signals and are recomputed before the next read,
+                            // so a typed value would vanish without ever
+                            // looking wrong — a control that silently does
+                            // nothing is worse than no control.
                             TextBox.create
                                 [ Grid.row row
                                   Grid.column 3
@@ -819,9 +836,19 @@ let debugger (source: Source) (panels: Panel list) =
                                           | Some value -> post (fun s -> s.Poke(v.name, value))
                                           | None -> ()),
                                       SubPatchOptions.OnChangeOf v.name
+                                  )
+                                  // Let go of what was typed and the box shows
+                                  // the truth again. An input holds the value,
+                                  // so nothing moves; a register the design
+                                  // drives moves every tick, and a field still
+                                  // showing what someone typed a minute ago
+                                  // would be a lie rather than an edit.
+                                  TextBox.onLostFocus (
+                                      (fun _ -> pokeText.Set(Map.remove v.name pokeText.Current)),
+                                      SubPatchOptions.OnChangeOf v.name
                                   ) ]
                             :> Avalonia.FuncUI.Types.IView
-                        else
+                        | _ ->
                             TextBlock.create
                                 [ Grid.row row
                                   Grid.column 3
@@ -840,7 +867,7 @@ let debugger (source: Source) (panels: Panel list) =
                               TextBlock.textWrapping TextWrapping.Wrap
                               TextBlock.text (
                                   if List.isEmpty current.values then
-                                      "pick signals on the left to watch them — inputs get a field to drive them"
+                                      "pick signals on the left to watch them — inputs and registers get a field to drive them"
                                   else
                                       count (List.length current.values) "watched signal" "watched signals"
                               ) ]
