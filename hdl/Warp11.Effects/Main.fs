@@ -373,6 +373,296 @@ let private writeHardware (repoRoot: string) =
         System.IO.File.WriteAllText(path, String.concat "\n" (layoutFor title m) + "\n")
         printfn $"wrote {path}"
 
+/// The sample recording that ships beside these designs, and the code that made
+/// it — so `in.wav` in this project is a build product rather than a blob
+/// nobody can regenerate.
+///
+/// **A plucked string, by Karplus-Strong.** A buffer of noise is circulated
+/// round a delay line one period long, averaged two taps at a time on the way
+/// past. The average is a lowpass, so the highs die before the fundamental
+/// does, which is what makes it sound plucked rather than like a filtered
+/// click. Fifteen lines for something recognisably a guitar.
+///
+/// **Why not tones.** A steady sine is the worst possible signal to judge an
+/// effect by: it has no transient for a compressor to catch, no harmonics for a
+/// clipper to add to, and nothing for a filter to move. A plucked string has
+/// all three — an attack, a decaying spectrum and a tail — so what the fabric
+/// does to it is audible rather than merely measurable.
+///
+/// The random buffer comes from a hand-rolled xorshift rather than
+/// `System.Random`, so the file is byte-reproducible by anyone on any runtime:
+/// `sample` regenerating something different from what is committed would make
+/// the committed file unverifiable.
+let private sampleWav () : WavData =
+    // The rate the link actually frames at, so `listen` has nothing to warn
+    // about and the file cannot outlive the divisors that set it.
+    let rate = int stockSampleRate
+    let seconds = 2.0
+    let frames = int (float rate * seconds)
+
+    let pluck (hz: float) (count: int) (seed: uint32) =
+        let period = max 2 (int (float rate / hz))
+
+        // xorshift32, three lines and identical everywhere.
+        let mutable state = seed
+        let next () =
+            state <- state ^^^ (state <<< 13)
+            state <- state ^^^ (state >>> 17)
+            state <- state ^^^ (state <<< 5)
+            float state / float System.UInt32.MaxValue * 2.0 - 1.0
+
+        let ring = Array.init period (fun _ -> next ())
+        let out = Array.zeroCreate<float> count
+        let mutable at = 0
+
+        for i in 0 .. count - 1 do
+            let current = ring[at]
+            out[i] <- current
+            // The 0.9995 is the string's damping; the average either side of it
+            // is the string itself.
+            ring[at] <- 0.9995 * 0.5 * (current + ring[(at + 1) % period])
+            at <- (at + 1) % period
+
+        out
+
+    // An E minor arpeggio, then the chord — six notes to walk up and something
+    // to ring out under the last half second, which is where a compressor's
+    // release and (later) an echo's tail are audible.
+    let notes =
+        [ 0.00, 82.41, 0.70 // E2
+          0.22, 123.47, 0.60 // B2
+          0.44, 164.81, 0.60 // E3
+          0.66, 196.00, 0.60 // G3
+          0.88, 246.94, 0.60 // B3
+          1.10, 329.63, 0.50 // E4
+          1.40, 82.41, 0.70 // the chord
+          1.40, 164.81, 0.50
+          1.40, 196.00, 0.50
+          1.40, 246.94, 0.45 ]
+
+    let left = Array.zeroCreate<float> frames
+    let right = Array.zeroCreate<float> frames
+
+    notes
+    |> List.iteri (fun index (at, hz, level) ->
+        let start = int (at * float rate)
+        let voice = pluck hz (frames - start) (uint32 index * 2_654_435_761u + 1u)
+        // Alternating emphasis, so the pair is wide enough that a swapped
+        // channel is audible.
+        let toLeft, toRight = if index % 2 = 0 then 1.0, 0.75 else 0.75, 1.0
+
+        for i in 0 .. voice.Length - 1 do
+            left[start + i] <- left[start + i] + level * toLeft * voice[i]
+            right[start + i] <- right[start + i] + level * toRight * voice[i])
+
+    // Normalised together rather than per channel, so the stereo image survives.
+    let loudest =
+        Array.fold (fun peak v -> max peak (abs v)) 0.0 left
+        |> fun peak -> Array.fold (fun peak v -> max peak (abs v)) peak right
+
+    let scale = 0.85 / loudest
+    let samples = Array.zeroCreate<int16> (frames * 2)
+
+    let quantise (v: float) =
+        int16 (max -32768.0 (min 32767.0 (v * scale * 32767.0)))
+
+    for i in 0 .. frames - 1 do
+        samples[i * 2] <- quantise left[i]
+        samples[i * 2 + 1] <- quantise right[i]
+
+    { sampleRate = rate
+      channels = 2
+      bitsPerSample = 16
+      samples = samples }
+
+/// Peak over RMS, in dB. The number a clipper moves and a filter does not: a
+/// plucked string is around 18 dB, a square wave is 0, so it says how far
+/// towards square a stage has taken the signal.
+let private crestDb (w: WavData) =
+    let squares = w.samples |> Array.sumBy (fun v -> let x = float v in x * x)
+    let rms = sqrt (squares / float w.samples.Length)
+    let peak = w.samples |> Array.fold (fun m v -> max m (abs (float v))) 0.0
+    if rms <= 0.0 then nan else 20.0 * log10 (peak / rms)
+
+let private eqCoeffNames = [ "b0"; "b1"; "b2"; "a1"; "a2" ]
+
+/// The chain's audible half, written out as files to play against each other.
+///
+/// `wav` measures the compressor, which is the effect you can put a number on
+/// and the one you cannot hear: at this threshold and slope it moves a plucked
+/// string by under 2 dB. This verb is the other half — clipping and filtering,
+/// which are unmistakable — and **every stage in it already ships**. There is
+/// no new hardware here, only settings.
+///
+/// **Overdrive is the gain stage, not a new one.** `audioGain` saturates above
+/// unity, so a volume of 8x is a signal driven into the rail and clipped there.
+/// That is what an overdrive pedal is, and it comes out loudness-matched for
+/// free because the output sits at full scale either way — which is what makes
+/// the A/B honest rather than just louder.
+///
+/// **The wah is the seam.** The host designs a fresh peaking biquad per block
+/// and writes its five coefficients while the fabric filters; the fabric never
+/// computes a cosine. That is the same division of labour the register map
+/// exists for, running at audio rate — and it is why the sweep costs no
+/// hardware at all.
+let private fx (inPath: string) (prefix: string) =
+    let input = readWavFile inPath
+    printfn $"in:  {input.FrameCount} frames, {input.sampleRate} Hz, {input.channels} ch"
+
+    let report (label: string) (path: string) (w: WavData) =
+        writeWavFile path w
+        let left, right = peaks w
+        printfn $"  %-10s{label} crest %5.1f{crestDb w} dB   peaks {left}/{right}   {path}"
+
+    // Unity is a documented pass-through, so this doubles as a check that the
+    // stage is transparent when it is told to be.
+    let through (volume: uint64) =
+        let sim = Sim Batch.gainStage.def
+        sim.Poke("volume", volume)
+        sim.Poke("mute", 0UL)
+        runWavThroughSim sim defaultWavPorts 0 input
+
+    // One sweep up and back across the file, geometric so it moves by octaves
+    // rather than by hertz — a linear sweep spends most of its time up top
+    // where there is nothing to hear.
+    let wah () =
+        let sim = Sim Batch.eqStage.def
+        let blockFrames = 512
+        let blocks = (input.FrameCount + blockFrames - 1) / blockFrames
+        let heard = ResizeArray<int16>(input.samples.Length)
+
+        for block in 0 .. blocks - 1 do
+            let start = block * blockFrames
+            let count = min blockFrames (input.FrameCount - start)
+            let phase = float block / float blocks
+            let travel = 0.5 - 0.5 * cos (2.0 * System.Math.PI * phase)
+            let centreHz = 300.0 * ((3000.0 / 300.0) ** travel)
+
+            rbjDesign Peaking centreHz 6.0 10.0 (float input.sampleRate)
+            |> toQ230
+            |> List.iter2 (fun name value -> sim.Poke(name, value)) eqCoeffNames
+
+            // The same `sim` across every block, so the biquad's state carries
+            // over: a filter reset each block would click at every boundary.
+            let slice = { input with samples = Array.sub input.samples (start * 2) (count * 2) }
+            heard.AddRange (runWavThroughSim sim defaultWavPorts 0 slice).samples
+
+        { input with samples = heard.ToArray() }
+
+    let source = "(source)"
+    let clean = through gainUnity
+
+    report "clean" $"{prefix}-clean.wav" clean
+
+    // Unity is documented as a pass-through; on real audio it is worth saying
+    // whether it actually was, because "nearly" and "exactly" are different
+    // claims and only one of them is this stage's.
+    if clean.samples = input.samples then
+        printfn "             ...identical to the source, sample for sample"
+    report "overdrive" $"{prefix}-drive.wav" (through (8UL * gainUnity))
+    report "fuzz" $"{prefix}-fuzz.wav" (through (48UL * gainUnity))
+    // Silence on the end, so the repeats have somewhere to ring out. Without it
+    // the tail is cut at the last frame of the source and an echo sounds like a
+    // stutter that stops.
+    let withTail (milliseconds: float) (w: WavData) =
+        let extra = int (milliseconds / 1000.0 * float w.sampleRate)
+        { w with samples = Array.append w.samples (Array.zeroCreate (extra * 2)) }
+
+    // Delay in samples, from a time and the file's own rate. A number of
+    // samples typed here would mean something different the moment either moved.
+    let echo (milliseconds: float) (feedback: uint64) =
+        let sim = Sim Batch.echoStage.def
+        let source = withTail (4.0 * milliseconds) input
+        sim.Poke("delay", uint64 (milliseconds / 1000.0 * float input.sampleRate))
+        sim.Poke("feedback", feedback)
+        runWavThroughSim sim defaultWavPorts 0 source
+
+    report "wah" $"{prefix}-wah.wav" (wah ())
+
+    // Both are the same stage at different settings: this topology feeds its
+    // own output back, so every repeat is `feedback` times the last and there
+    // is no single-repeat setting. A short delay with a low feedback is what
+    // slapback actually is.
+    report "echo" $"{prefix}-echo.wav" (echo 320.0 (115UL * gainUnity / 256UL))
+    report "slapback" $"{prefix}-slap.wav" (echo 90.0 (77UL * gainUnity / 256UL))
+    printfn $"  %-10s{source} crest %5.1f{crestDb input} dB"
+    0
+
+/// A recording playing into the codec pins of a design open in the debugger.
+///
+/// The pin-level counterpart of the `wav` verb below, and the reason
+/// `ISimDevice` exists. `wav` drives the DSP stage's *stream* ports, so `i2sRx`
+/// and `i2sTx` are not in its path and there is nothing to look at until the
+/// run has finished. This drives the pins, so the clock generator and both
+/// framers are in the path, and the device rides the debugger's own clock —
+/// stepping one cycle steps the recording with it, and a breakpoint stops the
+/// audio where it stops the design.
+///
+/// **It is not a way to listen to a file.** A frame is `fabricHz / sampleRate`
+/// cycles — 2,048 here — so a second of audio is a hundred million of them and
+/// the debugger runs this design at about 153k a second. Open a short clip,
+/// stop on the frame
+/// that interests you, and reach for `runWavThroughI2s` when what you want is
+/// the whole file processed.
+let private listen (inPath: string) (outPath: string option) =
+    let input = readWavFile inPath
+    // Derived rather than written down: the link frames at the rate its
+    // divisors make, and a number typed here would outlive the divisors.
+    let cyclesPerFrame = board.fabricHz / int stockSampleRate
+
+    printfn $"in:  {input.FrameCount} frames, {input.sampleRate} Hz, {input.channels} ch"
+    printfn $"     {cyclesPerFrame} cycles a frame, {input.FrameCount * cyclesPerFrame} to play it out"
+
+    // The link frames at the board's rate whatever the file says, and the
+    // recording that comes back carries the file's header. A file at another
+    // rate still plays; it just comes back at a pitch this says out loud.
+    if abs (float input.sampleRate - stockSampleRate) > 1.0 then
+        printfn $"     note: the link frames at %.3f{stockSampleRate} Hz, not the file's {input.sampleRate}"
+
+    // The settings are AXI-Lite registers, and the debugger's watch panel drives
+    // *inputs*. So this window shows the chain running at its no-op resets and
+    // there is nothing in it to turn — worth saying rather than leaving someone
+    // hunting the watch list for a field beside `volume`.
+    printfn "     filter the signals for 'left' and watch audio_rx_out_left through limiter_out_left"
+    printfn "     to see one sample move down the chain, at the registers' no-op reset settings"
+
+    let source = WavI2sSource(separateCodecSimPins, input)
+
+    let code =
+        Warp11.SimView.Desktop.debugWith
+            "a WAV on the codec pins"
+            audioEffectsAxi.def
+            [ source.Attach ]
+
+    // Read once the window has closed rather than from inside it: `Output` is
+    // what has been heard *so far*, and what a run produced is only settled
+    // when the run is over.
+    match outPath, source.Output with
+    | Some path, Some heard ->
+        writeWavFile path heard
+        let inLeft, inRight = peaks input
+        let outLeft, outRight = peaks heard
+        printfn $"out: {heard.FrameCount} frames, peaks {inLeft}/{inRight} -> {outLeft}/{outRight}"
+
+        // Both ends of the run need saying, because the peaks above compare the
+        // whole input against whatever was heard and neither case is visible in
+        // the numbers. Close the window early and that is a whole file against
+        // part of one; leave it running past the end and the model holds its
+        // last frame, so the tail is neither the recording nor silence.
+        let unplayed = input.FrameCount - source.FramesPlayed
+        let past = heard.FrameCount - source.FramesPlayed
+
+        if unplayed > 0 then
+            printfn $"     the window closed with {unplayed} frames still to play, so that compares the whole file against part of it"
+        elif past > 0 then
+            printfn $"     the last {past} are past the recording, where the model repeats its final frame"
+
+        printfn $"wrote {path}"
+    | Some path, None -> printfn $"nothing was heard, so {path} was not written"
+    | None, _ -> ()
+
+    code
+
 [<EntryPoint>]
 let main argv =
     match argv with
@@ -484,6 +774,21 @@ let main argv =
     // can be diffed byte for byte. `settleCycles = 0` because the batch design
     // does not pre-run its first frame either — the comparison is only honest
     // if both see exactly the same sequence.
+    // The debugger with the recording attached. `out.wav` is optional: leave it
+    // off to step and look, give it to keep what came back.
+    | [| "listen"; inPath |] -> listen inPath None
+    | [| "listen"; inPath; outPath |] -> listen inPath (Some outPath)
+    // The audible demo: one file in, four out, nothing but settings between
+    // them.
+    | [| "fx"; inPath; prefix |] -> fx inPath prefix
+    // Rewrite the shipped `in.wav`. Committed so the commands above run as
+    // written, regenerable so it is not a file of unknown provenance.
+    | [| "sample"; outPath |] ->
+        let sample = sampleWav ()
+        writeWavFile outPath sample
+        let left, right = peaks sample
+        printfn $"wrote {outPath}: {sample.FrameCount} frames, {sample.sampleRate} Hz, 2 ch, peaks {left}/{right}"
+        0
     | [| "wav"; inPath; outPath |] ->
         let input = readWavFile inPath
         printfn $"in:  {input.FrameCount} frames, {input.sampleRate} Hz, {input.channels} ch"

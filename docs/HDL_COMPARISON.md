@@ -463,6 +463,48 @@ the combinational-read-of-a-block trap: a hidden cycle on silicon that
 this repo's Sim and
 Verilator both pass.
 
+### Delaying a stream
+
+A FIFO holds beats until someone takes them. A **delay line** holds them for a
+stated distance and hands them back on schedule — the same memory, a different
+question, and the one an echo, a comb filter, a chorus or a matched pipeline
+delay is actually asking.
+
+| HDL | |
+|---|---|
+| Chisel | `SyncReadMem` plus your own pointer, or `ShiftRegister(x, n)` for the register-only case |
+| SpinalHDL | `Delay(x, n)` in registers; `Mem` plus pointers past that |
+| Amaranth | `lib.memory` plus a counter; no delay-line primitive |
+| Clash | `delay`/`register` chains, or `blockRam` with an index you keep |
+| Warp 11 | `delayChain "name" width n x` in registers, `delayBuffer "name" 32768 fired tap x` in a block |
+
+Two primitives rather than one, split by intent instead of by a threshold —
+which is the opposite of what `streamFifo` does one section up, and deliberately
+so. A FIFO's storage is invisible because both storages give the same contract;
+a delay's is not, because below about sixty-four beats a register chain is
+smaller *and* exact at every tap, and a block RAM at that depth is a waste of a
+block. So `delayBuffer` names its floor and refuses below it, pointing at the
+register form by name.
+
+**The tap is a value, not a parameter.** Capacity is fixed at elaboration
+because it is a resource; how far back to read is an `Expr`, so a host register
+moves an echo from ten milliseconds to half a second with no rebuild. Every
+entry above leaves that to the author, and it is a place authors get it subtly
+wrong, because of the next paragraph.
+
+**The delay is measured in accepted beats, not in cycles**, and that distinction
+is the whole difficulty. The write pointer only advances on a beat the stage
+took, so a stalled stage freezes the line intact rather than clocking silence
+through it. The trap is that a block RAM's read register does *not* stop when
+the pointer does: hold the address one step ahead — the obvious way to spend the
+memory's cycle rather than declare it — and the line advances during a stall,
+which comes out as a delay one beat short of what was asked for. It is invisible
+without backpressure, so `delayBuffer`'s check runs the same stimulus under four
+stall patterns and requires the same answer from each. That bug was found by
+writing the check before believing the primitive, which is the only reason it is
+a paragraph here rather than a defect.
+
+
 ### Carrying a caller's data through a memory read
 
 | HDL | |

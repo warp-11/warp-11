@@ -2770,3 +2770,44 @@ let multibandStage =
 
             streamSink outPorts stage
             envelope ==> envOut)
+
+/// How deep the echo toy's line is. Small on purpose: the address arithmetic
+/// that wraps at 256 is the arithmetic that wraps at 32,768, and Verilator
+/// builds this one in a second.
+let echoDemoCapacity = 256
+
+/// `delayBuffer` on its own — a value in, the same value out `tap` accepted
+/// beats later.
+///
+/// At the primitive's own minimum capacity rather than a number typed here, so
+/// the toy cannot drift from the guard that sends shallow callers to
+/// `delayChain`.
+let delayTap =
+    defModule
+        "DelayTap"
+        (fun p ->
+            (p.inPort "value" 16,
+             p.inPort "enable" 1,
+             p.inPort "tap" (log2Exact delayBufferMinimum),
+             p.outPort "delayed" 16))
+        (fun (value, enable, tap, delayed) ->
+            delayBuffer "line" delayBufferMinimum enable tap value ==> delayed)
+
+/// The stereo echo, stream-driven, so a test picks the signal rather than
+/// taking whatever an oscillator gives it.
+///
+/// The interesting input is an impulse: what comes back is the impulse, then a
+/// copy every `delay` beats, each one `feedback` times the last. A stage whose
+/// spacing or decay is wrong is obvious in that and invisible in a sine.
+let audioEchoStage =
+    defModule
+        "AudioEchoStage"
+        (fun p ->
+            (p.inPort "delay" (log2Exact echoDemoCapacity),
+             p.inPort "feedback" 16,
+             streamInputPorts p "in" sampleLayout,
+             streamOutputPorts p "out" sampleLayout))
+        (fun (delay, feedback, inPorts, outPorts) ->
+            streamSource inPorts
+            |> audioEcho "AudioEcho" echoDemoCapacity "echo" delay feedback
+            |> streamSink outPorts)

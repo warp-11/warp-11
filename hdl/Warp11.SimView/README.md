@@ -23,17 +23,16 @@ building a non-desktop head — the browser one, say.
 open Warp11
 
 let blinker =
-    design "Blinker" (fun () ->
-        let enable = inputBit "enable"
-        let led = outputBit "led"
-        let count = reg "count" 24
-        If enable (fun () -> count + 1UL ==> count)
-        slice 23 23 count ==> led)
+    defModule
+        "Blinker"
+        (fun p -> (p.inPort "enable" 1, p.outPort "led" 1))
+        (fun (enable, led) ->
+            let count = reg "count" 24
+            If enable (fun () -> count + 1UL ==> count)
+            slice 23 23 count ==> led)
 
 [<EntryPoint>]
-let main _ =
-    Warp11.SimView.Desktop.debug "Blinker" blinker
-    0
+let main _ = Warp11.SimView.Desktop.debug "Blinker" blinker.def
 ```
 
 Run it and the debugger opens on *your* design: your signals down the left, a
@@ -135,6 +134,57 @@ once: GEP's cluster is 2.9 MB of Verilog and 203 ms to emit, and it runs at
 24.5k cycles/s with the whole of it on screen. A design that will not emit shows
 the elaboration error instead of throwing, which makes this the readable home
 for a `checkWidths` or `checkStreams` refusal.
+
+## Devices on the design's pins
+
+A debugger opened with `debug` steps a design that nothing is talking to. Its
+inputs sit where you leave them, which is the right picture for a counter and
+the wrong one for a front end — an I2S receiver with no converter on its line
+decodes silence forever.
+
+`debugWith` attaches **devices**: things that drive and read the design's pins
+around every cycle the session runs.
+
+```fsharp
+let source = WavI2sSource(separateCodecSimPins, readWavFile "speech.wav")
+
+Warp11.SimView.Desktop.debugWith "a WAV on the codec pins" design.def [ source.Attach ]
+|> ignore
+
+source.Output |> Option.iter (writeWavFile "heard.wav")
+```
+
+They ride `Run` and `Step` alike, which is the whole reason they live in the
+session rather than in a harness: **step one cycle and the attached world steps
+one cycle**, and a breakpoint stops the outside where it stops the logic.
+
+`ISimDevice` is two halves rather than one `Tick`, because the device does not
+own the clock:
+
+```fsharp
+type ISimDevice =
+    /// Before the tick: put this cycle's values on the design's inputs.
+    abstract Drive: unit -> unit
+    /// After the tick: read the design's outputs, and work out what the next
+    /// `Drive` should put on the wire.
+    abstract Sample: unit -> unit
+```
+
+The ordering is the contract — `Drive` writes, the cycle happens, `Sample`
+reads. A test loop, this session's run loop and `SimAxi`'s `advance` all want to
+be the thing that calls `sim.Tick()`, so a device that ticked for itself could
+be embedded in none of them.
+
+**What `debugWith` takes is a factory, not a device.** The session builds its own
+`Sim` and a device has to be constructed against *that* one. A caller that also
+wants to read the device afterwards keeps its own handle, which is what
+`WavI2sSource` is: `Attach` for the session, `Output` for you, read once the
+window has closed.
+
+`WavI2sDevice`, and the `I2sCodec` underneath it, are what the library ships
+today. [The I2S cookbook](https://warp11.org/cookbook/i2s.html) has the worked
+example, and `dotnet run --project Warp11.Effects -- listen Warp11.Effects/in.wav
+heard.wav` is it running, on a sample recording that project ships.
 
 ## Attaching to a design already running
 

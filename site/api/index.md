@@ -46,6 +46,8 @@ type and function is at [`Warp11`](/reference/warp11.html).
 | [`Sim`](/reference/warp11-sim.html) | the compiled cycle-accurate simulator, and the AXI slaves a harness drives it through |
 | [`Debug`](/reference/warp11-debug.html) | `IDebugSession` — step, run, watch, breakpoint, record |
 | [`Inventory`](/reference/warp11-inventory.html), [`Breakpoint`](/reference/warp11-breakpoint.html), [`Catalog`](/reference/warp11-catalog.html), [`Vcd`](/reference/warp11-vcd.html) | the debugger's substrate |
+| [`SimDevice`](/reference/warp11-simdevice.html) | `ISimDevice` — something attached to a running design's pins, driven around every cycle by a test loop or by the debugger |
+| [`SimI2s`](/reference/warp11-simi2s.html) | a software I2S converter on those pins, written against the standard rather than against our own framers |
 | [`Diff`](/reference/warp11-diff.html) | the differential oracle's testbench generator |
 
 ## Audio
@@ -53,4 +55,4 @@ type and function is at [`Warp11`](/reference/warp11.html).
 | module | what is in it |
 |---|---|
 | [`Audio`](/reference/warp11-audio.html) | I2S, biquads, FIR, gain, compressor, limiter, the 8-band multiband compressor |
-| [`Wav`](/reference/warp11-wav.html) | reading and writing WAV, and streaming one through a simulated design |
+| [`Wav`](/reference/warp11-wav.html) | reading and writing WAV, and playing one through a simulated design — `runWavThroughSim` at its stream ports, `runWavThroughI2s` and `WavI2sSource` at its I2S pins |

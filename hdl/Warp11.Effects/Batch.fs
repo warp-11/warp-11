@@ -329,6 +329,34 @@ let compressorStage =
             |> audioCompressor "AudioCompressor" "c" settings
             |> streamSink outPorts)
 
+/// How deep the echo line is: the next power of two above half a second at the
+/// rate this board frames. Derived rather than written down, so a change of
+/// divisors moves the buffer with the rate instead of leaving it a fixed number
+/// of samples that used to be half a second.
+///
+/// At 48,828 Hz that is 32,768 frames of 48 bits — around 44 block RAMs, which
+/// is a third of this part's supply and the number a board build would have to
+/// argue with. Nothing here is on the board yet, so it argues with nobody.
+let echoCapacity =
+    let wanted = int (stockSampleRate / 2.0)
+    let rec upTo n = if n >= wanted then n else upTo (n * 2)
+    upTo 1
+
+/// The echo alone, stream-driven — the delay line the rest of this file does
+/// not have.
+let echoStage =
+    defModule
+        "EchoStage"
+        (fun p ->
+            (p.inPort "delay" (log2Exact echoCapacity),
+             p.inPort "feedback" 16,
+             streamInputPorts p "in" sampleLayout,
+             streamOutputPorts p "out" sampleLayout))
+        (fun (delay, feedback, inPorts, outPorts) ->
+            streamSource inPorts
+            |> audioEcho "AudioEcho" echoCapacity "echo" delay feedback
+            |> streamSink outPorts)
+
 let limiterStage =
     defModule
         "LimiterStage"

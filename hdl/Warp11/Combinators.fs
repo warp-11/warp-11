@@ -310,3 +310,84 @@ let reverse (value: Expr) =
     match value with
     | Ref (_, t) -> catAll [ for i in 0 .. t.Width - 1 -> slice i i value ]
     | _ -> failwith "reverse needs a declared signal — assign the computed value to a wire first"
+
+// ---------------------------------------------------------------------------
+// Deep delay.
+
+/// The shortest delay worth a memory. Below this a `delayChain` is smaller,
+/// faster and exact at every tap, so the guard sends callers there rather than
+/// spending a block RAM on eight samples.
+let delayBufferMinimum = 64
+
+/// A delay measured in **accepted beats**, deep enough to need a memory and
+/// tapped at a distance the design can change while it runs.
+///
+/// `delayChain` is the same idea in registers: shallow, fixed, and every tap
+/// exposed. This is the other end — thousands of beats, one tap, and the tap is
+/// an `Expr`, so a host register can move an echo from 10 ms to half a second
+/// without re-elaborating anything. **Capacity is an elaboration constant
+/// because it is a resource**; the tap is a setting, and the two are different
+/// kinds of thing.
+///
+/// ```fsharp
+/// let heard = delayBuffer "echo" 32768 fired tapSamples (cat left right)
+/// ```
+///
+/// `enable` is what makes the delay a delay: the write pointer, and therefore
+/// the read address, move only on beats the stage accepted. A stalled stage
+/// freezes the line intact rather than clocking silence through it, which is
+/// the difference between a delay and a shift register that happens to be in a
+/// pipeline.
+///
+/// **The storage is block RAM and that is part of the contract here**, unlike
+/// `streamFifo` where it is chosen from the depth and invisible. A delay this
+/// deep in LUTs is not a trade anyone would take, and the shallow case already
+/// has a better answer one function up — so the guard names it instead of
+/// silently building the wrong thing.
+///
+/// **Valid taps are `2 .. capacity - 1`.** The read is presented one beat ahead
+/// so the memory's own cycle is spent rather than declared, which is what keeps
+/// this a value rather than something that hands a latency back; the cost is
+/// that a tap of 1 would need the word being written this beat, and a block RAM
+/// reads first. A one-beat delay is a register — `delayChain` — so the bound
+/// costs nothing real. A tap outside the range wraps, because the address is
+/// masked; it does not fail.
+let delayBuffer (name: string) (capacity: int) (enable: Expr) (tap: Expr) (value: Expr) : Expr =
+    if not (isPowerOfTwo capacity) then
+        failwith
+            $"delayBuffer '{name}' needs a power-of-two capacity, got %d{capacity} — the pointer wraps on the array, so a capacity between two powers would quietly hand you the larger buffer"
+
+    if capacity < delayBufferMinimum then
+        failwith
+            $"delayBuffer '{name}' at capacity %d{capacity} is below %d{delayBufferMinimum} — that is `delayChain '{name}' (width) %d{capacity}` in registers, without a block RAM"
+
+    let addrWidth = log2Exact capacity
+    let line = blockMem name addrWidth (width value)
+
+    let writePtr = reg $"{name}_write" addrWidth
+    memWrite line writePtr value enable
+    If enable (fun () -> writePtr + lit 1UL addrWidth ==> writePtr)
+
+    // The tap is the caller's width, not this buffer's: a host register is 8 or
+    // 16 bits whatever the capacity happens to be. Widening pads and narrowing
+    // slices, said once here rather than at every call site. It is read as
+    // unsigned, which a count of beats is.
+    let tapAddr =
+        if width tap > addrWidth then slice (addrWidth - 1) 0 tap
+        elif width tap < addrWidth then pad addrWidth tap
+        else tap
+
+    // The invariant is that the read register holds `line[writePtr - tap]` on
+    // every cycle, not only on the ones a beat lands.
+    //
+    // The read answers a cycle late, so the address presented now is read back
+    // after the edge — by which time the pointer has moved if and only if this
+    // beat was accepted. **So the address carries `enable`**, and that is not a
+    // refinement: with a plain `+ 1` the line advances during a stall, because
+    // the memory's read register keeps clocking while the pointer holds. It
+    // shows up as a delay one beat short of the tap, only when something
+    // upstream stalls — which is exactly what a stall-free test cannot see.
+    let readAddr = wire $"{name}_read_addr" addrWidth
+    writePtr + pad addrWidth enable - tapAddr ==> readAddr
+
+    (memReadPort line readAddr).data

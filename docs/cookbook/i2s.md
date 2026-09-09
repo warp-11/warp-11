@@ -544,6 +544,82 @@ rather than the first thing out of it.
 by a hand-built ideal frame. That is the only way to test one without the other,
 and it is what pins the frame convention itself.
 
+## Real audio through the pins
+
+Every loop above tests the link against stimulus someone made up. `Wav.fs`
+closes the last gap: a real recording played into the design's converter pins by
+the software codec, and whatever leaves the other line collected as a recording
+of its own.
+
+```fsharp
+let input = readWavFile "speech.wav"      // or toneWav 48_828 400 440.0 0.6
+let heard = runWavThroughI2s (Sim design.def) separateCodecSimPins 4 input
+writeWavFile "heard.wav" heard
+```
+
+The pin record is the one your design declared — `sharedBusSimPins` for
+`SharedBus`, `separateCodecSimPins` for `SeparateCodecs` — and `slack` is how
+many frames beyond the recording to keep running, so the last samples have time
+to reach the output line.
+
+**It is the pin-level counterpart of `runWavThroughSim`**, and the difference is
+the point. `runWavThroughSim` drives a design's `in_left`/`in_right` *stream*
+ports, which is right for judging a filter and puts neither `i2sRx` nor `i2sTx`
+in the path. This drives the pins, so the clock generator, both framers and
+everything between them are carrying real audio.
+
+| worth knowing | |
+|---|---|
+| **16 → 24 → 16 is lossless** | the conversion left-justifies into the 24-bit sample and rounds rather than truncating on the way back, so a null test through a pass-through is *exact*. A check written with a tolerance here would pass a design that quietly lost a bit |
+| **the output carries the link's pre-roll** | a design cannot answer before it has heard. Two frames for a bare link, more once there is a pipeline in the middle. They are left in rather than trimmed, because trimming needs the latency declared, and it would silently eat a recording that genuinely starts quiet |
+| **the model holds its last frame** | run past the end of the file and the codec keeps sending the frame it finished on. A tail that is neither the recording nor silence is that, not a fault in your design |
+| **the link frames at its own rate** | the file's header rate is carried into the output file untouched; the hardware frames at whatever the divisors make. A 44.1 kHz file through a 48.8 kHz link plays fine, about 10% fast |
+
+### The same recording in the debugger
+
+`WavI2sDevice` is an `ISimDevice` — something attached to a running design's
+pins — so the object that serves the harness above serves the step-through
+debugger too. Attached there, the recording advances with the design: **step one
+cycle and the audio steps one cycle**, and a breakpoint stops the signal where
+it stops the logic.
+
+The session builds its own `Sim`, so what it takes is a *factory* rather than a
+device. `WavI2sSource` holds both ends — `Attach` is what the session gets,
+`Output` is what you read once the window has closed:
+
+```fsharp
+let source = WavI2sSource(separateCodecSimPins, readWavFile "speech.wav")
+
+Warp11.SimView.Desktop.debugWith "a WAV on the codec pins" design.def [ source.Attach ]
+|> ignore
+
+source.Output |> Option.iter (writeWavFile "heard.wav")
+```
+
+`Warp11.Effects` ships that as a verb, and a sample recording to point it at, so
+there is something to run before you write any of it:
+
+```sh
+dotnet run --project Warp11.Effects -- listen Warp11.Effects/in.wav heard.wav
+```
+
+It opens `AudioEffectsAxi` — gain, one EQ band, a compressor, a limiter — with
+the file on its codec pins. Filter the signal list for `left` and the chain is
+there to watch a sample move down: `audio_rx_out_left`, `gain_out_left`,
+`eq_out_left`, `compressor_out_left`, `limiter_out_left`, `audio_tx_in_left`.
+Every register resets to a no-op, so at rest the sample arrives at the
+transmitter exactly as the converter delivered it, and the output file is
+sample-for-sample the input after two frames of pre-roll.
+
+**Two things it is not.** It is not a way to turn the knobs: the settings are
+AXI-Lite registers and the watch panel drives *inputs*, so nothing beside
+`volume` is editable — changing a setting means writing the register, and there
+is no host device to attach for that yet. And it is not a way to listen to a
+file. A frame is `fabricHz / sampleRate` cycles — 2,048 on this board — and the
+debugger runs this design at about **153k cycles/s**, so a second of wall clock
+is 75 frames: 1.5 ms of 48 kHz audio. Open a short clip, stop where it matters,
+and reach for `runWavThroughI2s` when what you want is the whole file processed.
+
 ## Gotchas
 
 | | |
@@ -557,6 +633,9 @@ and it is what pins the frame convention itself.
 | expecting the receiver to stall | it ignores `ready`. Add a `streamFifo` if you need slack |
 | a design that only transmits | declares no `sdout` and its `.xdc` binds fewer pins — do not copy a receiving design's constraints |
 | consuming a received stream without a sink | leaves its `ready` undriven, and elaboration fails with *child inputs were never driven: 'out_ready'*. Drive it: `lit 1UL 1 ==> received.ready` |
+| a WAV that is not stereo | `runWavThroughI2s` and `WavI2sSource` both refuse it by name. The link carries two slots; a mono file has no second one |
+| expecting the debugger to play a file | 1.5 ms of audio a second — see above. The debugger is for stopping on a frame, not for listening |
+| `source.Output` read while the window is open | it is what has been heard *so far*. Read it after `debugWith` returns |
 | a `reg` sharing a name with a port | *declared twice … an output port, then a reg*. One declaration per name, ports included — name the register `last_left_reg` |
 
 ## See also

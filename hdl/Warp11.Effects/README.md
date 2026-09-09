@@ -13,17 +13,80 @@ becomes the bitstream:
 
 ```sh
 cd hdl
-dotnet run -c Release --project Warp11.Effects -- wav in.wav out.wav
+dotnet run -c Release --project Warp11.Effects -- fx Warp11.Effects/in.wav out
 ```
 
 ```
-in:  48000 frames, 48000 Hz, 2 ch
-out: 47994 frames, peaks 23592/23592 -> 18191/18088
+in:  97656 frames, 48828 Hz, 2 ch
+  clean      crest  17.3 dB   peaks 27851/26149   out-clean.wav
+             ...identical to the source, sample for sample
+  overdrive  crest   3.4 dB   peaks 32768/32768   out-drive.wav
+  fuzz       crest   0.5 dB   peaks 32768/32768   out-fuzz.wav
+  wah        crest  16.8 dB   peaks 29669/28862   out-wah.wav
+  echo       crest  19.2 dB   peaks 29496/27470   out-echo.wav
+  slapback   crest  18.0 dB   peaks 29139/27199   out-slap.wav
 ```
 
-Those peaks are the compressor working: the loud passage is pulled down, the
-quiet one is not. 16-bit stereo WAV in, 16-bit stereo WAV out — you can listen
-to both.
+Play those six against each other. **Crest factor** — peak over RMS — is the
+number that says what happened: a plucked string is about 17 dB, a square wave
+is 0, so 17.3 → 0.5 is a guitar turned into a fuzz box by the fabric.
+
+`in.wav` ships with this project: a two-second E minor arpeggio and chord,
+Karplus-Strong — a buffer of noise round a delay line one period long, averaged
+two taps at a time, which is fifteen lines and recognisably a guitar. A steady
+sine would have been the wrong signal: no transient for a compressor to catch,
+no harmonics for a clipper to add to, nothing for a filter to move.
+`dotnet run --project Warp11.Effects -- sample Warp11.Effects/in.wav` writes it
+again, byte for byte, so it is a build product rather than a file of unknown
+provenance. Bring your own instead whenever you like; any 16-bit stereo WAV
+works.
+
+**Four of the six needed no new hardware.** Overdrive and fuzz are `audioGain`,
+which saturates above unity — a volume of 8× is a signal driven into the rail
+and clipped there, which is what an overdrive pedal is, and it comes out
+loudness-matched for free because the output sits at full scale either way.
+`clean` is the same stage at unity, and it comes back *identical to the source*,
+which is the pass-through the stage documents, checked on real audio.
+
+The wah is the seam this repository is about. The host designs a fresh peaking
+biquad per 512-frame block with `rbjDesign` and writes its five coefficients;
+the fabric filters and never computes a cosine. That is the register map's
+division of labour running at audio rate, and it costs no hardware at all.
+
+**The echo is the one that is new hardware.** It runs on `delayBuffer` — a
+delay measured in accepted beats over a block RAM, with the tap as a port rather
+than a parameter, so the delay time is a register a host can move. `audioEcho`
+feeds its own output back through the line, so every repeat is `feedback` times
+the one before; `feedback = 0` is an exact pass-through, the reset every control
+in this file takes. Both files are the same stage at different settings, because
+this topology has no single-repeat mode — a short delay at a low feedback is
+what slapback actually is.
+
+Measured on the tail, where the source is silent and every sample is echo:
+2164 → 972 → 437 → 196 RMS in successive 320 ms windows, which is ×0.449 a
+repeat against a feedback of 115/256 = 0.449.
+
+## Then measure the compressor
+
+```sh
+dotnet run -c Release --project Warp11.Effects -- wav Warp11.Effects/in.wav out.wav
+```
+
+```
+in:  97656 frames, 48828 Hz, 2 ch
+out: 97650 frames, peaks 27851/26149 -> 21589/20589
+```
+
+**This one you measure rather than hear**, and it is worth being straight about
+why. `ratio` is a slope of gain against excess, not an N:1 knob, so at the
+threshold and slope the board is calibrated for it takes **−1.97 dB off the
+first pluck's attack and −0.65 dB off the ring-out**. That is a compressor
+working — transients pulled down, decay left alone — and it is also about two
+decibels, which nobody hears without an A/B switch. The settings are the ones
+`audio_batch_first_light.rs` writes and the ones the ffmpeg reference below is
+built against, so they are calibration rather than taste.
+
+16-bit stereo WAV in, 16-bit stereo WAV out — you can listen to all of them.
 
 ## Then run it on the board
 
@@ -201,9 +264,33 @@ transcendental arithmetic.
 ```sh
 cd hdl
 dotnet run -c Release --project Warp11.Effects              # checks + Verilog line counts
+dotnet run -c Release --project Warp11.Effects -- sample in.wav             # rewrite the shipped sample
+dotnet run -c Release --project Warp11.Effects -- fx in.wav out              # clean/drive/fuzz/wah, audible
+dotnet run -c Release --project Warp11.Effects -- wav in.wav out.wav        # the DSP stage, headless
+dotnet run -c Release --project Warp11.Effects -- listen in.wav heard.wav   # the whole chain, in the debugger
+dotnet run -c Release --project Warp11.Effects -- debug [design]            # the debugger on the catalog
 dotnet run -c Release --project Warp11.Effects -- hardware <repo-root>
 ./run_differential.sh                                       # includes these four
 ```
+
+`wav` and `listen` are the two halves of the same idea and they enter the design
+at different places. `wav` drives the DSP stage's *stream* ports, which is what
+you want to hear a compressor work; `listen` plays the file into
+`AudioEffectsAxi`'s **I2S pins**, so the clock generator and both framers are in
+the path, and it does it inside the step-through debugger — the recording rides
+`Run` and `Step`, so stepping one cycle steps the audio with it.
+
+It is for stopping on a frame, not for listening: a frame is 2,048 cycles and
+the debugger runs this design at about 153k cycles/s, so a second of wall clock
+is 1.5 ms of audio. Filter the signals for `left` and watch `audio_rx_out_left`
+through `limiter_out_left` to see one sample cross the chain. The settings are
+AXI-Lite registers and the watch panel drives inputs, so what you see is the
+chain at its no-op resets — every register is designed to reset that way, which
+is why the file comes back sample-for-sample after two frames of pre-roll.
+[The I2S cookbook](https://warp11.org/cookbook/i2s.html) has the API behind it.
+
+The paths above are relative to `hdl/`, so the shipped sample is
+`Warp11.Effects/in.wav` from there.
 
 `hardware` writes each design's Verilog to `hardware/build/` **and** a Rust
 register layout to `runtime/core/src/audio_*_layout.rs`, both from the same

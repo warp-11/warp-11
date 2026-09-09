@@ -409,6 +409,100 @@ let audioLimiter (name: string) instName =
         threshold ==> io.threshold
         stereoSplice io.s s
 
+/// The ports of a stereo echo: the stream, how far back to read, and how much
+/// of what it reads comes back round.
+type AudioEchoPorts =
+    { /// The stereo stream through the stage.
+      s: StereoPorts
+      /// How far back the echo is read, in samples. At `stockSampleRate` a
+      /// delay of 16,000 is about a third of a second.
+      delay: Input
+      /// How much of the echo is fed back in, Q8.8 as every gain in this file
+      /// is: 0 is dry, `gainUnity / 2` halves each repeat, `gainUnity` would
+      /// never decay at all.
+      feedback: Input }
+
+/// Stereo echo over a memory-backed delay line.
+///
+///     written = saturate24(in + (echo * feedback) >> 8)
+///     out     = written
+///
+/// What leaves is also what goes back into the line, so every pass round is
+/// multiplied by `feedback` again and the repeats decay geometrically. With
+/// `feedback = 0` the stage is an exact pass-through — the reset value every
+/// control in this file takes, so a bitstream that has heard from no host still
+/// passes audio.
+///
+/// **`capacity` is a resource and `delay` is a setting**, which is why one is
+/// an argument and the other a port. The line is a block RAM and a design
+/// cannot grow one while it runs; the tap is arithmetic, so a host moves the
+/// echo time without a rebuild. `delayBuffer` is where that split is made.
+///
+/// The two channels share one line as a single packed frame — one memory rather
+/// than two, and a pair that cannot drift apart, which is what `sampleLayout`
+/// already means by a frame.
+let audioEchoDef (name: string) (capacity: int) : TypedModule<AudioEchoPorts> =
+    let wetWidth = sampleWidth + 17 - gainFracBits
+    let sumWidth = wetWidth + 1
+
+    defModule
+        name
+        (fun p ->
+            { s = stereoPorts p
+              delay = p.inPort "delay" (log2Exact capacity)
+              feedback = p.inPort "feedback" 16 })
+        (fun io ->
+            spliceHandshake io.s
+
+            // The line advances on beats the stage accepted, never on bare
+            // cycles: an echo measured in clocks would change pitch the first
+            // time something downstream stalled.
+            let fired = wireBit "fired"
+            (io.s.inValid &&& io.s.outReady) ==> fired
+
+            // Declared before the line reads it and driven after: the loop from
+            // `written` back to itself runs through the memory's registered
+            // read, so it is a recurrence rather than a combinational cycle.
+            let written = wire "written" sampleBits
+            let echoed = delayBuffer "line" capacity fired io.delay written
+
+            let feedbackSigned = wire "feedback_signed" (SInt 17)
+            widenUnsigned 17 io.feedback ==> feedbackSigned
+
+            let channel channelName (dry: Expr) (wetBits: Expr) =
+                let wet = wire $"{channelName}_wet" (SInt sampleWidth)
+                asSInt wetBits ==> wet
+
+                let product = wire $"{channelName}_product" (SInt(sampleWidth + 17))
+                mul wet feedbackSigned ==> product
+
+                let scaled = wire $"{channelName}_scaled" (SInt wetWidth)
+                shr gainFracBits product ==> scaled
+
+                let sum = wire $"{channelName}_sum" (SInt sumWidth)
+                add (pad sumWidth dry) (pad sumWidth scaled) ==> sum
+
+                let saturated = wire $"{channelName}_saturated" (SInt sampleWidth)
+                saturate sampleWidth sum ==> saturated
+                saturated
+
+            let left = channel "left" io.s.inLeft (sampleLeft echoed)
+            let right = channel "right" io.s.inRight (sampleRight echoed)
+
+            cat left right ==> written
+            left ==> io.s.outLeft
+            right ==> io.s.outRight)
+
+/// One instance under `instName`, called as a function: wire the two controls,
+/// splice the stream through.
+let audioEcho (name: string) (capacity: int) instName =
+    let io = (audioEchoDef name capacity).NewNamed instName
+
+    fun (delay: Expr) (feedback: Expr) (s: Stream<Expr * Expr>) ->
+        delay ==> io.delay
+        feedback ==> io.feedback
+        stereoSplice io.s s
+
 // The two halves every compressor in this file shares. Kept as functions
 // rather than modules deliberately: they declare into whichever module body
 // calls them, so a per-band unit and a stereo one emit the same nets under the

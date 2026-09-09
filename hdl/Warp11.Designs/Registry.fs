@@ -93,7 +93,11 @@ let catalog =
           entry "I2S link (transmit only)" (nameof i2sLinkTone) (fun () -> i2sLinkTone.def)
           entry "I2S link + half volume" (nameof i2sLinkHalfVolume) (fun () -> i2sLinkHalfVolume.def)
           entry "Select ladder (first match wins)" (nameof selectLadder) (fun () -> selectLadder.def)
-          entry "Max pool, combinational" (nameof maxPoolCombinational) (fun () -> maxPoolCombinational.def) ]
+          entry "Max pool, combinational" (nameof maxPoolCombinational) (fun () -> maxPoolCombinational.def)
+          entry "Delay tap (accepted beats)" (nameof delayTap) (fun () -> delayTap.def)
+          |> poking [ "enable", 1UL; "tap", 8UL ]
+          entry "Echo (memory delay line)" (nameof audioEchoStage) (fun () -> audioEchoStage.def)
+          |> poking [ "delay", 64UL; "feedback", 128UL; "in_valid", 1UL; "out_ready", 1UL ] ]
 
 let designs = catalog.entries
 

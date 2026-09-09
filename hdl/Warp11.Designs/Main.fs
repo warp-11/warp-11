@@ -112,7 +112,9 @@ let private diffDesigns () =
       i2sLinkTone.def
       i2sLinkHalfVolume.def
       selectLadder.def
-      multibandStage.def ]
+      multibandStage.def
+      delayTap.def
+      audioEchoStage.def ]
 
 /// Unity settings must be audibly transparent: gain at 1.0x unmuted,
 /// compression with a zero slope and 1.0x makeup, and a limiter threshold at
@@ -553,6 +555,106 @@ let private wavThroughI2sPins () : bool =
     && matches halved (fun v -> int16 ((int v + 1) >>> 1))
     && through.sampleRate = input.sampleRate
     && through.channels = 2
+
+/// `delayBuffer`'s defining property: the delay is measured in **accepted
+/// beats**, not in cycles.
+///
+/// A vector taken from a run that never stalls proves nothing here, and that is
+/// not hypothetical — this exact design passed one while being a beat short
+/// under backpressure, because a block RAM's read register keeps clocking while
+/// the write pointer holds. So the same stimulus runs at four stall patterns
+/// and every one of them has to give the same answer: what comes out at beat
+/// `n` is what went in at beat `n - tap`, whatever the cycles in between did.
+let private delayBufferCountsBeats () : bool =
+    let capacity = delayBufferMinimum
+
+    let holds (tap: int) (stalled: int -> bool) =
+        let sim = Sim delayTap.def
+        sim.Poke("tap", uint64 tap)
+
+        let offered = ResizeArray<uint64>()
+        let heard = ResizeArray<uint64>()
+        let mutable cycle = 0
+
+        while heard.Count < 4 * capacity && cycle < 100_000 do
+            let stalling = stalled cycle
+            let value = uint64 (offered.Count % 60_000) + 1UL
+            sim.Poke("value", value)
+            sim.Poke("enable", if stalling then 0UL else 1UL)
+
+            // Sampled before the tick, so the beat being read is the beat being
+            // offered — the same instant the design sees.
+            if not stalling then
+                heard.Add(sim.Peek "delayed")
+                offered.Add value
+
+            sim.Tick()
+            cycle <- cycle + 1
+
+        [ tap .. heard.Count - 1 ]
+        |> List.forall (fun beat -> heard[beat] = offered[beat - tap])
+
+    // A tap of 1 is out of range by construction — a block RAM reads first, so
+    // the word written this beat is not there to be read. That bound is
+    // documented rather than enforced, and `delayChain` is the answer below it.
+    [ 2; 3; 8; capacity - 1 ]
+    |> List.forall (fun tap ->
+        holds tap (fun _ -> false)
+        && holds tap (fun cycle -> cycle % 3 = 1)
+        && holds tap (fun cycle -> cycle % 2 = 0)
+        && holds tap (fun cycle -> (cycle / 7) % 2 = 0))
+
+/// The echo's shape: an impulse comes back every `delay` beats, each repeat
+/// `feedback` times the one before, and `feedback = 0` is an exact
+/// pass-through.
+///
+/// Spacing and decay rather than a golden waveform, because those are the two
+/// things the stage is: a tap that is off by one and a feedback path that is
+/// off by a shift both produce a perfectly plausible stream of repeats.
+let private audioEchoRepeats () : bool =
+    let impulse = 1UL <<< (sampleWidth - 4)
+
+    let taps (delay: int) (feedback: uint64) (beats: int) =
+        let sim = Sim audioEchoStage.def
+        sim.Poke("delay", uint64 delay)
+        sim.Poke("feedback", feedback)
+        sim.Poke("in_valid", 1UL)
+        sim.Poke("out_ready", 1UL)
+        let heard = ResizeArray<int * uint64>()
+
+        for beat in 0 .. beats - 1 do
+            sim.Poke("in_left", (if beat = 0 then impulse else 0UL))
+            sim.Poke("in_right", 0UL)
+
+            // Read on the beat rather than after the tick. The stage is
+            // combinational, so this is the value that leaves with the beat
+            // that produced it — sampling after the edge puts the dry impulse
+            // and its first repeat one apart from every later pair, which makes
+            // an evenly spaced echo look uneven.
+            let value = sim.Peek "out_left"
+            if value <> 0UL then heard.Add(beat, value)
+            sim.Tick()
+
+        List.ofSeq heard
+
+    let delay = 37
+    let repeats = taps delay 192UL (5 * delay)
+
+    let evenlySpaced =
+        repeats
+        |> List.pairwise
+        |> List.forall (fun ((a, _), (b, _)) -> b - a = delay)
+
+    let decaysByFeedback =
+        repeats
+        |> List.pairwise
+        |> List.forall (fun ((_, loud), (_, quiet)) -> quiet = loud * 192UL / uint64 gainUnity)
+
+    List.length repeats >= 4
+    && evenlySpaced
+    && decaysByFeedback
+    // Zero feedback leaves exactly the impulse and nothing after it.
+    && taps delay 0UL (3 * delay) = [ 0, impulse ]
 
 /// A device attached to a `DebugSession` really is driven by it.
 ///
@@ -4517,7 +4619,9 @@ let private mainDemo () =
     printfn $"selectFirst is ordered:       %b{selectFirstIsOrdered ()}"
     printfn $"SimI2s round trips:           %b{simI2sRoundTrips ()}"
     printfn $"WAV through the I2S pins:     %b{wavThroughI2sPins ()}"
-    printfn $"debugger drives its devices: %b{debugSessionDrivesDevices ()}"
+    printfn $"debugger drives its devices:  %b{debugSessionDrivesDevices ()}"
+    printfn $"delayBuffer counts beats:     %b{delayBufferCountsBeats ()}"
+    printfn $"echo repeats and decays:      %b{audioEchoRepeats ()}"
     printfn $"stream driver is lazy:        %b{simStreamDrivesLazily ()}"
     printfn $"i2sThrough is a pipeline:     %b{i2sThroughIsAPipeline ()}"
 
