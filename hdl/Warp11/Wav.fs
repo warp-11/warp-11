@@ -26,8 +26,33 @@ type WavData =
     /// Frames rather than samples: a stereo file has two samples per frame.
     member this.FrameCount = this.samples.Length / this.channels
 
+/// `WAVE_FORMAT_EXTENSIBLE`: a file that carries its real format in a GUID at
+/// the end of the fmt chunk rather than in the tag. Ordinary 16-bit PCM is
+/// written this way by a great many encoders, so rejecting the tag rejects the
+/// audio for its packaging.
+let private formatExtensible = 0xFFFEus
+
+/// A `KSDATAFORMAT_SUBTYPE_*` GUID past its first two bytes — the fixed suffix
+/// `0000-0010-8000-00AA00389B71` that every one of them shares, stored the way
+/// a GUID is stored.
+///
+/// The two bytes ahead of it are the format tag the file would have carried
+/// directly. Matching the suffix first is what makes reading them safe: an
+/// unrelated GUID that happened to begin `01 00` would otherwise pass for PCM.
+let private subFormatSuffix =
+    [| 0x00uy; 0x00uy
+       0x00uy; 0x00uy
+       0x10uy; 0x00uy
+       0x80uy; 0x00uy; 0x00uy; 0xAAuy; 0x00uy; 0x38uy; 0x9Buy; 0x71uy |]
+
 /// Read a 16-bit PCM WAV. Chunk-walking rather than assuming a 44-byte header,
 /// because real files carry LIST and fact chunks ahead of the data.
+///
+/// `WAVE_FORMAT_EXTENSIBLE` is read as the format its subformat GUID names, so
+/// a file whose samples are ordinary PCM decodes whichever way its encoder
+/// chose to say so. What is still refused is refused for the audio rather than
+/// the wrapper: a float or companded subformat, or a container whose bits are
+/// not all data.
 let readWav (bytes: byte[]) : WavData =
     if bytes.Length < 12 then failwith "not a WAV file: too short"
     if Text.Encoding.ASCII.GetString(bytes, 0, 4) <> "RIFF" then failwith "not a RIFF file"
@@ -51,7 +76,20 @@ let readWav (bytes: byte[]) : WavData =
     match walk 12 None None with
     | Some (fmtAt, fmtSize), Some (dataAt, dataSize) ->
         if fmtSize < 16 then failwith "malformed fmt chunk"
-        let audioFormat = int (BitConverter.ToInt16(bytes, fmtAt))
+        let declaredFormat = BitConverter.ToUInt16(bytes, fmtAt)
+        let extensible = declaredFormat = formatExtensible
+
+        // The format the samples actually are, once the packaging is off.
+        let audioFormat =
+            if not extensible then
+                int declaredFormat
+            elif fmtSize < 40 then
+                failwith $"WAVE_FORMAT_EXTENSIBLE needs a 40-byte fmt chunk, got {fmtSize}"
+            elif Array.sub bytes (fmtAt + 26) subFormatSuffix.Length <> subFormatSuffix then
+                failwith "unrecognised WAVE_FORMAT_EXTENSIBLE subformat"
+            else
+                int (BitConverter.ToUInt16(bytes, fmtAt + 24))
+
         if audioFormat <> 1 then failwith $"only PCM is supported, got format {audioFormat}"
         let channels = int (BitConverter.ToInt16(bytes, fmtAt + 2))
         let sampleRate = BitConverter.ToInt32(bytes, fmtAt + 4)
@@ -59,6 +97,17 @@ let readWav (bytes: byte[]) : WavData =
 
         if bitsPerSample <> 16 then
             failwith $"only 16-bit PCM is supported, got {bitsPerSample}"
+
+        // An extensible file states the container separately from how much of
+        // it is signal — 24-bit samples in 32-bit containers is the common
+        // case. Reading the padding as data would be quietly wrong rather than
+        // loudly unsupported, so say so. Zero means "all of it", which is what
+        // an encoder writes when the two agree.
+        if extensible then
+            let validBits = int (BitConverter.ToUInt16(bytes, fmtAt + 18))
+
+            if validBits <> 0 && validBits <> bitsPerSample then
+                failwith $"{validBits} valid bits in a {bitsPerSample}-bit container is not supported"
 
         let count = dataSize / 2
         let samples = Array.init count (fun i -> BitConverter.ToInt16(bytes, dataAt + 2 * i))

@@ -522,6 +522,68 @@ let private i2sHandWiredCodec =
             let received = i2sRx "I2sRx" "i2s_rx" clocks.sclkRxTick clocks.lrclk sdout
             i2sTx "I2sTx" "i2s_tx" clocks.sclkTxTick clocks.lrclk received ==> sdin)
 
+/// `WAVE_FORMAT_EXTENSIBLE` is the same audio packaged the long way, and a
+/// great many encoders write ordinary 16-bit PCM that way — including the
+/// recordings this repo's own tools produce. The property is that the two
+/// packagings decode to the *same* `WavData`, which is what a golden vector
+/// could not say: a vector would pass a reader that decoded both wrongly and
+/// identically.
+///
+/// The negative half matters as much, because the subformat GUID is the only
+/// thing that says the samples are PCM. A float file wearing the extensible
+/// tag has to be refused, and so does a GUID that merely *begins* the way the
+/// PCM one does — otherwise the check would be reading two bytes of an
+/// unrelated identifier and calling the answer a format.
+let private wavReadsExtensibleHeader () : bool =
+    let source = toneWav 48_000 64 440.0 0.5
+    let plain = writeWav source
+
+    // Every `KSDATAFORMAT_SUBTYPE_*` past its first two bytes.
+    let pcmGuidSuffix =
+        [| 0x00uy; 0x00uy
+           0x00uy; 0x00uy
+           0x10uy; 0x00uy
+           0x80uy; 0x00uy; 0x00uy; 0xAAuy; 0x00uy; 0x38uy; 0x9Buy; 0x71uy |]
+
+    // The same file with a 40-byte extensible fmt chunk in place of the
+    // 16-byte one. `writeWav`'s layout is fixed, so the fmt body is at 20 and
+    // the data chunk begins at 36.
+    let repackage (subFormat: uint16) (validBits: uint16) (guidSuffix: byte[]) =
+        let head = Array.sub plain 0 20
+        let fmtBody = Array.sub plain 20 16
+        let rest = Array.sub plain 36 (plain.Length - 36)
+
+        Array.blit (System.BitConverter.GetBytes 40) 0 head 16 4
+        Array.blit (System.BitConverter.GetBytes 0xFFFEus) 0 fmtBody 0 2
+
+        let extension =
+            Array.concat
+                [ System.BitConverter.GetBytes 22us // cbSize
+                  System.BitConverter.GetBytes validBits
+                  System.BitConverter.GetBytes 3u // channel mask: front left, front right
+                  System.BitConverter.GetBytes subFormat
+                  guidSuffix ]
+
+        let out = Array.concat [ head; fmtBody; extension; rest ]
+        Array.blit (System.BitConverter.GetBytes(out.Length - 8)) 0 out 4 4
+        out
+
+    let rejects (bytes: byte[]) =
+        try
+            readWav bytes |> ignore
+            false
+        with _ ->
+            true
+
+    // Zero valid bits means "the whole container", which is what an encoder
+    // writes when the two agree; 16 states the same thing explicitly.
+    readWav (repackage 1us 0us pcmGuidSuffix) = source
+    && readWav (repackage 1us 16us pcmGuidSuffix) = source
+    && readWav plain = source
+    && rejects (repackage 3us 0us pcmGuidSuffix) // IEEE float
+    && rejects (repackage 1us 0us (Array.create 14 0uy)) // PCM tag, wrong GUID
+    && rejects (repackage 1us 12us pcmGuidSuffix) // padding read as signal
+
 /// Real audio through the real framers, from a file — the leg
 /// `notes/DEVICES.md` UC3 exists for.
 ///
@@ -4653,6 +4715,7 @@ let private mainDemo () =
     printfn $"selectFirst is ordered:       %b{selectFirstIsOrdered ()}"
     printfn $"SimI2s round trips:           %b{simI2sRoundTrips ()}"
     printfn $"WAV through the I2S pins:     %b{wavThroughI2sPins ()}"
+    printfn $"WAV extensible header:        %b{wavReadsExtensibleHeader ()}"
     printfn $"debugger drives its devices:  %b{debugSessionDrivesDevices ()}"
     printfn $"WAV through stream ports:     %b{wavThroughStreamPorts ()}"
     printfn $"delayBuffer counts beats:     %b{delayBufferCountsBeats ()}"
