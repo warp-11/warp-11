@@ -4,8 +4,8 @@
  * read by the fabric, pushed through the 8-band multiband compressor, and
  * written back.
  *
- * Replaces the Kotlin app of the same name, which left with the hearing-aid
- * vertical in 2026-07. The register map is different; nothing of the old app
+ * Replaces the Kotlin app of the same name, which left with the Kotlin stack
+ * in 2026-07. The register map is different; nothing of the old app
  * survives but the name.
  */
 

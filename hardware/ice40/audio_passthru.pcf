@@ -1,0 +1,46 @@
+# iCEBreaker with a Digilent Pmod I2S2 in PMOD1A.
+#
+# Pin numbers are the iCE40UP5K-SG48 package balls, cross-checked against two
+# independent published sources that agree — the amaranth-boards and migen
+# board definitions, both of which give PMOD1A as `4 2 47 45 / 3 48 46 44`,
+# clk12 as 35 and the LEDs as 11 (red) and 37 (green).
+#
+# **The Pmod ordering is the other half, and it is not the KV260's.** The
+# connector's rows are the same as the KV260 carrier's — the D/A on the top row
+# and the A/D on the bottom, each with its own MCLK/LRCK/SCLK — so this file is
+# `hardware/vivado/audio_passthru_pins.xdc` with Xilinx package pins swapped for
+# Lattice ones, signal for signal and in the same order. Read the two side by
+# side before trusting either.
+#
+#   Pmod pin   signal      PMOD1A     UP5K pin
+#   1          D/A MCLK    P1A1       4
+#   2          D/A LRCK    P1A2       2
+#   3          D/A SCLK    P1A3       47
+#   4          D/A SDIN    P1A4       45
+#   7          A/D MCLK    P1A7       3
+#   8          A/D LRCK    P1A8       48
+#   9          A/D SCLK    P1A9       46
+#   10         A/D SDOUT   P1A10      44
+#
+# No `-nowarn` anywhere, deliberately: every line here must bind a port that
+# exists, and `build.sh` checks the other direction — that every port has a
+# line. Between them an unbound pin is a failed build rather than a signal
+# nextpnr quietly placed somewhere convenient.
+
+set_io clk12   35
+
+# --- Top row: D/A (line out) ---
+set_io mclk     4
+set_io lrclk    2
+set_io sclk    47
+set_io sdin    45
+
+# --- Bottom row: A/D (line in) ---
+set_io mclk2    3
+set_io lrclk2  48
+set_io sclk2   46
+set_io sdout   44
+
+# --- On-board indicators, active low ---
+set_io ledr_n  11
+set_io ledg_n  37

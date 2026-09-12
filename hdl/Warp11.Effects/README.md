@@ -212,6 +212,35 @@ Only `audioBatchAxi` and `audioToneAxi` have a working bitstream path today;
 the two that *receive* audio do not, for one specific reason — see
 [To the board](#to-the-board).
 
+### The same ladder on an iCEBreaker
+
+`Ice.fs` carries the first two rungs again for a part with no host on it:
+`audioToneIce` and `audioPassthruIce`, over a Pmod I2S2, building to an iCE40
+UP5K bitstream through [`hardware/ice40/`](../../hardware/ice40/README.md). The
+hardware below them is unchanged — the same `i2sPins`, `i2sLink` and
+`toneGenerator` the KV260 apps call — and what differs is entirely outside the
+design:
+
+| | KV260 | iCEBreaker |
+|---|---|---|
+| fabric clock | 100 MHz from the PS | 24 MHz from an `SB_PLL40_PAD` |
+| frame rate | 48 828 Hz | 46 875 Hz |
+| controls | AXI-Lite register map | none — fixed function |
+| the two taps | `receivedCount`, `lastLeft` | the two on-board LEDs |
+| reset | the PS | a counter, released on PLL lock |
+
+The rate is not a preference. MCLK has to be 256x the frame rate for a CS5343 to
+lock, MCLK is made by toggling a register, so the fastest a design can present is
+half its fabric clock — and 24 MHz / 512 is 46 875 Hz exactly. 48 kHz is
+unavailable from a 12 MHz crystal, and `i2sMasterHz` refuses it rather than
+landing 2.3% out.
+
+**Fixed function is the same property as the KV260 apps' no-op defaults, arrived
+at from the other side.** There, every register resets to something that passes
+audio because the bitstream ships without a host daemon; here there is no host
+to write one, so the tone plays on load and the passthru passes on load because
+there is nothing else it could do.
+
 ## The shape of it
 
 ```
@@ -402,6 +431,7 @@ and `audio-passthru` exist, and they predate this code.
 ## Files
 
 - `Wrappers.fs` — the four register maps and the four designs
+- `Ice.fs` — the same front end on an iCEBreaker: no slave, LEDs for the taps
 - `Main.fs` — the checks, `diff`, and `hardware`
 - `../Warp11/Audio.fs` — the stdlib tier all of this is assembled from
 - `../Warp11.Designs/Designs.fs` — `audioChain`, `audioTone`, `i2sLoopback`:

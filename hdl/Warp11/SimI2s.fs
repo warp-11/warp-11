@@ -22,7 +22,7 @@
 /// tautology.
 ///
 /// **What it does not prove**: the same person can misread a datasheet twice,
-/// so an independent implementation agreeing is not a real ICS-43434 agreeing.
+/// so an independent implementation agreeing is not a real converter agreeing.
 /// This narrows the bench step; it does not replace it.
 [<AutoOpen>]
 module Warp11.SimI2s
@@ -41,7 +41,7 @@ type I2sSimPins =
       /// The line the design drives and the model samples. }
       fromDesign: string }
 
-/// The MEMS shape: `i2sPins p SharedBus`.
+/// The shared-bus shape: `i2sPins p SharedBus`.
 let sharedBusSimPins =
     { bitClock = "bclk"
       wordSelect = "ws"

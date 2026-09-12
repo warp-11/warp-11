@@ -267,7 +267,7 @@ let peaks (w: WavData) : int * int =
 // debugger — attach it to a `DebugSession` and stepping the design steps the
 // recording with it.
 
-/// A WAV playing into a design's microphone line, and what leaves its converter
+/// A WAV playing into a design's receive line, and what leaves its transmit
 /// line collected as a new one.
 ///
 /// **The output carries the link's pre-roll.** A design cannot answer before it
@@ -345,7 +345,7 @@ let runWavThroughI2s (sim: Sim) (pins: I2sSimPins) (slack: int) (input: WavData)
 /// is what the caller reads once the window has closed.
 ///
 ///     let source = WavI2sSource(sharedBusSimPins, readWavFile "speech.wav")
-///     debugWith "hearing aid" design [ source.Attach ]
+///     debugWith "audio chain" design [ source.Attach ]
 ///     source.Output |> Option.iter (writeWavFile "heard.wav")
 type WavI2sSource(pins: I2sSimPins, input: WavData) =
     let mutable device: WavI2sDevice option = None

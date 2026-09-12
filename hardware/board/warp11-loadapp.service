@@ -5,7 +5,7 @@
 # it) after dfx-mgrd is up.
 #
 # Change the app: edit WARP11_APP below to the xmutil app you want as default
-# (e.g. audio-wdrc, audio-wdrc-mems, mandel, gol). The app must already be
+# (e.g. audio-passthru, audio-batch, mandel, gol). The app must already be
 # installed under /lib/firmware/xilinx/<app>/ (deployBitstreamToBoard does that).
 #
 # Install (one-time):
@@ -29,7 +29,7 @@ Wants=dfx-mgrd.service
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-Environment=WARP11_APP=audio-wdrc-mems
+Environment=WARP11_APP=audio-passthru
 # dfx-mgrd needs a moment after start to accept socket connections.
 ExecStartPre=/bin/sleep 5
 # Unload whatever the boot default was (ignore failure if nothing is loaded).

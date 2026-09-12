@@ -8,6 +8,7 @@
 
     <ItemGroup>
         <Compile Include="Wrappers.fs"/>
+        <Compile Include="Ice.fs"/>
         <Compile Include="Batch.fs"/>
         <Compile Include="Main.fs"/>
     </ItemGroup>

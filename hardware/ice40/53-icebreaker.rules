@@ -1,0 +1,30 @@
+# iCEBreaker FPGA (FTDI FT2232H) — raw USB access for iceprog.
+#
+# Install:
+#   sudo cp hardware/ice40/53-icebreaker.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules && sudo udevadm trigger
+#   # then unplug and replug the board
+#
+# **Why it is needed, and why the symptom misleads.** Without a rule the raw USB
+# node under /dev/bus/usb is root:root 0664 — a normal user has read but not
+# write, and libftdi needs both. What iceprog then prints is
+#
+#   Can't find iCE FTDI USB device (vendor_id 0x0403, device_id 0x6010 ...)
+#
+# which reads like the board is absent or the cable is dead, and sends you
+# looking at the hardware. `ls -l /dev/bus/usb/<bus>/<dev>` is what tells you
+# otherwise.
+#
+# GROUP=plugdev covers the console user by group membership; TAG+="uaccess"
+# additionally grants whoever owns the active seat an ACL, so this keeps working
+# if group membership changes.
+#
+# 0x6010 is the FT2232H on the iCEBreaker; 0x6014 is the FT232H that iceprog
+# also accepts, listed here so a different board needs no second rule.
+SUBSYSTEM=="usb", ATTR{idVendor}=="0403", ATTR{idProduct}=="6010", GROUP="plugdev", MODE="0660", TAG+="uaccess"
+SUBSYSTEM=="usb", ATTR{idVendor}=="0403", ATTR{idProduct}=="6014", GROUP="plugdev", MODE="0660", TAG+="uaccess"
+
+# The FT2232H's second channel is a plain UART (/dev/ttyUSB1) and is what the
+# FTDI host window will use. Granted by seat ACL rather than by adding the user
+# to `dialout`, which would need a logout to take effect.
+SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6010", MODE="0660", TAG+="uaccess"

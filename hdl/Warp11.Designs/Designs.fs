@@ -2697,7 +2697,7 @@ let selectLadder =
 // three port sets come out with the names the constraint files bind, and the
 // byte-identity check next door says the machinery inside is the hand-wiring.
 
-/// A shared-bus duplex link — the MEMS shape. Four pins, no MCLK, and a body
+/// A shared-bus duplex link. Four pins, no MCLK, and a body
 /// that mentions no clock at all: pins in, streams out, straight through.
 let i2sLinkPassthru =
     defModule

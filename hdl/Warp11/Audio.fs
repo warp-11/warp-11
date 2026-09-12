@@ -756,9 +756,8 @@ let audioCompressorDef (name: string) : TypedModule<AudioCompressorPorts> =
 /// them the same width, handed over positionally: swapping attack and release
 /// elaborates, passes every width check, and produces a compressor that pumps
 /// instead of one that breathes. Named fields make the swap unwriteable, and a
-/// host-facing register map fills the record in one place (`aidSettings` in the
-/// hearing aid, `effectsSettings` in the audio example) so the map itself stops
-/// at the top of the design.
+/// host-facing register map fills the record in one place (`effectsSettings` in
+/// the audio example) so the map itself stops at the top of the design.
 type CompressorSettings =
     { threshold: Expr
       ratio: Expr
@@ -799,9 +798,16 @@ let audioCompressor (name: string) instName =
 /// Phase-accumulator width. Frequency = Fs * step / 2^tonePhaseWidth.
 let tonePhaseWidth = 24
 
-/// Phase increment for ~440 Hz at Fs ~= 48.83 kHz (the i2sMaster defaults on a
-/// 100 MHz fabric clock): round(440 / 48828.125 * 2^24).
-let toneStep440 = 151199UL
+/// The phase increment that plays `hz` at a link running at `fs`.
+///
+/// **Derived rather than written down**, because the step and the frame rate
+/// are the same fact twice: a constant picked for one Fs plays a different note
+/// the moment a design moves to a board that frames at another, and a tone
+/// generator that is 4% flat is not a failure anyone notices on a bench — it is
+/// still a sound. `sampleRateOf` supplies the `fs` a design actually achieves,
+/// so neither number is restated.
+let toneStepFor (fs: float) (hz: float) : uint64 =
+    uint64 (round (hz / fs * float (1 <<< tonePhaseWidth)))
 
 /// The output half of a stereo stage's ports — what a source declares.
 type StereoSourcePorts =
@@ -1223,8 +1229,9 @@ let i2sMasterDefault name =
 let i2sRateTolerance = 0.01
 
 /// The nominal MCLK a converter expects, as a multiple of the sample rate.
-/// 256x is what the CS5343/CS4344 want and what the stock divisors produce; a
-/// MEMS front end ignores MCLK entirely.
+/// 256x is what the CS5343/CS4344 want and what the stock divisors produce. A
+/// shared-bus pinout declares no MCLK pin at all, so the number does not reach
+/// anything there.
 let private i2sMclkRatio = 256
 
 /// The clock generator asked for a **sample rate** rather than for divisors.
@@ -1280,6 +1287,23 @@ let sampleRateOf (fabricHz: int) (sclkHalfDiv: int) (bitsPerSlot: int) : float =
 /// clock passes its own.
 let stockSampleRate =
     sampleRateOf kv260.fabricHz stockSclkHalfDiv stockBitsPerSlot
+
+/// Phase increment for 440 Hz at the stock rate — the tone every KV260 audio
+/// app plays.
+///
+/// **Declared beside the rate rather than beside `toneStepFor`**, which is the
+/// whole reason it is a derivation: the step depends on the frame rate, the
+/// frame rate depends on the divisors and the board, and putting the three in
+/// one place is what stops a divisor changing while the step stays put. A
+/// design on another clock calls `toneStepFor` with its own.
+///
+/// **It had already drifted.** The constant written here was 151,199, under a
+/// comment quoting this very formula at 48 828.125 Hz — which gives 151,183.
+/// 151,199 is what 48 823 Hz gives, a frame rate this repository has not run at
+/// for some time. The tone was 440.05 Hz rather than 440, which is inaudible
+/// and beside the point: a number that has quietly stopped agreeing with its own
+/// stated derivation is the failure mode, and the size of the error is luck.
+let toneStep440 = toneStepFor stockSampleRate 440.0
 
 /// The I2S receiver's ports. Clocking arrives from `i2sMaster` rather than
 /// being recovered, which is what FPGA-master operation means.
@@ -1472,9 +1496,10 @@ let i2sTx (name: string) instName =
 /// exactly these names, and a design must declare exactly what its `.xdc`
 /// binds or it will not build for the board.
 type I2sPinout =
-    /// One clock bus shared by every chip on it, and no MCLK — the MEMS shape:
-    /// `bclk`, `ws`, `sd_in`, `sd_out`. Digital microphones want no master
-    /// clock and a DAC like the UDA1334A makes its own.
+    /// One clock bus shared by every chip on it, and no MCLK: `bclk`, `ws`,
+    /// `sd_in`, `sd_out`. The shape a board takes when every device on the bus
+    /// derives its timing from the bit and word clocks — a source that wants no
+    /// master clock, and a sink that makes its own.
     | SharedBus
     /// Separate converters on separate connector rows, each with its own clock
     /// trio — the Pmod I2S2 shape: `mclk`/`sclk`/`lrclk` and `sdin` for the
@@ -1639,9 +1664,9 @@ let i2sTxLink (prefix: string) (pins: I2sTxPins) (fabricHz: int) (targetFs: int)
 
 // ---------------------------------------------------------------------------
 // Multiband compression. Generic DSP: an 8-band crossover feeding a compressor
-// per band. Mastering, broadcast loudness and hearing-aid fitting all want the
-// same machine — what differs is only where the per-band makeup gains come
-// from, and those arrive as register values.
+// per band. Mastering, broadcast loudness and any per-band level prescription
+// all want the same machine — what differs is only where the per-band makeup
+// gains come from, and those arrive as register values.
 
 /// How many bands the multiband compressor has. Eight, and stated here rather
 /// than repeated: the crossover list, the register map and the per-band
@@ -1915,7 +1940,7 @@ type MultibandCompressorPorts =
 ///
 /// Per-band makeup gains are the whole point of the shape: they are Q8.8
 /// register values, so what the module is *for* — mastering, broadcast
-/// loudness, a hearing-aid prescription — lives in whatever host writes them,
+/// loudness, any per-band prescription — lives in whatever host writes them,
 /// not in the fabric.
 ///
 /// `threshold` / `ratio` / `attack` / `releaseRate` are shared across bands; a

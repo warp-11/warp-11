@@ -243,7 +243,7 @@ ssh ubuntu@192.168.1.172 'systemctl --user disable --now mandel-daemon.service' 
 ```
 
 (The JVM units this convention was written for — `audio-server`, `gol-server`,
-`mandel-server`, `wdrc-server` — are all gone as of 2026-08-13. The Rust
+`mandel-server` — are all gone as of 2026-08-13. The Rust
 daemons need it less: both set `StartLimitBurst=3`, so they give up with the
 reason in the journal rather than storming.)
 

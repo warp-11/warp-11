@@ -1,0 +1,27 @@
+# iCEBreaker with a Digilent Pmod I2S2 in PMOD1A, transmit only.
+#
+# The same map as `audio_passthru.pcf` with the A/D row left out, because the
+# tone design has nothing to receive and its ports are the four the D/A needs.
+# The converter on the bottom row simply sits there unclocked.
+#
+# Pin numbers cross-checked against the amaranth-boards and migen iCEBreaker
+# definitions: PMOD1A is `4 2 47 45 / 3 48 46 44`, clk12 is 35, LEDs are 11
+# (red) and 37 (green).
+#
+#   Pmod pin   signal      PMOD1A     UP5K pin
+#   1          D/A MCLK    P1A1       4
+#   2          D/A LRCK    P1A2       2
+#   3          D/A SCLK    P1A3       47
+#   4          D/A SDIN    P1A4       45
+
+set_io clk12   35
+
+# --- Top row: D/A (line out) ---
+set_io mclk     4
+set_io lrclk    2
+set_io sclk    47
+set_io sdin    45
+
+# --- On-board indicators, active low ---
+set_io ledr_n  11
+set_io ledg_n  37

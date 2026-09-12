@@ -1,8 +1,7 @@
 # How do I send and receive audio over I2S?
 
-**You want:** samples off a converter or a microphone, and samples back out to a
-DAC — with your design owning the clock and the rest of it looking like ordinary
-streams.
+**You want:** samples off a converter, and samples back out to one — with your
+design owning the clock and the rest of it looking like ordinary streams.
 
 Three modules do the whole job. One generates the clocks, one turns the incoming
 serial line into a stereo stream, one turns a stereo stream back into a serial
@@ -69,8 +68,8 @@ the rest, which is why a 24-bit design and a 16-bit converter can share a wire.
 Many codecs additionally want a **master clock** — a much faster oversampling
 clock, conventionally 256 × Fs — to run their internal converters and digital
 filters. It is a separate signal that the I2S standard says nothing about.
-`i2sMaster` generates one because the Pmod codecs need it; MEMS microphones and
-self-clocking DACs do not, and there `mclk` simply goes unread.
+`i2sMaster` generates one because the Pmod codecs need it; devices that derive
+everything from the bit clock do not, and there `mclk` simply goes unread.
 
 ## How Warp 11 does it
 
@@ -124,14 +123,14 @@ builder for the body:
 ```fsharp
 defModuleClocked
     axiClock
-    "AudioWdrcMems_axi"
-    (fun p -> (axiLiteSlavePorts p aidMap.apertureAddrWidth, i2sPins p SharedBus))
+    "AudioGainShared"
+    (fun p -> (axiLiteSlavePorts p gainMap.apertureAddrWidth, i2sPins p SharedBus))
     (fun (slavePorts, pins) ->
-        let regs = regMapSlave slavePorts aidMap
+        let regs = regMapSlave slavePorts gainMap
         let i2s = i2sLink "i2s" pins kv260.fabricHz 48_828 32
 
         i2s.input
-        |> audioGain "AudioGain" "gain" (regs.value aidRegs.volume) (regs.value aidRegs.mute)
+        |> audioGain "AudioGain" "gain" (regs.value gainRegs.volume) (regs.value gainRegs.mute)
         |> i2s.send)
 ```
 
@@ -161,9 +160,9 @@ board fact rather than a preference:
 
 | | pins | for |
 |---|---|---|
-| `i2sPins p SharedBus` | `sd_in` `bclk` `ws` `sd_out` | MEMS microphones and a self-clocking DAC on one shared bus, no MCLK |
+| `i2sPins p SharedBus` | `sd_in` `bclk` `ws` `sd_out` | every device on one shared bus, no MCLK — a source that wants none, and a sink that makes its own |
 | `i2sPins p SeparateCodecs` | `sdout` `mclk` `sclk` `lrclk` `sdin` `mclk2` `sclk2` `lrclk2` | a Pmod I2S2 — two chips on two rows, each with its own clock trio |
-| `i2sTxPins p <pinout>` | the same, minus the input | a DAC with nothing to listen to. The link type has no `input` field, so there is nothing to leave dangling |
+| `i2sTxPins p <pinout>` | the same, minus the input | a transmit-only link with nothing to listen to. The link type has no `input` field, so there is nothing to leave dangling |
 
 For a transmit-only link the builder is `i2sTxLink` and the one field is
 `sendOnly`.
@@ -463,9 +462,9 @@ clocks.sclk ==> pins.sclk      ;  clocks.sclk ==> adcPins.sclk2
 clocks.lrclk ==> pins.lrclk    ;  clocks.lrclk ==> adcPins.lrclk2
 ```
 
-**A MEMS front end — one shared bus.** Digital microphones and a DAC like the
-UDA1334A share one clock bus and need no MCLK at all (the mics do not want one,
-and the DAC makes its own), so the whole interface is four pins: `bclk`, `ws`,
+**One shared bus.** Where every device on the bus derives its timing from the
+bit and word clocks, no MCLK is needed at all — the source wants none and the
+sink makes its own — so the whole interface is four pins: `bclk`, `ws`,
 `sd_in`, `sd_out`. `clocks.mclk` simply goes unread — **an instance output
 nobody consumes is legal**; only a *module* output nobody drives is an error.
 
@@ -477,7 +476,7 @@ One constraint detail that is silently ignored if you get it wrong: on
 UltraScale+ the weak pulldown on an input data line is **`PULLTYPE PULLDOWN`**,
 not the legacy `PULLDOWN TRUE`. With it an unused slot reads a clean zero;
 without it you get a floating input reading `0xFFFFFF` and looking exactly like
-a broken microphone.
+a broken converter.
 
 **Never instantiate two clock generators.** Receive and transmit share one
 frame, so they must share one generator — a second would drift against the

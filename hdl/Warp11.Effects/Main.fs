@@ -11,6 +11,14 @@ let private designs =
       "AudioEffectsAxi", audioEffectsAxi.def
       "AudioBatchAxi", Batch.audioBatchAxi.def ]
 
+/// The iCEBreaker's two, kept apart from the list above because they emit for a
+/// different target and have no register map to generate a Rust layout from.
+/// `hardware/ice40/` is where the top wrapper, the pin map and the build script
+/// that consume them live.
+let private iceDesigns =
+    [ "AudioToneIce", audioToneIce.def
+      "AudioPassthruIce", audioPassthruIce.def ]
+
 /// Every register's reset value must be a no-op, because these bitstreams ship
 /// without a host daemon: load one and it has to pass audio (or, for the tone,
 /// make a sound) with nothing written to it. A default that clamps, mutes or
@@ -329,6 +337,161 @@ let private stageStallReport () =
 
     allOk
 
+
+// ---------------------------------------------------------------------------
+// The iCEBreaker designs. Everything the KV260 apps get from a host — a
+// register write, a driver reading a tap back — is unavailable here, so what is
+// checked is what the *pins* do: the ratios a converter locks to, audio
+// surviving the round trip through a software codec, and the indicators moving
+// at the frame rate rather than the fabric clock.
+
+/// Rising edges of MCLK and SCLK across a whole number of LRCLK periods,
+/// measured off the design's own pins.
+///
+/// **Counted between LRCLK edges rather than over a fixed window**, so the
+/// answer is exact rather than off by whatever a window boundary happens to cut
+/// through — which matters, because the numbers being checked are ratios a
+/// converter either locks to or does not.
+let private clockRatios (design: ModuleDef) (frames: int) : int * int =
+    let sim = Sim design
+    let mutable previousMclk = 0UL
+    let mutable previousSclk = 0UL
+    let mutable previousLrclk = 0UL
+    let mutable mclkRises = 0
+    let mutable sclkRises = 0
+    let mutable framesSeen = -1
+    let mutable guard = 0
+
+    while framesSeen < frames && guard < 1_000_000 do
+        sim.Tick()
+        guard <- guard + 1
+
+        let mclk = sim.Peek "mclk"
+        let sclk = sim.Peek "sclk"
+        let lrclk = sim.Peek "lrclk"
+        let rose previous current = previous = 0UL && current = 1UL
+
+        // The first LRCLK rise opens the window; counting starts there, so a
+        // partial frame before it contributes nothing.
+        if rose previousLrclk lrclk then
+            framesSeen <- framesSeen + 1
+
+        if framesSeen >= 0 && framesSeen < frames then
+            if rose previousMclk mclk then mclkRises <- mclkRises + 1
+            if rose previousSclk sclk then sclkRises <- sclkRises + 1
+
+        previousMclk <- mclk
+        previousSclk <- sclk
+        previousLrclk <- lrclk
+
+    mclkRises, sclkRises
+
+/// The ratios the Pmod I2S2's converters lock to, measured rather than derived.
+///
+/// **This is the check that would have caught a silent bench.** Everything about
+/// the rate arithmetic is agreeable to `i2sMasterHz` at any MCLK ratio it
+/// happens to land on — 12 MHz would have elaborated, framed, passed every
+/// stream check and simulated perfectly while presenting MCLK at 128x, which
+/// neither converter will lock to. The datasheet's number is 256, the slot is
+/// 32 bits wide and a frame is two slots, so 64 SCLK periods per frame: both
+/// are properties of the pins, so both are counted off the pins.
+let private iceClocksAreWhatTheConverterNeeds () : bool =
+    let frames = 4
+    let mclkRises, sclkRises = clockRatios audioPassthruIce.def frames
+
+    let mclkRatio = mclkRises / frames
+    let sclkRatio = sclkRises / frames
+
+    printfn $"      ice link: MCLK %d{mclkRatio}x Fs, %d{sclkRatio} SCLK per frame, Fs = %d{iceSampleRate} Hz"
+
+    mclkRatio = 256
+    && sclkRatio = 2 * stockBitsPerSlot
+    && iceSampleRate = 46_875
+    // And the rate this board cannot make is refused rather than approximated,
+    // which is the whole reason these designs do not simply ask for 48 kHz.
+    && (try
+            i2sMasterHz iceBoard.fabricHz 48_000 stockBitsPerSlot "I2sMaster" |> ignore
+            false
+        with _ ->
+            true)
+
+/// Audio through the passthru and back out, over the software codec — the same
+/// stimulus leg the KV260 designs get, at the iCEBreaker's divisors.
+///
+/// Exact equality, not a tolerance: a pass-through that loses a bit still looks
+/// like audio, and the frame arithmetic changing under a new set of divisors is
+/// precisely the thing being asked about.
+let private icePassthruPassesAudio () : bool =
+    let sim = Sim audioPassthruIce.def
+
+    let samples =
+        [ 0x123456UL, 0x654321UL
+          0x7FFFFFUL, 0x800000UL
+          0x000001UL, 0xFFFFFFUL
+          0x0F0F0FUL, 0xF0F0F0UL ]
+
+    let received =
+        samples
+        |> i2sThrough sim separateCodecSimPins
+        |> Seq.skipWhile i2sSilence
+        |> Seq.take samples.Length
+        |> List.ofSeq
+
+    let ok = received = samples
+    printfn $"      ice link: %d{samples.Length} frames through, exact %b{ok}"
+
+    if not ok then
+        printfn $"                sent %A{samples}"
+        printfn $"                got  %A{received}"
+
+    ok
+
+/// The indicators are paced by the *link*, not by the clock.
+///
+/// A blink counter advanced on the fabric clock would run 512 times faster here
+/// and would keep counting with the converter unplugged, which is exactly the
+/// failure it exists to report. So the check is the counter's *increment* over a
+/// known number of frames — three frames, three counts.
+///
+/// The increment rather than the value, because the receiver leads the
+/// transmitter by the link's pre-roll: by the time a frame has come back out,
+/// two more have been taken in. Pinning the absolute count would pin that
+/// pre-roll as well, and a framer legitimately changing its pipeline depth is
+/// not this check's business.
+let private iceLedsFollowTheLink () : bool =
+    let loud = 1UL <<< (sampleWidth - 2)
+    let quiet = 1UL <<< (sampleWidth - 12)
+    let measured = 3
+
+    let countAcross (sample: uint64) (settle: int) =
+        let sim = Sim audioPassthruIce.def
+
+        let frames =
+            (i2sThrough sim separateCodecSimPins (List.replicate (settle + measured + 2) (sample, sample)))
+                .GetEnumerator()
+
+        for _ in 1..settle do
+            frames.MoveNext() |> ignore
+
+        let before = sim.Peek "blink_count"
+
+        for _ in 1..measured do
+            frames.MoveNext() |> ignore
+
+        int (sim.Peek "blink_count") - int before, sim.Peek "led_signal"
+
+    let advanced, signalOnLoud = countAcross loud 2
+    let _, signalOnQuiet = countAcross quiet 2
+
+    printfn
+        $"      ice leds: blink_count +%d{advanced} across %d{measured} frames, led_signal %d{signalOnLoud} loud / %d{signalOnQuiet} quiet"
+
+    advanced = measured
+    // Above -48 dBFS lights the signal indicator; a sample 66 dB down does not,
+    // which is what stops it being an LED that is simply always on.
+    && signalOnLoud = 1UL
+    && signalOnQuiet = 0UL
+
 let private checks =
     [ "effects defaults are passthrough", defaultsArePassthrough
       "register maps well formed", mapsAreWellFormed
@@ -337,7 +500,10 @@ let private checks =
       "batch: pacing changes nothing", pacingDoesNotChangeTheAudio
       "batch: flat copy survives jitter", pacedFlatStillCopies
       "audio: every stage is stall-independent", stageStallReport
-      "audio: unity settings pass audio through", unitySettingsPassAudioThrough ]
+      "audio: unity settings pass audio through", unitySettingsPassAudioThrough
+      "ice: clock ratios are the converter's", iceClocksAreWhatTheConverterNeeds
+      "ice: passthru passes audio exactly", icePassthruPassesAudio
+      "ice: indicators are paced by the link", iceLedsFollowTheLink ]
 
 /// The seam: each design's Verilog beside a Rust layout generated from the very
 /// map the slave was elaborated from. Nothing in public warp11 drives these
@@ -352,6 +518,16 @@ let private writeHardware (repoRoot: string) =
     for name, design in designs do
         let path = System.IO.Path.Combine(buildDir, $"{name}.v")
         System.IO.File.WriteAllText(path, emitDesign design + "\n")
+        printfn $"wrote {path}"
+
+    // **`Ice40`, not the default.** Neither of these declares a memory today,
+    // so the two targets emit the same bytes and the distinction costs nothing
+    // — which is exactly why it is worth making now rather than after a stage
+    // with a delay line is added to the passthru and gets its storage decided
+    // for it by yosys.
+    for name, design in iceDesigns do
+        let path = System.IO.Path.Combine(buildDir, $"{name}.v")
+        System.IO.File.WriteAllText(path, emitDesignFor Ice40 design + "\n")
         printfn $"wrote {path}"
 
     let layoutFor (title: string) (m: RegMap) =
@@ -968,6 +1144,9 @@ let main argv =
     | _ ->
         for name, design in designs do
             printfn $"{name}: {(emitDesign design).Split('\n').Length} lines of Verilog"
+
+        for name, design in iceDesigns do
+            printfn $"{name}: {(emitDesignFor Ice40 design).Split('\n').Length} lines of Verilog"
 
         let mutable ok = true
 

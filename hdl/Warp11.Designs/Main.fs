@@ -454,7 +454,7 @@ let private i2sTxEmits () : bool =
 /// each other. Nothing in the original suite could have found this: it drives rx
 /// and tx separately against hand-built frames and never closes the loop, and
 /// on real hardware the codec — not the other framer — defines the timing,
-/// which is why the MEMS front end worked. A fabric loopback would need the
+/// which is why the shipped front ends worked. A fabric loopback would need the
 /// line delayed by one bit time; no shipping design needs one, so this is
 /// recorded rather than fixed.
 ///
@@ -475,9 +475,8 @@ let private i2sTxEmits () : bool =
 /// the nearest divisor gives 48.828 kHz, 1.7% out. Before this function that
 /// was a comment; now it is a failure.
 ///
-/// The third is the iCEBreaker case §1.5 of the hearing-aid plan is about — a
-/// 12 MHz crystal cannot make 48 kHz at 32 bits per slot either, and the rate
-/// it *can* make is accepted.
+/// The third is the iCEBreaker case — a 12 MHz crystal cannot make 48 kHz at
+/// 32 bits per slot either, and the rate it *can* make is accepted.
 /// The same shared-bus link, hand-wired: a clock generator, both framers, the
 /// ticks routed by hand, the pins driven by hand. Named identically to the
 /// abstraction's design so the two emissions can be compared directly.

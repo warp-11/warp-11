@@ -91,10 +91,25 @@ let kv260At (fabricHz: int) =
 /// cared would pass the exact figure.
 let kv260 = kv260At 100_000_000
 
-/// The iCEBreaker's 12 MHz crystal. No AXI on this part — which is what makes
-/// it the useful second board: it is the one that catches an assumption about
-/// the KV260 baked into something generic.
-let iceBreaker =
+/// The iCEBreaker at a fabric clock **the caller pins**, for the same reason
+/// `kv260At` exists: the number a design divides is the clock reaching its
+/// `clk` port, and on this board that is rarely the crystal.
+///
+/// The part has one 12 MHz oscillator and no AXI, so every design here is
+/// clocked either straight off the crystal or off an `SB_PLL40_PAD` in the
+/// board's top wrapper — and the PLL is not optional for audio. `i2sMasterHz`
+/// derives MCLK as `fabric / (2 * 256 * Fs)`, so 12 MHz can only ever present
+/// 128x Fs, which is outside every ratio a CS5343 or CS4344 locks to. At
+/// 24 MHz the same arithmetic lands on 256x exactly. A design that took the
+/// crystal as its fabric clock would therefore frame perfectly and go silent
+/// on the bench, with nothing in simulation to say why.
+let iceBreakerAt (fabricHz: int) =
     { name = "icebreaker"
-      fabricHz = 12_000_000
+      fabricHz = fabricHz
       hostBus = SpiBus }
+
+/// The iCEBreaker clocked straight off its 12 MHz crystal — no PLL, the shape
+/// a design with no converter attached to it takes. No AXI on this part, which
+/// is what makes it the useful second board: it is the one that catches an
+/// assumption about the KV260 baked into something generic.
+let iceBreaker = iceBreakerAt 12_000_000

@@ -10,7 +10,7 @@ The handshake in [**Stream pipe**](streamPipe.md) assumes the producer can be he
 of things cannot be:
 
 - an ADC sampling at a fixed rate
-- an I2S microphone shifting in bits on its own clock
+- an I2S converter shifting in bits on its own clock
 - a free-running counter, a video source, anything with a real clock behind it
 
 Wiring one of those to a `ready` line does not make it stop; it just means the
