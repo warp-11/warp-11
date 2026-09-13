@@ -843,6 +843,105 @@ The distinction from LiteScope is worth being precise about, because LiteScope i
 
 What that buys is a development loop: telemetry, not intuition, has re-ranked GEP's roadmap three times (the table in [§3 below](#3-telemetry-as-a-first-class-output-readable-in-simulation)), and the shape sweep that picks a bitstream's breeder × lane × filler counts runs entirely in simulation before Vivado starts.
 
+### Folding a datapath onto one multiplier
+
+| HDL | |
+|---|---|
+| Chisel / SpinalHDL | by hand: a state machine or a hand-scheduled pipeline, an operand mux, per-instance state in a `Mem`/`SyncReadMem`; nothing relates the folded design to the unfolded one |
+| Clash | retiming/resource sharing is not automatic; `mealy` over an explicit schedule, by hand |
+| HardCaml | by hand; `Hardcaml_xilinx` has no fold |
+| Amaranth | by hand |
+| Bluespec | rules + a shared register file give the schedule for free, but the design is written folded from the start |
+| Warp 11 | `multibandCompressorFolded` — the spatial `multibandCompressor`'s signature exactly, as its own operations chained over a `warpFu`-shared multiplier; checked bit-exact against the spatial engine as a living property |
+
+The 8-band stereo compressor is the same DSP in two shapes. Spatial: fourteen
+biquads and sixteen band compressors with every multiply in hardware, 588 DSP
+blocks on a KV260. Folded: the same operations, chained —
+
+```fsharp
+streamOfStereo io.s
+|> sections shape |> readNode shape stores |> readHistory shape stores
+|> skidBuffer "history_skid" (sectionHistoryLayout shape)
+|> issueTaps shape stores biquad |> collectTaps shape biquad
+|> writeHistory shape stores |> writeNode shape stores |> bands
+|> skidBuffer "band_skid" bandLayout
+|> readEnvelope stores |> readDetected stores
+|> boost pod io |> writeDetected stores |> detect |> envelope pod io
+|> skidBuffer "stepped_skid" steppedLayout
+|> writeEnvelope stores |> reduction pod io |> apply pod
+|> sumBands
+```
+
+— each stage holding one beat, and one 34×32 multiplier shared behind them
+through `warpFu`: a stage asks the `SharedMultiplier` for a client, and
+`Finish` puts every client behind the arbiter with the registered multiply as
+the core. The crossover is a graph — `crossoverTree`, 24 sections an ear in
+dependency order — that both engines run: the spatial one as a seven-level
+pipeline, the fold as a program whose `readNode` waits, exactly, for the node
+a section reads to have been written this sample. **6 of an iCE40 UP5K's 8
+DSP blocks, 14 of its 30 block RAMs, 81% of its logic cells with the I2S link
+and the limiter beside it, 25.1 MHz placed and routed at a 24 MHz target, 365
+cycles a stereo frame of the 512 available at 46 875 Hz.** The bits are the
+spatial engine's by construction — every multiply issued at the widths the
+spatial engine uses, each stage rescaling its product exactly as the spatial
+one did, a section's products summed serially in the reference's own 59-bit
+accumulator — and by measurement: `audio: folded engine matches the spatial
+one` runs both on one stimulus under random stalls and compares frame for
+frame.
+
+**The crossover is a phase-matched tree, and it was not always.** The first
+was subtractive — seven low-passes, band *k* the difference of successive
+ones — which reconstructs the input bit for bit and isolates terribly: two
+low-passes with different cutoffs are not in phase below either, so a 440 Hz
+tone came out of the 1.4 kHz band at a third of its level, and a prescription
+with +30 dB in the high bands put +20 dB on the bass (measured, the first time
+a real prescription went through it). The tree is seven Linkwitz-Riley
+splits, each half compensated by the all-passes of the other half's splits, so
+the bands sum to an all-pass — flat to 0.01 dB — and a tone two bands away
+leaks at −15 to −25 dB rather than −5 to −10. Unity is no longer bit-exact,
+and the checks say so: `unity settings are an all-pass`, and a band's gain
+lands on its own frequencies. What the tree cannot telescope away is the
+direct-form biquad's fixed-point bias — ~1 100 LSB of DC offset, −78 dBFS —
+which is its own small increment.
+
+**Timing on the chain, since the numbers are what a reader wants.** The skid
+transition that lets a stage accept in the cycle its offer is taken makes
+`ready` combinational down the whole chain — fourteen stages, 46 ns on an
+iCE40 — so a two-beat register buffer cuts it every few stages. `warpFu`'s
+round-robin pick over five clients was 25 ns on its own, so the pod uses
+`warpFuPriority`: the pick registered, the grant announced a cycle later,
+the crossover's client served first because its taps are the pass's critical
+path; the combinational `warpFu` is untouched, and GEP's emission was A/B'd
+byte-identical across the change.
+
+**Call-site invariance is what makes it one word.** A design switches engine
+by writing `multibandCompressorFolded` for `multibandCompressor`; the settings
+record, the register map and the Rust seam are untouched, and a caller cannot
+tell which it has. The law itself — the envelope step, the gain computer — is
+written once, in halves that take their multiplier as an argument, so the
+spatial engine hands it `mul` and a `podStage` computes one half before the
+shared multiplier and the other after.
+
+**No stage states a latency, and nothing is scheduled.** A beat moves when the
+next stage can take it. A stage holds one beat, so a result from the shared
+unit always has a place to land, which is `warpFu`'s contract; a section is
+never in the chain twice, so its history read and write cannot race; a band's
+state is read and written one stage apart, sixteen beats before the same slot
+comes round again. The two shapes that preceded this one — a state machine
+with the multiplier's depth summed into a hand schedule (376 cycles), and a
+program ROM driving lockstep stages that dispatched on the op they were handed
+(167 cycles, unreadable) — are in `notes/BACKLOG.md`; this one is what the
+rule in CLAUDE.md now asks for.
+
+**Sharing cost negative logic** on the multiply side: the four-deep adder tree
+over 59-bit values you delete is bigger than the operand mux you add.
+`warpFu`'s rule — cheap units are per-lane, always, measured on GEP where
+pooling a 697-LUT divider cost throughput and saved nothing — is right there
+and wrong here, and the discriminator is which resource binds: LUTs on GEP,
+the eight multiplier blocks on a UP5K. What one-beat stages cost is
+*registers*: every stage holds its beat, and the first draft, holding each
+twice, did not place.
+
 ### Clock frequency, and rates derived from it
 
 A divider is arithmetic on the fabric clock, so anything that generates a baud rate, a sample rate or a timer interval needs to know what that clock is. Where that number lives is a real design axis, and the field answers it four different ways.

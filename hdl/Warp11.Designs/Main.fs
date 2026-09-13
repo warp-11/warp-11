@@ -5,7 +5,7 @@ module Warp11.Designs.Main
 open System.Numerics
 open Warp11
 
-let private diffDesigns () =
+let private diffDesignsAtDefault () =
     [ comparator8.def
       holdThroughReset.def
       dynamicShifts.def
@@ -115,6 +115,14 @@ let private diffDesigns () =
       multibandStage.def
       delayTap.def
       audioEchoStage.def ]
+
+/// Each design with the length of testbench it needs — the default for all but
+/// the one whose unit of work is a pass rather than a beat.
+let private diffDesigns () =
+    [ for d in diffDesignsAtDefault () -> d, diffCycles ]
+    // Three stereo frames through the folded engine — a pass is ~170 cycles
+    // plus the handshake — under stimulus that offers and takes at random.
+    @ [ multibandStageFolded.def, 4 * 200 ]
 
 /// Unity settings must be audibly transparent: gain at 1.0x unmuted,
 /// compression with a zero slope and 1.0x makeup, and a limiter threshold at
@@ -248,14 +256,22 @@ let private wavThroughMultiband () : bool =
 
         runWavThroughSim sim defaultWavPorts 64 input
 
-    let inLeft, inRight = peaks input
-    let openLeft, openRight = peaks (run ((1UL <<< (sampleWidth - 1)) - 1UL))
-    let clampedLeft, clampedRight = peaks (run 200_000UL)
+    // The crossover is a tree of all-passes, and an all-pass rings at an
+    // onset: the first few hundred frames of a tone that starts from nothing
+    // overshoot by up to a fifth. Peaks are read after it has settled.
+    let settled (w: WavData) =
+        let skip = 800 * w.channels
+        { w with samples = Array.sub w.samples skip (w.samples.Length - skip) }
 
-    // Wide open the peaks come back EXACTLY — 26213 in, 26213 out on both
-    // channels — so the eight-way split and reassembly are lossless on a
-    // moving signal, not merely on DC. The tolerance is here for the Q2.30
-    // coefficients to spend; measured, they spend none.
+    let inLeft, inRight = peaks (settled input)
+    let openLeft, openRight = peaks (settled (run ((1UL <<< (sampleWidth - 1)) - 1UL)))
+    let clampedLeft, clampedRight = peaks (settled (run 200_000UL))
+
+    // Wide open the peaks come back at their level — the tree is an all-pass,
+    // so a tone's amplitude survives it even though its waveform is shifted —
+    // which says the split and reassembly are flat on a moving signal, not
+    // merely at DC. The tolerance is for the Q2.30 coefficients and the
+    // fixed-point bias to spend.
     let survives got want = abs (got - want) * 100 < want * 5
 
     // Clamped, the measured reduction is ~23%: a multiband compressor only
@@ -270,19 +286,22 @@ let private wavThroughMultiband () : bool =
     && reduced clampedLeft openLeft
     && reduced clampedRight openRight
 
-/// The eight bands must sum back to the signal they were split from.
+/// The eight bands must sum back to the signal they were split from, at DC.
 ///
-/// This is the property the whole filterbank rests on, and it is a real claim
-/// rather than a tautology: the split is *subtractive* — band 0 is the lowest
-/// low-pass, band k the difference of successive low-passes, band 7 the
-/// residue — so the bands telescope back to the input exactly, where a bank of
-/// independent band-pass filters would only approximate it and leave audible
-/// crossover ripple. At unity makeup and zero ratio every compressor is a
-/// pass-through, so what comes out is the reconstruction and nothing else.
+/// The crossover is a balanced tree of Linkwitz-Riley splits with all-pass
+/// compensation, so the bands sum to an all-pass: flat in magnitude, and at
+/// DC — where an all-pass is exactly 1 — the input. At unity makeup and zero
+/// ratio every compressor is a pass-through, so what comes out is the
+/// reconstruction and nothing else.
 ///
-/// Only two counts are tolerated away from exact: the biquads are Q2.30 and
-/// the band sum saturates once, so a least-significant bit or two is expected.
-/// Anything more means the split is not telescoping.
+/// **Within an offset, and the offset is real.** A direct-form biquad in
+/// fixed point truncates toward minus infinity and the recurrence amplifies
+/// that by `1/(1+a1+a2)`, hundreds of LSB at a 320 Hz cutoff; the old
+/// subtractive split telescoped every section's bias away and this tree
+/// cannot. Measured: 198 888 for 200 000 and 98 900 for 100 000 — the same
+/// ~1 100 LSB whatever the level, a −78 dBFS DC offset. The bound is 2 048
+/// LSB, −72 dBFS. Rounding or error feedback in the biquad would take it
+/// out, and is its own increment.
 let private multibandReconstructs () : bool =
     let sim = Sim(multibandStage.def)
     sim.Poke("threshold", 0UL)
@@ -308,7 +327,7 @@ let private multibandReconstructs () : bool =
     let asSample (v: uint64) =
         if v >= (1UL <<< (sampleWidth - 1)) then int64 v - (1L <<< sampleWidth) else int64 v
 
-    let near target value = abs (asSample value - int64 target) <= 2L
+    let near target value = abs (asSample value - int64 target) <= 2048L
 
     near level (sim.Peek "out_left")
     && near (level / 2UL) (sim.Peek "out_right")
@@ -2894,10 +2913,12 @@ let private firrtlIsClosed () =
         |> List.map (fun e -> e.build ())
         |> List.filter (fun d ->
             not (laneMasked d)
-            && d.decls
-               |> List.forall (function
-                   | Memory(_, _, _, Some _, _) -> false
-                   | _ -> true))
+            && allModules d
+               |> List.forall (fun m ->
+                   m.decls
+                   |> List.forall (function
+                       | Memory(_, _, _, Some _, _) -> false
+                       | _ -> true)))
 
     List.forall closed exportable && refusesRomInit && not (List.isEmpty exportable)
 
@@ -2924,10 +2945,12 @@ let private firrtlRoundTrips () =
         |> List.map (fun e -> e.build ())
         |> List.filter (fun d ->
             not (laneMasked d)
-            && d.decls
-               |> List.forall (function
-                   | Memory(_, _, _, Some _, _) -> false
-                   | _ -> true))
+            && allModules d
+               |> List.forall (fun m ->
+                   m.decls
+                   |> List.forall (function
+                       | Memory(_, _, _, Some _, _) -> false
+                       | _ -> true)))
 
     // `ram_style` is the one thing a round trip loses, and it is worth being
     // exact about what that means. FIRRTL has no notion of storage style — it
@@ -4702,7 +4725,7 @@ let private mainDemo () =
     printfn $"audio chain unity passthrough:%b{audioUnityPassthrough ()}"
     printfn $"audio FIR preset DC response: %b{audioFirDcResponse ()}"
     printfn $"compressor regulates output:  %b{compressorRegulatesOutput ()}"
-    printfn $"8-band split reconstructs:    %b{multibandReconstructs ()}"
+    printfn $"8-band tree is flat at DC:    %b{multibandReconstructs ()}"
     printfn $"WAV through the multiband:    %b{wavThroughMultiband ()}"
     printfn $"RBJ cookbook designs:         %b{rbjCookbookDesigns ()}"
     printfn $"I2S rx decodes ideal frame:   %b{i2sRxDecodes ()}"
@@ -5499,7 +5522,7 @@ let main argv =
         printfn $"wrote {outPath}"
         0
     | [| "diff"; outDir |] ->
-        writeDiff (diffDesigns ()) outDir
+        writeDiffWith (diffDesigns ()) outDir
         0
     // FIRRTL nobody here wrote, read by our reader and simulated. The testbench
     // asserts our Sim's trace; the runner then verilates *firtool's* Verilog

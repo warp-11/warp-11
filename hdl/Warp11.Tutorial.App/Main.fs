@@ -639,6 +639,113 @@ let private pagesTellTheTruth () =
 
         grindsThenOffers && holdsUnderStall && releases
 
+    // Folding: the two stages sharing one multiplier produce exactly the
+    // spatial map's values, the grants alternate between them under load, and
+    // never coincide — one multiplier, one grant a cycle.
+    let foldedMatchesSpatial =
+        let sim = Sim folded.def
+        sim.Poke("a", 3UL)
+        sim.Poke("b", 5UL)
+        sim.Poke("spatial_ready", 1UL)
+        sim.Poke("out_ready", 1UL)
+        let inputs = [ 7UL; 200UL; 0UL; 255UL; 1UL; 99UL ]
+        let spatial = ResizeArray()
+        let out = ResizeArray()
+        let grants = ResizeArray()
+        let mutable fed = 0
+
+        for _ in 1..120 do
+            let offer = fed < inputs.Length
+            sim.Poke("in_valid", (if offer then 1UL else 0UL))
+            if offer then sim.Poke("in_value", inputs[fed])
+            if sim.Peek "spatial_valid" = 1UL then spatial.Add(sim.Peek "spatial_value")
+            if sim.Peek "out_valid" = 1UL then out.Add(sim.Peek "out_value")
+            grants.Add(sim.Peek "first_pod_grant", sim.Peek "second_pod_grant")
+            let accepted = offer && sim.Peek "in_ready" = 1UL
+            sim.Tick()
+            if accepted then fed <- fed + 1
+
+        let expected = [ for x in inputs -> x * 3UL * 5UL ]
+        let bothServed = grants |> Seq.exists (fun (f, _) -> f = 1UL) && grants |> Seq.exists (fun (_, s) -> s = 1UL)
+        let oneAtATime = grants |> Seq.forall (fun (f, s) -> f + s <= 1UL)
+        List.ofSeq spatial = expected && List.ofSeq out = expected && bothServed && oneAtATime
+
+    // Multiband, folded: one sample through the whole engine comes back inside
+    // one audio frame as exactly what the spatial engine makes of it — the
+    // property the page rests on — and every one of the five operations was
+    // granted the multiplier along the way.
+    let multibandFoldedReconstructs =
+        let left, right = 0x123456UL, 0x7EDCBAUL
+
+        let settings (s: Sim) =
+            for n, v in
+                [ "threshold", 200_000UL
+                  "ratio", 4UL
+                  "attack", 1UL <<< 14
+                  "releaseRate", 1UL <<< 12
+                  "in_left", left
+                  "in_right", right
+                  "in_valid", 1UL
+                  "out_ready", 1UL ] do
+                s.Poke(n, v)
+
+            for i in 0..7 do
+                s.Poke($"lg{i}", Warp11.Audio.gainUnity)
+                s.Poke($"rg{i}", Warp11.Audio.gainUnity)
+
+        // The spatial engine on the same sample, at the same rate.
+        let spatial =
+            let stage =
+                defModule
+                    "MultibandSpatialReference"
+                    (fun p ->
+                        (Warp11.Audio.multibandSettingsPorts p,
+                         streamInputPorts p "in" Warp11.Audio.sampleLayout,
+                         streamOutputPorts p "out" Warp11.Audio.sampleLayout))
+                    (fun (settings, inPorts, outPorts) ->
+                        let out, _ =
+                            streamSource inPorts
+                            |> Warp11.Audio.multibandCompressor "MultibandCompressor8" 46_875.0 "mb" settings
+
+                        streamSink outPorts out)
+
+            let sim = Sim stage.def
+            settings sim
+            let mutable answer = None
+
+            for _ in 1..64 do
+                let accepted = sim.Peek "in_valid" = 1UL && sim.Peek "in_ready" = 1UL
+
+                if answer.IsNone && sim.Peek "out_valid" = 1UL then
+                    answer <- Some(sim.Peek "out_left", sim.Peek "out_right")
+
+                sim.Tick()
+                if accepted then sim.Poke("in_valid", 0UL)
+
+            answer
+
+        let sim = Sim multibandFolded.def
+        settings sim
+
+        let clients = [ "biquad"; "boost"; "envelope"; "reduction"; "apply" ]
+        let granted = System.Collections.Generic.HashSet<string>()
+        let frame = 512
+        let mutable output = None
+
+        for _ in 1..frame do
+            let accepted = sim.Peek "in_valid" = 1UL && sim.Peek "in_ready" = 1UL
+
+            for c in clients do
+                if sim.Peek $"mb_{c}_pod_grant" = 1UL then granted.Add c |> ignore
+
+            if output.IsNone && sim.Peek "out_valid" = 1UL then
+                output <- Some(sim.Peek "out_left", sim.Peek "out_right")
+
+            sim.Tick()
+            if accepted then sim.Poke("in_valid", 0UL) // one sample only
+
+        output.IsSome && output = spatial && granted.Count = clients.Length
+
     // The arm gate, which is a hardware-safety property before it is a
     // correctness one: with no base address the master must not issue at all.
     let masterStaysDisarmed =
@@ -670,6 +777,8 @@ let private pagesTellTheTruth () =
     && firRespondsWithItsCoefficients
     && edgePoliciesDiffer
     && sharedUnitRoutesByTag
+    && foldedMatchesSpatial
+    && multibandFoldedReconstructs
     && registerMapAnswers
     && masterStaysDisarmed
     && lfsrIsMaximalLength

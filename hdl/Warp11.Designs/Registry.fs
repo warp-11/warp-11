@@ -10,10 +10,24 @@
 /// well. The `source` pane still works, which is all this list ever wanted.
 module Warp11.Designs.Registry
 
+open Warp11
 open Warp11.Catalog
 open Warp11.Designs.Catalog
 open Warp11.Designs.MemoryCatalog
 open Warp11.Designs.BusCatalog
+
+/// The multiband toys at the Effects demo's settings, with unity makeup and the
+/// stream free-running, so stepping one shows every band's envelope moving.
+let private multibandDemo =
+    [ "threshold", 200_000UL
+      "ratio", 4UL
+      "attack", 1UL <<< 14
+      "releaseRate", 1UL <<< 12
+      "in_valid", 1UL
+      "out_ready", 1UL ]
+    @ [ for i in 0 .. multibandBands - 1 do
+            yield $"lg{i}", gainUnity
+            yield $"rg{i}", gainUnity ]
 
 let catalog =
     embeddedFrom
@@ -97,7 +111,11 @@ let catalog =
           entry "Delay tap (accepted beats)" (nameof delayTap) (fun () -> delayTap.def)
           |> poking [ "enable", 1UL; "tap", 8UL ]
           entry "Echo (memory delay line)" (nameof audioEchoStage) (fun () -> audioEchoStage.def)
-          |> poking [ "delay", 64UL; "feedback", 128UL; "in_valid", 1UL; "out_ready", 1UL ] ]
+          |> poking [ "delay", 64UL; "feedback", 128UL; "in_valid", 1UL; "out_ready", 1UL ]
+          entry "Multiband compressor (spatial)" (nameof multibandStage) (fun () -> multibandStage.def)
+          |> poking multibandDemo
+          entry "Multiband compressor (folded, one multiplier)" (nameof multibandStageFolded) (fun () -> multibandStageFolded.def)
+          |> poking multibandDemo ]
 
 let designs = catalog.entries
 

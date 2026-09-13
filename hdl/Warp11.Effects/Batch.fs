@@ -287,6 +287,23 @@ let multibandStageRef =
 
             streamSink outPorts stage)
 
+/// The same compressor on one multiplier: the folded engine's twin, with the
+/// spatial twin's ports exactly, so the two can be run on one stimulus and
+/// compared frame for frame.
+let multibandStageFoldedRef =
+    defModule
+        "MultibandStageFoldedRef"
+        (fun p ->
+            (multibandSettingsPorts p,
+             streamInputPorts p "in" sampleLayout,
+             streamOutputPorts p "out" sampleLayout))
+        (fun (settings, inPorts, outPorts) ->
+            let stage, _envelope =
+                streamSource inPorts
+                |> multibandCompressorFolded "MultibandCompressor8Folded" stockSampleRate "mb" settings
+
+            streamSink outPorts stage)
+
 // ---------------------------------------------------------------------------
 // One stage each, as a bare stream design, so the stall-independence property
 // can be asked of them one at a time. These exist to localise a defect the

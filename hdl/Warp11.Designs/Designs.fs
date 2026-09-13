@@ -2771,6 +2771,26 @@ let multibandStage =
             streamSink outPorts stage
             envelope ==> envOut)
 
+/// The same compressor on one shared multiplier — `MultibandStage`'s ports
+/// exactly, with the engine chosen by one word. The property it exists for is
+/// that its samples are the spatial engine's; that check runs beside the other
+/// multiband checks in `Warp11.Effects`, where the stalled-stream harness is.
+let multibandStageFolded =
+    defModule
+        "MultibandStageFolded"
+        (fun p ->
+            (multibandSettingsPorts p,
+             streamInputPorts p "in" sampleLayout,
+             streamOutputPorts p "out" sampleLayout,
+             p.outPort "envelope" sampleWidth))
+        (fun (settings, inPorts, outPorts, envOut) ->
+            let stage, envelope =
+                streamSource inPorts
+                |> multibandCompressorFolded "MultibandCompressor8Folded" stockSampleRate "mb" settings
+
+            streamSink outPorts stage
+            envelope ==> envOut)
+
 /// How deep the echo toy's line is. Small on purpose: the address arithmetic
 /// that wraps at 256 is the arithmetic that wraps at 32,768, and Verilator
 /// builds this one in a second.

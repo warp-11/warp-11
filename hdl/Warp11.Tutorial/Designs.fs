@@ -980,3 +980,144 @@ let ddrMaster =
             |> axiMasterWriterOn (axiWriteBusOf writeBus) 4
 
             index ==> written)
+
+// ---------------------------------------------------------------------------
+// Folding: the same arithmetic, on fewer multipliers than it has multiplies.
+
+/// One client's end of a shared multiplier. The stage drives `a`, `b` and
+/// `issue`; the pod drives `grant` the cycle it takes them, and `landed` with
+/// the `product` some cycles later. Six wires, and no cycle count crosses
+/// them in either direction.
+type PodClient =
+    { a: Expr
+      b: Expr
+      issue: Expr
+      grant: Expr
+      product: Expr
+      landed: Expr }
+
+/// One multiplier for every stage that wants one. Each stage asks for a
+/// client as it is built; `Finish`, called last, puts them all behind
+/// `warpFu` — the round-robin arbiter, the registered multiply as the core,
+/// results routed back to their issuer. The clients come first because a
+/// stage needs its wires before the arbiter can exist; the arbiter is wired
+/// to them afterwards, which nets allow.
+type SharedMultiplier(name: string, aWidth: int, bWidth: int) =
+    let clients = ResizeArray<PodClient>()
+
+    member _.Client(client: string) : PodClient =
+        let c =
+            { a = wire $"{client}_pod_a" aWidth
+              b = wire $"{client}_pod_b" bWidth
+              issue = wireBit $"{client}_pod_issue"
+              grant = wireBit $"{client}_pod_grant"
+              product = wire $"{client}_pod_product" (aWidth + bWidth)
+              landed = wireBit $"{client}_pod_landed" }
+
+        clients.Add c
+        c
+
+    member _.Finish() =
+        let issues =
+            [ for c in clients ->
+                  ({ payload = { tag = lit 0UL 1; fields = [ c.a; c.b ] }
+                     valid = c.issue
+                     ready = c.grant
+                     layout = fuLayout 1 [ "a", aWidth; "b", bWidth ] }
+                   : Stream<FuBeat>) ]
+
+        // The core reports its own depth — see Shared unit.
+        let stages = 2
+
+        let multiply operands =
+            match operands with
+            | [ a; b ] -> [ delayChain name (aWidth + bWidth) stages (mul a b) ], stages
+            | _ -> failwith "the multiplier takes two operands"
+
+        for c, r in Seq.zip clients (warpFu name [ "product", aWidth + bWidth ] multiply issues) do
+            r.payload.fields.Head ==> c.product
+            r.valid ==> c.landed
+            lit 1UL 1 ==> r.ready
+
+/// A stage whose whole job is one multiply on the shared unit: accept a beat,
+/// hold it, ask for the multiplier, and offer the product once it lands. One
+/// beat at a time, so the answer always has somewhere to go — which is the
+/// one thing `warpFu` asks of a client.
+let private times (pod: SharedMultiplier) (name: string) (gain: Expr) (outWidth: int) (s: Stream<Expr>) : Stream<Expr> =
+    let st, out = streamFsm s (layout1 ($"{name}_value", outWidth))
+    let accept = st.Is Accepting &&& s.valid
+    let held = reg $"{name}_held" (width s.payload)
+    If accept (fun () -> s.payload ==> held)
+
+    let client = pod.Client name
+    pad (width client.a) held ==> client.a
+    pad (width client.b) gain ==> client.b
+
+    // Ask once per beat: the request drops the cycle the grant arrives.
+    let issued = regBit $"{name}_issued"
+    If accept (fun () -> lit 0UL 1 ==> issued)
+    (st.Is Working &&& bnot issued) ==> client.issue
+    If (client.issue &&& client.grant) (fun () -> lit 1UL 1 ==> issued)
+
+    let product = reg $"{name}_product" (width client.product)
+
+    If (st.Is Working &&& client.landed) (fun () ->
+        client.product ==> product
+        st.Goto Offering)
+
+    slice (outWidth - 1) 0 product ==> out.payload
+    out
+
+/// The same value scaled twice, two ways. `spatial` is `(x·a)·b` as two
+/// multipliers in a row — the free map every stream lesson so far has used.
+/// `out` is the same arithmetic as two stages sharing ONE multiplier, each
+/// holding a beat while it waits its turn. The bits are identical; what
+/// differs is one multiplier against two, and a few cycles.
+let folded =
+    defModule
+        "Folded"
+        (fun p ->
+            (p.inPort "a" 4,
+             p.inPort "b" 4,
+             streamInputPorts p "in" (layout1 ("value", 8)),
+             streamOutputPorts p "spatial" (layout1 ("value", 16)),
+             streamOutputPorts p "out" (layout1 ("value", 16))))
+        (fun (a, b, inPorts, spatialPorts, outPorts) ->
+            match streamBroadcast 2 (streamSource inPorts) with
+            | [ toSpatial; toFolded ] ->
+                toSpatial
+                |> streamMapTo (layout1 ("value", 16)) (fun x -> mul (mul x a) b)
+                |> streamSink spatialPorts
+
+                let pod = SharedMultiplier("pod", 12, 4)
+
+                toFolded
+                |> times pod "first" a 12
+                |> times pod "second" b 16
+                |> streamSink outPorts
+
+                pod.Finish()
+            | _ -> failwith "broadcast 2 gave the wrong arity")
+
+/// The real thing the page before this one is a miniature of: the audio
+/// stdlib's 8-band stereo compressor on one multiplier. The body is one word
+/// — `multibandCompressorFolded` for `multibandCompressor` — and the ports,
+/// the settings and the samples are the spatial engine's exactly. What the
+/// word buys is in `Audio.fs`: the spatial engine's own operations chained
+/// one after another, each holding a beat, sharing one multiplier behind
+/// them through `warpFu`.
+let multibandFolded =
+    defModule
+        "MultibandFolded"
+        (fun p ->
+            (multibandSettingsPorts p,
+             streamInputPorts p "in" sampleLayout,
+             streamOutputPorts p "out" sampleLayout,
+             p.outPort "envelope" sampleWidth))
+        (fun (settings, inPorts, outPorts, envelope) ->
+            let out, meter =
+                streamSource inPorts
+                |> multibandCompressorFolded "MultibandCompressor8Folded" 46_875.0 "mb" settings
+
+            streamSink outPorts out
+            meter ==> envelope)

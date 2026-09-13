@@ -123,9 +123,23 @@ let diffTb (design: ModuleDef) (cycles: int) =
           yield "    end"
           yield "endmodule" ]
 
-/// `writeDiff designs outDir` writes modules.v plus one self-checking testbench
-/// per design; run_differential.sh drives Verilator over the result.
-let writeDiff (designs: ModuleDef list) (outDir: string) =
+/// How many cycles of seeded stimulus a testbench asserts unless a design says
+/// otherwise. Enough for a beat-a-cycle design to move real data through every
+/// construct it uses, which is what the oracle checks — the toolchain, not the
+/// design.
+let diffCycles = 50
+
+/// `writeDiffWith designs outDir` writes modules.v plus one self-checking
+/// testbench per design, each `cycles` long; run_differential.sh drives
+/// Verilator over the result.
+///
+/// The length is per design because a design whose one unit of work is a long
+/// pass — an engine folded onto one multiplier spends hundreds of cycles a
+/// sample — would otherwise be asserted over a window that never reaches the
+/// half of it the emitter has not been checked on. The default is
+/// `diffCycles`; `writeDiff` is this with every design at the default.
+let writeDiffWith (designs: (ModuleDef * int) list) (outDir: string) =
+    let designs, cycles = List.unzip designs |> fun (ds, cs) -> ds, Map.ofList (List.zip (List.map (fun (d: ModuleDef) -> d.name) ds) cs)
     System.IO.Directory.CreateDirectory outDir |> ignore
 
     for d in designs do
@@ -141,7 +155,7 @@ let writeDiff (designs: ModuleDef list) (outDir: string) =
     System.IO.File.WriteAllText(System.IO.Path.Combine(outDir, "modules.v"), moduleText + "\n")
 
     for d in designs do
-        System.IO.File.WriteAllText(System.IO.Path.Combine(outDir, $"{d.name}_diff_tb.v"), diffTb d 50 + "\n")
+        System.IO.File.WriteAllText(System.IO.Path.Combine(outDir, $"{d.name}_diff_tb.v"), diffTb d cycles[d.name] + "\n")
 
     // The third leg's input. A design firtool can compile gets a `.fir` beside
     // its testbench, and the runner verilates *that* Verilog against the same
@@ -164,3 +178,7 @@ let writeDiff (designs: ModuleDef list) (outDir: string) =
 
         for name, why in unrepresentable do
             printfn $"    {name}: {why}"
+
+/// Every design at `diffCycles`.
+let writeDiff (designs: ModuleDef list) (outDir: string) =
+    writeDiffWith [ for d in designs -> d, diffCycles ] outDir

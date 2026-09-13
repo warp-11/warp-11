@@ -134,20 +134,15 @@ let private runBatch flat frames seed = runBatchPaced flat frames seed None
 
 
 
-let private batchCopiesWhenFlat () =
-    let idOk, input, out, spins = runBatch true 64 7
-    idOk && spins < 400_000 && input = out
-
-/// Unbypassed, every frame must equal what the bare stage produced from the
-/// same sequence. The DSP is deterministic and both see identical frames in
-/// identical order, so anything but equality means the DDR path reordered,
-/// dropped or duplicated a frame.
-let private batchMatchesTheStage () =
-    let _, input, out, spins = runBatch false 64 11
-
+/// What the bare stage makes of a frame sequence at the batch path's
+/// settings — flat (threshold at full scale, ratio zero, unity gains) or the
+/// demo's. Flat is no longer the input: since the crossover became a
+/// phase-matched tree, unity settings are an all-pass, so the plumbing checks
+/// compare against the stage rather than against what went in.
+let private stageOutput (flat: bool) (input: (uint64 * uint64)[]) =
     let sim = Sim Batch.multibandStageRef.def
-    sim.Poke("threshold", 200_000UL)
-    sim.Poke("ratio", 4UL)
+    sim.Poke("threshold", (if flat then (1UL <<< sampleWidth) - 1UL else 200_000UL))
+    sim.Poke("ratio", (if flat then 0UL else 4UL))
     sim.Poke("attack", 1UL <<< 14)
     sim.Poke("releaseRate", 1UL <<< 12)
 
@@ -179,8 +174,19 @@ let private batchMatchesTheStage () =
         collect ()
         guard <- guard + 1
 
-    spins < 400_000 && Array.ofSeq expected = out
+    Array.ofSeq expected
 
+let private batchCopiesWhenFlat () =
+    let idOk, input, out, spins = runBatch true 64 7
+    idOk && spins < 400_000 && stageOutput true input = out
+
+/// Unbypassed, every frame must equal what the bare stage produced from the
+/// same sequence. The DSP is deterministic and both see identical frames in
+/// identical order, so anything but equality means the DDR path reordered,
+/// dropped or duplicated a frame.
+let private batchMatchesTheStage () =
+    let _, input, out, spins = runBatch false 64 11
+    spins < 400_000 && stageOutput false input = out
 /// **The property the whole stream layer rests on**: a stage advances on
 /// `valid && ready`, not on the clock, so how fast the beats arrive cannot
 /// change what comes out. The always-ready DDR model runs this design at one
@@ -207,7 +213,7 @@ let private pacedFlatStillCopies () =
     [ 1..8 ]
     |> List.forall (fun seed ->
         let _, input, out, _ = runBatchPaced true 64 7 (Some seed)
-        input = out)
+        stageOutput true input = out)
 
 // ---------------------------------------------------------------------------
 // Stall-independence, at the stage rather than through the DDR.
@@ -272,27 +278,47 @@ let private stageIsStallIndependent (d: ModuleDef) (setup: Sim -> unit) =
     baseline.Length = samples.Length
     && ([ 1..6 ] |> List.forall (fun seed -> runStageStalled d setup samples (Some seed) = baseline))
 
-/// Can the DSP be made transparent by *configuration* rather than by routing
-/// around it? Threshold at full scale with ratio 0 is "no gain reduction
-/// whatever the signal", gains are unity, so the chain should be a no-op. If
-/// the output equals the input the bypass mux is redundant and the parallel
-/// path it needs could go; if it does not, the subtractive crossover does not
-/// reassemble bit-exactly in fixed point and a raw copy is the only way to get
-/// one.
+/// Unity settings — threshold at full scale, ratio zero, unity gains — are an
+/// **all-pass**: a tone comes back at its level, at every frequency, and not
+/// clipped. That is what "bypass by configuration" means since the crossover
+/// became a phase-matched tree (2026-09-13): the bands sum to the all-pass of
+/// the splits rather than to the input bit for bit, which the subtractive
+/// split gave and which cost it a third of every low tone in the wrong band.
+/// Level is checked to a tenth of a decibel, and at both ends of the band so
+/// a tree that was flat only in its middle would show.
 let private unitySettingsPassAudioThrough () =
-    let samples = stereoSamples 64 5
-    let got = runStageStalled Batch.multibandStageRef.def (fun s ->
+    let rate = float stockSampleRate
+    let amplitude = 0.4 * float (1 <<< (sampleWidth - 1))
+
+    let tone (hz: float) =
+        [| for i in 0..799 ->
+               let v = int64 (amplitude * sin (2.0 * System.Math.PI * hz * float i / rate))
+               uint64 (v &&& 0xFFFFFFL), uint64 (v &&& 0xFFFFFFL) |]
+
+    let unity (s: Sim) =
         s.Poke("threshold", (1UL <<< sampleWidth) - 1UL)
         s.Poke("ratio", 0UL)
         s.Poke("attack", 0UL)
         s.Poke("releaseRate", 0UL)
+
         for i in 0 .. multibandBands - 1 do
             s.Poke($"lg{i}", gainUnity)
-            s.Poke($"rg{i}", gainUnity)) samples None
+            s.Poke($"rg{i}", gainUnity)
 
-    let differing = Seq.zip got samples |> Seq.filter (fun (a, b) -> a <> b) |> Seq.length
-    printfn $"      unity-config passthrough: %d{differing} of %d{samples.Length} frames differ from the input"
-    differing = 0
+    let signed (v: uint64) =
+        if v >= (1UL <<< (sampleWidth - 1)) then int64 v - (1L <<< sampleWidth) else int64 v
+
+    let levelDb (hz: float) =
+        let got = runStageStalled Batch.multibandStageRef.def unity (tone hz) None
+        let peak = got |> Array.skip 400 |> Array.map (fun (l, _) -> abs (signed l)) |> Array.max
+        20.0 * log10 (float peak / amplitude)
+
+    let levels = [ for hz in [ 100.0; 1_000.0; 12_000.0 ] -> hz, levelDb hz ]
+
+    for hz, db in levels do
+        printfn $"      unity at %6.0f{hz} Hz: %+.2f{db} dB"
+
+    levels |> List.forall (fun (_, db) -> abs db < 0.1)
 
 let private multibandSetup (sim: Sim) =
     sim.Poke("threshold", 200_000UL)
@@ -306,6 +332,93 @@ let private multibandSetup (sim: Sim) =
 
 let private multibandIsStallIndependent () =
     stageIsStallIndependent Batch.multibandStageRef.def multibandSetup
+
+/// **The folded engine's defining property**: the same samples out as the
+/// spatial engine, frame for frame, on the same stimulus — at the demo's
+/// settings, where every band compresses, and at unity, where the bank must
+/// reconstruct. A golden vector would pass a fold with the wrong schedule;
+/// only the spatial engine says what the bits should be.
+let private foldedMatchesTheSpatial () =
+    let samples = stereoSamples 96 11
+
+    // `changed` is how many output frames differ from the input: the guard
+    // that a comparison of two passthroughs is not passing for nothing.
+    let compare label setup (changed: int -> bool) =
+        let spatial = runStageStalled Batch.multibandStageRef.def setup samples (Some 2)
+        let folded = runStageStalled Batch.multibandStageFoldedRef.def setup samples (Some 2)
+
+        let differing =
+            Seq.zip spatial folded |> Seq.filter (fun (a, b) -> a <> b) |> Seq.length
+
+        let fromInput =
+            Seq.zip spatial samples |> Seq.filter (fun (a, b) -> a <> b) |> Seq.length
+
+        printfn
+            $"      {label}: spatial %d{spatial.Length} frames, folded %d{folded.Length}, %d{differing} differ; %d{fromInput} changed from the input"
+
+        spatial.Length = samples.Length
+        && folded.Length = samples.Length
+        && differing = 0
+        && changed fromInput
+
+    let unity (s: Sim) =
+        s.Poke("threshold", (1UL <<< sampleWidth) - 1UL)
+        s.Poke("ratio", 0UL)
+        s.Poke("attack", 0UL)
+        s.Poke("releaseRate", 0UL)
+
+        for i in 0 .. multibandBands - 1 do
+            s.Poke($"lg{i}", gainUnity)
+            s.Poke($"rg{i}", gainUnity)
+
+    // A gentle setting — every band's gain moving without any band muted —
+    // beside the demo's, where the slope law drives bands to silence.
+    let gentle (s: Sim) =
+        multibandSetup s
+        s.Poke("threshold", 1_000_000UL)
+        s.Poke("ratio", 1UL)
+
+        for i in 0 .. multibandBands - 1 do
+            s.Poke($"lg{i}", gainUnity + (uint64 i <<< 4))
+            s.Poke($"rg{i}", gainUnity - (uint64 i <<< 3))
+
+    // Unity changes the frames too, now that the crossover is an all-pass;
+    // what the guard still rules out is a run where nothing happened at all.
+    let compressing = compare "compressing" multibandSetup (fun n -> n > samples.Length / 2)
+    let shaped = compare "gentle" gentle (fun n -> n > samples.Length / 2)
+    let passthrough = compare "unity" unity (fun n -> n > samples.Length / 2)
+    compressing && shaped && passthrough
+
+/// The folded engine spends cycles where the spatial one spends multipliers, so
+/// the question it raises is whether a pass fits inside one audio frame on the
+/// board it exists for. Measured rather than summed from the schedule: the
+/// cycles from one accepted beat to the next with the consumer never stalling,
+/// against the iCEBreaker's frame — `fabricHz / sampleRate`, the same quotient
+/// the I2S link divides by.
+let private foldedPassFitsTheFrame () =
+    let sim = Sim Batch.multibandStageFoldedRef.def
+    multibandSetup sim
+    sim.Poke("in_valid", 1UL)
+    sim.Poke("in_left", 0x123456UL)
+    sim.Poke("in_right", 0x7EDCBAUL)
+    sim.Poke("out_ready", 1UL)
+
+    // Cycles between the first two acceptances after the engine has settled
+    // into its rhythm: the pass, plus the one cycle the handshake costs.
+    let acceptedAt = ResizeArray<int>()
+    let mutable cycle = 0
+
+    while acceptedAt.Count < 3 && cycle < 10_000 do
+        if sim.Peek "in_ready" = 1UL then
+            acceptedAt.Add cycle
+
+        sim.Tick()
+        cycle <- cycle + 1
+
+    let pass = acceptedAt[2] - acceptedAt[1]
+    let frame = Ice.iceBoard.fabricHz / Ice.iceSampleRate
+    printfn $"      folded pass: %d{pass} cycles a stereo frame, against %d{frame} on the iCEBreaker (%d{pass * 100 / frame}%%)"
+    acceptedAt.Count = 3 && pass <= frame
 
 /// The same question of each stage on its own, so a failure names one entry in
 /// the audio stdlib rather than "somewhere in the chain".
@@ -326,13 +439,14 @@ let private stageStallReport () =
           "limiter", Batch.limiterStage.def, (fun (sim: Sim) ->
             sim.Poke("threshold", (1UL <<< (sampleWidth - 1)) - 1UL))
           "fir", Batch.firStage.def, (fun (sim: Sim) -> sim.Poke("preset", 0UL))
-          "multiband", Batch.multibandStageRef.def, multibandSetup ]
+          "multiband", Batch.multibandStageRef.def, multibandSetup
+          "multiband folded", Batch.multibandStageFoldedRef.def, multibandSetup ]
 
     let mutable allOk = true
 
     for name, d, setup in stages do
         let ok = stageIsStallIndependent d setup
-        printfn $"      stall-independent: %-14s{name} %b{ok}"
+        printfn $"      stall-independent: %-17s{name} %b{ok}"
         allOk <- allOk && ok
 
     allOk
@@ -500,7 +614,9 @@ let private checks =
       "batch: pacing changes nothing", pacingDoesNotChangeTheAudio
       "batch: flat copy survives jitter", pacedFlatStillCopies
       "audio: every stage is stall-independent", stageStallReport
-      "audio: unity settings pass audio through", unitySettingsPassAudioThrough
+      "audio: unity settings are an all-pass", unitySettingsPassAudioThrough
+      "audio: folded engine matches the spatial one", foldedMatchesTheSpatial
+      "audio: folded pass fits an iCE40 frame", foldedPassFitsTheFrame
       "ice: clock ratios are the converter's", iceClocksAreWhatTheConverterNeeds
       "ice: passthru passes audio exactly", icePassthruPassesAudio
       "ice: indicators are paced by the link", iceLedsFollowTheLink ]

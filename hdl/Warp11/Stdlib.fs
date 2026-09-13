@@ -900,7 +900,27 @@ type FuSharing =
 /// this wrapper never reads it. There is no `assert` yet, so that contract
 /// lives here rather than in the design; a client that cannot honour it wants
 /// per-client skid buffers, still a wrapper-only change.
-let warpFu
+/// How the issue arbiter announces its pick.
+type FuArbiter =
+    /// The pick and the grant in one cycle: a client that asks is served the
+    /// same cycle if it wins. The request-to-grant path is the arbiter's whole
+    /// depth plus the operand mux, which at five clients is 25 ns of iCE40 —
+    /// fine at 166 MHz on a KV260's carry, not at 24 MHz on a UP5K.
+    | Combinational
+    /// The pick registered, the grant announced the cycle after, and the core
+    /// fed only if the picked client still asks — so a request that dropped in
+    /// between costs an idle cycle rather than a stray product. Same depth,
+    /// same tags, same writeback; the grant is a register and the operand mux
+    /// selects on a register.
+    | Registered
+    /// `Registered`, picking the lowest-numbered asking client rather than the
+    /// next in turn. For clients that are not peers: one whose issues are the
+    /// design's critical path and others that can wait a few cycles. Fair only
+    /// if the first client's requests have gaps, which is the caller's to know.
+    | RegisteredPriority
+
+let private warpFuWith
+    (arbiter: FuArbiter)
     (prefix: string)
     (respPorts: (string * int) list)
     (core: Expr list -> Expr list * int)
@@ -931,11 +951,34 @@ let warpFu
                     (lastGrant + lit 1UL laneW)
             ==> rrBase
 
-            let anyValid, pickedLane = roundRobinPick [ for s in issues -> s.valid ] rrBase laneW
+            let valids = [ for s in issues -> s.valid ]
+
+            let anyValid, pickedLane =
+                match arbiter with
+                | Combinational
+                | Registered -> roundRobinPick valids rrBase laneW
+                | RegisteredPriority ->
+                    let any, picked = priorityPick valids [ [ for l in 0 .. n - 1 -> lit (uint64 l) laneW ] ]
+                    any, picked.Head
+
             let valid = wireBit $"{prefix}_grantValid"
-            anyValid ==> valid
             let lane = wire $"{prefix}_grantLane" laneW
-            pickedLane ==> lane
+
+            match arbiter with
+            | Combinational ->
+                anyValid ==> valid
+                pickedLane ==> lane
+            | Registered
+            | RegisteredPriority ->
+                // Last cycle's pick, fired this cycle if its client still asks.
+                let picked = regBit $"{prefix}_picked"
+                anyValid ==> picked
+                let pickedLaneR = reg $"{prefix}_pickedLane" laneW
+                pickedLane ==> pickedLaneR
+                let stillAsking = mux1H [ for l in 0 .. n - 1 -> eq pickedLaneR (lit (uint64 l) laneW) ] [ for s in issues -> s.valid ]
+                (picked &&& stillAsking) ==> valid
+                pickedLaneR ==> lane
+
             If valid (fun () -> lane ==> lastGrant)
 
             // The one-hot grant IS each client's ready — a client fires exactly
@@ -996,6 +1039,14 @@ let warpFu
                   outValid &&& eq outLane (lit (uint64 l) laneW)
             ready = rdy
             layout = wbLayout } ]
+
+let warpFu prefix respPorts core issues = warpFuWith Combinational prefix respPorts core issues
+
+/// `warpFu` with the registered arbiter — see `FuArbiter`.
+let warpFuRegistered prefix respPorts core issues = warpFuWith Registered prefix respPorts core issues
+
+/// `warpFu` with the registered, lowest-client-first arbiter — see `FuArbiter`.
+let warpFuPriority prefix respPorts core issues = warpFuWith RegisteredPriority prefix respPorts core issues
 
 /// Neighbor set: the 8 surrounding cells (diagonals included) or the 4
 /// orthogonal ones.

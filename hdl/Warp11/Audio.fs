@@ -516,16 +516,11 @@ let private gainRedWidth = sampleWidth + 8
 let private gainWidth = sampleWidth + 1
 let private gainCap = 1UL <<< sampleWidth
 
-/// Envelope follower: `env += alpha*(peak - env)` with `alpha` the attack
-/// coefficient while the signal is rising and the release one while it falls,
-/// clipped into the envelope register's unsigned range. Returns the register
-/// and its widened form, which the gain computer reuses rather than rebuilding.
-///
-/// The loop is a recurrence, so it stays combinational — there is no pipelining
-/// it, which is why callers pipeline only the apply path around it.
-let private envelopeFollower (peak: Expr) (attack: Expr) (releaseRate: Expr) (advance: Expr) : Expr * Expr =
-    let env = reg "env" sampleWidth
-
+/// The envelope step's multiply operands, from the current envelope and this
+/// sample's peak: the difference and the chosen coefficient, plus the widened
+/// envelope the second half needs back. The first half of `envelopeStep`,
+/// split so a pipelined engine can compute it a stage ahead of the multiply.
+let private envelopeOperands (env: Expr) (peak: Expr) (attack: Expr) (releaseRate: Expr) : Expr * Expr * Expr =
     let alpha = wire "alpha" 16
     mux (greaterThan peak env) attack releaseRate ==> alpha
 
@@ -541,8 +536,12 @@ let private envelopeFollower (peak: Expr) (attack: Expr) (releaseRate: Expr) (ad
     let alphaSigned = wire "alpha_signed" (SInt 17)
     widenUnsigned 17 alpha ==> alphaSigned
 
-    let step = wire "step" (SInt stepWidth)
-    mul difference alphaSigned ==> step
+    difference, alphaSigned, envWide
+
+/// The next envelope from the step product and the widened envelope it was
+/// stepped from — the second half of `envelopeStep`. `step` must be a declared
+/// `SInt stepWidth` signal, the multiply's own product width.
+let private envelopeFromStep (step: Expr) (envWide: Expr) : Expr =
     let stepQ15 = wire "step_q15" (SInt(stepWidth - 15))
     shr 15 step ==> stepQ15
 
@@ -562,15 +561,44 @@ let private envelopeFollower (peak: Expr) (attack: Expr) (releaseRate: Expr) (ad
 
     let envValue = wire "env_value" sampleWidth
     slice (sampleWidth - 1) 0 envClipped ==> envValue
+    envValue
+
+/// One step of the envelope recurrence, as arithmetic on a value: the next
+/// envelope from the current one and this sample's peak, and the current one
+/// widened for the gain computer. `multiply` is whichever multiplier the caller
+/// owns — see `envelopeFollower`. The two halves are `envelopeOperands` and
+/// `envelopeFromStep`, for an engine that puts a pipeline between them.
+let private envelopeStep (multiply: Expr -> Expr -> Expr) (env: Expr) (peak: Expr) (attack: Expr) (releaseRate: Expr) : Expr * Expr =
+    let difference, alphaSigned, envWide = envelopeOperands env peak attack releaseRate
+
+    let step = wire "step" (SInt stepWidth)
+    multiply difference alphaSigned ==> step
+
+    envelopeFromStep step envWide, envWide
+
+/// Envelope follower: `env += alpha*(peak - env)` with `alpha` the attack
+/// coefficient while the signal is rising and the release one while it falls,
+/// clipped into the envelope register's unsigned range. Returns the register
+/// and its widened form, which the gain computer reuses rather than rebuilding.
+///
+/// The loop is a recurrence, so it stays combinational — there is no pipelining
+/// it, which is why callers pipeline only the apply path around it.
+///
+/// **The arithmetic is `envelopeStep`; this is the register around it.** The
+/// folded engine keeps its envelopes in memory and runs the same step on a
+/// fetched value, so the step is written once and takes the multiplier as an
+/// argument — a spatial engine hands it `mul`, a folded one hands it a slot on
+/// a shared multiplier. One law, two storages.
+let private envelopeFollower (peak: Expr) (attack: Expr) (releaseRate: Expr) (advance: Expr) : Expr * Expr =
+    let env = reg "env" sampleWidth
+    let envValue, envWide = envelopeStep mul env peak attack releaseRate
     If advance (fun () -> envValue ==> env)
 
     env, envWide
 
-/// Gain computer: `gain = 1 - min((env - threshold) * ratio, 1)` in Q0.24,
-/// returned sign-extended and ready for the apply multiply. `ratio` is a slope
-/// of gain against excess rather than an N:1 knob, which is what keeps the
-/// whole computer one multiply and a clip — no division, no log.
-let private gainComputer (envWide: Expr) (threshold: Expr) (ratio: Expr) : Expr =
+/// How far the envelope is over the threshold, clipped at zero — the gain
+/// computer's multiply operand, and the first half of `gainComputer`.
+let private gainExcess (envWide: Expr) (threshold: Expr) : Expr =
     let thresholdWide = wire "threshold_wide" (SInt wideWidth)
     widenUnsigned wideWidth threshold ==> thresholdWide
     let overThreshold = wire "over_threshold" (SInt wideWidth)
@@ -584,8 +612,12 @@ let private gainComputer (envWide: Expr) (threshold: Expr) (ratio: Expr) : Expr 
             (slice (sampleWidth - 1) 0 overThreshold)
     ==> excess
 
-    let reductionRaw = wire "reduction_raw" gainRedWidth
-    mul excess ratio ==> reductionRaw
+    excess
+
+/// The gain from the reduction product, clipped and sign-extended for the apply
+/// multiply — the second half of `gainComputer`. `reductionRaw` must be a
+/// declared `gainRedWidth` signal.
+let private gainFromReduction (reductionRaw: Expr) : Expr =
     let reduction = wire "reduction" gainWidth
 
     mux
@@ -599,6 +631,19 @@ let private gainComputer (envWide: Expr) (threshold: Expr) (ratio: Expr) : Expr 
     let gainSigned = wire "gain_signed" (SInt(gainWidth + 1))
     widenUnsigned (gainWidth + 1) gain ==> gainSigned
     gainSigned
+
+/// Gain computer: `gain = 1 - min((env - threshold) * ratio, 1)` in Q0.24,
+/// returned sign-extended and ready for the apply multiply. `ratio` is a slope
+/// of gain against excess rather than an N:1 knob, which is what keeps the
+/// whole computer one multiply and a clip — no division, no log. The halves
+/// are `gainExcess` and `gainFromReduction`.
+let private gainComputer (multiply: Expr -> Expr -> Expr) (envWide: Expr) (threshold: Expr) (ratio: Expr) : Expr =
+    let excess = gainExcess envWide threshold
+
+    let reductionRaw = wire "reduction_raw" gainRedWidth
+    multiply excess ratio ==> reductionRaw
+
+    gainFromReduction reductionRaw
 
 /// Pipeline latency of [audioCompressor]'s gain-apply datapath. The envelope
 /// feedback is a recurrence and stays combinational; only the two output
@@ -723,7 +768,7 @@ let audioCompressorDef (name: string) : TypedModule<AudioCompressorPorts> =
             mux (greaterThan absLeft absRight) absLeft absRight ==> peak
 
             let _, envWide = envelopeFollower peak io.attack io.releaseRate advance
-            let gainSigned = gainComputer envWide io.threshold io.ratio
+            let gainSigned = gainComputer mul envWide io.threshold io.ratio
 
             // Stage 1 — latch the gain beside the boosted samples it was
             // derived from, so they stay aligned down the apply pipeline.
@@ -1871,7 +1916,7 @@ let monoBandCompressorDef (name: string) : TypedModule<MonoBandCompressorPorts> 
             // --- envelope follower + gain computer, shared with audioCompressor ---
             let env, envWide = envelopeFollower peak io.attack io.releaseRate io.advance
             env ==> io.envelope
-            let gainSigned = gainComputer envWide io.threshold io.ratio
+            let gainSigned = gainComputer mul envWide io.threshold io.ratio
 
             // --- apply, pipelined ---
             let boostedHeld = reg "boosted_held" (SInt gainedWidth)
@@ -1907,6 +1952,111 @@ let monoBandCompressor (name: string) instName =
         makeup ==> io.makeup
         io.gained, io.envelope
 
+/// One section of the crossover: a biquad that reads one node of the graph and
+/// writes another. Node 0 is the ear's sample; every other node is an earlier
+/// section's output.
+type CrossoverSection =
+    { input: int
+      output: int
+      /// Q2.30 `[b0; b1; b2; a1; a2]`, a high-pass's negation already folded in.
+      coefficients: uint64 list
+      /// What it is, for a reader: `lp 320`, `hp 320`, `ap 525`.
+      role: string }
+
+/// The crossover as a graph of sections, in an order every engine can run it
+/// in: a section appears after every section it reads.
+type CrossoverTree =
+    { sections: CrossoverSection list
+      /// The nodes that are the bands, low band first.
+      bands: int list
+      /// How many nodes there are, the sample included.
+      nodes: int
+      /// Sections on the path from the sample to any band — the same for
+      /// every band, which is what keeps them time-aligned in a pipeline.
+      depth: int }
+
+/// The Linkwitz-Riley quality: two cascaded first-order sections, so a
+/// low-pass and a high-pass at the same cutoff sum to an all-pass rather than
+/// to a peak or a notch. It is the design's, not a caller's.
+let linkwitzRileyQ = 0.5
+
+/// A first-order all-pass at `fc`, as a section: what an LR2 low-pass and
+/// high-pass at `fc` sum to, and therefore what the *other* branch of a split
+/// has to pass through to stay in phase with this one.
+let private allPassDesign (fc: float) (fs: float) : BiquadDesign =
+    let t = tan (System.Math.PI * fc / fs)
+    let c = (1.0 - t) / (1.0 + t)
+    // (−c + z⁻¹) / (1 − c·z⁻¹): y = −c·x + x1 + c·y1
+    { b0 = -c; b1 = 1.0; b2 = 0.0; a1 = -c; a2 = 0.0 }
+
+/// The crossover: a balanced tree of second-order Linkwitz-Riley splits, each
+/// branch passed through the all-passes of the splits in the *other* branch.
+///
+/// **Why a tree, and why the all-passes.** A subtractive split — band k as the
+/// difference of two low-passes — reconstructs exactly and isolates terribly:
+/// two low-passes with different cutoffs are not in phase below either, and
+/// the difference of two near-unit vectors 12° apart is 20% of the signal,
+/// so a 440 Hz tone came out of the 1.4 kHz band at a third of its level
+/// (measured 2026-09-13). An LR2 low-pass and high-pass at one cutoff sum to
+/// a first-order all-pass, so a split loses nothing; the tree then keeps the
+/// two halves of every split in phase by sending each through the all-passes
+/// of the other half's splits. The bands sum to an all-pass — flat in
+/// magnitude, not bit-exact — and a tone leaks into a band two away at
+/// −15 dB rather than −5.
+///
+/// For eight bands: seven splits, ten all-passes, and every band's path
+/// exactly seven sections long. Sections are listed breadth-first, so a
+/// section's input was produced as many beats before it as the tree allows.
+let crossoverTree (crossovers: float list) (sampleRate: float) : CrossoverTree =
+    let fc = List.toArray crossovers
+    let mutable nextNode = 1
+    let fresh () = let n = nextNode in nextNode <- nextNode + 1; n
+    let quantise (d: BiquadDesign) = toQ230 d
+
+    let lowPass k = quantise (rbjDesign LowPass fc[k] linkwitzRileyQ 0.0 sampleRate)
+
+    let highPass k =
+        let d = rbjDesign HighPass fc[k] linkwitzRileyQ 0.0 sampleRate
+        quantise { d with b0 = -d.b0; b1 = -d.b1; b2 = -d.b2 }
+
+    let allPass k = quantise (allPassDesign fc[k] sampleRate)
+
+    // (level, section) pairs; `lo..hi` are the crossovers still to split on.
+    let rec build (node: int) (level: int) (lo: int) (hi: int) : (int * CrossoverSection) list * (int * int) list =
+        if lo > hi then
+            [], [ node, level ]
+        else
+            let mid = (lo + hi) / 2
+            let low = fresh ()
+            let high = fresh ()
+
+            let splits =
+                [ level, { input = node; output = low; coefficients = lowPass mid; role = $"lp %.0f{fc[mid]}" }
+                  level, { input = node; output = high; coefficients = highPass mid; role = $"hp %.0f{fc[mid]}" } ]
+
+            let compensate (from: int) (through: int list) =
+                ((from, level + 1, []), through)
+                ||> List.fold (fun (node, level, acc) k ->
+                    let out = fresh ()
+                    out, level + 1, acc @ [ level, { input = node; output = out; coefficients = allPass k; role = $"ap %.0f{fc[k]}" } ])
+
+            let lowNode, lowLevel, lowComp = compensate low [ mid + 1 .. hi ]
+            let highNode, highLevel, highComp = compensate high [ lo .. mid - 1 ]
+            let lowSections, lowLeaves = build lowNode lowLevel lo (mid - 1)
+            let highSections, highLeaves = build highNode highLevel (mid + 1) hi
+            splits @ lowComp @ highComp @ lowSections @ highSections, lowLeaves @ highLeaves
+
+    let sections, leaves = build 0 0 0 (fc.Length - 1)
+    let depths = leaves |> List.map snd |> List.distinct
+
+    if List.length depths <> 1 then
+        failwith $"crossover tree: bands at different depths %A{depths} — a balanced count of bands is required"
+
+    { sections = sections |> List.sortBy fst |> List.map snd
+      bands = leaves |> List.map fst
+      nodes = nextNode
+      depth = List.head depths }
+
 /// The eight-band compressor's ports. One crossover feeding one compressor per
 /// band, with independent left and right makeup gains.
 type MultibandCompressorPorts =
@@ -1930,13 +2080,12 @@ type MultibandCompressorPorts =
 
 /// 8-band stereo multiband compressor.
 ///
-/// A subtractive crossover splits each ear into eight bands with seven fixed
-/// low-pass biquads — band 0 is the lowest low-pass, band k the difference
-/// between successive low-passes, band 7 what the last low-pass leaves. The
-/// split is exact by construction: the bands sum back to the input, so unity
-/// makeup and zero ratio reconstruct the signal rather than approximating it.
-/// Each band then gets its own compressor, and the eight are summed and
-/// saturated once.
+/// Each ear goes through the crossover tree — seven Linkwitz-Riley splits and
+/// their all-pass compensation, one section per pipeline level, so every band
+/// arrives at the same position — then each band gets its own compressor,
+/// and the eight are summed and saturated once. The bands sum to an all-pass:
+/// unity makeup and zero ratio return the signal at its level, phase-shifted,
+/// not bit for bit.
 ///
 /// Per-band makeup gains are the whole point of the shape: they are Q8.8
 /// register values, so what the module is *for* — mastering, broadcast
@@ -1947,12 +2096,11 @@ type MultibandCompressorPorts =
 /// global threshold is meaningful here only because each band compresses its
 /// own post-makeup level (see `monoBandCompressor`). `envelope` reports the
 /// loudest band detector across both ears, for host metering.
-let multibandCompressor8Def (name: string) (crossovers: float list) (q: float) (sampleRate: float) : TypedModule<MultibandCompressorPorts> =
+let multibandCompressor8Def (name: string) (crossovers: float list) (sampleRate: float) : TypedModule<MultibandCompressorPorts> =
     if List.length crossovers <> multibandBands - 1 then
         failwith $"multibandCompressor8 needs {multibandBands - 1} crossovers, got {List.length crossovers}"
 
-    let lowPassCount = List.length crossovers
-    let coefficients = crossovers |> List.map (fun fc -> lowPassCoeffsQ230 fc q sampleRate)
+    let tree = crossoverTree crossovers sampleRate
     let section = biquadSection $"{name}_biquad"
     let compressor = monoBandCompressor $"{name}_band"
     let sumWidth = gainedWidth + 3
@@ -1993,57 +2141,56 @@ let multibandCompressor8Def (name: string) (crossovers: float list) (q: float) (
             // apart: there were two notions of "where is this beat" and nothing
             // held them together. Now there is one.
 
-            // Position 0 — the filterbank may touch its history only when the
-            // beat in the input register is real.
-            let advance = wireBit "advance"
-            (inValid &&& enable) ==> advance
+            // Positions 0..depth: the beat in the input register is at 0, and
+            // each level of the crossover tree moves it one on. A section at
+            // level l may touch its history only when the beat at l is real;
+            // the compressors sit at `depth`, where every band arrives at once.
+            let validAt =
+                (inValid, [ 1 .. tree.depth ])
+                ||> List.scan (fun previous l ->
+                    let r = regBit $"valid_%d{l}"
+                    If enable (fun () -> previous ==> r)
+                    r)
 
-            // Position 1 — the compressors sit one place further down, because
-            // the bands come off registered low-pass outputs. The same bit,
-            // moved once: the first link of the chain rather than a separately
-            // derived signal that happens to resemble it.
-            let validAt1 = regBit "valid_1"
-            If enable (fun () -> inValid ==> validAt1)
-
-            let advanceDelayed = wireBit "advance_delayed"
-            (validAt1 &&& enable) ==> advanceDelayed
+            let advanceAt =
+                validAt
+                |> List.mapi (fun l v ->
+                    let a = wireBit $"advance_%d{l}"
+                    (v &&& enable) ==> a
+                    a)
 
             let envelopes = ResizeArray<Expr>()
 
             let ear earName x (gains: Expr list) =
-                let lowPass =
-                    coefficients
-                    |> List.mapi (fun k cs ->
-                        // Annotated because BiquadDesign shares these field
-                        // names — one carries reals for the host, the other
-                        // nets for the fabric.
-                        let coeffs: BiquadCoeffs =
-                            { b0 = lit cs[0] biquadCoeffWidth
-                              b1 = lit cs[1] biquadCoeffWidth
-                              b2 = lit cs[2] biquadCoeffWidth
-                              a1 = lit cs[3] biquadCoeffWidth
-                              a2 = lit cs[4] biquadCoeffWidth }
+                // The tree, one register after every section: node 0 is the
+                // input register, and a section at level l reads a node that
+                // was registered at level l − 1.
+                let nodes = Array.create tree.nodes x
+                let levelOf = Array.create tree.nodes 0
 
-                        let y = section $"{earName}_lp{k}" x advance coeffs
-                        let held = reg $"{earName}_lp_held{k}" sampleWidth
-                        If enable (fun () -> y ==> held)
-                        held)
+                for i, sec in List.indexed tree.sections do
+                    let cs = sec.coefficients
 
-                let xHeld = reg $"{earName}_x_held" sampleWidth
-                If enable (fun () -> x ==> xHeld)
+                    // Annotated because BiquadDesign shares these field
+                    // names — one carries reals for the host, the other
+                    // nets for the fabric.
+                    let coeffs: BiquadCoeffs =
+                        { b0 = lit cs[0] biquadCoeffWidth
+                          b1 = lit cs[1] biquadCoeffWidth
+                          b2 = lit cs[2] biquadCoeffWidth
+                          a1 = lit cs[3] biquadCoeffWidth
+                          a2 = lit cs[4] biquadCoeffWidth }
 
-                // The subtractive split: successive low-pass differences, with
-                // the input's own residue as the top band.
+                    let level = levelOf[sec.input]
+                    let y = section $"{earName}_s{i}" nodes[sec.input] advanceAt[level] coeffs
+                    let held = reg $"{earName}_node{sec.output}" sampleWidth
+                    If enable (fun () -> y ==> held)
+                    nodes[sec.output] <- held
+                    levelOf[sec.output] <- level + 1
+
                 let band k =
                     let b = wire $"{earName}_band{k}" bandWidth
-
-                    (if k = 0 then signExtend bandWidth lowPass[0]
-                         elif k = lowPassCount then
-                             sub (signExtend bandWidth xHeld) (signExtend bandWidth lowPass[lowPassCount - 1])
-                         else
-                             sub (signExtend bandWidth lowPass[k]) (signExtend bandWidth lowPass[k - 1]))
-                    ==> b
-
+                    signExtend bandWidth nodes[tree.bands[k]] ==> b
                     b
 
                 let gained =
@@ -2052,7 +2199,7 @@ let multibandCompressor8Def (name: string) (crossovers: float list) (q: float) (
                             compressor
                                 $"{earName}_band{k}_comp"
                                 (band k)
-                                advanceDelayed
+                                advanceAt[tree.depth]
                                 enable
                                 io.threshold
                                 io.ratio
@@ -2072,7 +2219,7 @@ let multibandCompressor8Def (name: string) (crossovers: float list) (q: float) (
                 total ==> sum
                 let saturated = wire $"{earName}_out" (SInt sampleWidth)
                 saturate sampleWidth sum ==> saturated
-                saturated, 1 + compressorLatency + treeLatency
+                saturated, tree.depth + compressorLatency + treeLatency
 
             let outLeft, earLatency = ear "left" inLeft io.leftGains
             let outRight, _ = ear "right" inRight io.rightGains
@@ -2088,31 +2235,30 @@ let multibandCompressor8Def (name: string) (crossovers: float list) (q: float) (
             // `valid` rides a delay line matched to the DSP path, so it arrives
             // with the result it describes rather than ahead of it.
             //
-            // There is no bypass copy alongside it any more. A raw passthrough
-            // was a second data path, `latency` deep and two samples wide per
-            // ear, kept so that flipping bypass would not move the signal in
-            // time — and it was redundant: this chain is *measurably*
-            // bit-exact with threshold at full scale, ratio zero and unity
-            // gains, which are the register map's own defaults. Configuration
-            // already gives a bit-perfect passthrough, so the mux bought
-            // nothing and cost a path that had to be kept in step with this
-            // one. See `audio: unity settings pass audio through`.
-            // Positions 2..earLatency, continuing from `validAt1`. The output's
-            // valid is the last link — the very same bit that gated the
-            // filterbank, arriving with the result it describes.
-            let validRest = List.init (earLatency - 1) (fun i -> regBit $"v{i}")
+            // There is no bypass copy alongside it. A raw passthrough would be
+            // a second data path, `latency` deep and two samples wide per ear,
+            // kept so that flipping bypass would not move the signal in time.
+            // Unity settings pass the signal at its level — as an all-pass
+            // since the crossover became a tree, bit-exact before — which is
+            // what a bypass is for. See `audio: unity settings pass audio
+            // through`.
+            // Positions depth+1..earLatency, continuing from the tree's last
+            // level. The output's valid is the last link — the very same bit
+            // that gated the filterbank, arriving with the result it describes.
+            let validAtDepth = List.last validAt
+            let validRest = List.init (earLatency - tree.depth) (fun i -> regBit $"v{i}")
 
             // These shift on `enable`, with the data pipeline they describe:
-            // the held low-pass outputs, `x_held` and the adder tree all move
-            // on the same bit, so a bubble travels through as `valid` low and
-            // the tail drains. Only the *recurrences* — the filterbank history
-            // and the compressor envelopes — gate on `advance`, because state
-            // may move only on a real beat.
+            // the tree's node registers and the adder tree all move on the
+            // same bit, so a bubble travels through as `valid` low and the
+            // tail drains. Only the *recurrences* — the filterbank history and
+            // the compressor envelopes — gate on `advance`, because state may
+            // move only on a real beat.
             If enable (fun () ->
                 validRest
-                |> List.iteri (fun i r -> (if i = 0 then validAt1 else validRest[i - 1]) ==> r))
+                |> List.iteri (fun i r -> (if i = 0 then validAtDepth else validRest[i - 1]) ==> r))
 
-            (if List.isEmpty validRest then validAt1 else List.last validRest) ==> io.s.outValid
+            (if List.isEmpty validRest then validAtDepth else List.last validRest) ==> io.s.outValid
             outLeft ==> io.s.outLeft
             outRight ==> io.s.outRight)
 
@@ -2145,9 +2291,9 @@ let multibandSettingsPorts (p: Ports) : MultibandSettings =
       leftGains = List.init multibandBands (fun i -> p.inPort $"lg{i}" 16)
       rightGains = List.init multibandBands (fun i -> p.inPort $"rg{i}" 16) }
 
-let multibandCompressor8 (name: string) (crossovers: float list) (q: float) (sampleRate: float) instName =
-    let io = (multibandCompressor8Def name crossovers q sampleRate).NewNamed instName
-
+/// Wire one bank's settings and splice the stream through it — the call shape
+/// both engines share, so a caller cannot tell which it has.
+let private multibandInstance (io: MultibandCompressorPorts) =
     fun (settings: MultibandSettings) (s: Stream<Expr * Expr>) ->
         settings.threshold ==> io.threshold
         settings.ratio ==> io.ratio
@@ -2157,8 +2303,11 @@ let multibandCompressor8 (name: string) (crossovers: float list) (q: float) (sam
         List.iter2 (fun port g -> g ==> port) io.rightGains settings.rightGains
         stereoSplice io.s s, io.envelope
 
-/// The stock 8-band compressor: the default crossovers and Butterworth Q, at
-/// **the rate the design actually runs**.
+let multibandCompressor8 (name: string) (crossovers: float list) (sampleRate: float) instName =
+    multibandInstance ((multibandCompressor8Def name crossovers sampleRate).NewNamed instName)
+
+/// The stock 8-band compressor: the default crossovers, at **the rate the
+/// design actually runs**.
 ///
 /// The sample rate is an argument rather than a constant because a filter's
 /// coefficients fix a frequency in cycles per *sample*, so designing at one
@@ -2180,4 +2329,1228 @@ let multibandCompressor8 (name: string) (crossovers: float list) (q: float) (sam
 /// one filter redesigned and the rest left alone — puts a real dip at that
 /// crossover. If this ever gains a per-band override, that is the trap.
 let multibandCompressor name (sampleRate: float) =
-    multibandCompressor8 name defaultCrossovers 0.707 sampleRate
+    multibandCompressor8 name defaultCrossovers sampleRate
+
+// ---------------------------------------------------------------------------
+// The folded multiband compressor: the same DSP, as the spatial engine's own
+// operations chained one after another over one shared multiplier.
+//
+// `multibandCompressor8` holds every multiply in hardware at once — 588 DSP
+// blocks on the KV260, and 32 on a part that has 8. Here every operation that
+// multiplies is a stage holding one beat, and the multiplier is shared behind
+// them through `warpFu`. The bits are the spatial engine's by construction —
+// every multiply issued at the widths the spatial engine uses, each stage
+// rescaling its product exactly as the spatial one did, the biquad's five
+// products summed serially in the reference's own accumulator — and by
+// measurement: the equivalence is a living check, not an argument.
+
+/// Select from a power-of-two list by a binary tree on the index bits: `log2 n`
+/// muxes deep where `selectIndexed`'s chain is `n` deep. The sixteen-way pick
+/// of a band's makeup was fourteen LUTs end to end as a chain (measured:
+/// 47 ns on an iCE40), and four as a tree.
+let private selectTree (sel: Expr) (values: Expr list) : Expr =
+    let n = List.length values
+
+    if n <> (1 <<< width sel) then
+        failwith $"selectTree wants exactly 2^%d{width sel} values for a %d{width sel}-bit selector, got %d{n}"
+
+    let rec pick (bit: int) (values: Expr list) =
+        match values with
+        | [ single ] -> single
+        | _ ->
+            let half = List.length values / 2
+            let lower, upper = List.splitAt half values
+            mux (slice bit bit sel) (pick (bit - 1) upper) (pick (bit - 1) lower)
+
+    pick (width sel - 1) values
+
+// ---------------------------------------------------------------------------
+// The shared multiplier, and the three kinds of one-beat stage the folded
+// engine is assembled from.
+
+/// The multiplier's operand widths: the widest pair any operation presents.
+let private podAWidth = gainedWidth
+let private podBWidth = biquadCoeffWidth
+let private podProductWidth = podAWidth + podBWidth
+
+/// One client's end of the shared multiplier: the client drives `a`, `b` and
+/// `issue`; the pod answers `grant` the cycle it takes them, and `landed` with
+/// the `product` some cycles later. The product's low bits are the client's
+/// own product exactly, because a product of its operands fits their widths.
+type private PodClient =
+    { a: Expr
+      b: Expr
+      /// Rides with the operands and comes back with the product, untouched.
+      tag: Expr
+      issue: Expr
+      grant: Expr
+      product: Expr
+      tagBack: Expr
+      landed: Expr }
+
+let private podTagWidth = 2
+
+/// One multiplier for every operation that needs one. Each stage asks for a
+/// client; `Finish` puts them all behind `warpFu` — a round-robin arbiter, the
+/// registered multiply as the core, results routed back to their issuer. No
+/// client holds more than it can take back: a stage keeps one beat in flight,
+/// so a result always has somewhere to land.
+type private SharedMultiplier(name: string) =
+    let clients = ResizeArray<PodClient>()
+
+    member _.Client(client: string) : PodClient =
+        let c =
+            { a = wire $"{client}_pod_a" (SInt podAWidth)
+              b = wire $"{client}_pod_b" (SInt podBWidth)
+              tag = wire $"{client}_pod_tag" podTagWidth
+              issue = wireBit $"{client}_pod_issue"
+              grant = wireBit $"{client}_pod_grant"
+              product = wire $"{client}_pod_product" (SInt podProductWidth)
+              tagBack = wire $"{client}_pod_tag_back" podTagWidth
+              landed = wireBit $"{client}_pod_landed" }
+
+        clients.Add c
+        c
+
+    member _.Finish() =
+        let issueLayout = fuLayout podTagWidth [ "a", podAWidth; "b", podBWidth ]
+
+        let issues =
+            [ for c in clients ->
+                  ({ payload = { tag = c.tag; fields = [ c.a; c.b ] }
+                     valid = c.issue
+                     ready = c.grant
+                     layout = issueLayout }
+                   : Stream<FuBeat>) ]
+
+        // Operands in registers, the product in a register — both of which the
+        // DSP block absorbs. The depth is the construction's, reported to
+        // warpFu rather than declared to it.
+        let core (operands: Expr list) =
+            match operands with
+            | [ a; b ] ->
+                let heldA = reg $"{name}_a" (SInt podAWidth)
+                a ==> heldA
+                let heldB = reg $"{name}_b" (SInt podBWidth)
+                b ==> heldB
+                let product = reg $"{name}_product_held" (SInt podProductWidth)
+                mul heldA heldB ==> product
+                [ product ], 2
+            | _ -> failwith $"'{name}' multiplies two operands"
+
+        // The registered arbiter: the pick over five clients was 25 ns of an
+        // iCE40 cycle before the operand mux even started. Lowest client
+        // first, and the crossover asks for its client first: its taps are the
+        // pass's critical path and issue back to back, while a compressor
+        // step can wait the few cycles a section takes.
+        let results = warpFuPriority name [ "product", podProductWidth ] core issues
+
+        for c, r in Seq.zip clients results do
+            r.payload.fields.Head ==> c.product
+            r.payload.tag ==> c.tagBack
+            r.valid ==> c.landed
+            lit 1UL 1 ==> r.ready
+
+/// A layout's `unpack` hands a field back in its reading (`asSInt` over the
+/// net); to drive the net itself, take the reading off again.
+let rec private bare (e: Expr) =
+    match e with
+    | AsSInt v
+    | AsUInt v -> bare v
+    | v -> v
+
+/// `streamFsm` with one more transition: a stage whose offer is taken this
+/// cycle accepts the next beat this cycle too, straight back into `Working`,
+/// rather than spending a cycle in `Accepting` first. A chain of one-beat
+/// stages then moves a beat per stage-cycle instead of per stage-cycle plus
+/// one, which across the crossover's forty-eight sections a sample is what
+/// keeps the pass inside the frame.
+let private workerFsm (name: string) (input: Stream<'p>) (outputLayout: Layout<'q>) : Machine<StreamWorkerState> * Stream<'q> =
+    let st = machine $"{name}_state" [ Accepting; Working; Offering ]
+    let ready = wireBit $"{name}_ready"
+    registerStreamReady ready
+
+    let taken = st.Is Offering &&& ready
+    (st.Is Accepting ||| taken) ==> input.ready
+
+    ifElse
+        [ (input.valid &&& input.ready, fun () -> st.Goto Working)
+          (taken, fun () -> st.Goto Accepting) ]
+
+    let payloadWires = [ for n, w in outputLayout.fields -> wire $"{name}_out_{n}" w ]
+
+    st,
+    { payload = outputLayout.unpack payloadWires
+      valid = st.Is Offering
+      ready = ready
+      layout = outputLayout }
+
+/// Two beats of buffering whose `ready` is a function of its own state alone.
+/// With the skid, a stage's `ready` reaches back through the stage behind it,
+/// and through the one behind that: a chain of one-beat stages is one long
+/// combinational path from the last stage's consumer to the first stage's
+/// producer — fourteen stages and 46 ns here, measured. One of these every
+/// few stages ends the chain, at the cost of two copies of the beat in
+/// registers rather than LUTRAM, which an iCE40 does not have.
+let private skidBuffer (name: string) (layout: Layout<'p>) (s: Stream<'p>) : Stream<'p> =
+    let ready = wireBit $"{name}_ready"
+    registerStreamReady ready
+
+    let head = [ for n, w in layout.fields -> reg $"{name}_head_{n}" w ]
+    let tail = [ for n, w in layout.fields -> reg $"{name}_tail_{n}" w ]
+    let headValid = regBit $"{name}_head_valid"
+    let tailValid = regBit $"{name}_tail_valid"
+
+    bnot tailValid ==> s.ready
+    let push = s.valid &&& s.ready
+    let pop = headValid &&& ready
+    let incoming = layout.pack s.payload
+    let load regs values = List.iter2 (fun r v -> v ==> r) regs values
+
+    ifElse
+        [ (pop &&& tailValid,
+           fun () ->
+               load head tail
+               lit 1UL 1 ==> headValid
+               If push (fun () -> load tail incoming)
+               push ==> tailValid)
+          (pop,
+           fun () ->
+               If push (fun () -> load head incoming)
+               push ==> headValid)
+          (push &&& headValid,
+           fun () ->
+               load tail incoming
+               lit 1UL 1 ==> tailValid)
+          (push,
+           fun () ->
+               load head incoming
+               lit 1UL 1 ==> headValid) ]
+
+    ({ payload = layout.unpack head
+       valid = headValid
+       ready = ready
+       layout = layout }
+     : Stream<'p>)
+
+/// Hold the beat a stage accepts, in registers named for the stage.
+let private holdBeat (name: string) (layout: Layout<'p>) (accept: Expr) (s: Stream<'p>) : 'p =
+    let held = [ for n, w in layout.fields -> reg $"{name}_{n}" w ]
+    If accept (fun () -> List.iter2 (fun r v -> v ==> r) held (layout.pack s.payload))
+    layout.unpack held
+
+/// Drive a stage's output payload from what it holds. The value is a function
+/// of the stage's own registers — the beat it holds and what its work put in
+/// registers — so it is stable for as long as the stage offers it, and the
+/// stage keeps one copy of the beat rather than two.
+let private offer (layout: Layout<'q>) (out: Stream<'q>) (value: 'q) =
+    List.iter2 (fun v r -> r ==> bare v) (layout.pack out.payload) (layout.pack value)
+
+/// A stage that reads words from one store for each beat: the addresses the
+/// beat names, one a cycle, and the beat handed on with the words attached.
+let private readStage
+    (name: string)
+    (store: Mem)
+    (inLayout: Layout<'p>)
+    (outLayout: Layout<'q>)
+    (addresses: 'p -> Expr list)
+    (attach: 'p -> Expr list -> 'q)
+    (s: Stream<'p>)
+    : Stream<'q> =
+    let st, out = workerFsm name s outLayout
+    let accept = s.valid &&& s.ready
+    let beat = holdBeat name inLayout accept s
+    let addrs = addresses beat
+    let count = List.length addrs
+
+    let issuing = regBit $"{name}_issuing"
+    If accept (fun () -> lit 1UL 1 ==> issuing)
+    let which = counter $"{name}_which" count (st.Is Working &&& issuing)
+    If which.wrap (fun () -> lit 0UL 1 ==> issuing)
+
+    // Each word lands its port's depth after its address, with its index.
+    let read = memReadPort store (selectIndexed which.count addrs)
+    let arrived = read.through $"{name}_arrived" (st.Is Working &&& issuing)
+    let arrivedIndex = read.through $"{name}_arrived_index" which.count
+    let words = [ for i in 0 .. count - 1 -> reg $"{name}_word%d{i}" (width read.data) ]
+
+    If arrived (fun () ->
+        ifElse [ for i, w in List.indexed words -> (eq arrivedIndex (lit (uint64 i) (width arrivedIndex)), fun () -> read.data ==> w) ])
+
+    // Offer from the edge the last word lands on: the word register and the
+    // state move together.
+    If (st.Is Working &&& arrived &&& eq arrivedIndex (lit (uint64 (count - 1)) (width arrivedIndex))) (fun () ->
+        st.Goto Offering)
+
+    offer outLayout out (attach beat words)
+    out
+
+/// A stage that writes words to one store for each beat — one a cycle, from
+/// the beat — and hands the beat on unchanged.
+let private writeStage (name: string) (store: Mem) (layout: Layout<'p>) (writes: 'p -> (Expr * Expr) list) (s: Stream<'p>) : Stream<'p> =
+    let st, out = workerFsm name s layout
+    let accept = s.valid &&& s.ready
+    let beat = holdBeat name layout accept s
+    let pending = writes beat
+
+    let writing = regBit $"{name}_writing"
+    If accept (fun () -> lit 1UL 1 ==> writing)
+    let which = counter $"{name}_which" (List.length pending) (st.Is Working &&& writing)
+
+    memWrite
+        store
+        (selectIndexed which.count (List.map fst pending))
+        (selectIndexed which.count (List.map snd pending))
+        (st.Is Working &&& writing)
+
+    If which.wrap (fun () ->
+        lit 0UL 1 ==> writing
+        st.Goto Offering)
+
+    offer layout out beat
+    out
+
+/// A write that costs no beat: the word goes to the store as the beat
+/// transfers, and the stream is handed on as it was.
+let private writeThrough (store: Mem) (write: 'p -> Expr * Expr) (s: Stream<'p>) : Stream<'p> =
+    let addr, data = write s.payload
+    memWrite store addr data (s.valid &&& s.ready)
+    s
+
+/// A stage whose work is one multiply on the shared unit: the operands from
+/// the beat (declared signals, any width up to the pod's), and the beat
+/// handed on as `finish product beat` when the product lands.
+let private podStage
+    (name: string)
+    (pod: SharedMultiplier)
+    (inLayout: Layout<'p>)
+    (outLayout: Layout<'q>)
+    (operands: 'p -> Expr * Expr)
+    (finish: Expr -> 'p -> 'q)
+    (s: Stream<'p>)
+    : Stream<'q> =
+    let st, out = workerFsm name s outLayout
+    let accept = s.valid &&& s.ready
+    let beat = holdBeat name inLayout accept s
+    let client = pod.Client name
+
+    let a, b = operands beat
+    signExtend podAWidth a ==> client.a
+    signExtend podBWidth b ==> client.b
+    lit 0UL podTagWidth ==> client.tag
+
+    // The request is a register, not a decode of the state: it heads the
+    // arbiter's path into the multiplier, which is the engine's longest.
+    let issued = regBit $"{name}_issued"
+    If accept (fun () -> lit 0UL 1 ==> issued)
+    let request = regBit $"{name}_request"
+    (accept ||| (st.Is Working &&& bnot issued &&& bnot client.grant)) ==> request
+    request ==> client.issue
+    If (client.issue &&& client.grant) (fun () -> lit 1UL 1 ==> issued)
+
+    // The product is held here — the pod's own register is every client's —
+    // and the output is finished from it and the held beat.
+    let product = reg $"{name}_product_held" (SInt podProductWidth)
+
+    If (st.Is Working &&& client.landed) (fun () ->
+        client.product ==> product
+        st.Goto Offering)
+
+    offer outLayout out (finish product beat)
+    out
+
+// ---------------------------------------------------------------------------
+// The beats between the stages. Each carries what the next stage needs and
+// no more; a stage's registers are its beat's fields.
+
+/// One crossover section of one ear: which section, which node it reads and
+/// which it writes, whether its output is a band and which, the sample's
+/// parity (for the node scoreboard), and — once `readNode` has run — the
+/// value it filters, in `x`. Before that `x` carries the ear's sample, which
+/// is what a section reading node 0 filters.
+type private Section =
+    { ear: Expr
+      section: Expr
+      input: Expr
+      output: Expr
+      leaf: Expr
+      band: Expr
+      /// Whether the section is first order — an all-pass — with three
+      /// non-zero taps rather than five.
+      short: Expr
+      parity: Expr
+      x: Expr }
+
+/// A section with its history read.
+type private SectionHistory =
+    { section: Section
+      history: Expr list }
+
+/// A section filtered: its output, and what its history becomes.
+type private SectionDone =
+    { section: Section
+      x1: Expr
+      y: Expr
+      y1: Expr }
+
+/// One band of one ear, from the crossover.
+type private Band = { ear: Expr; band: Expr; value: Expr }
+
+/// A band with its compressor's envelope read.
+type private BandEnvelope =
+    { ear: Expr
+      band: Expr
+      value: Expr
+      env: Expr }
+
+/// A band with last sample's boosted value read too — the detector's input.
+type private BandState =
+    { ear: Expr
+      band: Expr
+      value: Expr
+      env: Expr
+      detected: Expr }
+
+/// A band boosted by its makeup gain.
+type private Boosted =
+    { ear: Expr
+      band: Expr
+      env: Expr
+      detected: Expr
+      boosted: Expr }
+
+/// A band with its detector's peak: the magnitude of last sample's boosted
+/// value, at sample scale.
+type private Detected =
+    { ear: Expr
+      band: Expr
+      env: Expr
+      boosted: Expr
+      peak: Expr }
+
+/// A band whose envelope has stepped — `env` is still the value before the
+/// step, which is what the gain reads.
+type private Stepped =
+    { ear: Expr
+      band: Expr
+      env: Expr
+      boosted: Expr
+      envNext: Expr }
+
+/// A band with its gain computed.
+type private Gain =
+    { ear: Expr
+      band: Expr
+      boosted: Expr
+      gain: Expr
+      envNext: Expr }
+
+/// A band compressed, ready to sum.
+type private Gained =
+    { ear: Expr
+      band: Expr
+      gained: Expr
+      envNext: Expr }
+
+let private historyTaps = 4
+let private biquadIssues = 5
+let private slotBits = ceilLog2 multibandBands
+let private historyTapBits = ceilLog2 historyTaps
+let private stateFieldBits = 1
+
+/// The tree's dimensions, from the tree.
+type private TreeShape =
+    { tree: CrossoverTree
+      sectionBits: int
+      nodeBits: int }
+
+let private treeShape (tree: CrossoverTree) : TreeShape =
+    { tree = tree
+      sectionBits = ceilLog2 (List.length tree.sections)
+      nodeBits = ceilLog2 tree.nodes }
+
+let private sectionFields (t: TreeShape) =
+    [ "ear", 1
+      "section", t.sectionBits
+      "input", t.nodeBits
+      "output", t.nodeBits
+      "leaf", 1
+      "band", slotBits
+      "short", 1
+      "parity", 1
+      "x", sampleWidth ]
+
+let private packSection (s: Section) = [ s.ear; s.section; s.input; s.output; s.leaf; s.band; s.short; s.parity; s.x ]
+
+let private unpackSection (nets: Expr list) : Section * Expr list =
+    match nets with
+    | ear :: section :: input :: output :: leaf :: band :: short :: parity :: x :: rest ->
+        { ear = ear
+          section = section
+          input = input
+          output = output
+          leaf = leaf
+          band = band
+          short = short
+          parity = parity
+          x = asSInt x },
+        rest
+    | _ -> failwith "section: wrong arity"
+
+let private sectionLayout (t: TreeShape) : Layout<Section> =
+    { fields = sectionFields t
+      pack = packSection
+      unpack = unpackSection >> fst }
+
+let private sectionHistoryLayout (t: TreeShape) : Layout<SectionHistory> =
+    { fields = sectionFields t @ [ for i in 0 .. historyTaps - 1 -> $"history%d{i}", sampleWidth ]
+      pack = fun s -> packSection s.section @ s.history
+      unpack =
+        fun nets ->
+            match unpackSection nets with
+            | section, history when history.Length = historyTaps -> { section = section; history = List.map asSInt history }
+            | _ -> failwith "section history: wrong arity" }
+
+let private sectionDoneLayout (t: TreeShape) : Layout<SectionDone> =
+    { fields = sectionFields t @ [ "x1", sampleWidth; "y", sampleWidth; "y1", sampleWidth ]
+      pack = fun s -> packSection s.section @ [ s.x1; s.y; s.y1 ]
+      unpack =
+        fun nets ->
+            match unpackSection nets with
+            | section, [ x1; y; y1 ] -> { section = section; x1 = asSInt x1; y = asSInt y; y1 = asSInt y1 }
+            | _ -> failwith "section done: wrong arity" }
+
+let private bandLayout: Layout<Band> =
+    { fields = [ "ear", 1; "band", slotBits; "value", bandWidth ]
+      pack = fun b -> [ b.ear; b.band; b.value ]
+      unpack =
+        function
+        | [ ear; band; value ] -> { ear = ear; band = band; value = asSInt value }
+        | _ -> failwith "band: wrong arity" }
+
+let private bandEnvelopeLayout: Layout<BandEnvelope> =
+    { fields = [ "ear", 1; "band", slotBits; "value", bandWidth; "env", sampleWidth ]
+      pack = fun b -> [ b.ear; b.band; b.value; b.env ]
+      unpack =
+        function
+        | [ ear; band; value; env ] -> { ear = ear; band = band; value = asSInt value; env = env }
+        | _ -> failwith "band envelope: wrong arity" }
+
+let private bandStateLayout: Layout<BandState> =
+    { fields = [ "ear", 1; "band", slotBits; "value", bandWidth; "env", sampleWidth; "detected", gainedWidth ]
+      pack = fun b -> [ b.ear; b.band; b.value; b.env; b.detected ]
+      unpack =
+        function
+        | [ ear; band; value; env; detected ] ->
+            { ear = ear
+              band = band
+              value = asSInt value
+              env = env
+              detected = asSInt detected }
+        | _ -> failwith "band state: wrong arity" }
+
+let private boostedLayout: Layout<Boosted> =
+    { fields = [ "ear", 1; "band", slotBits; "env", sampleWidth; "detected", gainedWidth; "boosted", gainedWidth ]
+      pack = fun b -> [ b.ear; b.band; b.env; b.detected; b.boosted ]
+      unpack =
+        function
+        | [ ear; band; env; detected; boosted ] ->
+            { ear = ear
+              band = band
+              env = env
+              detected = asSInt detected
+              boosted = asSInt boosted }
+        | _ -> failwith "boosted: wrong arity" }
+
+let private detectedLayout: Layout<Detected> =
+    { fields = [ "ear", 1; "band", slotBits; "env", sampleWidth; "boosted", gainedWidth; "peak", sampleWidth ]
+      pack = fun b -> [ b.ear; b.band; b.env; b.boosted; b.peak ]
+      unpack =
+        function
+        | [ ear; band; env; boosted; peak ] ->
+            { ear = ear
+              band = band
+              env = env
+              boosted = asSInt boosted
+              peak = peak }
+        | _ -> failwith "detected: wrong arity" }
+
+let private steppedLayout: Layout<Stepped> =
+    { fields = [ "ear", 1; "band", slotBits; "env", sampleWidth; "boosted", gainedWidth; "env_next", sampleWidth ]
+      pack = fun b -> [ b.ear; b.band; b.env; b.boosted; b.envNext ]
+      unpack =
+        function
+        | [ ear; band; env; boosted; envNext ] ->
+            { ear = ear
+              band = band
+              env = env
+              boosted = asSInt boosted
+              envNext = envNext }
+        | _ -> failwith "stepped: wrong arity" }
+
+let private gainLayout: Layout<Gain> =
+    { fields = [ "ear", 1; "band", slotBits; "boosted", gainedWidth; "gain", gainWidth + 1; "env_next", sampleWidth ]
+      pack = fun b -> [ b.ear; b.band; b.boosted; b.gain; b.envNext ]
+      unpack =
+        function
+        | [ ear; band; boosted; gain; envNext ] ->
+            { ear = ear
+              band = band
+              boosted = asSInt boosted
+              gain = asSInt gain
+              envNext = envNext }
+        | _ -> failwith "gain: wrong arity" }
+
+let private gainedLayout: Layout<Gained> =
+    { fields = [ "ear", 1; "band", slotBits; "gained", gainedWidth; "env_next", sampleWidth ]
+      pack = fun b -> [ b.ear; b.band; b.gained; b.envNext ]
+      unpack =
+        function
+        | [ ear; band; gained; envNext ] -> { ear = ear; band = band; gained = asSInt gained; envNext = envNext }
+        | _ -> failwith "gained: wrong arity" }
+
+// ---------------------------------------------------------------------------
+// The stores.
+
+/// What persists between samples — each section's history (x1, x2, y1, y2),
+/// each band's envelope and last boosted value, the coefficients — and what
+/// lives for one sample: the tree's node values, and per node the parity of
+/// the sample that last wrote it, which is how a section knows the node it
+/// reads is this sample's. All in block memory — iCE40 has no LUTRAM —
+/// packed by entry, because its blocks are width-bound (256×16: a memory 16
+/// deep and 24 wide costs two).
+type private FoldStores =
+    { history: Mem
+      coefficients: Mem
+      state: Mem
+      nodes: Mem
+      /// One register per ear, a bit per node.
+      written: Expr list }
+
+let private envelopeField = 0UL
+let private detectedField = 1UL
+
+let private foldStores (t: TreeShape) : FoldStores =
+    let coeffSlots = 1 <<< ceilLog2 biquadIssues
+
+    { history = blockMem "history" (1 + t.sectionBits + historyTapBits) sampleWidth
+      coefficients =
+        blockRom
+            "coefficients"
+            biquadCoeffWidth
+            [| for sec in t.tree.sections do
+                   yield! sec.coefficients
+                   yield! Array.zeroCreate (coeffSlots - biquadIssues) |]
+      state = blockMem "band_state" (1 + slotBits + stateFieldBits) gainedWidth
+      nodes = blockMem "nodes" (1 + t.nodeBits) sampleWidth
+      written = [ for ear in 0..1 -> reg $"written_%d{ear}" (1 <<< t.nodeBits) ] }
+
+let private historyAddr (s: Section) (tap: int) = cat s.ear (cat s.section (lit (uint64 tap) historyTapBits))
+let private coefficientAddr (s: Section) (tap: int) = cat s.section (lit (uint64 tap) (ceilLog2 (1 <<< ceilLog2 biquadIssues)))
+let private stateAddr (ear: Expr) (band: Expr) (field: uint64) = cat ear (cat band (lit field stateFieldBits))
+
+// ---------------------------------------------------------------------------
+// The stages, in the order the body chains them.
+
+/// Accept a stereo beat and emit its sections: the tree's sections in their
+/// order, each for the left ear and then the right, with the ear's sample and
+/// the sample's parity riding on each. The next beat is accepted once the
+/// last section has gone, so a section is never in the chain twice — which
+/// keeps its history read and its history write in order without an argument
+/// about depth. The program is a ROM: one word per section, saying which
+/// node it reads, which it writes, and whether that is a band.
+let private sections (t: TreeShape) (s: Stream<Expr * Expr>) : Stream<Section> =
+    let busy = regBit "sections_busy"
+    bnot busy ==> s.ready
+    let accept = s.valid &&& s.ready
+
+    let left, right = s.payload
+    let sampleLeft = reg "sample_left" (SInt sampleWidth)
+    let sampleRight = reg "sample_right" (SInt sampleWidth)
+    let parity = regBit "sample_parity"
+
+    let ready = wireBit "sections_taken"
+    registerStreamReady ready
+    let transfer = busy &&& ready
+    let ear = counter "section_ear" 2 transfer
+    let section = counter "section" (List.length t.tree.sections) ear.wrap
+
+    If accept (fun () ->
+        left ==> sampleLeft
+        right ==> sampleRight
+        bnot parity ==> parity
+        lit 1UL 1 ==> busy)
+
+    If section.wrap (fun () -> lit 0UL 1 ==> busy)
+
+    // The program word: input node, output node, leaf, band.
+    let bandOf =
+        t.tree.bands |> List.mapi (fun k node -> node, k) |> Map.ofList
+
+    let wordWidth = t.nodeBits + t.nodeBits + 1 + slotBits + 1
+
+    let words =
+        [| for sec in t.tree.sections ->
+               let leaf, band =
+                   match Map.tryFind sec.output bandOf with
+                   | Some k -> 1UL, uint64 k
+                   | None -> 0UL, 0UL
+
+               // First order when b2 and a2 are zero: three taps to issue.
+               let short = if sec.coefficients[2] = 0UL && sec.coefficients[4] = 0UL then 1UL else 0UL
+
+               ((((uint64 sec.input <<< t.nodeBits ||| uint64 sec.output) <<< 1 ||| leaf) <<< slotBits ||| band) <<< 1) ||| short |]
+
+    let program = blockRom "crossover" wordWidth words
+    // The word for the section the counter names arrives the port's depth
+    // after the counter moves; until then what the port shows is the last
+    // section's, and the beat is not offered.
+    let read = memReadPort program section.count
+    let word = wire "crossover_word" wordWidth
+    read.data ==> word
+    let stale = read.through "crossover_stale" ear.wrap
+
+    let inputAt = wordWidth - t.nodeBits
+    let outputAt = inputAt - t.nodeBits
+    let leafAt = outputAt - 1
+    let bandAt = leafAt - slotBits
+
+    let input = wire "section_input" t.nodeBits
+    slice (wordWidth - 1) inputAt word ==> input
+    let output = wire "section_output" t.nodeBits
+    slice (inputAt - 1) outputAt word ==> output
+    let leaf = wire "section_leaf" 1
+    slice leafAt leafAt word ==> leaf
+    let band = wire "section_band" slotBits
+    slice (bandAt + slotBits - 1) bandAt word ==> band
+    let short = wire "section_short" 1
+    slice 0 0 word ==> short
+
+    ({ payload =
+        { ear = ear.count
+          section = section.count
+          input = input
+          output = output
+          leaf = leaf
+          band = band
+          short = short
+          parity = parity
+          x = mux ear.count sampleRight sampleLeft }
+       valid = busy &&& bnot stale
+       ready = ready
+       layout = sectionLayout t }
+     : Stream<Section>)
+
+/// Fetch the value a section filters: the ear's sample for node 0, otherwise
+/// the node an earlier section of this sample wrote — and not before it has:
+/// the stage waits while the node's parity is not this sample's. That wait is
+/// the only ordering in the crossover, and it is exact, so nothing here needs
+/// to know how far apart a producer and its consumer are.
+let private readNode (t: TreeShape) (stores: FoldStores) (s: Stream<Section>) : Stream<Section> =
+    let layout = sectionLayout t
+    let st, out = workerFsm "node" s layout
+    let accept = s.valid &&& s.ready
+    let beat = holdBeat "node" layout accept s
+
+    let fromSample = eq beat.input (lit 0UL t.nodeBits)
+    let writtenBits = wire "written_bits" (1 <<< t.nodeBits)
+    mux beat.ear stores.written[1] stores.written[0] ==> writtenBits
+    let writtenShifted = wire "written_shifted" (1 <<< t.nodeBits)
+    shrBy beat.input writtenBits ==> writtenShifted
+    let writtenParity = wire "written_parity" 1
+    slice 0 0 writtenShifted ==> writtenParity
+    let available = fromSample ||| eq writtenParity beat.parity
+
+    // The read is issued once, on the first cycle the node is available.
+    let issued = regBit "node_issued"
+    If accept (fun () -> lit 0UL 1 ==> issued)
+    let issue = st.Is Working &&& available &&& bnot issued
+    If issue (fun () -> lit 1UL 1 ==> issued)
+    let read = memReadPort stores.nodes (cat beat.ear beat.input)
+    let arrived = read.through "node_arrived" issue
+    let word = reg "node_word" (SInt sampleWidth)
+    If arrived (fun () -> read.data ==> word)
+    If (st.Is Working &&& arrived) (fun () -> st.Goto Offering)
+
+    offer layout out { beat with x = mux fromSample beat.x word }
+    out
+
+/// Read a section's four history words.
+let private readHistory (t: TreeShape) (stores: FoldStores) =
+    readStage
+        "history"
+        stores.history
+        (sectionLayout t)
+        (sectionHistoryLayout t)
+        (fun s -> [ for tap in 0 .. historyTaps - 1 -> historyAddr s tap ])
+        (fun s words -> ({ section = s; history = List.map asSInt words }: SectionHistory))
+
+/// Issue a section's five multiplies to the shared unit, back to back as the
+/// grants come — b0·x, b1·x1, b2·x2, a1·y1, a2·y2 — and hand the beat on the
+/// moment the last is granted, so the next section issues while this one's
+/// products are still landing in `collectTaps`.
+///
+/// The coefficients come from the ROM as they are needed rather than riding
+/// in the beat: two ports, one at the tap the counter names and one at the
+/// tap after it, so the right word is present whether or not the last cycle
+/// was a grant. In `Accepting` the ports already look at the offered beat's
+/// section, so the first tap needs no wait.
+let private issueTaps (t: TreeShape) (stores: FoldStores) (client: PodClient) (s: Stream<SectionHistory>) : Stream<SectionHistory> =
+    let layout = sectionHistoryLayout t
+    let st, out = workerFsm "issue" s layout
+    let accept = s.valid &&& s.ready
+    let beat = holdBeat "issue" layout accept s
+
+    // A second-order section issues slots 0..4 (b0, b1, b2, a1, a2); a
+    // first-order one issues 0, 1, 3 — its b2 and a2 are zero, and a product
+    // of zero need not be made. The tap counter counts issues; the slot is
+    // what the counter means for this section.
+    let granted = client.issue &&& client.grant
+    let taps = wire "issue_taps" 3
+    mux beat.section.short (lit 2UL 3) (lit 4UL 3) ==> taps
+    let tap = counterTo "issue_tap" taps granted
+    let last = eq tap.count taps
+    let slotBits = ceilLog2 (1 <<< ceilLog2 biquadIssues)
+    let slotOf (count: Expr) (short: Expr) =
+        mux (short &&& eq count (lit 2UL 3)) (lit 3UL slotBits) (pad slotBits count)
+    let slot = wire "issue_slot" slotBits
+    slotOf tap.count beat.section.short ==> slot
+    let subtracts = lt (lit 2UL slotBits) slot
+
+    let issuedAll = regBit "issue_all"
+    If accept (fun () -> lit 0UL 1 ==> issuedAll)
+    If (granted &&& last) (fun () -> lit 1UL 1 ==> issuedAll)
+    let request = regBit "issue_request"
+    (accept ||| (st.Is Working &&& bnot issuedAll &&& bnot (granted &&& last))) ==> request
+    request ==> client.issue
+
+    // The section the ROM is asked about: the offered beat's whenever this
+    // stage could accept it — which, with the skid, includes `Offering`.
+    let section = wire "issue_rom_section" t.sectionBits
+    mux (st.Is Working) beat.section.section s.payload.section.section ==> section
+    let short = wire "issue_rom_short" 1
+    mux (st.Is Working) beat.section.short s.payload.section.short ==> short
+    let thisTap = memReadPort stores.coefficients (cat section slot)
+    let nextCount = wire "issue_next_count" 3
+    tap.count + lit 1UL 3 ==> nextCount
+    let nextSlot = wire "issue_next_slot" slotBits
+    slotOf nextCount short ==> nextSlot
+    let nextTap = memReadPort stores.coefficients (cat section nextSlot)
+    let justGranted = regBit "issue_just_granted"
+    granted ==> justGranted
+    let coefficient = wire "issue_coefficient" (SInt biquadCoeffWidth)
+    mux justGranted nextTap.data thisTap.data ==> coefficient
+
+    let operand = wire "issue_operand" (SInt sampleWidth)
+    selectIndexed slot (beat.section.x :: beat.history) ==> operand
+    signExtend podAWidth operand ==> client.a
+    signExtend podBWidth coefficient ==> client.b
+    // The product comes back knowing whether it subtracts and whether it is
+    // the section's last, so the collector counts nothing.
+    cat last subtracts ==> client.tag
+
+    // Offer from the last grant's edge.
+    If (st.Is Working &&& granted &&& last) (fun () -> st.Goto Offering)
+    offer layout out beat
+    out
+
+/// Sum a section's five products as they land — in `biquadDef`'s own
+/// accumulator width, the first tap loading and the feedback taps
+/// subtracting, so the total is the tree's total — rescale, and offer the
+/// section with its output.
+///
+/// The products land whether or not this stage holds their section yet:
+/// `issueTaps` hands the beat on at the last grant, two cycles before the
+/// last product, and may have to wait for this stage to take it. So the sum
+/// lives beside the beat rather than in it, and a finished result waits in
+/// `pending` for its beat to arrive. Nothing can overrun it: the issuer does
+/// not start the next section until this stage has taken this one, and by
+/// then `pending` has been consumed.
+let private collectTaps (t: TreeShape) (client: PodClient) (s: Stream<SectionHistory>) : Stream<SectionDone> =
+    let st, out = workerFsm "collect" s (sectionDoneLayout t)
+    let accept = s.valid &&& s.ready
+    let beat = holdBeat "collect" (sectionHistoryLayout t) accept s
+
+    let productWidth = sampleWidth + biquadCoeffWidth
+    let accWidth = productWidth + 3
+    let product = wire "collect_product" (SInt productWidth)
+    slice (productWidth - 1) 0 client.product ==> product
+    let addend = signExtend accWidth product
+    let acc = reg "collect_acc" (SInt accWidth)
+    let total = wire "collect_total" (SInt accWidth)
+
+    // Each product says whether it subtracts and whether it is the last of
+    // its section; the first after a last loads the accumulator.
+    let lastTap = wire "collect_last" 1
+    slice 1 1 client.tagBack ==> lastTap
+    let subtracts = wire "collect_subtracts" 1
+    slice 0 0 client.tagBack ==> subtracts
+    let first = regInit "collect_first" 1 1UL
+    If client.landed (fun () -> lastTap ==> first)
+
+    mux first addend (mux subtracts (sub acc addend) (add acc addend)) ==> total
+    If client.landed (fun () -> total ==> acc)
+
+    // Rescaled from the register the beat after the last product lands: the
+    // accumulate and the saturate are each a long carry chain.
+    let complete = regBit "collect_complete"
+    (client.landed &&& lastTap) ==> complete
+    let rescaled = wire "collect_rescaled" (SInt(accWidth - biquadCoeffFrac))
+    shr biquadCoeffFrac acc ==> rescaled
+    let y = wire "collect_y" (SInt sampleWidth)
+    saturate sampleWidth rescaled ==> y
+
+    let pending = reg "collect_pending" (SInt sampleWidth)
+    let pendingValid = regBit "collect_pending_valid"
+    If complete (fun () ->
+        y ==> pending
+        lit 1UL 1 ==> pendingValid)
+
+    let yHeld = reg "collect_y_held" (SInt sampleWidth)
+
+    If (st.Is Working &&& pendingValid) (fun () ->
+        pending ==> yHeld
+        lit 0UL 1 ==> pendingValid
+        st.Goto Offering)
+
+    offer
+        (sectionDoneLayout t)
+        out
+        { section = beat.section
+          x1 = beat.history[0]
+          y = yHeld
+          y1 = beat.history[2] }
+
+    out
+
+/// Shift a section's history: x2 ← x1, x1 ← x, y2 ← y1, y1 ← y.
+let private writeHistory (t: TreeShape) (stores: FoldStores) =
+    writeStage "history_write" stores.history (sectionDoneLayout t) (fun d ->
+        [ historyAddr d.section 1, d.x1
+          historyAddr d.section 0, d.section.x
+          historyAddr d.section 3, d.y1
+          historyAddr d.section 2, d.y ])
+
+/// Keep a section's output for the sections that read it, and mark the node
+/// as this sample's. Costs no beat.
+let private writeNode (t: TreeShape) (stores: FoldStores) (s: Stream<SectionDone>) : Stream<SectionDone> =
+    let d = s.payload
+    let transfer = s.valid &&& s.ready
+    memWrite stores.nodes (cat d.section.ear d.section.output) d.y transfer
+
+    for ear, written in List.indexed stores.written do
+        let mine = transfer &&& eq d.section.ear (lit (uint64 ear) 1)
+        let shifted = wire $"written_shift_%d{ear}" (width (shlBy d.section.output (lit 1UL 1)))
+        shlBy d.section.output (lit 1UL 1) ==> shifted
+        let bit = wire $"written_bit_%d{ear}" (1 <<< t.nodeBits)
+        slice ((1 <<< t.nodeBits) - 1) 0 shifted ==> bit
+
+        // Set or clear the one bit the section wrote, to the sample's parity.
+        If mine (fun () -> mux d.section.parity (written ||| bit) (written &&& bnot bit) ==> written)
+
+    s
+
+/// The bands are the tree's leaves: a section whose output is a band offers
+/// its value as that band, and any other section's beat ends here. Costs no
+/// beat.
+let private bands (s: Stream<SectionDone>) : Stream<Band> =
+    let d = s.payload
+    let ready = wireBit "bands_taken"
+    registerStreamReady ready
+    // A non-leaf beat is taken the cycle it is offered; a leaf waits for the
+    // band's consumer.
+    (ready ||| bnot d.section.leaf) ==> s.ready
+
+    ({ payload =
+        { ear = d.section.ear
+          band = d.section.band
+          value = signExtend bandWidth d.y }
+       valid = s.valid &&& d.section.leaf
+       ready = ready
+       layout = bandLayout }
+     : Stream<Band>)
+
+/// Read a band's envelope.
+let private readEnvelope (stores: FoldStores) =
+    readStage
+        "envelope_read"
+        stores.state
+        bandLayout
+        bandEnvelopeLayout
+        (fun b -> [ stateAddr b.ear b.band envelopeField ])
+        (fun b words ->
+            { ear = b.ear
+              band = b.band
+              value = b.value
+              env = slice (sampleWidth - 1) 0 words.Head })
+
+/// Read a band's last boosted value — the detector's input.
+let private readDetected (stores: FoldStores) =
+    readStage
+        "detected_read"
+        stores.state
+        bandEnvelopeLayout
+        bandStateLayout
+        (fun b -> [ stateAddr b.ear b.band detectedField ])
+        (fun b words ->
+            { ear = b.ear
+              band = b.band
+              value = b.value
+              env = b.env
+              detected = asSInt words.Head })
+
+/// The makeup boost: the band times its ear's Q8.8 gain for that band.
+let private boost (pod: SharedMultiplier) (io: MultibandCompressorPorts) =
+    podStage
+        "boost"
+        pod
+        bandStateLayout
+        boostedLayout
+        (fun b ->
+            let index = wire "makeup_index" (1 + slotBits)
+            cat b.ear b.band ==> index
+            let makeup = wire "makeup" 16
+            selectTree index (io.leftGains @ io.rightGains) ==> makeup
+            let makeupSigned = wire "makeup_signed" (SInt 17)
+            widenUnsigned 17 makeup ==> makeupSigned
+            b.value, makeupSigned)
+        (fun product b ->
+            let boostProduct = wire "boost_product" (SInt(bandWidth + 17))
+            slice (bandWidth + 17 - 1) 0 product ==> boostProduct
+            let boosted = wire "boosted" (SInt gainedWidth)
+            shr gainFracBits boostProduct ==> boosted
+
+            { ear = b.ear
+              band = b.band
+              env = b.env
+              detected = b.detected
+              boosted = boosted })
+
+/// Keep this sample's boosted value as next sample's detector input.
+let private writeDetected (stores: FoldStores) =
+    writeThrough stores.state (fun (b: Boosted) -> stateAddr b.ear b.band detectedField, b.boosted)
+
+/// The detector: the magnitude of last sample's boosted value, clipped to
+/// sample scale. Costs no beat; its chain — negate, pick, saturate — lands in
+/// the next stage's registers, a stage boundary ahead of the envelope's own
+/// compare and subtract, which it would otherwise share a cycle with.
+let private detect (s: Stream<Boosted>) : Stream<Detected> =
+    let b = s.payload
+    let negated = wire "negated" (SInt gainedWidth)
+    sub (lit 0UL gainedWidth) b.detected ==> negated
+    let absolute = wire "absolute" gainedWidth
+    mux (slice (gainedWidth - 1) (gainedWidth - 1) b.detected) negated b.detected ==> absolute
+    let peak = wire "peak" sampleWidth
+    saturate sampleWidth absolute ==> peak
+
+    streamMapTo detectedLayout (fun (b: Boosted) -> { ear = b.ear; band = b.band; env = b.env; boosted = b.boosted; peak = peak }) s
+
+/// The envelope step, off the detector's peak — the one law, in its two
+/// halves around the shared multiplier.
+let private envelope (pod: SharedMultiplier) (io: MultibandCompressorPorts) =
+    podStage
+        "envelope"
+        pod
+        detectedLayout
+        steppedLayout
+        (fun b ->
+            let difference, alphaSigned, _ = envelopeOperands b.env b.peak io.attack io.releaseRate
+            difference, alphaSigned)
+        (fun product b ->
+            let step = wire "step" (SInt stepWidth)
+            slice (stepWidth - 1) 0 product ==> step
+            let envWide = wire "env_wide_landed" (SInt wideWidth)
+            widenUnsigned wideWidth b.env ==> envWide
+
+            { ear = b.ear
+              band = b.band
+              env = b.env
+              boosted = b.boosted
+              envNext = envelopeFromStep step envWide })
+
+/// Keep the stepped envelope for the next sample.
+let private writeEnvelope (stores: FoldStores) =
+    writeThrough stores.state (fun (b: Stepped) -> stateAddr b.ear b.band envelopeField, widenUnsigned gainedWidth b.envNext)
+
+/// The gain, from the envelope before this sample's step — `gainComputer`'s
+/// two halves around the shared multiplier.
+let private reduction (pod: SharedMultiplier) (io: MultibandCompressorPorts) =
+    podStage
+        "reduction"
+        pod
+        steppedLayout
+        gainLayout
+        (fun b ->
+            let envWide = wire "reduction_env_wide" (SInt wideWidth)
+            widenUnsigned wideWidth b.env ==> envWide
+            let excess = wire "excess_signed" (SInt(sampleWidth + 1))
+            widenUnsigned (sampleWidth + 1) (gainExcess envWide io.threshold) ==> excess
+            let ratioSigned = wire "ratio_signed" (SInt 9)
+            widenUnsigned 9 io.ratio ==> ratioSigned
+            excess, ratioSigned)
+        (fun product b ->
+            let reductionRaw = wire "reduction_raw" gainRedWidth
+            slice (gainRedWidth - 1) 0 product ==> reductionRaw
+
+            { ear = b.ear
+              band = b.band
+              boosted = b.boosted
+              gain = gainFromReduction reductionRaw
+              envNext = b.envNext })
+
+/// Apply the gain to the boosted band.
+let private apply (pod: SharedMultiplier) =
+    podStage "apply" pod gainLayout gainedLayout (fun b -> b.boosted, b.gain) (fun product b ->
+        let applyProductWidth = gainedWidth + gainWidth + 1
+        let applyProduct = wire "apply_product" (SInt applyProductWidth)
+        slice (applyProductWidth - 1) 0 product ==> applyProduct
+        let applyScaled = wire "apply_scaled" (SInt(applyProductWidth - sampleWidth))
+        shr sampleWidth applyProduct ==> applyScaled
+        let applySaturated = wire "apply_saturated" (SInt gainedWidth)
+        saturate gainedWidth applyScaled ==> applySaturated
+
+        { ear = b.ear
+          band = b.band
+          gained = applySaturated
+          envNext = b.envNext })
+
+/// Sum the eight bands of each ear, saturate once, and offer the stereo beat
+/// when the right ear's last band has landed. The meter is the loudest
+/// envelope across the sixteen.
+let private sumBands (s: Stream<Gained>) : Stream<Expr * Expr> * Expr =
+    let offering = regBit "sum_offering"
+    bnot offering ==> s.ready
+    let transfer = s.valid &&& s.ready
+
+    // The beat lands in registers first: the apply's saturate into the sum's
+    // adder and its own saturate is more than a cycle, as the spatial engine's
+    // `gained` register already says. The sum runs a beat behind the transfer;
+    // the beat after a sample's last is sixteen away, so `offering` is set
+    // long before it could matter.
+    let arrived = regBit "sum_arrived"
+    transfer ==> arrived
+    let b = holdBeat "sum" gainedLayout transfer s
+    let first = eq b.band (lit 0UL slotBits)
+    let last = eq b.band (lit (uint64 (multibandBands - 1)) slotBits)
+
+    // One accumulator per ear: the crossover runs the ears interleaved, so
+    // the bands arrive left, right, left, right.
+    let sumWidth = gainedWidth + 3
+    let sums = [ for ear in 0..1 -> reg $"ear_sum_%d{ear}" (SInt sumWidth) ]
+    let sum = wire "ear_sum" (SInt sumWidth)
+    mux b.ear sums[1] sums[0] ==> sum
+    let total = wire "sum_total" (SInt sumWidth)
+    mux first (signExtend sumWidth b.gained) (add sum (signExtend sumWidth b.gained)) ==> total
+    If (arrived &&& bnot b.ear) (fun () -> total ==> sums[0])
+    If (arrived &&& b.ear) (fun () -> total ==> sums[1])
+
+    let earOut = wire "ear_out" (SInt sampleWidth)
+    saturate sampleWidth total ==> earOut
+    let outLeft = reg "out_left_reg" (SInt sampleWidth)
+    let outRight = reg "out_right_reg" (SInt sampleWidth)
+    If (arrived &&& last &&& bnot b.ear) (fun () -> earOut ==> outLeft)
+    If (arrived &&& last &&& b.ear) (fun () -> earOut ==> outRight)
+
+    let envMax = reg "env_max" sampleWidth
+    let envelope = reg "envelope_reg" sampleWidth
+    If arrived (fun () -> mux (lt envMax b.envNext) b.envNext envMax ==> envMax)
+
+    If (arrived &&& last &&& b.ear) (fun () ->
+        lit 1UL 1 ==> offering
+        mux (lt envMax b.envNext) b.envNext envMax ==> envelope
+        lit 0UL sampleWidth ==> envMax)
+
+    let ready = wireBit "sum_taken"
+    registerStreamReady ready
+    If (offering &&& ready) (fun () -> lit 0UL 1 ==> offering)
+
+    ({ payload = (outLeft, outRight)
+       valid = offering
+       ready = ready
+       layout = sampleLayout }
+     : Stream<Expr * Expr>),
+    envelope
+
+/// The module's stereo ports as the stream they carry, from inside the body.
+let private streamOfStereo (sp: StereoPorts) : Stream<Expr * Expr> =
+    ({ payload = (sp.inLeft, sp.inRight)
+       valid = sp.inValid
+       ready = sp.inReady
+       layout = sampleLayout }
+     : Stream<Expr * Expr>)
+
+/// Drive the module's stereo output ports from a stream, from inside the body.
+let private streamToStereo (sp: StereoPorts) (s: Stream<Expr * Expr>) =
+    let left, right = s.payload
+    left ==> sp.outLeft
+    right ==> sp.outRight
+    s.valid ==> sp.outValid
+    sp.outReady ==> s.ready
+
+/// The 8-band stereo multiband compressor on one multiplier — the same ports,
+/// the same settings and the same samples as `multibandCompressor8Def`, as
+/// the spatial engine's own operations chained one after another, each a
+/// stage that holds one beat: the crossover a section at a time, then each
+/// band through its compressor's steps, then the sum. What is shared is the
+/// multiplier behind them, through `warpFu`. No stage tells another how long
+/// it takes, and nothing here is scheduled: a beat moves when the next stage
+/// can take it. The state lives in memory, so it does not reset with the
+/// registers.
+let multibandCompressor8FoldedDef (name: string) (crossovers: float list) (sampleRate: float) : TypedModule<MultibandCompressorPorts> =
+    if List.length crossovers <> multibandBands - 1 then
+        failwith $"multibandCompressor8Folded needs {multibandBands - 1} crossovers, got {List.length crossovers}"
+
+    let shape = treeShape (crossoverTree crossovers sampleRate)
+
+    defModule
+        name
+        (fun p ->
+            { s = stereoPorts p
+              threshold = p.inPort "threshold" sampleWidth
+              ratio = p.inPort "ratio" 8
+              attack = p.inPort "attack" 16
+              releaseRate = p.inPort "releaseRate" 16
+              leftGains = List.init multibandBands (fun i -> p.inPort $"leftGain{i}" 16)
+              rightGains = List.init multibandBands (fun i -> p.inPort $"rightGain{i}" 16)
+              envelope = p.outPort "envelope" sampleWidth })
+        (fun io ->
+            let stores = foldStores shape
+            let pod = SharedMultiplier "pod"
+            let biquad = pod.Client "biquad"
+
+            let out, envelope =
+                streamOfStereo io.s
+                |> sections shape
+                |> readNode shape stores
+                |> readHistory shape stores
+                |> skidBuffer "history_skid" (sectionHistoryLayout shape)
+                |> issueTaps shape stores biquad
+                |> collectTaps shape biquad
+                |> writeHistory shape stores
+                |> writeNode shape stores
+                |> bands
+                |> skidBuffer "band_skid" bandLayout
+                |> readEnvelope stores
+                |> readDetected stores
+                |> boost pod io
+                |> writeDetected stores
+                |> detect
+                |> envelope pod io
+                |> skidBuffer "stepped_skid" steppedLayout
+                |> writeEnvelope stores
+                |> reduction pod io
+                |> apply pod
+                |> sumBands
+
+            envelope ==> io.envelope
+            out |> streamToStereo io.s
+            pod.Finish())
+
+/// One folded bank under `instName`, with `multibandCompressor8`'s call shape.
+let multibandCompressor8Folded (name: string) (crossovers: float list) (sampleRate: float) instName =
+    multibandInstance ((multibandCompressor8FoldedDef name crossovers sampleRate).NewNamed instName)
+
+/// The stock 8-band compressor on one multiplier: `multibandCompressor`'s
+/// signature exactly, so a design switches engine by changing this one word.
+let multibandCompressorFolded name (sampleRate: float) =
+    multibandCompressor8Folded name defaultCrossovers sampleRate

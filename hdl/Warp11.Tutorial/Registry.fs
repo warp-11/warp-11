@@ -57,5 +57,33 @@ let catalog =
           entry "FIR filter" (nameof firFilter) (fun () -> firFilter.def)
           entry "Neighborhood" (nameof lifeCell) (fun () -> lifeCell.def)
           entry "Shared unit" (nameof sharedUnit) (fun () -> sharedUnit.def)
+          entry "Folding" (nameof folded) (fun () -> folded.def)
+          |> watching [ "first_pod_grant"; "second_pod_grant" ]
+          |> poking [ "a", 3UL; "b", 5UL; "in_value", 7UL; "in_valid", 1UL; "spatial_ready", 1UL; "out_ready", 1UL ]
+          entry "Multiband, folded" (nameof multibandFolded) (fun () -> multibandFolded.def)
+          |> watching
+              [ "mb_section_ear"
+                "mb_section"
+                "mb_biquad_pod_grant"
+                "mb_boost_pod_grant"
+                "mb_envelope_pod_grant"
+                "mb_reduction_pod_grant"
+                "mb_apply_pod_grant"
+                "mb_written_0"
+                "mb_ear_sum_0"
+                "mb_ear_sum_1" ]
+          |> poking (
+              [ "threshold", 200_000UL
+                "ratio", 4UL
+                "attack", 1UL <<< 14
+                "releaseRate", 1UL <<< 12
+                "in_left", 0x123456UL
+                "in_right", 0x7EDCBAUL
+                "in_valid", 1UL
+                "out_ready", 1UL ]
+              @ [ for i in 0..7 do
+                      yield $"lg{i}", Warp11.Audio.gainUnity
+                      yield $"rg{i}", Warp11.Audio.gainUnity ]
+          )
           entry "Register map" (nameof registerMap) (fun () -> registerMap.def)
           entry "DDR master" (nameof ddrMaster) (fun () -> ddrMaster.def) ]

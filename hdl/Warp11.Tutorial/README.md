@@ -1,6 +1,6 @@
 # The tutorial
 
-Thirty-four small designs, each with a page explaining what it teaches, in a
+Thirty-seven small designs, each with a page explaining what it teaches, in a
 debugger you can step. Written for a developer who can program and has not
 written RTL.
 
@@ -88,6 +88,12 @@ substrates real accelerators are built from.
   4,096 cells update in one cycle.
 - **Shared unit** — sharing an expensive arm, and the measurement that says
   when not to.
+- **Folding** — the same arithmetic on fewer multipliers than it has
+  multiplies: each operation a stage holding one beat, the multiplier shared
+  behind them, and the bits unchanged.
+- **Multiband, folded** — the real one: an 8-band stereo compressor, 588 DSP
+  blocks spatially, on six of an iCE40's eight — sixteen stages, one word at
+  the call site, and a check that the bits are the spatial engine's.
 - **Register map** — the host seam, and the layout generated from the same
   definition the slave was.
 - **DDR master** — the fabric reaching out to memory, and the arm gate that
@@ -136,7 +142,7 @@ page teaching something the silicon does not do would be worse than no page.
 There are also two that guard the set rather than the designs: every entry has
 a page, and every "see also" link resolves.
 
-All thirty-four run through the Verilator differential alongside everything else.
+All thirty-seven run through the Verilator differential alongside everything else.
 
 **The browser build is for teaching, not for work.** `Warp11.Tutorial.Browser`
 publishes this same project to WebAssembly, which is what
