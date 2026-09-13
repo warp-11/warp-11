@@ -29,6 +29,55 @@ master, which is why nothing here recovers a clock.
 The sample rate is just the word-select rate: **one full cycle of WS is one
 stereo frame**, so Fs is however often WS repeats.
 
+### A frame is one stereo sample
+
+A **slot** is one channel's turn on the wire. A **frame** is both slots — one
+left sample and one right — and it is the unit that repeats at the sample rate,
+which is why WS is a square wave *at* Fs.
+
+With the 32-bit slots Warp 11 uses, that is **64 bit clocks per frame**:
+
+```
+WS    ______________________|‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾|________
+        left slot, 32 bits      right slot, 32 bits
+
+      |<--------- one frame = 64 bit clocks ------>|
+                                                      one stereo sample
+
+BCLK  ┐┌┐┌┐┌┐┌┐┌┐┌┐┌┐┌  ... 64 of these, every frame
+```
+
+So a 48 kHz link with 32-bit slots runs its bit clock at 48 000 × 64 =
+**3.072 MHz**, and anything reading that line sees a new sample pair once every
+64 bit clocks and nothing whatever in between. **Audio arrives slowly, and in
+pieces** — which is the fact `i2sRx` exists to hide.
+
+### Why it is serial at all
+
+A reasonable first reaction is that 24 wires would be simpler than one wire and
+a clock, and for some converters that is exactly right — a video or RF ADC
+really does put its bits out in parallel. Audio converters are serial for
+reasons specific to audio:
+
+- **Pins are the cost.** 24 bits × 2 channels is 48 pins, and a modern stereo
+  audio ADC is a 24-pin 4 mm package *in total*. Serial turns 24 wires into one.
+- **There is no speed pressure.** 48 kHz is 20.8 µs per sample; 64 bit times at
+  3 MHz fill a small fraction of it, so serial costs nothing you needed.
+  Converters that *are* fast go serial too — a gigasample part runs multi-gigabit
+  serdes, because parallel cannot be routed at that rate either.
+- **The chip is already serial inside.** A delta-sigma modulator emits one bit
+  at a time at a few MHz, and a decimation filter assembles words from them.
+  Serial out is the shape the architecture already has.
+- **Noise.** Two dozen fast-switching parallel lines beside a 119 dB analog
+  front end is a problem you would otherwise have to design away.
+
+And when you genuinely need more data the answer is *more* sharing rather than
+less: **TDM** puts eight channels on one wire by giving the frame more slots.
+
+None of this reaches your design. `i2sRx` hands you a 24-bit value per channel,
+in parallel, once per frame. The wide word you wanted does exist — the receiver
+assembles it, and the serial bus stops at the framer.
+
 ### The one quirk worth knowing
 
 Data starts **one bit clock after WS changes**. That single bit of delay is the
@@ -390,10 +439,32 @@ Fs = fabric / (4 * sclkHalfDiv * bitsPerSlot)
 | Fs | 100 MHz / 2048 = **48.828 kHz** |
 
 That is inside every converter's tolerance and it is what the shipped designs
-use. It is *not* exactly 48 kHz, and it cannot be: 100 MHz does not divide into
-48 000. **An exact rate wants an MMCM giving this module a 12.288 MHz clock
-instead** — worth doing if you are matching an external clock domain, and not
-worth doing otherwise.
+use.
+
+### Read it as a counting chain
+
+Every one of those dividers is a counter, so the rate is the fabric clock
+counted down twice — once to the bit clock, once to the frame:
+
+```
+fabric clock      100,000,000 Hz
+     ÷ 32          SCLK toggles every 16 cycles, so a period is 32
+SCLK                3,125,000 Hz
+     ÷ 64          32 bits × 2 slots = one frame
+Fs                     48,828 Hz
+```
+
+**And that is why some rates are simply unavailable.** A counter counts whole
+cycles: it can divide by 16, never by 15.6. Exact 48 kHz needs SCLK at
+48 000 × 64 = 3.072 MHz, which from 100 MHz means toggling every 16.28 cycles.
+No such counter exists.
+
+So an exact rate is not a matter of cleverer logic — it is a different input
+frequency. 48 kHz wants a clock from the 12.288 MHz family (12.288, 24.576,
+49.152 …), every one of which divides down to 48 000 exactly, and 44.1 kHz wants
+the 11.2896 family. **Arrange that when a converter has a *table* of supported
+rates rather than a tolerance** — many do, and a rate that is 2% off is then not
+slightly wrong but unsupported. Otherwise the nearest divisor is fine.
 
 ### Naming the rate instead of the divisors
 
