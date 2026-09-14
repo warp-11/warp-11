@@ -4,4 +4,8 @@
 
 pub const APERTURE_BYTES: usize = 256;
 pub const ENABLE_OFFSET: usize = 0x000;
+pub const ENABLE_WIDTH: u32 = 1;
+pub const ENABLE_RESET: u32 = 0x1;
 pub const STEP_OFFSET: usize = 0x004;
+pub const STEP_WIDTH: u32 = 24;
+pub const STEP_RESET: u32 = 0x24e8f;

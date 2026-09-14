@@ -320,15 +320,38 @@ let private unitySettingsPassAudioThrough () =
 
     levels |> List.forall (fun (_, db) -> abs db < 0.1)
 
-let private multibandSetup (sim: Sim) =
+/// The spatial bank takes its gains on sixteen inputs.
+let private pokeGains (sim: Sim) (left: uint64 list) (right: uint64 list) =
+    for i in 0 .. multibandBands - 1 do
+        sim.Poke($"lg{i}", left[i])
+        sim.Poke($"rg{i}", right[i])
+
+/// The folded bank reads its gains from a table, loaded a word a cycle
+/// through its three load ports — as a host loads the window.
+let private loadGains (sim: Sim) (left: uint64 list) (right: uint64 list) =
+    for i, g in List.indexed (left @ right) do
+        sim.Poke("makeup_index", uint64 i)
+        sim.Poke("makeup_gain", g)
+        sim.Poke("makeup_write", 1UL)
+        sim.Tick()
+
+    sim.Poke("makeup_write", 0UL)
+
+let private unityGains = List.replicate multibandBands gainUnity
+
+let private multibandLaw (sim: Sim) =
     sim.Poke("threshold", 200_000UL)
     sim.Poke("ratio", 4UL)
     sim.Poke("attack", 1UL <<< 14)
     sim.Poke("releaseRate", 1UL <<< 12)
 
-    for i in 0 .. multibandBands - 1 do
-        sim.Poke($"lg{i}", gainUnity)
-        sim.Poke($"rg{i}", gainUnity)
+let private multibandSetup (sim: Sim) =
+    multibandLaw sim
+    pokeGains sim unityGains unityGains
+
+let private multibandFoldedSetup (sim: Sim) =
+    multibandLaw sim
+    loadGains sim unityGains unityGains
 
 let private multibandIsStallIndependent () =
     stageIsStallIndependent Batch.multibandStageRef.def multibandSetup
@@ -343,9 +366,12 @@ let private foldedMatchesTheSpatial () =
 
     // `changed` is how many output frames differ from the input: the guard
     // that a comparison of two passthroughs is not passing for nothing.
-    let compare label setup (changed: int -> bool) =
-        let spatial = runStageStalled Batch.multibandStageRef.def setup samples (Some 2)
-        let folded = runStageStalled Batch.multibandStageFoldedRef.def setup samples (Some 2)
+    let compare label law (left: uint64 list) (right: uint64 list) (changed: int -> bool) =
+        let spatial =
+            runStageStalled Batch.multibandStageRef.def (fun s -> law s; pokeGains s left right) samples (Some 2)
+
+        let folded =
+            runStageStalled Batch.multibandStageFoldedRef.def (fun s -> law s; loadGains s left right) samples (Some 2)
 
         let differing =
             Seq.zip spatial folded |> Seq.filter (fun (a, b) -> a <> b) |> Seq.length
@@ -361,32 +387,27 @@ let private foldedMatchesTheSpatial () =
         && differing = 0
         && changed fromInput
 
-    let unity (s: Sim) =
+    let unityLaw (s: Sim) =
         s.Poke("threshold", (1UL <<< sampleWidth) - 1UL)
         s.Poke("ratio", 0UL)
         s.Poke("attack", 0UL)
         s.Poke("releaseRate", 0UL)
 
-        for i in 0 .. multibandBands - 1 do
-            s.Poke($"lg{i}", gainUnity)
-            s.Poke($"rg{i}", gainUnity)
-
     // A gentle setting — every band's gain moving without any band muted —
     // beside the demo's, where the slope law drives bands to silence.
-    let gentle (s: Sim) =
-        multibandSetup s
+    let gentleLaw (s: Sim) =
+        multibandLaw s
         s.Poke("threshold", 1_000_000UL)
         s.Poke("ratio", 1UL)
 
-        for i in 0 .. multibandBands - 1 do
-            s.Poke($"lg{i}", gainUnity + (uint64 i <<< 4))
-            s.Poke($"rg{i}", gainUnity - (uint64 i <<< 3))
+    let gentleLeft = [ for i in 0 .. multibandBands - 1 -> gainUnity + (uint64 i <<< 4) ]
+    let gentleRight = [ for i in 0 .. multibandBands - 1 -> gainUnity - (uint64 i <<< 3) ]
 
     // Unity changes the frames too, now that the crossover is an all-pass;
     // what the guard still rules out is a run where nothing happened at all.
-    let compressing = compare "compressing" multibandSetup (fun n -> n > samples.Length / 2)
-    let shaped = compare "gentle" gentle (fun n -> n > samples.Length / 2)
-    let passthrough = compare "unity" unity (fun n -> n > samples.Length / 2)
+    let compressing = compare "compressing" multibandLaw unityGains unityGains (fun n -> n > samples.Length / 2)
+    let shaped = compare "gentle" gentleLaw gentleLeft gentleRight (fun n -> n > samples.Length / 2)
+    let passthrough = compare "unity" unityLaw unityGains unityGains (fun n -> n > samples.Length / 2)
     compressing && shaped && passthrough
 
 /// The folded engine spends cycles where the spatial one spends multipliers, so
@@ -397,7 +418,7 @@ let private foldedMatchesTheSpatial () =
 /// the I2S link divides by.
 let private foldedPassFitsTheFrame () =
     let sim = Sim Batch.multibandStageFoldedRef.def
-    multibandSetup sim
+    multibandFoldedSetup sim
     sim.Poke("in_valid", 1UL)
     sim.Poke("in_left", 0x123456UL)
     sim.Poke("in_right", 0x7EDCBAUL)
@@ -440,7 +461,7 @@ let private stageStallReport () =
             sim.Poke("threshold", (1UL <<< (sampleWidth - 1)) - 1UL))
           "fir", Batch.firStage.def, (fun (sim: Sim) -> sim.Poke("preset", 0UL))
           "multiband", Batch.multibandStageRef.def, multibandSetup
-          "multiband folded", Batch.multibandStageFoldedRef.def, multibandSetup ]
+          "multiband folded", Batch.multibandStageFoldedRef.def, multibandFoldedSetup ]
 
     let mutable allOk = true
 

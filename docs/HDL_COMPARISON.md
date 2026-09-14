@@ -615,7 +615,7 @@ caller, where every direction is flipped. Operators: `streamStageFor`/`streamMap
 | SpinalHDL | AXI4, AXI4-Lite, AXI4-Stream, AHB-Lite, APB3, Wishbone, TileLink — all built-in |
 | HardCaml | `hardcaml_axi` |
 | Amaranth | `amaranth-soc` for SoC interconnect (CSR bus etc.); AXI via separate libs |
-| Warp 11 | A **declarative register map** — a list of `pulseBit` / `rwReg` / `roField` / `w1cBit` / `roConst` / `rwWindow` entries — from which `regMapSlave` synthesizes the W/R FSMs, register storage, multi-source IRQ OR and read mux, *and* `regMapRsLines` emits the Rust layout the driver imports. Written with `buildRegMap`, which **allocates the offsets**: registers are declared in order, packed words are a scope, and windows round the cursor up to their own alignment, so a map states widths and nothing states an address. `axiMasterReader` (multi-beat INCR bursts, `maxOutstanding`), `axiMasterReaderBurst`, `axiMasterWriter` (single- and multi-outstanding ring-buffer modes) |
+| Warp 11 | A **declarative register map** — a list of `pulseBit` / `rwReg` / `roField` / `w1cBit` / `roConst` / `rwArray` / `roArray` entries — from which `regMapSlave` synthesizes the W/R FSMs, register storage, multi-source IRQ OR and read mux, *and* `regMapRsLines` emits the Rust layout the driver imports. A window declares its storage like any memory, and a host-written one may carry initial contents (`preloadedBlockMem`): the design boots on them, the seam carries them as `{NAME}_INIT`, and a board with no processor is fitted from configuration. The same map goes behind a **UART** (`serialRegMapSlave`, 8N1, a framed request/reply with a checksum) with the design unable to tell which link it is behind. Written with `buildRegMap`, which **allocates the offsets**: registers are declared in order, packed words are a scope, and windows round the cursor up to their own alignment, so a map states widths and nothing states an address. `axiMasterReader` (multi-beat INCR bursts, `maxOutstanding`), `axiMasterReaderBurst`, `axiMasterWriter` (single- and multi-outstanding ring-buffer modes) |
 
 Warp 11 doesn't ship higher-level fabrics (TileLink, Wishbone, etc.) or an AXI4 *slave* beyond AXI-Lite, but the AXI-Lite + AXI4-master pair covers KV260 deployments and is what every demo runs on — including GEP's sustained burst feed and Mandelbrot's 16-px-per-beat framebuffer egress.
 
@@ -852,7 +852,7 @@ What that buys is a development loop: telemetry, not intuition, has re-ranked GE
 | HardCaml | by hand; `Hardcaml_xilinx` has no fold |
 | Amaranth | by hand |
 | Bluespec | rules + a shared register file give the schedule for free, but the design is written folded from the start |
-| Warp 11 | `multibandCompressorFolded` — the spatial `multibandCompressor`'s signature exactly, as its own operations chained over a `warpFu`-shared multiplier; checked bit-exact against the spatial engine as a living property |
+| Warp 11 | `multibandCompressorFolded` — the spatial `multibandCompressor`'s operations chained over a `warpFu`-shared multiplier, over the same stream and law with the per-band gains in a table the bank reads rather than sixteen wires; checked bit-exact against the spatial engine as a living property |
 
 The 8-band stereo compressor is the same DSP in two shapes. Spatial: fourteen
 biquads and sixteen band compressors with every multiply in hardware, 588 DSP
@@ -860,12 +860,12 @@ blocks on a KV260. Folded: the same operations, chained —
 
 ```fsharp
 streamOfStereo io.s
-|> sections shape |> readNode shape stores |> readHistory shape stores
-|> skidBuffer "history_skid" (sectionHistoryLayout shape)
+|> sections shape |> readNode shape stores
+|> skidBuffer "node_skid" (sectionLayout shape)
 |> issueTaps shape stores biquad |> collectTaps shape biquad
 |> writeHistory shape stores |> writeNode shape stores |> bands
 |> skidBuffer "band_skid" bandLayout
-|> readEnvelope stores |> readDetected stores
+|> readState stores
 |> boost pod io |> writeDetected stores |> detect |> envelope pod io
 |> skidBuffer "stepped_skid" steppedLayout
 |> writeEnvelope stores |> reduction pod io |> apply pod
@@ -879,9 +879,10 @@ the core. The crossover is a graph — `crossoverTree`, 24 sections an ear in
 dependency order — that both engines run: the spatial one as a seven-level
 pipeline, the fold as a program whose `readNode` waits, exactly, for the node
 a section reads to have been written this sample. **6 of an iCE40 UP5K's 8
-DSP blocks, 14 of its 30 block RAMs, 81% of its logic cells with the I2S link
-and the limiter beside it, 25.1 MHz placed and routed at a 24 MHz target, 365
-cycles a stereo frame of the 512 available at 46 875 Hz.** The bits are the
+DSP blocks, 16 of its 30 block RAMs, 84% of its logic cells with the I2S
+link, the limiter and a serial register map beside it, 27.9 MHz placed and
+routed at a 24 MHz target, 341 cycles a stereo frame of the 512 available at
+46 875 Hz.** The bits are the
 spatial engine's by construction — every multiply issued at the widths the
 spatial engine uses, each stage rescaling its product exactly as the spatial
 one did, a section's products summed serially in the reference's own 59-bit
@@ -914,13 +915,24 @@ the crossover's client served first because its taps are the pass's critical
 path; the combinational `warpFu` is untouched, and GEP's emission was A/B'd
 byte-identical across the change.
 
-**Call-site invariance is what makes it one word.** A design switches engine
-by writing `multibandCompressorFolded` for `multibandCompressor`; the settings
-record, the register map and the Rust seam are untouched, and a caller cannot
-tell which it has. The law itself — the envelope step, the gain computer — is
-written once, in halves that take their multiplier as an argument, so the
-spatial engine hands it `mul` and a `podStage` computes one half before the
-shared multiplier and the other after.
+**What rides in a beat is what no store can supply.** The first fold read a
+section's four history words into the beat and shifted them back out four
+writes later; two stages held 142 bits each to carry them. Now `issueTaps`
+fetches each history word as the tap issues, exactly as it fetches the
+coefficient — two ports, this tap and the next — and the history is two slots
+of `x` and `y` indexed by the sample's parity, so a sample writes two words
+and nothing is shifted. The makeup gains went the same way: a sixteen-word
+table the `boost` stage asks by `(ear, band)` rather than sixteen wires,
+because on the UP5K sixteen host-written registers and their readback mux
+were the difference between fitting and not — a window costs a block, a
+register file costs the fabric — and because the table is where every later
+per-band term goes. That is the one place the two engines' surfaces differ:
+`MultibandFoldedSettings` carries a `MakeupTable` where the spatial engine,
+which needs all sixteen at once, takes the wires. The law itself — the
+envelope step, the gain computer — is written once, in halves that take
+their multiplier as an argument, so the spatial engine hands it `mul` and a
+`podStage` computes one half before the shared multiplier and the other
+after.
 
 **No stage states a latency, and nothing is scheduled.** A beat moves when the
 next stage can take it. A stage holds one beat, so a result from the shared

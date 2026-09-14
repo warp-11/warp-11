@@ -2414,6 +2414,66 @@ let regMapScratch =
 
             regs.irq ==> irqOut)
 
+/// The same kind of map behind a UART instead of AXI-Lite: an identity
+/// constant, a control register the design reads, a pulse, and two live
+/// fields the host reads back. A board with no bus — an iCEBreaker over its
+/// FTDI, a microcontroller over its UART — reaches a design this way, and the
+/// design cannot tell which link it is behind: `regs` is the same
+/// `SlaveRegs` `regMapSlave` gives.
+type SerialRegs =
+    { id: RegEntry
+      control: RegEntry
+      bump: RegEntry
+      count: RegEntry
+      ticks: RegEntry
+      /// A host-written table in block storage that boots loaded: the shape
+      /// a board with no processor needs — right from configuration, and
+      /// refitted over the link when a host is there.
+      preset: RegEntry
+      /// The table word at `control`'s low bits, as the design sees it.
+      entry: RegEntry }
+
+/// What `table` holds from configuration.
+let serialTableInit = [ 10UL; 20UL; 30UL; 40UL ]
+
+let serialRegs, serialMap =
+    buildRegMap (fun r ->
+        { id = r.RoConst("id", 0x5E71A1UL)
+          control = r.RwReg("control", 16, 0x100UL)
+          bump = r.Word(fun w -> w.Pulse "bump")
+          count = r.RoField("count", 8)
+          ticks = r.RoField("ticks", 32)
+          entry = r.RoField("entry", 32)
+          preset = r.RwArray("preset", 8, storage = Block, init = serialTableInit) })
+
+/// The link's rate: a fabric clock and a baud, stated once here and derived
+/// everywhere below — `serialClient` in the checks asks the same function.
+let serialFabricHz = 24_000_000
+let serialBaud = 1_000_000
+
+let serialRegMap =
+    defModule
+        "SerialRegMap"
+        (fun p -> (uartPins p "host", p.outPort "control_out" 16))
+        (fun (pins, controlOut) ->
+            let regs = serialRegMapSlave "host" serialFabricHz serialBaud pins serialMap
+
+            let count = reg "count_reg" 8
+            If (regs.pulse serialRegs.bump) (fun () -> count + lit 1UL 8 ==> count)
+            regs.drive serialRegs.count count
+
+            let ticks = reg "ticks_reg" 32
+            ticks + lit 1UL 32 ==> ticks
+            regs.drive serialRegs.ticks ticks
+
+            let control = regs.value serialRegs.control
+            // `hostTurn` is ignored: `entry` only shows the word, and the
+            // one-cycle glitch of a readback is visible only to the host
+            // mid-transaction, on another offset.
+            regs.drive serialRegs.entry (regs.readArray serialRegs.preset (slice 2 0 control)).read.data
+
+            control ==> controlOut)
+
 /// Four animated rows (free-running counters, so every frame differs) through
 /// `snapshotSource` and `streamConflate3` at ports: the testbench's random
 /// capture/release/writer-idle/backpressure pokes differentially exercise the
@@ -2771,22 +2831,24 @@ let multibandStage =
             streamSink outPorts stage
             envelope ==> envOut)
 
-/// The same compressor on one shared multiplier — `MultibandStage`'s ports
-/// exactly, with the engine chosen by one word. The property it exists for is
-/// that its samples are the spatial engine's; that check runs beside the other
-/// multiband checks in `Warp11.Effects`, where the stalled-stream harness is.
+/// The same compressor on one shared multiplier — `MultibandStage`'s stream
+/// and law, with the makeup gains in a table the bank reads (loaded through
+/// `makeup_index`/`makeup_gain`/`makeup_write`, unity from boot) rather than
+/// sixteen inputs. The property it exists for is that its samples are the
+/// spatial engine's; that check runs beside the other multiband checks in
+/// `Warp11.Effects`, where the stalled-stream harness is.
 let multibandStageFolded =
     defModule
         "MultibandStageFolded"
         (fun p ->
-            (multibandSettingsPorts p,
+            (multibandFoldedSettingsPorts p,
              streamInputPorts p "in" sampleLayout,
              streamOutputPorts p "out" sampleLayout,
              p.outPort "envelope" sampleWidth))
         (fun (settings, inPorts, outPorts, envOut) ->
             let stage, envelope =
                 streamSource inPorts
-                |> multibandCompressorFolded "MultibandCompressor8Folded" stockSampleRate "mb" settings
+                |> multibandCompressorFolded "MultibandCompressor8Folded" stockSampleRate "mb" (multibandFoldedSettingsOf settings)
 
             streamSink outPorts stage
             envelope ==> envOut)

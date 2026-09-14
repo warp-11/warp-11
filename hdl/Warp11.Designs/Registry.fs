@@ -18,13 +18,16 @@ open Warp11.Designs.BusCatalog
 
 /// The multiband toys at the Effects demo's settings, with unity makeup and the
 /// stream free-running, so stepping one shows every band's envelope moving.
-let private multibandDemo =
+let private multibandLaw =
     [ "threshold", 200_000UL
       "ratio", 4UL
       "attack", 1UL <<< 14
       "releaseRate", 1UL <<< 12
       "in_valid", 1UL
       "out_ready", 1UL ]
+
+let private multibandDemo =
+    multibandLaw
     @ [ for i in 0 .. multibandBands - 1 do
             yield $"lg{i}", gainUnity
             yield $"rg{i}", gainUnity ]
@@ -92,6 +95,9 @@ let catalog =
           entry "Signed operations" (nameof signedOps) (fun () -> signedOps.def)
           entry "Neighborhood count" (nameof neighborCount) (fun () -> neighborCount.def)
           entry "AXI-Lite scratch registers" (nameof regMapScratch) (fun () -> regMapScratch.def)
+          entry "Register map over a UART" (nameof serialRegMap) (fun () -> serialRegMap.def)
+          |> watching [ "host_request"; "host_rx_byte"; "host_command"; "count_reg" ]
+          |> poking [ "host_rx", 1UL ]
           entry "Frame pipeline" (nameof framePipeline) (fun () -> framePipeline.def)
           entry "Sweep pipeline (4 workers)" (nameof sweepPipeline) (fun () -> (sweepPipeline 4).def)
           entry "Line window (3-row stencil feed)" (nameof windowSweep) (fun () -> windowSweep.def)
@@ -114,8 +120,10 @@ let catalog =
           |> poking [ "delay", 64UL; "feedback", 128UL; "in_valid", 1UL; "out_ready", 1UL ]
           entry "Multiband compressor (spatial)" (nameof multibandStage) (fun () -> multibandStage.def)
           |> poking multibandDemo
+          // The folded bank's makeup table boots at unity, so the law is all
+          // the demo pokes.
           entry "Multiband compressor (folded, one multiplier)" (nameof multibandStageFolded) (fun () -> multibandStageFolded.def)
-          |> poking multibandDemo ]
+          |> poking multibandLaw ]
 
 let designs = catalog.entries
 

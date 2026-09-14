@@ -93,8 +93,9 @@ it.
   `Combinators.fs`, `Streams.fs`, `AxiLite.fs`, `RegMap.fs`, `Number.fs`,
   `NumberOperators.fs`, `Verilog.fs`, `Flatten.fs`, `Firrtl.fs`,
   `FirrtlImport.fs`, `Inventory.fs`, `Sim.fs`, `SimAxi.fs`, `Breakpoint.fs`,
-  `Debug.fs`, `Catalog.fs`, `Vcd.fs`, `Diff.fs`, `Stdlib.fs`, `Audio.fs`,
-  `Wav.fs`. Most modules are `[<AutoOpen>]` — so `open Warp11` is the whole DSL
+  `Debug.fs`, `Catalog.fs`, `Vcd.fs`, `Diff.fs`, `Stdlib.fs`, `Uart.fs`,
+  `SerialRegMap.fs`, `SimUart.fs`, `Audio.fs`, `Wav.fs`. Most modules are
+  `[<AutoOpen>]` — so `open Warp11` is the whole DSL
   surface — the exceptions being `Breakpoint`, `Catalog`, `Debug`, `Firrtl`,
   `FirrtlImport`, `Inventory`, `Number` and `Vcd`, which are reached by
   qualified name because their members would otherwise shadow the IR's.
@@ -148,6 +149,8 @@ designs are the interesting ones.
 | **`withContext` / `Stream.farmWith`** | `Streams.fs` | a slow stage keeps the caller's data. The stage never learns about it — the context rides a FIFO and comes back paired with the result, so no component grows a passthrough for a payload it never reads and no caller keeps a shadow queue. `farmWith` is `farm` of `withContext`, and needs **no tags**: a farm owns the dispatch *and* the merge, so it knows which lane produced each beat. Depth is a throughput knob, not a correctness one. |
 | **`streamZip` / `layoutJoin`** | `Streams.fs` / `Layout.fs` | pair two streams beat for beat, and put two payloads side by side. A *join*, which `streamMergeTree` is not — a merge arbitrates between alternatives and would hand back two beats from the same side. |
 | **`divider`** | `Stdlib.fs` | an integer divider as a stream stage, radix-2 restoring. One subtractor reused for `width` iterations, so it cannot take a new pair every cycle and `ready` is the only thing that can say so — **no latency crosses the boundary**. Division by zero saturates to all-ones, because every trial subtraction succeeds. |
+| **`serialRegMapSlave`** | `SerialRegMap.fs`, `Uart.fs` | the same `RegMap` behind a UART instead of AXI-Lite: 8N1 at a stated baud, a framed request/reply with a checksum, and the same `SlaveRegs` back, so the design cannot tell which link it is behind. `SimUart` drives the Sim's pins bit by bit; `serialClient` is the `AxiLiteClient` shape over it, so a check reads and writes the map the way the host will. |
+| **`RwArray` with `init`, `preloadedBlockMem`** | `RegMap.fs`, `Dsl.fs` | a host-written window that boots loaded: a writable memory with initial contents (the ROM-write refusal is at the `memWrite` site, so contents no longer mean read-only), the seam carrying them as `{NAME}_INIT`. A window declares its storage like any memory — `Block` on a part with no LUTRAM. |
 | **`warpFu`** | `Stdlib.fs` | share one fixed-latency unit across N clients without touching the unit: round-robin issue, a tag delay-line, a writeback demux, and at one client none of it. The core **reports** its own depth (`Expr list -> Expr list * int`) rather than being told one — a wrapper cannot check a number it was handed, and a wrong one misroutes every result. |
 | **`checkStreams`** | `Verilog.fs` | a stream has exactly one consumer: every registered ready net must be driven exactly once. Zero = created-but-never-consumed (was an undriven port only Verilator noticed); two = two consumers fighting. `emitDesign` refuses on violation. |
 | **`If` / `Else`** | `Dsl.fs` | conditional assignment folding to Mux trees at block end — Warp 11's construct, as two sequential statements. Each branch elaborates into its own scope and merges into its parent as a Mux, so nesting AND-folds structurally and last-connect-wins gives priority semantics. A reg with no unconditional default holds (the hold arm exists only in the fold); a wire there is an elaboration error. `Else` must immediately follow its `If` — any intervening statement seals the On as else-less. |

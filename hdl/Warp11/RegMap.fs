@@ -31,7 +31,8 @@ type RegKind =
     /// the host's read port are exactly a block RAM's two ports. Host writes
     /// in the range are ignored, as they are on any read-only entry. `words`
     /// must be a power of two and the window aligned to its own size.
-    | RoArray of words: int
+    /// `storage` is the backing memory's, as a design declares any memory's.
+    | RoArray of words: int * storage: RamStyle
     /// A host-writable window of 32-bit words backed by a mem the hardware
     /// reads. Host reads in the window return its contents, through the same
     /// single read port the design uses — a second port would cost the BRAM
@@ -39,7 +40,14 @@ type RegKind =
     /// cycles a readback is in flight, and the design's side of the port says
     /// so (`hostTurn`). `words` must be a power of two and the window aligned
     /// to its own size.
-    | RwArray of words: int
+    ///
+    /// `init` is what the window holds from configuration until the host
+    /// writes it — the table's reset values, as `RwReg` has one. A design that
+    /// has to work before any host reaches it (a board with no processor,
+    /// fitted over a serial link) boots on them; without, the window reads
+    /// zero until loaded. They reach the seam as `{NAME}_INIT`, so a host's
+    /// "restore defaults" writes the same words the fabric booted with.
+    | RwArray of words: int * storage: RamStyle * init: uint64[] option
 
 /// One register in a map: what it is called, where the host finds it, and what
 /// kind of thing it is. Built by the constructors below and then held on to —
@@ -76,13 +84,13 @@ let roConst name offset value =
 
 /// A block of words the host writes and the design reads. `words` must be a
 /// power of two, and the window aligned to its own size.
-let rwArray name offset words =
-    { name = name; offset = offset; kind = RwArray words }
+let rwArray name offset words storage init =
+    { name = name; offset = offset; kind = RwArray(words, storage, init) }
 
 /// A block of words the design writes and the host reads, on the same
 /// alignment rule.
-let roArray name offset words =
-    { name = name; offset = offset; kind = RoArray words }
+let roArray name offset words storage =
+    { name = name; offset = offset; kind = RoArray(words, storage) }
 
 /// A whole register map: its aperture, and the entries in it. One definition
 /// elaborates the slave *and* emits the Rust layout, so host and fabric cannot
@@ -120,8 +128,13 @@ let private layoutFingerprint (apertureAddrWidth: int) (entries: RegEntry list) 
         | RoField (bo, w) -> $"rf{bo},{w}"
         | W1cBit b -> $"w1c{b}"
         | RoConst v -> $"c{v}"
-        | RoArray w -> $"row{w}"
-        | RwArray w -> $"rww{w}"
+        | RoArray (w, _) -> $"row{w}"
+        // Initial contents are part of what the host sees, as a register's
+        // reset value is; a window without keeps the tag it always had.
+        | RwArray (w, _, None) -> $"rww{w}"
+        | RwArray (w, _, Some init) ->
+            let contents = init |> Array.map string |> String.concat ","
+            $"rww{w},{contents}"
 
     let canonical =
         entries
@@ -319,15 +332,25 @@ type RegBuilder internal () =
         cursor <- cursor + bytes
         offset
 
-    /// A block of words the host writes and the design reads.
-    member this.RwArray(name: string, words: int) =
-        let e = rwArray name (this.TakeArray words) words
+    /// A block of words the host writes and the design reads. The backing
+    /// memory is LUTRAM unless `storage` says otherwise — a board without any
+    /// (iCE40) says `Block`. `init` is the window's contents from
+    /// configuration; a shorter list fills from word zero.
+    member this.RwArray(name: string, words: int, ?storage: RamStyle, ?init: uint64 list) =
+        let contents = init |> Option.map List.toArray
+
+        match contents with
+        | Some c when c.Length > words -> failwith $"regMap '{name}': %d{c.Length} initial words for a %d{words}-word window"
+        | _ -> ()
+
+        let e = rwArray name (this.TakeArray words) words (defaultArg storage Distributed) contents
         entries.Add e
         e
 
-    /// A block of words the design writes and the host reads.
-    member this.RoArray(name: string, words: int) =
-        let e = roArray name (this.TakeArray words) words
+    /// A block of words the design writes and the host reads, in LUTRAM
+    /// unless `storage` says otherwise.
+    member this.RoArray(name: string, words: int, ?storage: RamStyle) =
+        let e = roArray name (this.TakeArray words) words (defaultArg storage Distributed)
         entries.Add e
         e
 
@@ -424,6 +447,17 @@ let private log2 n =
 
     w
 
+/// A window's backing memory, of 32-bit words, in the storage the entry
+/// declared — with its initial contents when it has them.
+let private windowMem name addrWidth (storage: RamStyle) (init: uint64[] option) : Mem =
+    match storage, init with
+    | Block, Some contents -> preloadedBlockMem name addrWidth 32 contents
+    | Block, None -> blockMem name addrWidth 32
+    | Distributed, Some contents -> preloadedDistributedMem name addrWidth 32 contents
+    | Distributed, None -> distributedMem name addrWidth 32
+    | Ultra, _ -> ultraMem name addrWidth 32
+    | Unspecified, _ -> failwith $"regMap '{name}': a window must declare its storage"
+
 let private validate (m: RegMap) =
     let wordWidth = m.apertureAddrWidth - 2
 
@@ -456,8 +490,8 @@ let private validate (m: RegMap) =
             if bo < 0 || w < 1 || bo + w > 32 then
                 failwith $"regMap '{e.name}': field [%d{bo + w - 1}:%d{bo}] does not fit a 32-bit word"
         | RoConst _ -> ()
-        | RwArray words
-        | RoArray words ->
+        | RwArray (words, _, _)
+        | RoArray (words, _) ->
             if words < 2 || words &&& (words - 1) <> 0 then
                 failwith $"regMap '{e.name}': window words must be a power of two >= 2, got %d{words}"
 
@@ -466,8 +500,8 @@ let private validate (m: RegMap) =
 
     let windowRange (e: RegEntry) =
         match e.kind with
-        | RwArray words
-        | RoArray words -> Some(wordOf e, wordOf e + uint64 words - 1UL)
+        | RwArray (words, _, _)
+        | RoArray (words, _) -> Some(wordOf e, wordOf e + uint64 words - 1UL)
         | _ -> None
 
     for e in m.entries do
@@ -531,16 +565,19 @@ let private validate (m: RegMap) =
                     | true, prior -> failwith $"regMap: '{owner}' and '{prior}' overlap at bit %d{b} of word 0x%x{word * 4UL}"
                     | _ -> taken[b] <- owner
 
-/// The slave elaborated from a map — the same one-outstanding scratch-slave
-/// scheme as `axiLiteSlaveFull`, with the register file, decode, read mux and
-/// interrupt OR all derived from the entries.
-let regMapSlave (ports: AxiLiteSlavePorts) (m: RegMap) : SlaveRegs =
+/// The slave elaborated from a map, behind whatever channel carries the
+/// host's words — the register file, decode, read mux and interrupt OR all
+/// derived from the entries. `AxiLiteChannel` is the shape a channel has to
+/// present — a write word and its fire, a read that answers `answersAfter`
+/// cycles on — and AXI-Lite is one thing that presents it; a serial link is
+/// another (`SerialRegMap.fs`), and the map cannot tell them apart.
+let regMapSlaveOn (ch: AxiLiteChannel) (m: RegMap) : SlaveRegs =
     validate m
     let addrWidth = m.apertureAddrWidth
 
-    if ports.addrWidth <> addrWidth then
+    if ch.wordWidth <> addrWidth - 2 then
         failwith
-            $"regMapSlave: the boundary was declared %d{ports.addrWidth} bits wide but the map's aperture needs %d{addrWidth}"
+            $"regMapSlaveOn: the channel carries %d{ch.wordWidth}-bit word indices but the map's aperture needs %d{addrWidth - 2}"
 
     let wordWidth = addrWidth - 2
     let wordOf (e: RegEntry) = e.offset >>> 2
@@ -551,9 +588,6 @@ let regMapSlave (ports: AxiLiteSlavePorts) (m: RegMap) : SlaveRegs =
 
         zeroExtend32 shifted
 
-    // No read source here costs a cycle — a window is written by the host and
-    // read by the design, and reads of it answer 0.
-    let ch = axiLiteChannelOn ports 1
     let wdata = ch.wdata
     let writeFire = ch.writeFire
     let awWord = ch.awWord
@@ -589,9 +623,9 @@ let regMapSlave (ports: AxiLiteSlavePorts) (m: RegMap) : SlaveRegs =
             w1cState[e.name] <- r
             w1cSets[e.name] <- setWire
         | RoConst _ -> ()
-        | RwArray words ->
+        | RwArray (words, storage, init) ->
             let aw = log2 words
-            let backing = distributedMem e.name aw 32
+            let backing = windowMem e.name aw storage init
             let inWrite = wireBit $"{e.name}_write_hit"
 
             let baseWord = wordOf e
@@ -606,13 +640,13 @@ let regMapSlave (ports: AxiLiteSlavePorts) (m: RegMap) : SlaveRegs =
             (writeFire &&& below) ==> inWrite
             memWrite backing (slice (aw - 1) 0 awWord) wdata inWrite
             windows[e.name] <- (backing, aw, baseWord, uint64 words)
-        | RoArray words ->
+        | RoArray (words, storage) ->
             // The design's to write, the host's to read: two exclusive ports,
             // which is exactly what a block RAM has, so no arbitration and no
             // host-write decode — writes landing here are ignored like writes
             // to any read-only entry.
             let aw = log2 words
-            let backing = distributedMem e.name aw 32
+            let backing = windowMem e.name aw storage None
             outWindows[e.name] <- (backing, aw, wordOf e, uint64 words)
 
     let rd = ch.beginRead ()
@@ -720,6 +754,19 @@ let regMapSlave (ports: AxiLiteSlavePorts) (m: RegMap) : SlaveRegs =
             p.port
       irq = irqLevel }
 
+/// The slave over AXI-Lite — the same one-outstanding scratch-slave scheme as
+/// `axiLiteSlaveFull`. No read source in a map costs a cycle — a window is
+/// written by the host and read by the design, and reads of it answer 0 — so
+/// the channel answers after one.
+let regMapSlave (ports: AxiLiteSlavePorts) (m: RegMap) : SlaveRegs =
+    validate m
+
+    if ports.addrWidth <> m.apertureAddrWidth then
+        failwith
+            $"regMapSlave: the boundary was declared %d{ports.addrWidth} bits wide but the map's aperture needs %d{m.apertureAddrWidth}"
+
+    regMapSlaveOn (axiLiteChannelOn ports 1) m
+
 let private upperSnake (name: string) =
     [ for i, c in Seq.indexed name do
           if System.Char.IsUpper c && i > 0 then yield '_'
@@ -737,12 +784,26 @@ let regMapRsLines (m: RegMap) : string list =
           yield $"pub const {s}_OFFSET: usize = 0x%03x{e.offset};"
 
           match e.kind with
+          | RwReg (w, init) ->
+              yield $"pub const {s}_WIDTH: u32 = %d{w};"
+              yield $"pub const {s}_RESET: u32 = 0x%x{init};"
+          | _ -> ()
+
+          match e.kind with
           | PulseBit b -> yield $"pub const {s}_BIT: u32 = %d{b};"
           | W1cBit b -> yield $"pub const {s}_BIT: u32 = %d{b};"
           | RoField (bo, w) ->
               yield $"pub const {s}_SHIFT: u32 = %d{bo};"
               yield $"pub const {s}_MASK: u32 = 0x%x{((1UL <<< w) - 1UL) <<< bo};"
           | RoConst v -> yield $"pub const {s}_VALUE: u32 = 0x%08x{v};"
-          | RwArray words
-          | RoArray words -> yield $"pub const {s}_WORDS: usize = %d{words};"
+          | RwArray (words, _, init) ->
+              yield $"pub const {s}_WORDS: usize = %d{words};"
+
+              match init with
+              | Some contents ->
+                  let padded = Array.init words (fun i -> if i < contents.Length then contents[i] else 0UL)
+                  let hex = padded |> Array.map (fun v -> $"0x%08x{v}") |> String.concat ", "
+                  yield $"pub const {s}_INIT: [u32; %d{words}] = [{hex}];"
+              | None -> ()
+          | RoArray (words, _) -> yield $"pub const {s}_WORDS: usize = %d{words};"
           | RwReg _ -> () ]

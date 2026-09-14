@@ -72,7 +72,8 @@ let catalog =
                 "mb_written_0"
                 "mb_ear_sum_0"
                 "mb_ear_sum_1" ]
-          |> poking (
+          // The makeup table boots at unity; the law is all the page pokes.
+          |> poking
               [ "threshold", 200_000UL
                 "ratio", 4UL
                 "attack", 1UL <<< 14
@@ -81,9 +82,5 @@ let catalog =
                 "in_right", 0x7EDCBAUL
                 "in_valid", 1UL
                 "out_ready", 1UL ]
-              @ [ for i in 0..7 do
-                      yield $"lg{i}", Warp11.Audio.gainUnity
-                      yield $"rg{i}", Warp11.Audio.gainUnity ]
-          )
           entry "Register map" (nameof registerMap) (fun () -> registerMap.def)
           entry "DDR master" (nameof ddrMaster) (fun () -> ddrMaster.def) ]

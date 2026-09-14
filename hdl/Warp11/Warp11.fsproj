@@ -55,6 +55,9 @@
         <Compile Include="Vcd.fs"/>
         <Compile Include="Diff.fs"/>
         <Compile Include="Stdlib.fs"/>
+        <Compile Include="Uart.fs"/>
+        <Compile Include="SerialRegMap.fs"/>
+        <Compile Include="SimUart.fs"/>
         <Compile Include="Windows.fs"/>
         <Compile Include="Bands.fs"/>
         <Compile Include="Audio.fs"/>

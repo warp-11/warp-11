@@ -689,6 +689,9 @@ let private pagesTellTheTruth () =
                   "out_ready", 1UL ] do
                 s.Poke(n, v)
 
+        // The spatial bank takes its gains on sixteen inputs; the folded one
+        // boots with its table at unity, which is what this compares at.
+        let spatialGains (s: Sim) =
             for i in 0..7 do
                 s.Poke($"lg{i}", Warp11.Audio.gainUnity)
                 s.Poke($"rg{i}", Warp11.Audio.gainUnity)
@@ -711,6 +714,7 @@ let private pagesTellTheTruth () =
 
             let sim = Sim stage.def
             settings sim
+            spatialGains sim
             let mutable answer = None
 
             for _ in 1..64 do

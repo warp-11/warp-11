@@ -815,12 +815,14 @@ type Ports =
       outPortAs: string -> GroundType -> Expr }
 
 /// A mem handle: enough to address it and type its reads. The array itself lives
-/// in the module's decls.
+/// in the module's decls. `readOnly` is what a ROM former sets: contents alone
+/// do not make a ROM, since a preloaded memory is written too.
 type Mem =
     { memName: string
       addrWidth: int
       memWidth: int
-      style: RamStyle }
+      style: RamStyle
+      readOnly: bool }
 
 /// The w-bit pattern reinterpreted as a signed value in 64 bits — the reference
 /// semantics for MulS, LtS and Sra, mirroring the emitter's replication. Public

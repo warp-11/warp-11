@@ -4,6 +4,8 @@
 
 pub const APERTURE_BYTES: usize = 256;
 pub const MUTE_OFFSET: usize = 0x000;
+pub const MUTE_WIDTH: u32 = 1;
+pub const MUTE_RESET: u32 = 0x0;
 pub const RECEIVED_COUNT_OFFSET: usize = 0x004;
 pub const RECEIVED_COUNT_SHIFT: u32 = 0;
 pub const RECEIVED_COUNT_MASK: u32 = 0xffffffff;

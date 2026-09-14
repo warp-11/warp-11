@@ -4,4 +4,8 @@
 
 pub const APERTURE_BYTES: usize = 256;
 pub const VOLUME_OFFSET: usize = 0x000;
+pub const VOLUME_WIDTH: u32 = 16;
+pub const VOLUME_RESET: u32 = 0x100;
 pub const MUTE_OFFSET: usize = 0x004;
+pub const MUTE_WIDTH: u32 = 1;
+pub const MUTE_RESET: u32 = 0x0;

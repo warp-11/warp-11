@@ -724,24 +724,6 @@ let checkDrivenOutputs m =
               yield $"{m.name}: output '{n}' is never driven — it would emit as a floating port"
           | _ -> () ]
 
-/// A write to a memory that was declared with contents. `distributedRom` and
-/// `blockRom` are the only way to get initial contents, so contents mean a ROM,
-/// and a write to one passes elaboration today and diverges only in simulation.
-let checkRomWrites m =
-    let roms =
-        System.Collections.Generic.HashSet<string>(
-            [ for d in m.decls do
-                  match d with
-                  | Memory (n, _, _, Some _, _) -> yield n
-                  | _ -> () ]
-        )
-
-    [ for stmt in m.stmts do
-          match stmt with
-          | MemWrite (mem, _, _, _, _) when roms.Contains mem ->
-              yield $"{m.name}: '{mem}' is a rom — it has initial contents and cannot be written"
-          | _ -> () ]
-
 /// The whole design as Verilog, gated on the three checks.
 ///
 /// Widths, duplicate module names and stream consumers all have to hold before
@@ -757,8 +739,7 @@ let emitDesignFor (target: Target) m =
         [ for md in allModules m |> List.distinct do
               yield! checkWidths md
               yield! checkCombinationalLoops md
-              yield! checkDrivenOutputs md
-              yield! checkRomWrites md ]
+              yield! checkDrivenOutputs md ]
 
     match perModule @ checkNames m @ checkStreams m with
     | [] -> ()

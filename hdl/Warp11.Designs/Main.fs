@@ -101,6 +101,7 @@ let private diffDesignsAtDefault () =
       axiScratch.def
       neighborCount.def
       regMapScratch.def
+      serialRegMap.def
       snapshotConflate.def
       snapshotDdr.def
       audioOps.def
@@ -122,7 +123,10 @@ let private diffDesigns () =
     [ for d in diffDesignsAtDefault () -> d, diffCycles ]
     // Three stereo frames through the folded engine — a pass is ~170 cycles
     // plus the handshake — under stimulus that offers and takes at random.
-    @ [ multibandStageFolded.def, 4 * 200 ]
+    @ [ multibandStageFolded.def, 4 * 200
+        // A UART frame is ten bits of 24 cycles; a few of them under random
+        // pokes on `rx` is the receiver seeing every state.
+        serialRegMap.def, 2_000 ]
 
 /// Unity settings must be audibly transparent: gain at 1.0x unmuted,
 /// compression with a zero slope and 1.0x makeup, and a limiter threshold at
@@ -5174,8 +5178,8 @@ let private mainDemo () =
               roField "high" 0x008UL 8 1
               w1cBit "wrapIrq" 0x00CUL 0
               roField "patLow" 0x010UL 0 8
-              rwArray "pattern" 0x040UL 16
-              roArray "trace" 0x080UL 16 ]
+              rwArray "pattern" 0x040UL 16 Distributed None
+              roArray "trace" 0x080UL 16 Distributed ]
 
         let allocated = scratchMap.entries
 
@@ -5306,6 +5310,78 @@ let private mainDemo () =
     printfn $"reg map builder At seeks:     %b{builderAtSeeks}"
     printfn $"layout hash tracks layout:    %b{fingerprintTracksLayout}"
     printfn $"declarative reg map:          %b{regMapOk}"
+
+    // The same map over a UART: the constant reads back, a write lands and
+    // reads back, a pulse counts, a live field moves — through a software
+    // UART bit by bit — and a request with a bad checksum is refused, with
+    // the register it named untouched. The design under it never learns which
+    // link it is behind.
+    let serialRegMapOk =
+        let sim = Sim(serialRegMap.def)
+        let cyclesPerBit = uartCyclesPerBit serialFabricHz serialBaud
+        let link, uart = serialClient sim (uartSimPins "host") cyclesPerBit
+        let read32, write32 = link.read32, link.write32
+
+        let idOk = read32 serialRegs.id.offset = 0x5E71A1UL
+        let resetOk = read32 serialRegs.control.offset = 0x100UL && sim.Peek "control_out" = 0x100UL
+        write32 serialRegs.control.offset 0xBEEFUL
+        let writeOk = read32 serialRegs.control.offset = 0xBEEFUL && sim.Peek "control_out" = 0xBEEFUL
+        write32 serialRegs.bump.offset 1UL
+        write32 serialRegs.bump.offset 1UL
+        let countOk = read32 serialRegs.count.offset = 2UL
+        let t1 = read32 serialRegs.ticks.offset
+        let t2 = read32 serialRegs.ticks.offset
+        let ticksMove = t2 > t1
+
+        // A corrupted checksum: the reply says refused, nothing is written.
+        let request = SerialFrame.write (int (serialRegs.control.offset >>> 2)) 0x1234UL
+        let corrupted = List.take (List.length request - 1) request @ [ List.last request ^^^ 0x01uy ]
+        uart.TakeReceived() |> ignore
+        uart.Send corrupted
+        let device = uart :> ISimDevice
+
+        for _ in 1 .. (List.length corrupted + 3) * 10 * cyclesPerBit + 64 * cyclesPerBit do
+            device.Drive()
+            sim.Tick()
+            device.Sample()
+
+        let refused =
+            match SerialFrame.parse false (uart.TakeReceived()) with
+            | Error why -> why.Contains "refused"
+            | Ok _ -> false
+
+        let untouched = sim.Peek "control_out" = 0xBEEFUL
+
+        idOk && resetOk && writeOk && countOk && ticksMove && refused && untouched
+
+    printfn $"reg map over a UART:          %b{serialRegMapOk}"
+
+    // A window that boots loaded: its contents read back before any host
+    // write, the design sees the same word, a host write replaces one and
+    // both views agree, and a reset (reconfiguration) brings the contents
+    // back — which is what a board with no processor stands on.
+    let preloadedWindowOk =
+        let sim = Sim(serialRegMap.def)
+        let cyclesPerBit = uartCyclesPerBit serialFabricHz serialBaud
+        let link, _ = serialClient sim (uartSimPins "host") cyclesPerBit
+        let read32, write32 = link.read32, link.write32
+        let wordAt i = serialRegs.preset.offset + uint64 (4 * i)
+        let expected = serialTableInit @ List.replicate 4 0UL
+
+        let bootsLoaded = [ 0..7 ] |> List.forall (fun i -> read32 (wordAt i) = expected[i])
+        write32 serialRegs.control.offset 1UL
+        let designSees = read32 serialRegs.entry.offset = 20UL
+        write32 (wordAt 1) 77UL
+        let hostSees = read32 (wordAt 1) = 77UL
+        let designFollows = read32 serialRegs.entry.offset = 77UL
+        let restNotTouched = read32 (wordAt 0) = 10UL && read32 (wordAt 2) = 30UL
+
+        sim.Reset()
+        let reloads = read32 (wordAt 1) = 20UL
+
+        bootsLoaded && designSees && hostSees && designFollows && restNotTouched && reloads
+
+    printfn $"window boots preloaded:       %b{preloadedWindowOk}"
 
     // The arbitrated window readback: the host reads back what it wrote,
     // through the same single read port the design is using every cycle.

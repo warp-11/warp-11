@@ -66,8 +66,8 @@ of the last two samples. Each of the fourteen sections has its own history.
 does in the spatial engine:
 
 1. **boost** — the band times its ear's *makeup* gain for that band, a Q8.8
-   register: `boosted = band × makeup ≫ 8`. This is where the prescription
-   goes in.
+   word from a sixteen-word table: `boosted = band × makeup ≫ 8`. This is
+   where the prescription goes in.
 2. **envelope** — a detector follows how loud the band is: it takes the
    magnitude of *last* sample's boosted value (the *peak*), moves the stored
    envelope toward it — `env += α·(peak − env)`, with `α` the attack
@@ -98,16 +98,14 @@ this:
 streamOfStereo io.s
 |> sections shape
 |> readNode shape stores
-|> readHistory shape stores
-|> skidBuffer "history_skid" (sectionHistoryLayout shape)
+|> skidBuffer "node_skid" (sectionLayout shape)
 |> issueTaps shape stores biquad
 |> collectTaps shape biquad
 |> writeHistory shape stores
 |> writeNode shape stores
 |> bands
 |> skidBuffer "band_skid" bandLayout
-|> readEnvelope stores
-|> readDetected stores
+|> readState stores
 |> boost pod io
 |> writeDetected stores
 |> detect
@@ -120,23 +118,24 @@ streamOfStereo io.s
 ```
 
 Read it as the spatial design's own decomposition, because it is. The first
-ten lines are the crossover: a stereo beat becomes forty-eight **section**
+nine lines are the crossover: a stereo beat becomes forty-eight **section**
 beats, the tree's twenty-four sections for each ear in an order where a
 section comes after the sections it reads; each fetches the node it filters,
-reads its history, has its taps multiplied on the shared unit and summed as
-they land, writes its history and its output node back, and — if its output
-is a leaf of the tree — goes on as a **band**. The next eleven are one band's
-compressor — the same four multiplies `monoBandCompressor` does, in the same
-order, with the envelope and last boosted value read from a store before and
-written after. The last line sums eight bands an ear and offers the stereo
-beat. The three `skidBuffer`s are not processing at all; they are where the
-handshake's ready chain is cut, below.
+has its taps multiplied on the shared unit — the history words and the
+coefficients fetched as each tap issues — and summed as they land, writes its
+history and its output node back, and — if its output is a leaf of the tree
+— goes on as a **band**. The next ten are one band's compressor — the same
+four multiplies `monoBandCompressor` does, in the same order, with the
+envelope and last boosted value read from a store before and written after,
+and the makeup gain fetched from its table. The last line sums eight bands an
+ear and offers the stereo beat. The three `skidBuffer`s are not processing at
+all; they are where the handshake's ready chain is cut, below.
 
-Every stage holds one beat. `readHistory` is `readStage` told which store and
-which addresses; `boost`, `envelope`, `reduction` and `apply` are `podStage`
-told what to multiply and what to make of the product — the two halves of the
-spatial engine's own arithmetic, split around the shared unit. There are three
-generic stages, a buffer, and eighteen lines that use them. Nothing is
+Every stage holds one beat. `readState` is `readStage` told which store and
+which addresses; `envelope`, `reduction` and `apply` are `podStage` told what
+to multiply and what to make of the product — the two halves of the spatial
+engine's own arithmetic, split around the shared unit. There are three
+generic stages, a buffer, and seventeen lines that use them. Nothing is
 scheduled and no latency is written anywhere: a beat moves when the next
 stage can take it, and a stage that holds one beat always has somewhere for
 its answer to land, which is all `warpFu` asks. The one wait in the crossover
@@ -165,22 +164,24 @@ read is issued only once that matches the beat's. That wait is the only
 ordering in the crossover, it is exact, and it is why no stage needs to know
 how far apart a producer and its consumer are.
 
-**`readHistory`** — *→ `SectionHistory { …; history = [x1; x2; y1; y2] }`.*
-A `readStage`: four addresses from the beat, `(ear, section, tap)`, read one
-a cycle from the `history` block memory, the beat handed on with the words
-attached.
+**`issueTaps`** — *`Section` → `Section`.* Issues the section's multiplies
+to the shared unit, one per grant: `x·b0, x1·b1, x2·b2, y1·a1, y2·a2` for a
+second-order section, `x·b0, x1·b1, y1·a1` for a first-order all-pass whose
+other two taps are zero. Coefficients come from the ROM as needed, and the
+history words from their store the same way — two ports each, one at the tap
+the counter names and one at the next, so the right word is there whether or
+not the last cycle was a grant. Nothing rides in the beat that a store can
+supply. Each product goes out with a two-bit tag: *subtracts* and *last*.
+The beat is handed on the moment the last tap is granted, so the next section
+issues while this one's products are still landing.
 
-**`issueTaps`** — *`SectionHistory` → `SectionHistory`.* Issues the section's
-multiplies to the shared unit, one per grant: `x·b0, x1·b1, x2·b2, y1·a1,
-y2·a2` for a second-order section, `x·b0, x1·b1, y1·a1` for a first-order
-all-pass whose other two taps are zero. Coefficients come from the ROM as
-needed — two ports, one at the tap the counter names and one at the next, so
-the right word is there whether or not the last cycle was a grant. Each
-product goes out with a two-bit tag: *subtracts* and *last*. The beat is
-handed on the moment the last tap is granted, so the next section issues
-while this one's products are still landing.
+The history is two slots each of `x` and `y`, and the slot a sample writes is
+the sample's *parity* — the bit `sections` flips per sample and puts on every
+beat. This sample's `x` goes where the sample before last's was, so `x1` is
+at the other parity and `x2` at this one: a sample writes two words, and
+nothing is ever shifted.
 
-**`collectTaps`** — *`SectionHistory` → `SectionDone { …; x1; y; y1 }`.* Sums
+**`collectTaps`** — *`Section` → `SectionDone { …; y }`.* Sums
 products as they land, in `biquadDef`'s own 59-bit width — a product tagged
 *last* on the previous landing loads the accumulator, one tagged *subtracts*
 subtracts — so the total is exactly what the spatial adder tree produces.
@@ -188,11 +189,10 @@ The beat after the last product, the accumulator is shifted down by the
 coefficients' 30 fraction bits and saturated to a sample. Products may land
 before this stage holds their section (the issuer handed it on two cycles
 before the last product), so a finished result waits in `pending` for its
-beat. What it keeps for the next stage is what the history becomes: `x` and
-`x1`, `y` and `y1`.
+beat.
 
-**`writeHistory`** — *`SectionDone` → `SectionDone`.* A `writeStage`: four
-writes, `x2 ← x1, x1 ← x, y2 ← y1, y1 ← y`, one a cycle, then the beat
+**`writeHistory`** — *`SectionDone` → `SectionDone`.* A `writeStage`: two
+writes, `x` and `y` into this parity's slots, one a cycle, then the beat
 handed on unchanged.
 
 **`writeNode`** — *`SectionDone` → `SectionDone`.* Free: as the beat moves
@@ -204,19 +204,27 @@ for.
 filter: a section whose output is a leaf offers `y` as that band; any other
 section's beat ends here. Sections become bands.
 
-**`readEnvelope`** — *`Band` → `BandEnvelope { …; env }`.* One word from the
-`band_state` store at `(ear, band, envelope)`: this band's envelope as of
-last sample.
-
-**`readDetected`** — *→ `BandState { …; env; detected }`.* One more word from
-the same store, `(ear, band, boosted)`: the band's boosted value from last
-sample, which is what the detector listens to.
+**`readState`** — *`Band` → `BandState { …; env; detected }`.* A `readStage`:
+two words from the `band_state` store, `(ear, band, envelope)` — this band's
+envelope as of last sample — and `(ear, band, boosted)` — its boosted value
+from last sample, which is what the detector listens to.
 
 **`boost`** — *`BandState` → `Boosted { ear; band; env; detected; boosted }`.*
-A `podStage`. Operands: the band value, and this ear's makeup gain for this
-band picked from the sixteen gain registers by `(ear, band)`. Finish:
-`boosted = product ≫ 8`, the Q8.8 fraction bits dropped. The band's raw
-`value` is done with; `boosted` replaces it in the beat.
+Two steps in one stage, so the beat is held once. First the fetch: a request
+for word `ear·8 + band` goes out on the bank's *makeup* port and is held
+until the table takes it — a host reading the table back borrows its one
+read port for a cycle, and the bank simply asks again — and the gain lands a
+port-depth later. Then the multiply, as a `podStage` would: the band value
+times the gain, `boosted = product ≫ 8`, the Q8.8 fraction bits dropped. The
+band's raw `value` is done with; `boosted` replaces it in the beat.
+
+The table is the caller's. On the board it is a register map's `RwArray`: a
+block memory that boots at the prescription and that the host rewrites a
+word at a time over the serial link. Here it boots at unity and is loaded
+through three ports. It is a memory rather than sixteen registers because on
+a UP5K the register file was the difference between fitting and not — a
+window costs a block, a register file costs the fabric — and because
+everything the fitting side will add to a band later is another word.
 
 **`writeDetected`** — *`Boosted` → `Boosted`.* A `writeThrough`: as the beat
 moves on, `boosted` is written to `(ear, band, boosted)` — next sample's
@@ -263,10 +271,12 @@ combinationally, and so on down the chain: fourteen stages and 46 ns on an
 iCE40, measured. A two-beat register buffer whose `ready` is a function of
 its own state cuts the chain. Three of them keep every run under six stages.
 
-Three stages read the `band_state` store and two write it, and the reads of
+One stage reads the `band_state` store and two write it, and the reads of
 one sample's band are a stage or two ahead of the writes, sixteen beats before
 the same band comes round again — which is why nothing here needs to know how
-long anything takes.
+long anything takes. The `history` store is the same story a section at a
+time: read as a section's taps issue, written a few stages later, twenty-four
+sections before the section comes round.
 
 ## What to look at
 
@@ -275,28 +285,28 @@ unity band gains. **Step N** with 20 and watch the counters:
 
 - `mb_section` and `mb_section_ear` count the forty-eight section beats out
   of the sequencer; the sample was accepted on step 1.
-- `mb_biquad_pod_grant` first pulses on step 14 — the first section fetched
-  its node and read its four history words first — then five times in a row:
-  one section's five taps, back to back. Sections then follow at five to
-  seven steps each, the first-order all-passes taking three grants.
+- `mb_biquad_pod_grant` first pulses on step 8 — the first section fetched
+  its node first — then five times in a row: one section's five taps, back
+  to back, each with its history word and coefficient fetched as it issues.
+  Sections then follow at five to seven steps each, the first-order
+  all-passes taking three grants.
 - `mb_written_0` fills in as sections finish: one bit per node of the left
   ear, set to the sample's parity as each is written. A section that reads a
   node waits in `readNode` for its bit.
-- The other four grants begin around step 238, when the tree's first leaf —
+- The other four grants begin around step 219, when the tree's first leaf —
   band 0 — finishes and starts down the compressor chain; `boost`,
   `envelope`, `reduction`, `apply` each pulse as that band reaches them, in
   the gaps between the crossover's taps.
-- `mb_ear_sum_0` and `mb_ear_sum_1` grow as bands land. On step 570
+- `mb_ear_sum_0` and `mb_ear_sum_1` grow as bands land. On step 503
   `out_valid` goes high with the first stereo beat. It is not the input: the
   tree is an all-pass, and a sample that starts from nothing rings through
   seven sections. What it is, exactly, is what the spatial engine makes of the
   same sample, which is the living check.
 
-Press **Run**. The next sample is accepted on step 288, before the first has
+Press **Run**. The next sample is accepted on step 291, before the first has
 finished — the crossover is on the second sample while the compressors finish
-the first — and from then on a sample every **365 cycles**. At 46 875 Hz on a
-24 MHz fabric a sample lasts 512, so the engine is busy 71% of the time and the
-multiplier 72%.
+the first — and from then on a sample every **341 cycles**. At 46 875 Hz on a
+24 MHz fabric a sample lasts 512, so the engine is busy 67% of the time.
 
 ## The property, and where it is checked
 
@@ -315,9 +325,9 @@ were granted along the way.
 | | spatial | folded |
 |---|---|---|
 | DSP blocks (UP5K has 8) | hundreds | **6** |
-| block RAMs | 0 | 14 |
-| logic cells, with the I2S link and limiter | does not fit | 4,283 of 5,280 |
-| cycles a stereo sample | 1 | 365 |
+| block RAMs | 0 | 16 |
+| logic cells, with the I2S link, limiter and a serial register map | does not fit | 4,486 of 5,280 |
+| cycles a stereo sample | 1 | 341 |
 | the bits | — | identical |
 
 Three shapes were tried for the folded side and the first two are worth
@@ -337,9 +347,11 @@ above is slower than the second and readable, and readable won.
   fills from the back — `sumBands` holds, then `apply`, then `reduction`, the
   skid buffers filling in between — until `in_ready` drops. Nothing is lost;
   release it and the beats drain.
-- Poke `lg3 = 512` (two times unity on the left ear's fourth band) and watch
-  `out_left` diverge from `out_right` on the next sample. The band gains are
-  live registers; on the board they are the hearing prescription.
+- Load a gain: poke `makeup_index = 3`, `makeup_gain = 512` (two times unity
+  on the left ear's fourth band), `makeup_write = 1`, step once, and put
+  `makeup_write` back. Watch `out_left` diverge from `out_right` on the next
+  sample. The table is live; on the board it is the hearing prescription,
+  and the host rewrites it the same way.
 
 ## See also
 

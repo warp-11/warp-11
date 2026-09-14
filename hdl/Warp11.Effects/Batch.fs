@@ -288,19 +288,19 @@ let multibandStageRef =
             streamSink outPorts stage)
 
 /// The same compressor on one multiplier: the folded engine's twin, with the
-/// spatial twin's ports exactly, so the two can be run on one stimulus and
-/// compared frame for frame.
+/// spatial twin's stream and law and its makeup gains in the loadable table,
+/// so the two can be run on one stimulus and compared frame for frame.
 let multibandStageFoldedRef =
     defModule
         "MultibandStageFoldedRef"
         (fun p ->
-            (multibandSettingsPorts p,
+            (multibandFoldedSettingsPorts p,
              streamInputPorts p "in" sampleLayout,
              streamOutputPorts p "out" sampleLayout))
         (fun (settings, inPorts, outPorts) ->
             let stage, _envelope =
                 streamSource inPorts
-                |> multibandCompressorFolded "MultibandCompressor8Folded" stockSampleRate "mb" settings
+                |> multibandCompressorFolded "MultibandCompressor8Folded" stockSampleRate "mb" (multibandFoldedSettingsOf settings)
 
             streamSink outPorts stage)
 

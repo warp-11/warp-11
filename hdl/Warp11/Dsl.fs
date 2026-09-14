@@ -393,19 +393,23 @@ type Builder(name: string, ?clockSpec: ClockSpec) =
     /// Declare a memory of 2^addrWidth words. `style` decides what it becomes on
     /// silicon, and with it which reads are legal — the combinational read is only
     /// allowed on distributed storage.
-    member this.Memory(n, addrWidth, memWidth, init, style) : Mem =
+    member this.Memory(n, addrWidth, memWidth, init, style, readOnly) : Mem =
         this.Declare(Memory(n, addrWidth, memWidth, init, style), n, UInt memWidth) |> ignore
 
         { memName = n
           addrWidth = addrWidth
           memWidth = memWidth
-          style = style }
+          style = style
+          readOnly = readOnly }
 
     /// Record a write. Several writes to one memory fold into a single
     /// priority-muxed write site, because two write sites stop a synthesiser
     /// inferring a block RAM even when they are mutually exclusive.
     member this.Write(mem: Mem, addr, data, enable, mask: Expr option) =
         this.FlushPending() // a write is a statement: it seals a pending If
+
+        if mem.readOnly then
+            failwith $"'{mem.memName}' is a rom — it has initial contents and cannot be written; a table the design writes is `preloadedBlockMem`"
 
         if width enable <> 1 then
             failwith $"write enable for '{mem.memName}' must be 1 bit"
@@ -915,7 +919,7 @@ let registerStreamReady (ready: Expr) = (current ()).RegisterStreamReady ready
 /// memory has to land somewhere; nothing in the authoring surface produces one.
 [<System.Obsolete("A memory must declare its storage. Use `distributedMem` (LUTRAM: register files, small tables, and the only kind `memRead` is legal on) or `blockMem` (BRAM: deep arrays, `memReadPort` only). Leaving the choice to the synthesiser means the design's behaviour depends on a decision nobody made, and the tool changes its mind when the array's shape changes.", true)>]
 let mem name addrWidth width =
-    (current ()).Memory(name, addrWidth, width, None, Unspecified)
+    (current ()).Memory(name, addrWidth, width, None, Unspecified, false)
 
 /// A memory built from LUTs, and **the only kind an asynchronous read is
 /// allowed on**.
@@ -931,13 +935,13 @@ let mem name addrWidth width =
 /// this is for register files, small tables and FIFO storage. A frame buffer
 /// wants `blockMem` and a pipelined consumer.
 let distributedMem name addrWidth width =
-    (current ()).Memory(name, addrWidth, width, None, Distributed)
+    (current ()).Memory(name, addrWidth, width, None, Distributed, false)
 
 /// A memory built from block RAM: `ram_style = "block"`, and synchronous reads
 /// only. `memRead` on one is an elaboration error rather than a surprise
 /// on the board.
 let blockMem name addrWidth width =
-    (current ()).Memory(name, addrWidth, width, None, Block)
+    (current ()).Memory(name, addrWidth, width, None, Block, false)
 
 /// A memory built from UltraRAM: `ram_style = "ultra"`, and synchronous reads
 /// only — `blockMem`'s rule at 288 Kb a block. On the KV260 this is where
@@ -948,27 +952,56 @@ let blockMem name addrWidth width =
 /// its contents after configuration are zero, which happens to be exactly the
 /// Sim's zero default, so the two worlds agree without an `initial` block.
 let ultraMem name addrWidth width =
-    (current ()).Memory(name, addrWidth, width, None, Ultra)
+    (current ()).Memory(name, addrWidth, width, None, Ultra, false)
+
+/// Check contents against a memory's word, for the preloaded formers.
+let private checkContents name width (values: uint64[]) =
+    for i in 0 .. values.Length - 1 do
+        if values[i] > maskOf width then
+            failwith $"'{name}'[%d{i}] = %d{values[i]} does not fit %d{width} bits"
+
+/// A memory with initial contents that the design goes on to write: a table
+/// that boots loaded and is rewritten afterwards — a host-tuned coefficient
+/// set, a map the design keeps. Emitted as an `initial` block, which both
+/// Vivado and yosys turn into the block's INIT, so the contents are there
+/// from configuration without a loader; the Sim loads them at construction
+/// and on `Reset()`, as it does a ROM's, modeling reconfiguration. Depth is
+/// stated, since a table's size is a design choice rather than the count of
+/// values it starts with; the values fill from address zero and the rest
+/// reads zero.
+let preloadedBlockMem name addrWidth width (values: uint64[]) =
+    if values.Length > (1 <<< addrWidth) then
+        failwith $"'{name}' has %d{values.Length} initial values for %d{1 <<< addrWidth} words"
+
+    checkContents name width values
+    (current ()).Memory(name, addrWidth, width, Some(Array.copy values), Block, false)
+
+/// `preloadedBlockMem` in LUTs — `distributedMem`'s storage with contents, for
+/// a small table that wants the combinational read.
+let preloadedDistributedMem name addrWidth width (values: uint64[]) =
+    if values.Length > (1 <<< addrWidth) then
+        failwith $"'{name}' has %d{values.Length} initial values for %d{1 <<< addrWidth} words"
+
+    checkContents name width values
+    (current ()).Memory(name, addrWidth, width, Some(Array.copy values), Distributed, false)
 
 /// A read-only memory: contents fixed at elaboration, emitted as a Verilog
 /// `initial` block (Vivado turns it into a BRAM INIT). Depth is the smallest
 /// power of two covering the values; the remainder reads zero. The Sim loads
 /// the contents at construction and `Reset()` reloads them, modeling
-/// reconfiguration. Nothing stops a design writing it — a preloaded RAM is
-/// the same declaration.
+/// reconfiguration. A write to one is an elaboration error; the memory that
+/// boots loaded and is written afterwards is `preloadedBlockMem`.
 let private romOf name width (values: uint64[]) style =
     if Array.isEmpty values then failwith $"rom '{name}' needs at least one value"
 
-    for i in 0 .. values.Length - 1 do
-        if values[i] > maskOf width then
-            failwith $"rom '{name}'[%d{i}] = %d{values[i]} does not fit %d{width} bits"
+    checkContents name width values
 
     let mutable addrWidth = 0
 
     while (1 <<< addrWidth) < values.Length do
         addrWidth <- addrWidth + 1
 
-    (current ()).Memory(name, addrWidth, width, Some(Array.copy values), style)
+    (current ()).Memory(name, addrWidth, width, Some(Array.copy values), style, true)
 
 /// **Retired**, for the same reason `mem` was: a memory must say where it
 /// lives. A ROM is not exempt — the storage class decides what the array is
