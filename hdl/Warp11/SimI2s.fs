@@ -108,9 +108,12 @@ type I2sCodec(sim: Sim, pins: I2sSimPins, ?width: int) =
             shift <- 0UL
         elif clock = 1UL && previousClock = 0UL then
             // Rising: the design's line is stable, so this is where a receiver
-            // samples. Bits past the sample's width are the slot's zero padding
-            // and are dropped rather than shifted in.
-            if takeBit < sampleWidth then
+            // samples. The first rising edge after a slot boundary is the I2S
+            // transition bit and carries nothing — the mirror of the falling
+            // edge below, where the model's own MSB waits one clock. Bits past
+            // the sample's width are the slot's zero padding and are dropped
+            // rather than shifted in.
+            if takeBit >= 1 && takeBit <= sampleWidth then
                 shift <- (shift <<< 1) ||| (sim.Peek pins.fromDesign &&& 1UL)
 
             takeBit <- takeBit + 1

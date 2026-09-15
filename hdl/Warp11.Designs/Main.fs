@@ -428,6 +428,14 @@ let private i2sRxDecodes () : bool =
 /// line. Pairing this with the receiver check is what makes the two
 /// independent: each is judged against the ideal frame rather than against the
 /// other, so a shared misreading of the convention cannot cancel out.
+///
+/// **The ideal frame has a transition bit**, and this check did not until
+/// 2026-09-14: it read the MSB straight off the edge tick, which is
+/// left-justified framing, and the transmitter was built to pass it. Every
+/// I2S-mode converter then read each word one bit left — a clean x2 below half
+/// scale, a wrap above — and the loopback check below measured exactly that and
+/// recorded it as a property of the loopback. The line must carry nothing on
+/// the tick after the LRCLK edge; the MSB is the one after.
 let private i2sTxEmits () : bool =
     let sim = Sim(i2sTxStage.def)
     let left = 0x123456UL
@@ -446,43 +454,42 @@ let private i2sTxEmits () : bool =
     sim.Poke("lrclk", 1UL)
     sim.Tick()
 
-    // The edge tick commits the pending sample; `sdin` is combinational from
-    // the shift register, so the MSB is readable before the first data tick.
+    // The edge tick commits the pending sample. `sdin` is combinational from
+    // the shift register, so what it shows before the next tick is the
+    // transition bit, and the MSB follows on the tick after.
     let slot lrclk =
         sim.Poke("lrclk", lrclk)
         sim.Tick()
 
-        [ for _ in 1..sampleWidth ->
-              let bit = sim.Peek "sdin"
-              sim.Tick()
-              bit ]
-        |> List.fold (fun acc bit -> (acc <<< 1) ||| bit) 0UL
+        let transition = sim.Peek "sdin"
+        sim.Tick()
 
-    slot 0UL = left && slot 1UL = right
+        let word =
+            [ for _ in 1..sampleWidth ->
+                  let bit = sim.Peek "sdin"
+                  sim.Tick()
+                  bit ]
+            |> List.fold (fun acc bit -> (acc <<< 1) ||| bit) 0UL
+
+        transition, word
+
+    slot 0UL = (0UL, left) && slot 1UL = (0UL, right)
 
 /// Looping the transmitter's line back into the receiver over the real clock
-/// generator: the link is stable, and it lands **one bit position late**.
+/// generator: the link is stable and the round trip is exact.
 ///
-/// That is not a bug in either framer — both pass the ideal-frame checks above,
-/// which is the convention a real codec supplies. It is a property of looping
-/// them back through `i2sMaster`'s two ticks. LRCLK turns on the *falling* edge,
-/// which is tx's tick: tx commits and presents its MSB there. Rx runs on the
-/// *rising* edge, so the first rx tick of the new slot is the one where it sees
-/// LRCLK changed — and by its own (correct) rule it treats that tick as the
-/// no-data transition and discards what is on the line. Which is the MSB. The
-/// receiver then takes bits 22..0 plus a trailing pad zero, giving exactly
-/// `input << 1`.
-///
-/// So the two framers are each right against the codec and off by one against
-/// each other. Nothing in the original suite could have found this: it drives rx
-/// and tx separately against hand-built frames and never closes the loop, and
-/// on real hardware the codec — not the other framer — defines the timing,
-/// which is why the shipped front ends worked. A fabric loopback would need the
-/// line delayed by one bit time; no shipping design needs one, so this is
-/// recorded rather than fixed.
-///
-/// Asserted as the measured relationship, so the check still fails if the link
-/// breaks in some *other* way.
+/// Until 2026-09-14 this check asserted that the loop landed **one bit
+/// position late** — received was exactly `input << 1` — and explained it as a
+/// property of looping the framers through `i2sMaster`'s two ticks rather than
+/// a defect in either: the codec, not the other framer, was said to define the
+/// timing on hardware. The explanation had the mechanism right and the verdict
+/// wrong. The transmitter presented its MSB on the edge tick; a receiver
+/// following the standard discards that tick; so did every converter the
+/// transmitter ever drove, reading each word one bit left. Measured at last on
+/// a UDA1334A's output: a -6 dBFS square read as full scale, a 0 dBFS square
+/// (`0x7FFFFF << 1` = -2) as silence. The transmitter now carries the
+/// transition bit, the loop closes exactly, and this check is the one that
+/// fails first if either framer drifts off the standard again.
 /// `i2sMasterHz`'s defining property: naming a sample rate picks the same
 /// hardware that naming the divisors does, and a rate the clock cannot make is
 /// refused rather than approximated.
@@ -980,6 +987,53 @@ let private simStreamDrivesLazily () : bool =
     unstalled = expected
     && List.forall ((=) expected) stalled
 
+/// Where the MSB sits relative to the word-select edge, **on the pins**: I2S
+/// puts it one bit clock after the edge, so the first rising bit clock after a
+/// word-select change samples nothing and the second samples the MSB.
+///
+/// This is the check a converter performs on every frame, and the one this
+/// suite lacked: the stage-level checks judged each framer against a hand-built
+/// frame, the loopback judged them against each other, and the codec model was
+/// written to the transmitter's timing — so all three passed with the MSB one
+/// bit early. Measured against the standard rather than against anything of
+/// ours, through the real clock generator, with a sample whose MSB is set and
+/// whose next bit is clear so the two positions cannot be confused.
+let private i2sMsbFollowsTheEdge () : bool =
+    let sim = Sim i2sLinkPassthru.def
+    let codec = I2sCodec(sim, sharedBusSimPins)
+    let sample = 1UL <<< (sampleWidth - 1)
+    codec.Queue(List.replicate 8 (sample, sample))
+
+    let mutable previousBit = sim.Peek "bclk"
+    let mutable previousWord = sim.Peek "ws"
+    let mutable sinceEdge = -1
+    let edges = ResizeArray<uint64 * uint64>()
+    let mutable first = 0UL
+
+    // Let the sample reach the transmitter before judging the line.
+    while codec.Count < 12 do
+        codec.Tick()
+        let bit = sim.Peek "bclk"
+        let word = sim.Peek "ws"
+
+        if word <> previousWord then
+            sinceEdge <- 0
+        elif bit = 1UL && previousBit = 0UL && sinceEdge >= 0 then
+            sinceEdge <- sinceEdge + 1
+
+            if sinceEdge = 1 then
+                first <- sim.Peek "sd_out"
+            elif sinceEdge = 2 then
+                if codec.Count >= 4 then
+                    edges.Add(first, sim.Peek "sd_out")
+
+                sinceEdge <- -1
+
+        previousBit <- bit
+        previousWord <- word
+
+    edges.Count > 4 && edges |> Seq.forall (fun (transition, msb) -> transition = 0UL && msb = 1UL)
+
 /// The lazy I2S pipeline, in the shape a test actually reads as.
 let private i2sThroughIsAPipeline () : bool =
     let samples = [ 0xA5A5A0UL, 0x5A5A50UL; 0x123456UL, 0x654321UL; 0x111111UL, 0x222222UL ]
@@ -1105,11 +1159,7 @@ let private i2sLoopbackRoundTrip () : bool =
 
     // The first frame catches the transmitter mid-slot, so judge the settled
     // link rather than the first thing out of it.
-    let mask = (1UL <<< sampleWidth) - 1UL
-    let oneBitLate v = (v <<< 1) &&& mask
-
-    received.Count > 1
-    && List.ofSeq received |> List.last = (oneBitLate left, oneBitLate right)
+    received.Count > 1 && List.ofSeq received |> List.last = (left, right)
 
 /// The tone-control presets have to actually shape tone. A constant input is
 /// pure DC, so the low-pass — normalised to unity gain at DC — must pass it
@@ -4748,6 +4798,7 @@ let private mainDemo () =
     printfn $"echo repeats and decays:      %b{audioEchoRepeats ()}"
     printfn $"stream driver is lazy:        %b{simStreamDrivesLazily ()}"
     printfn $"i2sThrough is a pipeline:     %b{i2sThroughIsAPipeline ()}"
+    printfn $"I2S MSB follows the edge:     %b{i2sMsbFollowsTheEdge ()}"
 
     // The Fixed layer compiles away: every line except the module header and the
     // escape compare (Number.lessThan is signed; the hand-written design chose the unsigned

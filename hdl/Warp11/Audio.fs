@@ -1458,7 +1458,15 @@ type I2sTxPorts =
 /// `ready` asserts whenever that slot is empty, and the slot commits to the
 /// shift registers on entry to a new left slot. That is what lets a producer
 /// hand over a sample at any point in the frame without tearing one in half.
-/// After a slot's 24 ticks the shift register has zero-filled, so the padding
+///
+/// **The shift registers carry a leading zero** — 25 bits for a 24-bit
+/// sample — so the transition tick drives nothing and the MSB lands one bit
+/// clock after the LRCLK edge, where I2S puts it. Without that bit (until
+/// 2026-09-14) the MSB rode the edge itself, which is left-justified framing:
+/// an I2S-mode converter read every word shifted left by one — a clean x2
+/// below half scale and a wrap above it — and nothing in simulation could see
+/// it, because the codec model's receive side had been written to the same
+/// timing. After the 25 ticks the register has zero-filled, so the padding
 /// ticks emit zeros without a case for them.
 let i2sTxDef (name: string) : TypedModule<I2sTxPorts> =
     defModule
@@ -1469,19 +1477,21 @@ let i2sTxDef (name: string) : TypedModule<I2sTxPorts> =
               lrclk = p.inPort "lrclk" 1
               sdin = p.outPort "sdin" 1 })
         (fun io ->
-            let leftShift = reg "left_shift" sampleWidth
-            let rightShift = reg "right_shift" sampleWidth
+            // The leading zero is the transition bit.
+            let shiftWidth = sampleWidth + 1
+            let leftShift = reg "left_shift" shiftWidth
+            let rightShift = reg "right_shift" shiftWidth
             let pendingLeft = reg "pending_left" sampleWidth
             let pendingRight = reg "pending_right" sampleWidth
             let pendingValid = regBit "pending_valid"
 
             let bitCount = reg "bit_count" 6
 
-            // Whichever channel's slot is live drives the line from its MSB.
+            // Whichever channel's slot is live drives the line from its top bit.
             mux
                     io.lrclk
-                    (slice (sampleWidth - 1) (sampleWidth - 1) rightShift)
-                    (slice (sampleWidth - 1) (sampleWidth - 1) leftShift)
+                    (slice (shiftWidth - 1) (shiftWidth - 1) rightShift)
+                    (slice (shiftWidth - 1) (shiftWidth - 1) leftShift)
             ==> io.sdin
 
             bnot pendingValid ==> io.s.inReady
@@ -1501,18 +1511,18 @@ let i2sTxDef (name: string) : TypedModule<I2sTxPorts> =
                         lit 0UL 6 ==> bitCount
 
                         If (eq io.lrclk (lit 0UL 1) &&& pendingValid) (fun () ->
-                            pendingLeft ==> leftShift
-                            pendingRight ==> rightShift
+                            cat (lit 0UL 1) pendingLeft ==> leftShift
+                            cat (lit 0UL 1) pendingRight ==> rightShift
                             lit 0UL 1 ==> pendingValid))
                     (otherwise, fun () ->
                     bitCount + lit 1UL 6 ==> bitCount
 
-                    If (lt bitCount (lit (uint64 sampleWidth) 6)) (fun () ->
+                    If (lt bitCount (lit (uint64 shiftWidth) 6)) (fun () ->
                         ifElse [
                             (eq io.lrclk (lit 0UL 1), fun () ->
-                                cat (slice (sampleWidth - 2) 0 leftShift) (lit 0UL 1) ==> leftShift)
+                                cat (slice (shiftWidth - 2) 0 leftShift) (lit 0UL 1) ==> leftShift)
                             (otherwise, fun () ->
-                            cat (slice (sampleWidth - 2) 0 rightShift) (lit 0UL 1) ==> rightShift) ])) ]))
+                            cat (slice (shiftWidth - 2) 0 rightShift) (lit 0UL 1) ==> rightShift) ])) ]))
 
 /// One transmitter under `instName`, called as a function: wire the clocking,
 /// sink the stream, hand back the serial line out.
