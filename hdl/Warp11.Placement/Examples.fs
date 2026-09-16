@@ -35,12 +35,7 @@ let private stereoDesign (name: string) (rate: float) : History =
 /// M1's design: a stereo stream through `gain`, volume and mute the
 /// design's own controls.
 let gain (rate: float) : Graph =
-    { gainGraph with
-        sampleRate = rate
-        // Its default mapping: the KV260 through the host's memory, the
-        // file beside it.
-        mapping = Some "gain.kv260.json" }
-    |> inARow [ "input"; "gain"; "output" ]
+    { gainGraph with sampleRate = rate } |> inARow [ "input"; "gain"; "output" ]
 
 /// The gain example's mapping: the KV260 preset, the boundary in the
 /// host's memory — a WAV in, the design, a WAV out, no codec needed.
@@ -147,7 +142,9 @@ let numbers: Table =
 
 /// Every example, with the file it is written to.
 let all (rate: float) : (string * Graph) list =
-    [ "gain.json", gain rate
+    // The gain example names its default mapping, the file beside it; the
+    // designs built from it do not inherit that.
+    [ "gain.json", { gain rate with mapping = Some "gain.kv260.json" }
       "three-band-eq.json", threeBandEq rate
       "controls.json", controls rate
       "twice.json", twice rate
