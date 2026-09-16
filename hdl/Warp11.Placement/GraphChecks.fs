@@ -1032,14 +1032,15 @@ let writtenUnitTravels () : bool =
 // register per control port; in the simulator, a host writes `volume`
 // through the AXI-Lite bridge and a tone through the software codec comes
 // back doubled. The register map is the seam's, one entry per port; the
-// iCEBreaker top elaborates and emits for its target at its own rate; a
-// design made for another rate is refused, saying the rate the board lands
-// on.
+// same design on the iCEBreaker preset takes the UART shape and emits for
+// iCE40 at the board's own rate; with no host at all the controls are baked
+// at their starting values; a design made for another rate is refused,
+// saying the rate the board lands on.
 
 // CHECK
 let designOnABoard () : bool =
     let onKv260 = { gainGraph with name = "GainBoard"; sampleRate = stockSampleRate }
-    let top = Warp11.BoardTop.kv260Top kv260 onKv260
+    let top = Warp11.BoardTop.boardTop kv260 onKv260
     let sim = Sim top.top
     let axi = SimAxi.client sim
     let volume = top.registers |> List.find (fun (n, _) -> n = "volume") |> snd
@@ -1058,19 +1059,30 @@ let designOnABoard () : bool =
 
     let iceBoard = iceBreakerAt 24_000_000
     let onIce = { onKv260 with name = "GainIce"; sampleRate = Warp11.BoardTop.boardRate iceBoard 48_000.0 }
-    let ice = Warp11.BoardTop.iceBreakerTop iceBoard onIce
+    let ice = Warp11.BoardTop.boardTop iceBoard onIce
+    let bare = Warp11.BoardTop.boardTop { iceBoard with host = NoHost } onIce
 
     let refused =
         try
-            Warp11.BoardTop.kv260Top kv260 { onKv260 with sampleRate = 48_000.0 } |> ignore
+            Warp11.BoardTop.boardTop kv260 { onKv260 with sampleRate = 48_000.0 } |> ignore
             false
         with e ->
             e.Message.Contains "48000" && e.Message.Contains "48828.125"
+
+    let impossible =
+        try
+            Warp11.BoardTop.boardTop { iceBoard with host = AxiLiteAt 0UL } onIce |> ignore
+            false
+        with e ->
+            e.Message.Contains "no processing system"
 
     heard = (samples |> List.map (fun (l, r) -> 2UL * l, 2UL * r))
     && (top.registers |> List.map fst) = [ "volume"; "mute" ]
     && seam.Contains "VOLUME"
     && seam.Contains "MUTE"
-    && (emitDesignFor Ice40 ice.top).Contains "module GainIce"
+    && (emitDesignFor ice.target ice.top).Contains "module GainIceUart"
     && ice.board.name = iceBoard.name
+    && bare.registers.IsEmpty
+    && (emitDesignFor bare.target bare.top).Contains "module GainIceTop"
     && refused
+    && impossible

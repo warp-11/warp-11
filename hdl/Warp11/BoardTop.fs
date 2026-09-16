@@ -4,9 +4,10 @@
 /// definition the slave is elaborated from and the Rust seam is generated
 /// from — so the host program and the fabric cannot disagree about it.
 ///
-/// Two boards, two ways to reach the registers: the KV260 over AXI-Lite, the
-/// iCEBreaker over a UART. The design between them is the one the canvas
-/// drew; the top is what the board's toolchain builds.
+/// The board says how the host reaches the registers — AXI-Lite, a UART, or
+/// not at all — and the top takes that shape; the design between the
+/// converter and the registers is the one the canvas drew, and the top is
+/// what `Build` hands the board's toolchain.
 module Warp11.BoardTop
 
 open Warp11.Graph
@@ -56,12 +57,12 @@ let registersOf (g: Graph) : (string * RegEntry) list * RegMap =
 /// The design between the converter and the registers: the stream from the
 /// link through the design's instance and back, every control port driven
 /// from its register.
-let private through (g: Graph) (regs: SlaveRegs) (entries: (string * RegEntry) list) (i2s: I2sLink) =
+let private through (g: Graph) (control: string -> Expr -> Expr) (i2s: I2sLink) =
     // `design` is a Verilog reserved word; the instance is the drawn one.
     let io = (elaborate g).NewNamed "drawn"
 
-    for (_, port), (_, entry) in List.zip io.controls entries do
-        regs.value entry ==> port
+    for name, port in io.controls do
+        control name port ==> port
 
     i2s.input
     |> Stream.mapTo (layoutOfList g.inputs) (fun (l, r) -> [ l; r ])
@@ -76,59 +77,87 @@ type BoardTop =
       /// The top module's name, and the file's.
       name: string
       top: ModuleDef
+      /// Empty when the board has no host: the controls are then baked at
+      /// their starting values.
       registers: (string * RegEntry) list
       map: RegMap
       /// The Verilog target the board's toolchain wants.
       target: Target }
 
-/// The KV260: an AXI-Lite slave at the aperture every Warp 11 app lives at,
-/// the Pmod I2S2's separate converters, the design between.
-let kv260Top (board: Board) (g: Graph) : BoardTop =
+/// The emitter's target for a part.
+let targetOf (part: Part) =
+    match part.family with
+    | UltraScalePlus -> Xilinx
+    | Ice40UltraPlus -> Ice40
+
+/// The design on a board: the converter on the board's I2S pins, the
+/// registers reached the way the board's host reaches them.
+///
+/// The top's name says the host path — `GainPatchAxi`, `GainPatchUart`,
+/// `GainPatchTop` — because that is what changes its port list; the board
+/// is the file's business, not the module's.
+let boardTop (board: Board) (g: Graph) : BoardTop =
+    checkBoard board
     check board g
     let entries, map = registersOf g
-    let name = $"{g.name}Axi"
+    let rate = int (round g.sampleRate)
 
-    let top =
-        defModuleClocked
-            axiClock
-            name
-            (fun p -> axiLiteSlavePorts p map.apertureAddrWidth, i2sPins p SeparateCodecs)
-            (fun (slavePorts, pins) ->
-                let regs = regMapSlave slavePorts map
-                let i2s = i2sLink "audio" pins board.fabricHz (int (round g.sampleRate)) stockBitsPerSlot
-                through g regs entries i2s)
+    let fromRegisters (regs: SlaveRegs) =
+        let byName = Map.ofList entries
+        fun (name: string) (_: Expr) -> regs.value byName[name]
+
+    let baked =
+        let starting = startingValues g |> Map.ofList
+        fun (name: string) (port: Expr) -> lit (starting |> Map.tryFind name |> Option.defaultValue 0UL) (width port)
+
+    let name, top, registers =
+        match board.host with
+        | AxiLiteAt _ ->
+            let name = $"{g.name}Axi"
+
+            let top =
+                defModuleClocked
+                    axiClock
+                    name
+                    (fun p -> axiLiteSlavePorts p map.apertureAddrWidth, i2sPins p SeparateCodecs)
+                    (fun (slavePorts, pins) ->
+                        let regs = regMapSlave slavePorts map
+                        let i2s = i2sLink "audio" pins board.fabricHz rate stockBitsPerSlot
+                        through g (fromRegisters regs) i2s)
+
+            name, top.def, entries
+        | UartAt baud ->
+            let name = $"{g.name}Uart"
+
+            let top =
+                defModule
+                    name
+                    (fun p -> uartPins p "host", i2sPins p SeparateCodecs)
+                    (fun (uart, pins) ->
+                        let regs = serialRegMapSlave "host" board.fabricHz baud uart map
+                        let i2s = i2sLink "audio" pins board.fabricHz rate stockBitsPerSlot
+                        through g (fromRegisters regs) i2s)
+
+            name, top.def, entries
+        | NoHost ->
+            let name = $"{g.name}Top"
+
+            let top =
+                defModule
+                    name
+                    (fun p -> i2sPins p SeparateCodecs)
+                    (fun pins ->
+                        let i2s = i2sLink "audio" pins board.fabricHz rate stockBitsPerSlot
+                        through g baked i2s)
+
+            name, top.def, []
 
     { board = board
       name = name
-      top = top.def
-      registers = entries
+      top = top
+      registers = registers
       map = map
-      target = Xilinx }
-
-/// The baud the iCEBreaker's register map is spoken at.
-let iceBaud = 115_200
-
-/// The iCEBreaker: the same registers over a UART, the same converters.
-let iceBreakerTop (board: Board) (g: Graph) : BoardTop =
-    check board g
-    let entries, map = registersOf g
-    let name = $"{g.name}Ice"
-
-    let top =
-        defModule
-            name
-            (fun p -> uartPins p "host", i2sPins p SeparateCodecs)
-            (fun (uart, pins) ->
-                let regs = serialRegMapSlave "host" board.fabricHz iceBaud uart map
-                let i2s = i2sLink "audio" pins board.fabricHz (int (round g.sampleRate)) stockBitsPerSlot
-                through g regs entries i2s)
-
-    { board = board
-      name = name
-      top = top.def
-      registers = entries
-      map = map
-      target = Ice40 }
+      target = targetOf board.part }
 
 /// The register map as the Rust seam prints it, headed for the top it serves.
 let seamLines (t: BoardTop) : string list =

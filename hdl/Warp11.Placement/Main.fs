@@ -65,20 +65,19 @@ let main argv =
             printfn $"{System.IO.Path.Combine(dir, file)}"
 
         0
-    // A saved design on a board: `board design.json kv260|icebreaker <dir>`
-    // writes the top's Verilog and the Rust seam.
+    // A saved design on a board: `board design.json <preset> <dir>` writes
+    // the top's Verilog and the Rust seam for one of the preset boards.
     | [| "board"; path; which; dir |] ->
-        match Warp11.DesignFile.load path with
-        | Error why ->
+        match Warp11.DesignFile.load path, preset which with
+        | Error why, _ ->
             eprintfn $"{path}: {why}"
             1
-        | Ok g ->
+        | _, Error why ->
+            eprintfn $"{why}"
+            1
+        | Ok g, Ok board ->
             try
-                let top =
-                    match which with
-                    | "kv260" -> Warp11.BoardTop.kv260Top kv260 g
-                    | "icebreaker" -> Warp11.BoardTop.iceBreakerTop (iceBreakerAt 24_000_000) g
-                    | other -> failwith $"a board is kv260 or icebreaker, not '{other}'"
+                let top = Warp11.BoardTop.boardTop board g
 
                 for file in Warp11.BoardTop.write dir top do
                     printfn $"wrote {file}"
