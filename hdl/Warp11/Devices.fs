@@ -8,13 +8,13 @@
 /// both, which is the point of keeping the two apart.
 ///
 /// Only the simulator's mapping exists yet.
-module Warp11.Placement.Devices
+module Warp11.Devices
 
 open Warp11
-open Warp11.Placement.Fu
-open Warp11.Placement.Graph
-open Warp11.Placement.Edit
-open Warp11.Placement.Elaborate
+open Warp11.Fu
+open Warp11.Graph
+open Warp11.Edit
+open Warp11.Elaborate
 
 /// The simulator's answer to a stereo boundary: a recording in, control
 /// values held for the run, and where to put what came out.
@@ -26,11 +26,7 @@ type SimMapping =
 
 /// What a stereo WAV device needs the boundary to be: one stream, two signed
 /// sample pins each way.
-let private stereo = [ "left", sint sampleWidth; "right", sint sampleWidth ]
-
-let private describeFormat (f: NumberFormat) =
-    let sign = if f.signed then "signed" else "unsigned"
-    $"%d{f.totalWidth}w/%d{f.fracBits}f/{sign}"
+let private stereo = [ "left", signedInt sampleWidth; "right", signedInt sampleWidth ]
 
 let private describePins (pins: (string * NumberFormat) list) =
     pins |> List.map (fun (n, f) -> $"{n}: {describeFormat f}") |> String.concat ", "
@@ -83,7 +79,7 @@ let runInSim (idleLimit: int) (g: Graph) (m: SimMapping) : WavData =
         sim.Poke(name, value)
 
     let heard =
-        runWavThroughStream sim (streamPins "in1" (lower (pinsOfList g.inputs))) (streamPins "out1" (lower (pinsOfList g.outputs))) idleLimit m.source
+        runWavThroughStream sim (streamPins "in1" (layoutOfList g.inputs)) (streamPins "out1" (layoutOfList g.outputs)) idleLimit m.source
 
     m.outputPath |> Option.iter (fun path -> writeWavFile path heard)
     heard

@@ -5,7 +5,7 @@ module Warp11.Placement.Main
 open Warp11
 open Warp11.Placement.Placement
 open Warp11.Placement.GraphChecks
-open Warp11.Placement.Devices
+open Warp11.Devices
 
 let private run (name: string) (check: unit -> bool) =
     let verdict =
@@ -22,15 +22,15 @@ let main argv =
     | [| "show"; s; m; a |] ->
         printf $"{Warp11.Verilog.emitDesign (mac (int s) (int m) (int a)).def}"
         0
-    // A recording through the gain patch: `patch in.wav out.wav [volume]`,
+    // A recording through the gain design: `play in.wav out.wav [volume]`,
     // volume in Q8.8 where 256 is unity.
-    | [| "patch"; inPath; outPath |]
-    | [| "patch"; inPath; outPath; _ |] ->
+    | [| "play"; inPath; outPath |]
+    | [| "play"; inPath; outPath; _ |] ->
         let volume = if argv.Length = 4 then uint64 argv[3] else gainUnity
         let source = readWavFile inPath
 
         let heard =
-            runInSim 100_000 Warp11.Placement.Graph.gainGraph { source = source; controls = [ "volume", volume; "mute", 0UL ]; outputPath = Some outPath }
+            runInSim 100_000 Warp11.Graph.gainGraph { source = source; controls = [ "volume", volume; "mute", 0UL ]; outputPath = Some outPath }
 
         let peak (w: WavData) = w.samples |> Array.map (fun s -> abs (int s)) |> Array.max
         printfn $"{inPath}: %d{source.FrameCount} frames, peak %d{peak source} → {outPath}: %d{heard.FrameCount} frames, peak %d{peak heard}, volume %d{volume}/256"
@@ -41,16 +41,16 @@ let main argv =
         printf $"{Warp11.Verilog.emitDesign gainPatch.def}"
         0
     | [| "emit"; path |] ->
-        match Warp11.Placement.DesignFile.load path with
+        match Warp11.DesignFile.load path with
         | Ok g ->
-            printf $"{Warp11.Verilog.emitDesign (Warp11.Placement.Elaborate.elaborate g).def}"
+            printf $"{Warp11.Verilog.emitDesign (Warp11.Elaborate.elaborate g).def}"
             0
         | Error why ->
             eprintfn $"{path}: {why}"
             1
     // A saved design as typed F# source: `export design.json`.
     | [| "export"; path |] ->
-        match Warp11.Placement.DesignFile.load path |> Result.bind Warp11.Placement.Export.export with
+        match Warp11.DesignFile.load path |> Result.bind Warp11.Export.export with
         | Ok source ->
             printf $"{source}"
             0

@@ -17,21 +17,13 @@
 /// vocabularies stay apart everywhere else.
 module Warp11.Number
 
-/// The description. Everything here is checked at elaboration, which is this
-/// system's build step — the same treatment widths have always had.
-type NumberFormat =
-    { totalWidth: int
-      fracBits: int
-      signed: bool }
-
-/// A value and how to read it.
+/// A value and how to read it. The format is `Format.fs`'s, ahead of the
+/// layouts whose fields carry it.
 type Number =
     { bits: Expr
       format: NumberFormat }
 
-let private describe (f: NumberFormat) =
-    let sign = if f.signed then "signed" else "unsigned"
-    $"%d{f.totalWidth}w/%d{f.fracBits}f/{sign}"
+let private describe = describeFormat
 
 let private sameFormat op (a: NumberFormat) (b: NumberFormat) =
     if a <> b then
@@ -186,21 +178,6 @@ let wire name (x: Number) : Number =
     let w = Dsl.wire name (groundType x.format)
     x.bits ==> w
     { x with bits = w }
-
-/// Format witnesses. One line each, binding the three numbers together — the
-/// trust point, and everything downstream of it is checked.
-let signedInt w : NumberFormat = { totalWidth = w; fracBits = 0; signed = true }
-/// An unsigned integer of `w` bits.
-let unsignedInt w : NumberFormat = { totalWidth = w; fracBits = 0; signed = false }
-
-/// A signed fixed-point format: `totalWidth` bits, `fracBits` of them below the
-/// binary point.
-let signedFixed totalWidth fracBits : NumberFormat =
-    { totalWidth = totalWidth; fracBits = fracBits; signed = true }
-
-/// The unsigned fixed-point format.
-let unsignedFixed totalWidth fracBits : NumberFormat =
-    { totalWidth = totalWidth; fracBits = fracBits; signed = false }
 
 /// The formats this codebase actually uses, named the way the literature names
 /// them. `q4_4` is 8 bits with 4 below the point — the audio gain format.

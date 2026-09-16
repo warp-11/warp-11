@@ -1,15 +1,11 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
-    <!-- The placement trial, kept self-contained until the API settles: it
-         builds over the library as it is and changes nothing in it. `Fu.fs`
-         is the surface under trial, `Units.fs` the units that cost cycles, `Pedal.fs` the units a
-         pedal wants that the library lacks,
-         `Placement.fs` the use cases that judge them, `Factories.fs` the palette — units made from creation arguments,
-         `Graph.fs` the design as data, `Edit.fs` every change an editor makes to it, `DesignFile.fs`
-         the design as a file, `Elaborate.fs` the data back into a design, `Export.fs` the data as the
-         typed F# a person would have written, `Devices.fs` what
-         satisfies its boundary in the simulator, and `GraphChecks.fs` the
-         proof that data and typed forms meet at the bytes. -->
+    <!-- The placement use cases and the design model's checks. The model
+         itself — `Fu`, `Graph`, `Edit`, `DesignFile`, `Elaborate`, `Export`,
+         `Devices`, the palette — lives in the library since its promotion;
+         `Placement.fs` is the use cases that judged the unit surface, and
+         `GraphChecks.fs` the proof that data, typed and exported forms meet at
+         the bytes. -->
     <PropertyGroup>
         <OutputType>Exe</OutputType>
         <TargetFramework>net10.0</TargetFramework>
@@ -17,17 +13,7 @@
     </PropertyGroup>
 
     <ItemGroup>
-        <Compile Include="Fu.fs"/>
-        <Compile Include="Units.fs"/>
-        <Compile Include="Pedal.fs"/>
         <Compile Include="Placement.fs"/>
-        <Compile Include="Factories.fs"/>
-        <Compile Include="Graph.fs"/>
-        <Compile Include="Edit.fs"/>
-        <Compile Include="DesignFile.fs"/>
-        <Compile Include="Elaborate.fs"/>
-        <Compile Include="Export.fs"/>
-        <Compile Include="Devices.fs"/>
         <Compile Include="GraphChecks.fs"/>
         <Compile Include="Main.fs"/>
     </ItemGroup>

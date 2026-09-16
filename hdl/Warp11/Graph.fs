@@ -10,13 +10,12 @@
 /// No reflection: a unit's pins come from its `Pins` witness, hand-written
 /// once per shape and read here as data. The `'p` type parameter is the
 /// compile-time face of the same information.
-module Warp11.Placement.Graph
+module Warp11.Graph
 
 open Warp11
-open Warp11.Placement.Fu
-open Warp11.Placement.Units
-open Warp11.Placement.Placement
-open Warp11.Placement.Factories
+open Warp11.Fu
+open Warp11.Units
+open Warp11.Factories
 
 /// One box: a factory by name, the creation arguments typed into it, how
 /// many copies, and the **settings** — the value each control inlet nobody
@@ -114,9 +113,9 @@ let macGraph (streams: int) (multipliers: int) (adders: int) : Graph =
     { name = $"Mac%d{streams}s%d{multipliers}x%d{adders}"
       streams = streams
       sampleRate = defaultSampleRate
-      inputs = [ "a", uint 16; "b", uint 16; "c", uint 32 ]
+      inputs = [ "a", unsignedInt 16; "b", unsignedInt 16; "c", unsignedInt 32 ]
       controls = []
-      outputs = [ "out", uint 33 ]
+      outputs = [ "out", unsignedInt 33 ]
       boxes =
         [ { name = "product"; unit = "mul16"; copies = multipliers; arguments = Map.empty; settings = Map.empty }
           { name = "sum"; unit = "add32"; copies = adders; arguments = Map.empty; settings = Map.empty } ]
@@ -134,13 +133,13 @@ let macGraph (streams: int) (multipliers: int) (adders: int) : Graph =
 /// The first patch: a stereo stream through `gain`, volume and mute from the
 /// design's controls.
 let gainGraph: Graph =
-    let stereo = [ "left", sint sampleWidth; "right", sint sampleWidth ]
+    let stereo = [ "left", signedInt sampleWidth; "right", signedInt sampleWidth ]
 
     { name = "GainPatch"
       streams = 1
       sampleRate = defaultSampleRate
       inputs = stereo
-      controls = [ "volume", uint 16; "mute", uint 1 ]
+      controls = [ "volume", unsignedInt 16; "mute", unsignedInt 1 ]
       outputs = stereo
       boxes = [ { name = "gain"; unit = "gain"; copies = 1; arguments = Map.empty; settings = Map.empty } ]
       controlBoxes = []
@@ -175,7 +174,7 @@ let pinsOf (g: Graph) (box: string) : (string * NumberFormat) list * (string * N
         match boxOf g name with
         | Some b ->
             let unit = unitOf g b
-            unit.operands.pins, unit.results.pins
+            unit.operands.fields, unit.results.fields
         | None -> [], []
 
 /// A box's control pins: sinks on a box, sources on the `input` box.
@@ -195,10 +194,6 @@ type PinKind =
     | SignalOut
     | ControlIn
     | ControlOut
-
-let describeFormat (f: NumberFormat) =
-    let sign = if f.signed then "signed" else "unsigned"
-    $"%d{f.totalWidth}w/%d{f.fracBits}f/{sign}"
 
 let showPin (p: PinRef) = $"{p.box}.{p.pin}"
 

@@ -590,7 +590,7 @@ let streamFsm (input: Stream<'p>) (outputLayout: Layout<'q>) : Machine<StreamWor
     b.RegisterStreamReady ready
     If (st.Is Offering &&& ready) (fun () -> st.Goto Accepting)
 
-    let payloadWires = [ for n, w in outputLayout.fields -> wire (b.FreshName n) w ]
+    let payloadWires = [ for n, f in outputLayout.fields -> wire (b.FreshName n) f.totalWidth ]
 
     st,
     { payload = outputLayout.unpack payloadWires
@@ -629,7 +629,7 @@ let streamIterate (outputLayout: Layout<'q>) (it: Iteration<'p, 's, 'q>) (input:
     let b = current ()
     let st, out = streamFsm input outputLayout
 
-    let stateRegs = [ for n, w in it.state.fields -> reg (b.FreshName n) w ]
+    let stateRegs = [ for n, f in it.state.fields -> reg (b.FreshName n) f.totalWidth ]
     let state = it.state.unpack stateRegs
 
     let load values =
@@ -843,7 +843,7 @@ type FuBeat = { tag: Expr; fields: Expr list }
 /// core's port names. Both ends build theirs from the same description, so
 /// they cannot disagree about field order.
 let fuLayout (tagWidth: int) (ports: (string * int) list) : Layout<FuBeat> =
-    { fields = ("tag", tagWidth) :: ports
+    { fields = fieldsOfWidths (("tag", tagWidth) :: ports)
       pack = fun b -> b.tag :: b.fields
       unpack =
         fun nets ->
@@ -1137,7 +1137,7 @@ let rangeStream (start: Expr) (n: int) : Stream<Expr> =
 /// The layout of a `count`-beat window whose entries are `w` bits — field
 /// names `{name}0 … {name}{count−1}`, oldest first.
 let private beatsLayout (name: string) (count: int) (w: int) : Layout<Expr list> =
-    { fields = [ for i in 0 .. count - 1 -> ($"%s{name}%d{i}", w) ]
+    { fields = [ for i in 0 .. count - 1 -> ($"%s{name}%d{i}", unsignedInt w) ]
       pack = fun beats -> beats
       unpack = fun nets -> nets }
 

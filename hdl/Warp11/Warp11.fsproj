@@ -32,6 +32,7 @@
         <Compile Include="Ir.fs"/>
         <Compile Include="Keywords.fs"/>
         <Compile Include="Board.fs"/>
+        <Compile Include="Format.fs"/>
         <Compile Include="Layout.fs"/>
         <Compile Include="Dsl.fs"/>
         <Compile Include="Combinators.fs"/>
@@ -63,6 +64,16 @@
         <Compile Include="Audio.fs"/>
         <Compile Include="SimI2s.fs"/>
         <Compile Include="Wav.fs"/>
+        <Compile Include="Fu.fs"/>
+        <Compile Include="Units.fs"/>
+        <Compile Include="Pedal.fs"/>
+        <Compile Include="Factories.fs"/>
+        <Compile Include="Graph.fs"/>
+        <Compile Include="Edit.fs"/>
+        <Compile Include="DesignFile.fs"/>
+        <Compile Include="Elaborate.fs"/>
+        <Compile Include="Export.fs"/>
+        <Compile Include="Devices.fs"/>
     </ItemGroup>
 
 </Project>

@@ -1,108 +1,11 @@
-/// The surface under trial: a functional unit as a law over typed pins, and
-/// a stage that places it by counting streams against copies.
-///
-/// Nothing in `Warp11/` moves. `Pins` carries what a palette needs — a number
-/// format per field — and `lower` drops it to the width-only `Layout` the
-/// library speaks, at the one place a stage hands a stream to the library.
-/// If the trial earns its place, `Layout` becomes `Pins` and `lower` the
-/// identity; if not, this directory is what gets deleted.
-module Warp11.Placement.Fu
+/// A functional unit as a law over typed pins, and a stage that places it by
+/// counting streams against copies. A unit's pins are a `Layout` whose
+/// fields carry their format — what a palette reads to decide whether two
+/// pins connect — declared with `pinsN` where the reading matters and
+/// `layoutN` where only the width does.
+module Warp11.Fu
 
 open Warp11
-
-type NumberFormat = Warp11.Number.NumberFormat
-
-/// An unsigned integer of `w` bits — the format a bare width has always meant.
-let uint (w: int) : NumberFormat = { totalWidth = w; fracBits = 0; signed = false }
-
-/// A signed integer of `w` bits.
-let sint (w: int) : NumberFormat = { totalWidth = w; fracBits = 0; signed = true }
-
-/// A payload's pins: name and number format per field, and the pack/unpack
-/// pair that turns the typed payload into nets and back. `Layout` with the
-/// reading kept — what a palette reads to decide whether two pins connect.
-type Pins<'p> =
-    { pins: (string * NumberFormat) list
-      pack: 'p -> Expr list
-      unpack: Expr list -> 'p }
-
-/// The one bridge to the library: widths only, the reading dropped.
-let lower (p: Pins<'p>) : Layout<'p> =
-    { fields = [ for n, f in p.pins -> n, f.totalWidth ]
-      pack = p.pack
-      unpack = p.unpack }
-
-/// One pin; the payload is the `Expr` itself.
-let pins1 (an: string, af: NumberFormat) : Pins<Expr> =
-    { pins = [ an, af ]
-      pack = fun x -> [ x ]
-      unpack =
-        fun nets ->
-            match nets with
-            | [ x ] -> x
-            | _ -> failwith $"pins1 {an}: expected 1 net" }
-
-/// Two pins, as a pair.
-let pins2 (an: string, af: NumberFormat) (bn: string, bf: NumberFormat) : Pins<Expr * Expr> =
-    { pins = [ an, af; bn, bf ]
-      pack = fun (x, y) -> [ x; y ]
-      unpack =
-        fun nets ->
-            match nets with
-            | [ x; y ] -> x, y
-            | _ -> failwith $"pins2 {an},{bn}: expected 2 nets" }
-
-/// Three pins, as a triple.
-let pins3 (an: string, af: NumberFormat) (bn: string, bf: NumberFormat) (cn: string, cf: NumberFormat) : Pins<Expr * Expr * Expr> =
-    { pins = [ an, af; bn, bf; cn, cf ]
-      pack = fun (x, y, z) -> [ x; y; z ]
-      unpack =
-        fun nets ->
-            match nets with
-            | [ x; y; z ] -> x, y, z
-            | _ -> failwith $"pins3 {an},{bn},{cn}: expected 3 nets" }
-
-/// Four pins, as a 4-tuple.
-let pins4 (an: string, af: NumberFormat) (bn: string, bf: NumberFormat) (cn: string, cf: NumberFormat) (dn: string, df: NumberFormat) : Pins<Expr * Expr * Expr * Expr> =
-    { pins = [ an, af; bn, bf; cn, cf; dn, df ]
-      pack = fun (a, b, c, d) -> [ a; b; c; d ]
-      unpack =
-        fun nets ->
-            match nets with
-            | [ a; b; c; d ] -> a, b, c, d
-            | _ -> failwith $"pins4 {an},{bn},{cn},{dn}: expected 4 nets" }
-
-/// Five pins, as a 5-tuple.
-let pins5 (an: string, af: NumberFormat) (bn: string, bf: NumberFormat) (cn: string, cf: NumberFormat) (dn: string, df: NumberFormat) (en: string, ef: NumberFormat) : Pins<Expr * Expr * Expr * Expr * Expr> =
-    { pins = [ an, af; bn, bf; cn, cf; dn, df; en, ef ]
-      pack = fun (a, b, c, d, e) -> [ a; b; c; d; e ]
-      unpack =
-        fun nets ->
-            match nets with
-            | [ a; b; c; d; e ] -> a, b, c, d, e
-            | _ -> failwith $"pins5 {an},{bn},{cn},{dn},{en}: expected 5 nets" }
-
-/// Six pins, as a 6-tuple — as wide as a beat goes in the typed form.
-let pins6 (an: string, af: NumberFormat) (bn: string, bf: NumberFormat) (cn: string, cf: NumberFormat) (dn: string, df: NumberFormat) (en: string, ef: NumberFormat) (fn: string, ff: NumberFormat) : Pins<Expr * Expr * Expr * Expr * Expr * Expr> =
-    { pins = [ an, af; bn, bf; cn, cf; dn, df; en, ef; fn, ff ]
-      pack = fun (a, b, c, d, e, f) -> [ a; b; c; d; e; f ]
-      unpack =
-        fun nets ->
-            match nets with
-            | [ a; b; c; d; e; f ] -> a, b, c, d, e, f
-            | _ -> failwith $"pins6 {an},{bn},{cn},{dn},{en},{fn}: expected 6 nets" }
-
-/// Pins with no typed payload: the nets themselves, in order. What a graph
-/// works in, and what a typed unit erases to.
-let pinsOfList (pins: (string * NumberFormat) list) : Pins<Expr list> =
-    { pins = pins
-      pack = id
-      unpack =
-        fun nets ->
-            if nets.Length <> pins.Length then
-                failwith $"pins: expected %d{pins.Length} nets, got %d{nets.Length}"
-
-            nets }
 
 /// What a unit does. A combinational unit is a function of its operands and
 /// costs nothing to copy. A sequential unit costs cycles and says so the only
@@ -121,14 +24,14 @@ type Law<'a, 'r> =
 /// copies of it a design may spend.
 type Fu<'a, 'r> =
     { name: string
-      operands: Pins<'a>
-      results: Pins<'r>
+      operands: Layout<'a>
+      results: Layout<'r>
       controls: (string * NumberFormat) list
       law: Law<'a, 'r>
       copies: int }
 
 /// A combinational unit with no controls, one copy.
-let fu (name: string) (operands: Pins<'a>) (results: Pins<'r>) (law: 'a -> 'r) : Fu<'a, 'r> =
+let fu (name: string) (operands: Layout<'a>) (results: Layout<'r>) (law: 'a -> 'r) : Fu<'a, 'r> =
     { name = name
       operands = operands
       results = results
@@ -137,7 +40,7 @@ let fu (name: string) (operands: Pins<'a>) (results: Pins<'r>) (law: 'a -> 'r) :
       copies = 1 }
 
 /// A sequential unit with no controls, one copy.
-let fuSequential (name: string) (operands: Pins<'a>) (results: Pins<'r>) (law: string -> Stream<'a> -> Stream<'r>) : Fu<'a, 'r> =
+let fuSequential (name: string) (operands: Layout<'a>) (results: Layout<'r>) (law: string -> Stream<'a> -> Stream<'r>) : Fu<'a, 'r> =
     { name = name
       operands = operands
       results = results
@@ -150,8 +53,8 @@ let fuSequential (name: string) (operands: Pins<'a>) (results: Pins<'r>) (law: s
 /// instance as a function, which is what makes any `defModule` a box.
 let moduleUnit
     (name: string)
-    (operands: Pins<'a>)
-    (results: Pins<'r>)
+    (operands: Layout<'a>)
+    (results: Layout<'r>)
     (controls: (string * NumberFormat) list)
     (law: string -> Expr list -> Stream<'a> -> Stream<'r>)
     : Fu<'a, 'r> =
@@ -171,10 +74,10 @@ let copies (n: int) (unit: Fu<'a, 'r>) : Fu<'a, 'r> = { unit with copies = n }
 type ErasedFu = Fu<Expr list, Expr list>
 
 let erase (unit: Fu<'a, 'r>) : ErasedFu =
-    let results = pinsOfList unit.results.pins
+    let results = layoutOfList unit.results.fields
 
     { name = unit.name
-      operands = pinsOfList unit.operands.pins
+      operands = layoutOfList unit.operands.fields
       results = results
       controls = unit.controls
       copies = unit.copies
@@ -184,9 +87,9 @@ let erase (unit: Fu<'a, 'r>) : ErasedFu =
         | Sequential law ->
             Sequential(fun instance controls s ->
                 s
-                |> streamMapTo (lower unit.operands) unit.operands.unpack
+                |> streamMapTo (unit.operands) unit.operands.unpack
                 |> law instance controls
-                |> streamMapTo (lower results) unit.results.pack) }
+                |> streamMapTo (results) unit.results.pack) }
 
 /// A layout's `unpack` may hand a field back in its reading (`asSInt` over
 /// the net); to drive the net itself, take the reading off again.
@@ -217,7 +120,7 @@ type private Client =
 let private clientStage
     (unit: Fu<'a, 'r>)
     (name: string)
-    (outPins: Pins<'q>)
+    (outPins: Layout<'q>)
     (operands: 'p -> 'a)
     (finish: 'r -> 'p -> 'q)
     (s: Stream<'p>)
@@ -237,14 +140,14 @@ let private clientStage
           (taken, fun () -> st.Goto Accepting) ]
 
     // Hold the beat, in registers named for the stage.
-    let held = [ for n, w in s.layout.fields -> reg $"{name}_{n}" w ]
+    let held = [ for n, f in s.layout.fields -> reg $"{name}_{n}" f.totalWidth ]
     If accept (fun () -> List.iter2 (fun r v -> bare v ==> r) held (s.layout.pack s.payload))
     let beat = s.layout.unpack held
 
     // The client's wires, one per pin of the unit.
-    let operandWires = [ for n, f in unit.operands.pins -> wire $"{name}_{unit.name}_{n}" f.totalWidth ]
+    let operandWires = [ for n, f in unit.operands.fields -> wire $"{name}_{unit.name}_{n}" f.totalWidth ]
     List.iter2 (fun w v -> bare v ==> w) operandWires (unit.operands.pack (operands beat))
-    let resultWires = [ for n, f in unit.results.pins -> wire $"{name}_{unit.name}_{n}" f.totalWidth ]
+    let resultWires = [ for n, f in unit.results.fields -> wire $"{name}_{unit.name}_{n}" f.totalWidth ]
     let issue = wireBit $"{name}_issue"
     let grant = wireBit $"{name}_grant"
     let landed = wireBit $"{name}_landed"
@@ -260,14 +163,14 @@ let private clientStage
 
     // The results are held here — the pool's registers are every client's —
     // and the output is finished from them and the held beat.
-    let heldResults = [ for n, f in unit.results.pins -> reg $"{name}_{n}_held" f.totalWidth ]
+    let heldResults = [ for n, f in unit.results.fields -> reg $"{name}_{n}_held" f.totalWidth ]
 
     If (st.Is Working &&& landed) (fun () ->
         List.iter2 (fun r v -> v ==> r) heldResults resultWires
         st.Goto Offering)
 
-    let outLayout = lower outPins
-    let outWires = [ for n, w in outLayout.fields -> wire $"{name}_out_{n}" w ]
+    let outLayout = outPins
+    let outWires = [ for n, f in outLayout.fields -> wire $"{name}_out_{n}" f.totalWidth ]
     List.iter2 (fun w v -> bare v ==> w) outWires (outLayout.pack (finish (unit.results.unpack heldResults) beat))
 
     { payload = outLayout.unpack outWires
@@ -286,8 +189,8 @@ let private clientStage
 /// `warpFu` rather than being asked for it.
 let private pool (unit: Fu<'a, 'r>) (law: 'a -> 'r) (name: string) (clients: Client list) =
     let tagWidth = 1
-    let operandPorts = [ for n, f in unit.operands.pins -> n, f.totalWidth ]
-    let resultPorts = [ for n, f in unit.results.pins -> n, f.totalWidth ]
+    let operandPorts = [ for n, f in unit.operands.fields -> n, f.totalWidth ]
+    let resultPorts = [ for n, f in unit.results.fields -> n, f.totalWidth ]
     let issueLayout = fuLayout tagWidth operandPorts
 
     let issues: Stream<FuBeat> list =
@@ -299,14 +202,14 @@ let private pool (unit: Fu<'a, 'r>) (law: 'a -> 'r) (name: string) (clients: Cli
 
     let core (operands: Expr list) =
         let held =
-            [ for (n, f), o in List.zip unit.operands.pins operands ->
+            [ for (n, f), o in List.zip unit.operands.fields operands ->
                   let r = reg $"{name}_{n}" f.totalWidth
                   o ==> r
                   r ]
 
         let results = unit.results.pack (law (unit.operands.unpack held))
 
-        [ for (n, f), v in List.zip unit.results.pins results ->
+        [ for (n, f), v in List.zip unit.results.fields results ->
               let r = reg $"{name}_{n}" f.totalWidth
               bare v ==> r
               r ],
@@ -363,8 +266,8 @@ let private orderedFarm (name: string) (n: int) (worker: int -> Stream<'p> -> St
             (ready &&& eq taking.count (lane i)) ==> o.ready
 
         let fields =
-            [ for j, (fieldName, w) in List.indexed layout.fields ->
-                  let f = wire $"{name}_{fieldName}" w
+            [ for j, (fieldName, format) in List.indexed layout.fields ->
+                  let f = wire $"{name}_{fieldName}" format.totalWidth
                   selectIndexed taking.count [ for o in outs -> (layout.pack o.payload)[j] ] ==> f
                   f ]
 
@@ -381,14 +284,14 @@ let private sequentialStage
     (unit: Fu<'a, 'r>)
     (law: string -> Stream<'a> -> Stream<'r>)
     (name: string)
-    (outPins: Pins<'q>)
+    (outPins: Layout<'q>)
     (operands: 'p -> 'a)
     (finish: 'r -> 'p -> 'q)
     (k: int)
     (s: Stream<'p>)
     : Stream<'q> =
-    let opLayout = prefixed "op" (lower unit.operands)
-    let resLayout = prefixed "res" (lower unit.results)
+    let opLayout = prefixed "op" (unit.operands)
+    let resLayout = prefixed "res" (unit.results)
     let ctxLayout = prefixed "beat" s.layout
     let src = streamMapTo (layoutJoin opLayout ctxLayout) (fun p -> operands p, p) s
 
@@ -396,7 +299,7 @@ let private sequentialStage
         let instance = if k = 1 then $"{name}_{unit.name}" else $"{name}_{unit.name}%d{i}"
         withContext instance 2 opLayout resLayout ctxLayout (law instance)
 
-    orderedFarm name k copy src |> streamMapTo (lower outPins) (fun (r, p) -> finish r p)
+    orderedFarm name k copy src |> streamMapTo (outPins) (fun (r, p) -> finish r p)
 
 /// The M streams that need a unit, handed over together, so the row of the
 /// matrix is decided here:
@@ -415,7 +318,7 @@ let fuStagesWith
     (controls: Expr list)
     (unit: Fu<'a, 'r>)
     (name: string)
-    (outPins: Pins<'q>)
+    (outPins: Layout<'q>)
     (operands: 'p -> 'a)
     (finish: 'r -> 'p -> 'q)
     (streams: Stream<'p> list)
@@ -430,7 +333,7 @@ let fuStagesWith
     | Combinational law when n = m ->
         // In place: the law applied inside the payload, the handshake the
         // upstream's own. No net is declared.
-        streams |> List.map (streamMapTo (lower outPins) (fun p -> finish (law controls (operands p)) p))
+        streams |> List.map (streamMapTo (outPins) (fun p -> finish (law controls (operands p)) p))
     | Combinational law when n = 1 ->
         // Shared: every stream a client, the one copy behind an arbiter.
         let staged =

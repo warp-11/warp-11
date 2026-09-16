@@ -298,7 +298,7 @@ let fsm =
 /// A Q format is one line: a total width, a count of fraction bits, and a
 /// measure binding the two so the type system can carry it. Q5.3 is the same
 /// eight bits as `q4_4` with the point moved.
-let private q5_3 = Number.signedFixed 8 3
+let private q5_3 = signedFixed 8 3
 
 /// Fixed-point arithmetic where the Q format is part of the type. A multiply
 /// changes format — widths add and fraction bits add — and the renormalization

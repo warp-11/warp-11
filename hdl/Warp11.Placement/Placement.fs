@@ -27,35 +27,21 @@
 module Warp11.Placement.Placement
 
 open Warp11
-open Warp11.Placement.Fu
-open Warp11.Placement.Units
+open Warp11.Fu
+open Warp11.Units
 
 // ---------------------------------------------------------------------------
 // The units, and the one module.
 
 // USE CASE — declaring a unit: the law, once, over typed pins. The product's
 // format is derived from the operands', not typed.
-let multiply16 =
-    fu
-        "mul16"
-        (pins2 ("a", uint 16) ("b", uint 16))
-        (pins1 ("product", Warp11.Number.productFormat (uint 16) (uint 16)))
-        (fun (a, b) -> mul a b)
-
-let add32 = fu "add32" (pins2 ("x", uint 32) ("y", uint 32)) (pins1 ("sum", uint 33)) (fun (x, y) -> add (pad 33 x) (pad 33 y))
-
-// USE CASE — a unit that costs cycles. Sixteen a product, one at a time, so
-// copying it is the only way to keep up with a rate.
-let shiftAddMultiply16 =
-    fuSequential "smul16" (pins2 ("a", uint 16) ("b", uint 16)) (pins1 ("product", uint 32)) (fun instance -> shiftAddMultiplier instance 16)
-
 // helper — the payload shapes the beat takes on its way through.
-let macIn = pins3 ("a", uint 16) ("b", uint 16) ("c", uint 32)
-let productPins = pins2 ("product", uint 32) ("c", uint 32)
-let macOut = pins1 ("out", uint 33)
+let macIn = pins3 ("a", unsignedInt 16) ("b", unsignedInt 16) ("c", unsignedInt 32)
+let productPins = pins2 ("product", unsignedInt 32) ("c", unsignedInt 32)
+let macOut = pins1 ("out", unsignedInt 33)
 // A beat field is named for the pin that produced it — the rule a graph
 // follows — so the last stage carries `sum`, and the port it lands on is `out`.
-let sumPins = pins1 ("sum", uint 33)
+let sumPins = pins1 ("sum", unsignedInt 33)
 
 // USE CASE — THE module. Three integers and a unit in its signature; none
 // of them in its body. The body is two stages over M streams.
@@ -66,8 +52,8 @@ let macWith (multiplier: Fu<Expr * Expr, Expr>) (streams: int) (multipliers: int
     defModule
         $"Mac%d{streams}s%d{multipliers}x%d{adders}"
         (fun p ->
-            [ for i in 1..streams -> streamInputPorts p $"in%d{i}" (lower macIn) ],
-            [ for i in 1..streams -> streamOutputPorts p $"out%d{i}" (lower macOut) ])
+            [ for i in 1..streams -> streamInputPorts p $"in%d{i}" (macIn) ],
+            [ for i in 1..streams -> streamOutputPorts p $"out%d{i}" (macOut) ])
         (fun (ins, outs) ->
             ins
             |> List.map streamSource
@@ -90,8 +76,8 @@ let macByHand (streams: int) =
     defModule
         $"Mac%d{streams}s%d{streams}x%d{streams}"
         (fun p ->
-            [ for i in 1..streams -> streamInputPorts p $"in%d{i}" (lower macIn) ],
-            [ for i in 1..streams -> streamOutputPorts p $"out%d{i}" (lower macOut) ])
+            [ for i in 1..streams -> streamInputPorts p $"in%d{i}" (macIn) ],
+            [ for i in 1..streams -> streamOutputPorts p $"out%d{i}" (macOut) ])
         (fun (ins, outs) ->
             for inPorts, outPorts in List.zip ins outs do
                 let a, b, c = inPorts.payload
@@ -119,8 +105,8 @@ let inPlaceIsTheExpression () : bool =
 // with nothing arriving anywhere.
 let private macThrough (design: TypedModule<_>) (streams: int) (stallEvery: int) (beats: uint64 list list) =
     let sim = Sim design.def
-    let inputs = [| for i in 1..streams -> streamPins $"in%d{i}" (lower macIn) |]
-    let outputs = [| for i in 1..streams -> streamPins $"out%d{i}" (lower macOut) |]
+    let inputs = [| for i in 1..streams -> streamPins $"in%d{i}" (macIn) |]
+    let outputs = [| for i in 1..streams -> streamPins $"out%d{i}" (macOut) |]
     let pending = Array.create streams beats
     let got = Array.init streams (fun _ -> ResizeArray<uint64 list>())
     let wanted = beats.Length
@@ -282,14 +268,14 @@ let countsAreIndependent () : bool =
 let macWithOffset (streams: int) (multipliers: int) (adders: int) =
     let multiply = multiply16 |> copies multipliers
     let accumulate = add32 |> copies adders
-    let pairIn = pins2 ("a", uint 16) ("b", uint 16)
-    let productOnly = pins1 ("product", uint 32)
+    let pairIn = pins2 ("a", unsignedInt 16) ("b", unsignedInt 16)
+    let productOnly = pins1 ("product", unsignedInt 32)
 
     defModule
         $"MacOffset%d{streams}s%d{multipliers}x%d{adders}"
         (fun p ->
-            [ for i in 1..streams -> streamInputPorts p $"in%d{i}" (lower pairIn) ],
-            [ for i in 1..streams -> streamOutputPorts p $"out%d{i}" (lower macOut) ],
+            [ for i in 1..streams -> streamInputPorts p $"in%d{i}" (pairIn) ],
+            [ for i in 1..streams -> streamOutputPorts p $"out%d{i}" (macOut) ],
             p.inPort "c" 32)
         (fun (ins, outs, c) ->
             ins
@@ -302,8 +288,8 @@ let macWithOffset (streams: int) (multipliers: int) (adders: int) =
 let parameterTracks () : bool =
     let run streams multipliers adders =
         let sim = Sim (macWithOffset streams multipliers adders).def
-        let pairIn = pins2 ("a", uint 16) ("b", uint 16)
-        let one beat = streamThrough sim (streamPins "in1" (lower pairIn)) (streamPins "out1" (lower macOut)) [ beat ] |> Seq.head
+        let pairIn = pins2 ("a", unsignedInt 16) ("b", unsignedInt 16)
+        let one beat = streamThrough sim (streamPins "in1" (pairIn)) (streamPins "out1" (macOut)) [ beat ] |> Seq.head
         sim.Poke("c", 10UL)
         let first = one [ 6UL; 7UL ]
         sim.Poke("c", 20UL)
@@ -317,15 +303,15 @@ let parameterTracks () : bool =
 // controls from the design's own ports. The typed form; the graph form is
 // `Graph.gainGraph`, and the two must meet at the bytes.
 
-let stereoPins = pins2 ("left", sint sampleWidth) ("right", sint sampleWidth)
+let stereoPins = pins2 ("left", signedInt sampleWidth) ("right", signedInt sampleWidth)
 
 // USE CASE — a stream through a module, controls beside it.
 let gainPatch =
     defModule
         "GainPatch"
         (fun p ->
-            streamInputPorts p "in1" (lower stereoPins),
-            streamOutputPorts p "out1" (lower stereoPins),
+            streamInputPorts p "in1" (stereoPins),
+            streamOutputPorts p "out1" (stereoPins),
             p.inPort "volume" 16,
             p.inPort "mute" 1)
         (fun (inPorts, outPorts, volume, mute) ->
@@ -336,7 +322,7 @@ let gainPatch =
 // CHECK
 let gainScales () : bool =
     let sim = Sim gainPatch.def
-    let one beat = streamThrough sim (streamPins "in1" (lower stereoPins)) (streamPins "out1" (lower stereoPins)) [ beat ] |> Seq.head
+    let one beat = streamThrough sim (streamPins "in1" (stereoPins)) (streamPins "out1" (stereoPins)) [ beat ] |> Seq.head
     sim.Poke("volume", 2UL * gainUnity)
     sim.Poke("mute", 0UL)
     let doubled = one [ 1000UL; 2000UL ]

@@ -2,11 +2,11 @@
 /// The canvas calls one and renders what comes back; a change that cannot
 /// be made says why, naming the box or the pin, before anything is drawn.
 /// Undo is a list of the graphs before each change.
-module Warp11.Placement.Edit
+module Warp11.Edit
 
-open Warp11.Placement.Fu
-open Warp11.Placement.Factories
-open Warp11.Placement.Graph
+open Warp11.Fu
+open Warp11.Factories
+open Warp11.Graph
 
 type Position = float * float
 

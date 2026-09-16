@@ -2551,7 +2551,7 @@ let private workerFsm (name: string) (input: Stream<'p>) (outputLayout: Layout<'
         [ (input.valid &&& input.ready, fun () -> st.Goto Working)
           (taken, fun () -> st.Goto Accepting) ]
 
-    let payloadWires = [ for n, w in outputLayout.fields -> wire $"{name}_out_{n}" w ]
+    let payloadWires = [ for n, f in outputLayout.fields -> wire $"{name}_out_{n}" f.totalWidth ]
 
     st,
     { payload = outputLayout.unpack payloadWires
@@ -2570,8 +2570,8 @@ let private skidBuffer (name: string) (layout: Layout<'p>) (s: Stream<'p>) : Str
     let ready = wireBit $"{name}_ready"
     registerStreamReady ready
 
-    let head = [ for n, w in layout.fields -> reg $"{name}_head_{n}" w ]
-    let tail = [ for n, w in layout.fields -> reg $"{name}_tail_{n}" w ]
+    let head = [ for n, f in layout.fields -> reg $"{name}_head_{n}" f.totalWidth ]
+    let tail = [ for n, f in layout.fields -> reg $"{name}_tail_{n}" f.totalWidth ]
     let headValid = regBit $"{name}_head_valid"
     let tailValid = regBit $"{name}_tail_valid"
 
@@ -2609,7 +2609,7 @@ let private skidBuffer (name: string) (layout: Layout<'p>) (s: Stream<'p>) : Str
 
 /// Hold the beat a stage accepts, in registers named for the stage.
 let private holdBeat (name: string) (layout: Layout<'p>) (accept: Expr) (s: Stream<'p>) : 'p =
-    let held = [ for n, w in layout.fields -> reg $"{name}_{n}" w ]
+    let held = [ for n, f in layout.fields -> reg $"{name}_{n}" f.totalWidth ]
     If accept (fun () -> List.iter2 (fun r v -> v ==> r) held (layout.pack s.payload))
     layout.unpack held
 
@@ -2863,12 +2863,12 @@ let private unpackSection (nets: Expr list) : Section * Expr list =
     | _ -> failwith "section: wrong arity"
 
 let private sectionLayout (t: TreeShape) : Layout<Section> =
-    { fields = sectionFields t
+    { fields = fieldsOfWidths (sectionFields t)
       pack = packSection
       unpack = unpackSection >> fst }
 
 let private sectionDoneLayout (t: TreeShape) : Layout<SectionDone> =
-    { fields = sectionFields t @ [ "y", sampleWidth ]
+    { fields = fieldsOfWidths (sectionFields t @ [ "y", sampleWidth ])
       pack = fun s -> packSection s.section @ [ s.y ]
       unpack =
         fun nets ->
@@ -2877,7 +2877,7 @@ let private sectionDoneLayout (t: TreeShape) : Layout<SectionDone> =
             | _ -> failwith "section done: wrong arity" }
 
 let private bandLayout: Layout<Band> =
-    { fields = [ "ear", 1; "band", slotBits; "value", bandWidth ]
+    { fields = fieldsOfWidths [ "ear", 1; "band", slotBits; "value", bandWidth ]
       pack = fun b -> [ b.ear; b.band; b.value ]
       unpack =
         function
@@ -2885,7 +2885,7 @@ let private bandLayout: Layout<Band> =
         | _ -> failwith "band: wrong arity" }
 
 let private bandStateLayout: Layout<BandState> =
-    { fields = [ "ear", 1; "band", slotBits; "value", bandWidth; "env", sampleWidth; "detected", gainedWidth ]
+    { fields = fieldsOfWidths [ "ear", 1; "band", slotBits; "value", bandWidth; "env", sampleWidth; "detected", gainedWidth ]
       pack = fun b -> [ b.ear; b.band; b.value; b.env; b.detected ]
       unpack =
         function
@@ -2898,7 +2898,7 @@ let private bandStateLayout: Layout<BandState> =
         | _ -> failwith "band state: wrong arity" }
 
 let private boostedLayout: Layout<Boosted> =
-    { fields = [ "ear", 1; "band", slotBits; "env", sampleWidth; "detected", gainedWidth; "boosted", gainedWidth ]
+    { fields = fieldsOfWidths [ "ear", 1; "band", slotBits; "env", sampleWidth; "detected", gainedWidth; "boosted", gainedWidth ]
       pack = fun b -> [ b.ear; b.band; b.env; b.detected; b.boosted ]
       unpack =
         function
@@ -2911,7 +2911,7 @@ let private boostedLayout: Layout<Boosted> =
         | _ -> failwith "boosted: wrong arity" }
 
 let private detectedLayout: Layout<Detected> =
-    { fields = [ "ear", 1; "band", slotBits; "env", sampleWidth; "boosted", gainedWidth; "peak", sampleWidth ]
+    { fields = fieldsOfWidths [ "ear", 1; "band", slotBits; "env", sampleWidth; "boosted", gainedWidth; "peak", sampleWidth ]
       pack = fun b -> [ b.ear; b.band; b.env; b.boosted; b.peak ]
       unpack =
         function
@@ -2924,7 +2924,7 @@ let private detectedLayout: Layout<Detected> =
         | _ -> failwith "detected: wrong arity" }
 
 let private steppedLayout: Layout<Stepped> =
-    { fields = [ "ear", 1; "band", slotBits; "env", sampleWidth; "boosted", gainedWidth; "env_next", sampleWidth ]
+    { fields = fieldsOfWidths [ "ear", 1; "band", slotBits; "env", sampleWidth; "boosted", gainedWidth; "env_next", sampleWidth ]
       pack = fun b -> [ b.ear; b.band; b.env; b.boosted; b.envNext ]
       unpack =
         function
@@ -2937,7 +2937,7 @@ let private steppedLayout: Layout<Stepped> =
         | _ -> failwith "stepped: wrong arity" }
 
 let private gainLayout: Layout<Gain> =
-    { fields = [ "ear", 1; "band", slotBits; "boosted", gainedWidth; "gain", gainWidth + 1; "env_next", sampleWidth ]
+    { fields = fieldsOfWidths [ "ear", 1; "band", slotBits; "boosted", gainedWidth; "gain", gainWidth + 1; "env_next", sampleWidth ]
       pack = fun b -> [ b.ear; b.band; b.boosted; b.gain; b.envNext ]
       unpack =
         function
@@ -2950,7 +2950,7 @@ let private gainLayout: Layout<Gain> =
         | _ -> failwith "gain: wrong arity" }
 
 let private gainedLayout: Layout<Gained> =
-    { fields = [ "ear", 1; "band", slotBits; "gained", gainedWidth; "env_next", sampleWidth ]
+    { fields = fieldsOfWidths [ "ear", 1; "band", slotBits; "gained", gainedWidth; "env_next", sampleWidth ]
       pack = fun b -> [ b.ear; b.band; b.gained; b.envNext ]
       unpack =
         function

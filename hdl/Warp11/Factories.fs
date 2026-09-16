@@ -10,13 +10,12 @@
 /// `make` needs no closure; each factory parses its own and refuses naming
 /// the parameter. A filter is designed **for the design's sample rate**, which
 /// `make` is handed — coefficients fix a frequency in cycles per sample.
-module Warp11.Placement.Factories
+module Warp11.Factories
 
 open Warp11
-open Warp11.Placement.Fu
-open Warp11.Placement.Units
-open Warp11.Placement.Placement
-open Warp11.Placement.Pedal
+open Warp11.Fu
+open Warp11.Units
+open Warp11.Pedal
 
 type ParameterKind =
     | IntParameter
@@ -133,7 +132,7 @@ let private belowNyquist (name: string) (rate: float) (v: float) : Result<float,
 // line each, as `gainModule` is — the library's instance-as-a-function is
 // the law verbatim.
 
-let private stereo = pins2 ("left", sint sampleWidth) ("right", sint sampleWidth)
+let private stereo = pins2 ("left", signedInt sampleWidth) ("right", signedInt sampleWidth)
 
 let private literals (width: int) (values: uint64 list) = values |> List.map (fun v -> lit v width)
 
@@ -145,13 +144,13 @@ let eqSection (shape: EqType) (fc: float) (q: float) (gainDb: float) (rate: floa
     moduleUnit "eq" stereo stereo [] (fun instance _ s -> audioEqBand "AudioEqBand" instance (literals biquadCoeffWidth coefficients) s)
 
 let limiterUnit: Fu<Expr * Expr, Expr * Expr> =
-    moduleUnit "limiter" stereo stereo [ "threshold", sint sampleWidth ] (fun instance controls s ->
+    moduleUnit "limiter" stereo stereo [ "threshold", signedInt sampleWidth ] (fun instance controls s ->
         match controls with
         | [ threshold ] -> audioLimiter "AudioLimiter" instance threshold s
         | _ -> failwith "limiter: threshold")
 
 let echoUnit (capacity: int) : Fu<Expr * Expr, Expr * Expr> =
-    moduleUnit "echo" stereo stereo [ "delay", uint (log2Exact capacity); "feedback", uint 16 ] (fun instance controls s ->
+    moduleUnit "echo" stereo stereo [ "delay", unsignedInt (log2Exact capacity); "feedback", unsignedInt 16 ] (fun instance controls s ->
         match controls with
         | [ delay; feedback ] -> audioEcho "AudioEcho" capacity instance delay feedback s
         | _ -> failwith "echo: delay and feedback")
@@ -161,7 +160,7 @@ let compressorUnit: Fu<Expr * Expr, Expr * Expr> =
         "compressor"
         stereo
         stereo
-        [ "threshold", uint sampleWidth; "ratio", uint 8; "attack", uint 16; "releaseRate", uint 16; "makeup", uint 16 ]
+        [ "threshold", unsignedInt sampleWidth; "ratio", unsignedInt 8; "attack", unsignedInt 16; "releaseRate", unsignedInt 16; "makeup", unsignedInt 16 ]
         (fun instance controls s ->
             match controls with
             | [ threshold; ratio; attack; releaseRate; makeup ] ->
@@ -177,19 +176,19 @@ let compressorUnit: Fu<Expr * Expr, Expr * Expr> =
             | _ -> failwith "compressor: five controls")
 
 let firUnit (taps: int) (lowPass: float) (highPass: float) (rate: float) : Fu<Expr * Expr, Expr * Expr> =
-    moduleUnit "fir" stereo stereo [ "preset", uint 2 ] (fun instance controls s ->
+    moduleUnit "fir" stereo stereo [ "preset", unsignedInt 2 ] (fun instance controls s ->
         match controls with
         | [ preset ] -> audioFir "AudioFir" taps { sampleRate = rate; lowPass = lowPass; highPass = highPass } instance preset s
         | _ -> failwith "fir: preset")
 
 let multibandUnit (crossovers: float list) (rate: float) : Fu<Expr * Expr, Expr * Expr> =
-    let gains prefix = [ for i in 0 .. multibandBands - 1 -> $"{prefix}%d{i}", uint 16 ]
+    let gains prefix = [ for i in 0 .. multibandBands - 1 -> $"{prefix}%d{i}", unsignedInt 16 ]
 
     moduleUnit
         "multiband"
         stereo
         stereo
-        ([ "threshold", uint sampleWidth; "ratio", uint 8; "attack", uint 16; "releaseRate", uint 16 ] @ gains "lg" @ gains "rg")
+        ([ "threshold", unsignedInt sampleWidth; "ratio", unsignedInt 8; "attack", unsignedInt 16; "releaseRate", unsignedInt 16 ] @ gains "lg" @ gains "rg")
         (fun instance controls s ->
             match controls with
             | threshold :: ratio :: attack :: releaseRate :: gains when gains.Length = 2 * multibandBands ->

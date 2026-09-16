@@ -25,10 +25,10 @@ open Avalonia.FuncUI.DSL
 open Avalonia.Input
 open Avalonia.Media
 open Avalonia.VisualTree
-open Warp11.Placement.Fu
-open Warp11.Placement.Factories
-open Warp11.Placement.Graph
-open Warp11.Placement.Edit
+open Warp11.Fu
+open Warp11.Factories
+open Warp11.Graph
+open Warp11.Edit
 
 // ---------------------------------------------------------------------------
 // Geometry, in world units.
@@ -883,7 +883,7 @@ let view (opening: Opening) : Control =
                                     Button.onClick ((fun _ -> placeBox name (somewhereVisible ())), SubPatchOptions.Always) ]
                               :> Types.IView ]
                       @ [ TextBlock.create [ TextBlock.text "controls"; TextBlock.fontWeight FontWeight.Bold; TextBlock.margin (Thickness(4.0, 8.0, 4.0, 2.0)) ] :> Types.IView ]
-                      @ [ for label, kind, format, value in [ "number", NumberBox, uint 16, "0"; "toggle", NumberBox, uint 1, "0"; "constant", ConstantBox, uint 16, "0" ] ->
+                      @ [ for label, kind, format, value in [ "number", NumberBox, unsignedInt 16, "0"; "toggle", NumberBox, unsignedInt 1, "0"; "constant", ConstantBox, unsignedInt 16, "0" ] ->
                               Button.create
                                   [ Button.content label
                                     Button.horizontalAlignment Layout.HorizontalAlignment.Stretch
@@ -935,15 +935,15 @@ let view (opening: Opening) : Control =
                   StackPanel.children
                       [ button "New" (fun () ->
                             stopLive ()
-                            history.Set(Warp11.Placement.Edit.history (withLayout (emptyGraph "Untitled" g.sampleRate)))
+                            history.Set(Warp11.Edit.history (withLayout (emptyGraph "Untitled" g.sampleRate)))
                             designName.Set "Untitled"
                             select None
                             message.Set "a new design")
                         button "Open" (fun () ->
-                            match Warp11.Placement.DesignFile.load filePath.Current with
+                            match Warp11.DesignFile.load filePath.Current with
                             | Ok g ->
                                 stopLive ()
-                                history.Set(Warp11.Placement.Edit.history (withLayout g))
+                                history.Set(Warp11.Edit.history (withLayout g))
                                 designName.Set g.name
                                 rateText.Set(g.sampleRate.ToString(CultureInfo.InvariantCulture))
                                 select None
@@ -954,7 +954,7 @@ let view (opening: Opening) : Control =
                                 message.Set "a path to save to, first"
                             else
                                 try
-                                    Warp11.Placement.DesignFile.save filePath.Current g
+                                    Warp11.DesignFile.save filePath.Current g
                                     message.Set $"saved {filePath.Current}"
                                 with e ->
                                     message.Set $"could not save: {e.Message}")
@@ -963,7 +963,7 @@ let view (opening: Opening) : Control =
                             if filePath.Current = "" then
                                 message.Set "a path to export beside, first"
                             else
-                                match Warp11.Placement.Export.export g with
+                                match Warp11.Export.export g with
                                 | Ok source ->
                                     let path = System.IO.Path.ChangeExtension(filePath.Current, ".fs")
                                     System.IO.File.WriteAllText(path, source)
@@ -1311,9 +1311,9 @@ let view (opening: Opening) : Control =
               row ("unit", $"{b.unit}, {lawText}") ]
             @ (if factory.parameters.IsEmpty then [] else heading "creation arguments" :: (factory.parameters |> List.map argumentRow))
             @ [ heading "signal inlets" ]
-            @ (u.operands.pins |> List.map (fun (n, f) -> row (n, describeFormat f)))
+            @ (u.operands.fields |> List.map (fun (n, f) -> row (n, describeFormat f)))
             @ [ heading "signal outlets" ]
-            @ (u.results.pins |> List.map (fun (n, f) -> row (n, describeFormat f)))
+            @ (u.results.fields |> List.map (fun (n, f) -> row (n, describeFormat f)))
             @ [ heading "control inlets" ]
             @ (u.controls |> List.map controlRow)
 

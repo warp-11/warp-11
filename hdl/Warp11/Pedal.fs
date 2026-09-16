@@ -10,12 +10,12 @@
 ///
 /// A comb is `echo` — a feedback comb over a delay line is what an echo is —
 /// and a splitter is two wires from one outlet, which the graph allows.
-module Warp11.Placement.Pedal
+module Warp11.Pedal
 
 open Warp11
-open Warp11.Placement.Fu
+open Warp11.Fu
 
-let private stereo = pins2 ("left", sint sampleWidth) ("right", sint sampleWidth)
+let private stereo = pins2 ("left", signedInt sampleWidth) ("right", signedInt sampleWidth)
 
 /// A beat field read as a sample: a declared signed wire, whichever way the
 /// field arrived, so `pad` and `saturate` have a named signed signal.
@@ -62,7 +62,7 @@ let private saturatedDifference (instance: string) (name: string) (a: Expr) (b: 
 /// hands back the two samples out. The handshake passes straight through.
 let private stereoUnit
     (name: string)
-    (operands: Pins<'a>)
+    (operands: Layout<'a>)
     (controls: (string * NumberFormat) list)
     (law: string -> Expr list -> 'a -> Expr -> Expr * Expr)
     : Fu<'a, Expr * Expr> =
@@ -81,15 +81,15 @@ let private stereoUnit
             { payload = law instance controls s.payload accepted
               valid = s.valid
               ready = s.ready
-              layout = lower stereo }) }
+              layout = stereo }) }
 
 /// Two stereo inputs summed, each through its own Q8.8 gain — a wet/dry
 /// mix, or two voices. Saturating.
 let mixer: Fu<Expr * Expr * Expr * Expr, Expr * Expr> =
     stereoUnit
         "mixer"
-        (pins4 ("a_left", sint sampleWidth) ("a_right", sint sampleWidth) ("b_left", sint sampleWidth) ("b_right", sint sampleWidth))
-        [ "a_gain", uint 16; "b_gain", uint 16 ]
+        (pins4 ("a_left", signedInt sampleWidth) ("a_right", signedInt sampleWidth) ("b_left", signedInt sampleWidth) ("b_right", signedInt sampleWidth))
+        [ "a_gain", unsignedInt 16; "b_gain", unsignedInt 16 ]
         (fun instance controls (aL, aR, bL, bR) _ ->
             match controls with
             | [ aGain; bGain ] ->
@@ -114,7 +114,7 @@ let waveshaper: Fu<Expr * Expr, Expr * Expr> =
     stereoUnit
         "waveshaper"
         stereo
-        [ "drive", uint 16 ]
+        [ "drive", unsignedInt 16 ]
         (fun instance controls (l, r) _ ->
             match controls with
             | [ drive ] ->
@@ -164,7 +164,7 @@ let tremolo: Fu<Expr * Expr, Expr * Expr> =
     stereoUnit
         "tremolo"
         stereo
-        [ "rate", uint tremoloPhaseWidth; "depth", uint 16 ]
+        [ "rate", unsignedInt tremoloPhaseWidth; "depth", unsignedInt 16 ]
         (fun instance controls (l, r) accepted ->
             match controls with
             | [ rate; depth ] ->
@@ -208,7 +208,7 @@ let allpass (capacity: int) : Fu<Expr * Expr, Expr * Expr> =
     stereoUnit
         "allpass"
         stereo
-        [ "delay", uint (log2Exact capacity); "gain", uint 16 ]
+        [ "delay", unsignedInt (log2Exact capacity); "gain", unsignedInt 16 ]
         (fun instance controls (l, r) accepted ->
             match controls with
             | [ delay; gain ] ->

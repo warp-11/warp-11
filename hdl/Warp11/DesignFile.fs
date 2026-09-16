@@ -16,13 +16,13 @@
 ///   "wires":    [ { "from": "input.left", "to": "gain.left" }, … ],
 ///   "positions": { "input": [60, 120], "gain": [320, 120], "output": [580, 120] } }
 /// ```
-module Warp11.Placement.DesignFile
+module Warp11.DesignFile
 
 open System.Text.Json
 open System.Text.Json.Nodes
-open Warp11.Placement.Fu
-open Warp11.Placement.Factories
-open Warp11.Placement.Graph
+open Warp11.Fu
+open Warp11.Factories
+open Warp11.Graph
 
 let private formatNode (name: string, f: NumberFormat) : JsonNode =
     let o = JsonObject()

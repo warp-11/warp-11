@@ -3,15 +3,15 @@
 module Warp11.Placement.GraphChecks
 
 open Warp11
-open Warp11.Placement.Fu
-open Warp11.Placement.Units
+open Warp11.Fu
+open Warp11.Units
 open Warp11.Placement.Placement
-open Warp11.Placement.Pedal
-open Warp11.Placement.Factories
-open Warp11.Placement.Graph
-open Warp11.Placement.Edit
-open Warp11.Placement.Elaborate
-open Warp11.Placement.Devices
+open Warp11.Pedal
+open Warp11.Factories
+open Warp11.Graph
+open Warp11.Edit
+open Warp11.Elaborate
+open Warp11.Devices
 
 // ---------------------------------------------------------------------------
 // UD1 — The data form and the typed form meet at the bytes.
@@ -93,9 +93,9 @@ let paletteIsTheUnits () : bool =
         | Ok u -> u
         | Error why -> failwith why
 
-    (unit "mul16").operands.pins = multiply16.operands.pins
-    && (unit "mul16").results.pins = multiply16.results.pins
-    && (unit "add32").results.pins = add32.results.pins
+    (unit "mul16").operands.fields = multiply16.operands.fields
+    && (unit "mul16").results.fields = multiply16.results.fields
+    && (unit "add32").results.fields = add32.results.fields
     && (unit "gain").controls = gainModule.controls
     && (match (unit "smul16").law, (unit "gain").law with
         | Sequential _, Sequential _ -> true
@@ -109,7 +109,7 @@ let paletteIsTheUnits () : bool =
 let gainGraphIsTheGainPatch () : bool =
     let fromData = elaborate gainGraph
     let sim = Sim fromData.def
-    let one beat = streamThrough sim (streamPins "in1" (lower stereoPins)) (streamPins "out1" (lower stereoPins)) [ beat ] |> Seq.head
+    let one beat = streamThrough sim (streamPins "in1" (stereoPins)) (streamPins "out1" (stereoPins)) [ beat ] |> Seq.head
     sim.Poke("volume", 2UL * gainUnity)
     sim.Poke("mute", 0UL)
 
@@ -155,7 +155,7 @@ let wavPlaysThroughTheGraph () : bool =
 
 // CHECK
 let editsBuildTheGainDesign () : bool =
-    let stereo = [ "left", sint sampleWidth; "right", sint sampleWidth ]
+    let stereo = [ "left", signedInt sampleWidth; "right", signedInt sampleWidth ]
 
     let step (change: Graph -> Result<Graph, string>) (h: History) =
         match apply change h with
@@ -174,8 +174,8 @@ let editsBuildTheGainDesign () : bool =
         history (emptyGraph "GainPatch" defaultSampleRate)
         |> step (addInputPin stereo[0])
         |> step (addInputPin stereo[1])
-        |> step (addControl ("volume", uint 16))
-        |> step (addControl ("mute", uint 1))
+        |> step (addControl ("volume", unsignedInt 16))
+        |> step (addControl ("mute", unsignedInt 1))
         |> step (addOutputPin stereo[0])
         |> step (addOutputPin stereo[1])
         |> step (addBox "gain" (320.0, 120.0) >> Result.map fst)
@@ -223,7 +223,7 @@ let editsBuildTheGainDesign () : bool =
     // a pin that is not there
     && refuses (addWire (pin "input" "centre", Out) (pin "gain" "left", In)) [ "input.centre" ]
     // a control named like an input pin shares the input box with it
-    && refuses (addControl ("left", uint 8)) [ "left" ]
+    && refuses (addControl ("left", unsignedInt 8)) [ "left" ]
     // a box cannot be named for the boundary, and a unit must be in the palette
     && refuses (renameBox "gain" "output") [ "output" ]
     && refuses (addBox "biquad" (0.0, 0.0) >> Result.map fst) [ "biquad"; "palette" ]
@@ -305,10 +305,10 @@ let argumentsMakeTheUnit () : bool =
 
     let threeBand (low: string) (mid: string) (high: string) =
         (history (emptyGraph "ThreeBandEq" rate)
-         |> step (addInputPin stereoPins.pins[0])
-         |> step (addInputPin stereoPins.pins[1])
-         |> step (addOutputPin stereoPins.pins[0])
-         |> step (addOutputPin stereoPins.pins[1])
+         |> step (addInputPin stereoPins.fields[0])
+         |> step (addInputPin stereoPins.fields[1])
+         |> step (addOutputPin stereoPins.fields[0])
+         |> step (addOutputPin stereoPins.fields[1])
          |> band "low" low "200" "6"
          |> band "mid" mid "1000" "-4"
          |> band "high" high "5000" "3"
@@ -332,7 +332,7 @@ let argumentsMakeTheUnit () : bool =
 
         defModule
             "ThreeBandEq"
-            (fun p -> streamInputPorts p "in1" (lower stereoPins), streamOutputPorts p "out1" (lower stereoPins))
+            (fun p -> streamInputPorts p "in1" (stereoPins), streamOutputPorts p "out1" (stereoPins))
             (fun (inPorts, outPorts) ->
                 [ streamSource inPorts ]
                 |> fuStagesWith [] (section LowShelf 200.0 6.0) "low" stereoPins id (fun r _ -> r)
@@ -404,7 +404,7 @@ let argumentsMakeTheUnit () : bool =
 // CHECK
 let pedalUnitsDoWhatTheySay () : bool =
     let rate = int defaultSampleRate
-    let stereo = [ "left", sint sampleWidth; "right", sint sampleWidth ]
+    let stereo = [ "left", signedInt sampleWidth; "right", signedInt sampleWidth ]
 
     let chain (name: string) (unit: string) (controls: (string * NumberFormat) list) (extraEdges: Edge list) (boxEdges: Edge list) : Graph =
         { emptyGraph name defaultSampleRate with
@@ -433,7 +433,7 @@ let pedalUnitsDoWhatTheySay () : bool =
             (chain
                 "MixTwice"
                 "mixer"
-                [ "a_gain", uint 16; "b_gain", uint 16 ]
+                [ "a_gain", unsignedInt 16; "b_gain", unsignedInt 16 ]
                 []
                 [ { from = pin "input" "left"; ``to`` = pin "u" "a_left" }
                   { from = pin "input" "right"; ``to`` = pin "u" "a_right" }
@@ -441,7 +441,7 @@ let pedalUnitsDoWhatTheySay () : bool =
                   { from = pin "input" "right"; ``to`` = pin "u" "b_right" } ])
             [ "a_gain", gainUnity; "b_gain", gainUnity ]
 
-    let shaper = chain "Shape" "waveshaper" [ "drive", uint 16 ] [] straight
+    let shaper = chain "Shape" "waveshaper" [ "drive", unsignedInt 16 ] [] straight
     let shapedClean = heard shaper [ "drive", gainUnity ]
     let shapedHard = heard shaper [ "drive", 16UL * gainUnity ]
     // 1.5x − 0.5x³ at x = 0.25 is 0.3672, i.e. 1.469 times the input.
@@ -451,7 +451,7 @@ let pedalUnitsDoWhatTheySay () : bool =
     // tone and the quietest is near silence.
     let trem =
         heard
-            (chain "Trem" "tremolo" [ "rate", uint tremoloPhaseWidth; "depth", uint 16 ] [] straight)
+            (chain "Trem" "tremolo" [ "rate", unsignedInt tremoloPhaseWidth; "depth", unsignedInt 16 ] [] straight)
             [ "rate", uint64 ((1 <<< tremoloPhaseWidth) / 4000); "depth", gainUnity ]
 
     let tenth (samples: int16[]) (i: int) =
@@ -464,7 +464,7 @@ let pedalUnitsDoWhatTheySay () : bool =
     // its own level, within a few percent.
     let passed =
         heard
-            (chain "AllPass" "allpass" [ "delay", uint 12; "gain", uint 16 ] [] straight)
+            (chain "AllPass" "allpass" [ "delay", unsignedInt 12; "gain", unsignedInt 16 ] [] straight)
             [ "delay", 100UL; "gain", 179UL ]
 
     let settled = tenth passed 9
@@ -488,8 +488,6 @@ let pedalUnitsDoWhatTheySay () : bool =
 
 // CHECK
 let controlsHoldValues () : bool =
-    let stereo = [ "left", sint sampleWidth; "right", sint sampleWidth ]
-
     let step (change: Graph -> Result<Graph, string>) (h: History) =
         match apply change h with
         | h, None -> h
@@ -521,9 +519,9 @@ let controlsHoldValues () : bool =
          |> step (wire (pin "gain" "right") (pin "gain2" "right"))
          |> step (wire (pin "gain2" "left") (pin "output" "left"))
          |> step (wire (pin "gain2" "right") (pin "output" "right"))
-         |> step (addControlBox NumberBox (uint 16) (string gainUnity) (0.0, 0.0) >> Result.map fst)
+         |> step (addControlBox NumberBox (unsignedInt 16) (string gainUnity) (0.0, 0.0) >> Result.map fst)
          |> step (renameBox "number" "vol")
-         |> step (addControlBox ConstantBox (uint 1) "0" (0.0, 0.0) >> Result.map fst)
+         |> step (addControlBox ConstantBox (unsignedInt 1) "0" (0.0, 0.0) >> Result.map fst)
          |> step (wire (pin "vol" controlOutlet) (pin "gain" "volume"))
          |> step (wire (pin "vol" controlOutlet) (pin "gain2" "volume"))
          |> step (wire (pin "constant" controlOutlet) (pin "gain" "mute"))
@@ -583,7 +581,7 @@ let controlsHoldValues () : bool =
 
 // CHECK
 let exportIsTheDesign () : bool =
-    let stereo = [ "left", sint sampleWidth; "right", sint sampleWidth ]
+    let stereo = stereoPins.fields
 
     let step (change: Graph -> Result<Graph, string>) (h: History) =
         match apply change h with
@@ -634,9 +632,9 @@ let exportIsTheDesign () : bool =
          |> step (wire (pin "gain" "right") (pin "gain2" "right"))
          |> step (wire (pin "gain2" "left") (pin "output" "left"))
          |> step (wire (pin "gain2" "right") (pin "output" "right"))
-         |> step (addControlBox NumberBox (uint 16) (string gainUnity) (0.0, 0.0) >> Result.map fst)
+         |> step (addControlBox NumberBox (unsignedInt 16) (string gainUnity) (0.0, 0.0) >> Result.map fst)
          |> step (renameBox "number" "vol")
-         |> step (addControlBox ConstantBox (uint 1) "0" (0.0, 0.0) >> Result.map fst)
+         |> step (addControlBox ConstantBox (unsignedInt 1) "0" (0.0, 0.0) >> Result.map fst)
          |> step (wire (pin "vol" controlOutlet) (pin "gain" "volume"))
          |> step (wire (pin "vol" controlOutlet) (pin "gain2" "volume"))
          |> step (wire (pin "constant" controlOutlet) (pin "gain" "mute")))
@@ -659,7 +657,7 @@ let exportIsTheDesign () : bool =
     let sources =
         designs
         |> List.map (fun g ->
-            match Warp11.Placement.Export.export g with
+            match Warp11.Export.export g with
             | Ok source -> source
             | Error why -> failwith $"{g.name}: {why}")
 

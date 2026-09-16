@@ -101,7 +101,7 @@ let streamOfPorts (layout: Layout<'p>) (ports: StreamPorts) : Stream<'p> =
         | [ _ ] -> [ ports.data ]
         | fields ->
             fields
-            |> List.mapFold (fun hi (_, w) -> slice hi (hi - w + 1) ports.data, hi - w) (width ports.data - 1)
+            |> List.mapFold (fun hi (_, f) -> slice hi (hi - f.totalWidth + 1) ports.data, hi - f.totalWidth) (width ports.data - 1)
             |> fst
 
     { payload = layout.unpack fields
@@ -142,7 +142,7 @@ type StreamOutputPorts<'p> =
 /// Declare a consumed stream's boundary: one input per layout field
 /// (`{name}_{field}`), `{name}_valid` in, `{name}_ready` out.
 let streamInputPorts (p: Ports) name (layout: Layout<'p>) : StreamInputPorts<'p> =
-    { payload = layout.unpack [ for n, w in layout.fields -> p.inPort $"{name}_{n}" w ]
+    { payload = layout.unpack [ for n, f in layout.fields -> p.inPort $"{name}_{n}" f.totalWidth ]
       valid = p.inPort $"{name}_valid" 1
       ready = p.outPort $"{name}_ready" 1
       layout = layout }
@@ -150,7 +150,7 @@ let streamInputPorts (p: Ports) name (layout: Layout<'p>) : StreamInputPorts<'p>
 /// Declare a produced stream's boundary: one output per layout field,
 /// `{name}_valid` out, `{name}_ready` in.
 let streamOutputPorts (p: Ports) name (layout: Layout<'p>) : StreamOutputPorts<'p> =
-    { targets = [ for n, w in layout.fields -> p.outPort $"{name}_{n}" w ]
+    { targets = [ for n, f in layout.fields -> p.outPort $"{name}_{n}" f.totalWidth ]
       valid = p.outPort $"{name}_valid" 1
       ready = p.inPort $"{name}_ready" 1
       layout = layout }
@@ -241,13 +241,13 @@ type FlowOutputPorts<'p> =
 /// Declare a consumed flow's boundary: one input per layout field and
 /// `{name}_valid`, nothing driven back.
 let flowInputPorts (p: Ports) name (layout: Layout<'p>) : FlowInputPorts<'p> =
-    { payload = layout.unpack [ for n, w in layout.fields -> p.inPort $"{name}_{n}" w ]
+    { payload = layout.unpack [ for n, f in layout.fields -> p.inPort $"{name}_{n}" f.totalWidth ]
       valid = p.inPort $"{name}_valid" 1
       layout = layout }
 
 /// Declare a produced flow's boundary.
 let flowOutputPorts (p: Ports) name (layout: Layout<'p>) : FlowOutputPorts<'p> =
-    { targets = [ for n, w in layout.fields -> p.outPort $"{name}_{n}" w ]
+    { targets = [ for n, f in layout.fields -> p.outPort $"{name}_{n}" f.totalWidth ]
       valid = p.outPort $"{name}_valid" 1
       layout = layout }
 
@@ -275,7 +275,7 @@ let streamMap (f: 'p -> 'p) (s: Stream<'p>) : Stream<'p> =
         payload = payload
         layout =
             { s.layout with
-                fields = List.map2 (fun (n, _) e -> n, width e) s.layout.fields (s.layout.pack payload) } }
+                fields = List.map2 (fun (n, _) e -> n, formatOf e) s.layout.fields (s.layout.pack payload) } }
 
 /// The shape-changing map — projections and restructurings to a different
 /// payload type. The new type needs a new pack/unpack recipe, so the caller
@@ -300,23 +300,23 @@ let streamMapTo (l: Layout<'q>) (f: 'p -> 'q) (s: Stream<'p>) : Stream<'q> =
 let streamStageFor (layout: Layout<'p>) : Stream<'p> -> Stream<'p> =
     let stem =
         layout.fields
-        |> List.map (fun (n, w) -> $"{n}%d{w}")
+        |> List.map (fun (n, f) -> $"{n}%d{f.totalWidth}")
         |> String.concat "_"
 
     let stage =
         defModule
             $"StreamStage_{stem}"
             (fun p ->
-                let ins = [ for n, w in layout.fields -> p.inPort $"in_{n}" w ]
-                let outs = [ for n, w in layout.fields -> p.outPort $"out_{n}" w ]
+                let ins = [ for n, f in layout.fields -> p.inPort $"in_{n}" f.totalWidth ]
+                let outs = [ for n, f in layout.fields -> p.outPort $"out_{n}" f.totalWidth ]
 
                 ins, outs, p.inPort "in_valid" 1, p.outPort "in_ready" 1, p.outPort "out_valid" 1, p.inPort "out_ready" 1)
             (fun (ins, outs, inValid, inReady, outValid, outReady) ->
                 let validR = regBit "validR"
                 (bnot validR ||| outReady) ==> inReady
 
-                for (n, w), i, o in List.zip3 layout.fields ins outs do
-                    let r = reg $"{n}R" w
+                for (n, f), i, o in List.zip3 layout.fields ins outs do
+                    let r = reg $"{n}R" f.totalWidth
                     mux inReady i r ==> r
                     r ==> o
 
@@ -543,14 +543,14 @@ let streamFifo (name: string) (depth: int) (s: Stream<'p>) : Stream<'p> =
         | first :: rest -> List.fold cat first rest
 
     let unpackFields (packed: Expr) =
-        let widths = List.map snd s.layout.fields
+        let widths = List.map fieldWidth s.layout.fields
         let mutable offset = List.sum widths
 
         [ for w in widths ->
               offset <- offset - w
               slice (offset + w - 1) offset packed ]
 
-    let payloadWidth = s.layout.fields |> List.sumBy snd
+    let payloadWidth = s.layout.fields |> List.sumBy fieldWidth
     let packed = packFields (s.layout.pack s.payload)
 
     let build =
@@ -910,7 +910,7 @@ let streamConflate3
     : Stream<Expr * Expr * Expr> * Conflate3Status =
     let indexField, dataField =
         match frames.layout.fields with
-        | [ (_, iw); (_, dw); (_, 1) ] -> iw, dw
+        | [ (_, iw); (_, dw); (_, lw) ] when lw.totalWidth = 1 -> iw.totalWidth, dw.totalWidth
         | _ -> failwith "streamConflate3 wants an (index, data, last) stream — snapshotSource's shape"
 
     let index, data, last = frames.payload
@@ -1260,7 +1260,7 @@ let flowMap (fn: 'p -> 'p) (f: Flow<'p>) : Flow<'p> =
         payload = mapped
         layout =
             { f.layout with
-                fields = List.map2 (fun (n, _) v -> n, width v) f.layout.fields (f.layout.pack mapped) } }
+                fields = List.map2 (fun (n, _) v -> n, formatOf v) f.layout.fields (f.layout.pack mapped) } }
 
 /// One cycle of latency, and nothing else. Registering a stream needs a skid
 /// buffer to avoid dropping a beat when the consumer stalls; a flow has no
@@ -1271,8 +1271,8 @@ let flowStage (name: string) (f: Flow<'p>) : Flow<'p> =
     f.valid ==> validR
 
     let fields =
-        [ for (n, w), value in List.zip f.layout.fields (f.layout.pack f.payload) ->
-              let r = reg $"{name}_{n}" w
+        [ for (n, f), value in List.zip f.layout.fields (f.layout.pack f.payload) ->
+              let r = reg $"{name}_{n}" f.totalWidth
               value ==> r
               r ]
 

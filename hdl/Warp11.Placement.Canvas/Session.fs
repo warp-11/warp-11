@@ -1,19 +1,19 @@
 /// Opening a patch live: the graph elaborated with probes, a recording on its
 /// boundary, a debug session around it, and every probe on the watch list.
-module Warp11.Placement.Canvas.Patch
+module Warp11.Placement.Canvas.Session
 
 open Warp11
 open Warp11.Debug
-open Warp11.Placement.Fu
-open Warp11.Placement.Graph
-open Warp11.Placement.Elaborate
+open Warp11.Fu
+open Warp11.Graph
+open Warp11.Elaborate
 open Warp11.Placement.Canvas.FuncCanvas
 
 /// A graph running in the simulator with a WAV playing into it. The session
 /// runs on its own thread except in a browser, where the canvas pumps it.
 let rec openWith (g: Graph) (recording: WavData) (controls: (string * uint64) list) (savePath: string option) (sink: AudioSink.AudioSink option) : Live =
     let design = elaborateWith true g
-    let inPins, outPins = streamPins "in1" (lower (pinsOfList g.inputs)), streamPins "out1" (lower (pinsOfList g.outputs))
+    let inPins, outPins = streamPins "in1" (layoutOfList g.inputs), streamPins "out1" (layoutOfList g.outputs)
 
     // With a speaker, the device that hears also plays; without, the
     // library's own recording device.
@@ -42,7 +42,7 @@ let rec openWith (g: Graph) (recording: WavData) (controls: (string * uint64) li
     // have lost one.
     let ports = controlPorts g
 
-    for name, value in Warp11.Placement.Devices.startingValues g @ controls do
+    for name, value in Warp11.Devices.startingValues g @ controls do
         if ports |> List.exists (fun (n, _) -> n = name) then
             session.Poke(name, System.Numerics.BigInteger value)
 

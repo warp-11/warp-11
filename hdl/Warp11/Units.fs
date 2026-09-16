@@ -1,10 +1,10 @@
 /// Units that cost cycles, for the trial. A sequential unit presents a
 /// stream — the only way anything here may say it takes time — and takes an
 /// instance name, because there will be copies.
-module Warp11.Placement.Units
+module Warp11.Units
 
 open Warp11
-open Warp11.Placement.Fu
+open Warp11.Fu
 
 /// Multiply by shift-and-add: `w` cycles a product, one product at a time,
 /// no DSP block. The classic bit-serial form — the accumulator starts as
@@ -65,9 +65,28 @@ let shiftAddMultiplier (name: string) (w: int) : Stream<Expr * Expr> -> Stream<E
 /// beside it. The library's instance-as-a-function is the law verbatim; this
 /// line is the whole cost of making a module a box.
 let gainModule: Fu<Expr * Expr, Expr * Expr> =
-    let stereo = pins2 ("left", sint sampleWidth) ("right", sint sampleWidth)
+    let stereo = pins2 ("left", signedInt sampleWidth) ("right", signedInt sampleWidth)
 
-    moduleUnit "gain" stereo stereo [ "volume", uint 16; "mute", uint 1 ] (fun instance controls s ->
+    moduleUnit "gain" stereo stereo [ "volume", unsignedInt 16; "mute", unsignedInt 1 ] (fun instance controls s ->
         match controls with
         | [ volume; mute ] -> audioGain "AudioGain" instance volume mute s
         | _ -> failwith "gain: volume and mute")
+
+// ---------------------------------------------------------------------------
+// Three small units the first designs were placed with, and the palette
+// still offers: a 16-bit multiply and a 32-bit add that cost nothing to
+// copy, and the shift-and-add multiplier that costs sixteen cycles a
+// product.
+
+let multiply16 =
+    fu
+        "mul16"
+        (pins2 ("a", unsignedInt 16) ("b", unsignedInt 16))
+        (pins1 ("product", Warp11.Number.productFormat (unsignedInt 16) (unsignedInt 16)))
+        (fun (a, b) -> mul a b)
+
+let add32 = fu "add32" (pins2 ("x", unsignedInt 32) ("y", unsignedInt 32)) (pins1 ("sum", unsignedInt 33)) (fun (x, y) -> add (pad 33 x) (pad 33 y))
+
+let shiftAddMultiply16 =
+    fuSequential "smul16" (pins2 ("a", unsignedInt 16) ("b", unsignedInt 16)) (pins1 ("product", unsignedInt 32)) (fun instance -> shiftAddMultiplier instance 16)
+

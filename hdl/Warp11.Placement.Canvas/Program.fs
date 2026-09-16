@@ -7,7 +7,7 @@ open Avalonia.FuncUI.Hosts
 open Avalonia.Themes.Fluent
 open Warp11
 open Warp11.Placement
-open Warp11.Placement.Graph
+open Warp11.Graph
 
 type CanvasWindow(o: FuncCanvas.Opening) as this =
     inherit HostWindow()
@@ -34,7 +34,7 @@ type App(o: FuncCanvas.Opening) =
 
 /// What to open:
 ///
-/// - `patch file.wav` — the gain design with the recording playing into it,
+/// - `play file.wav` — the gain design with the recording playing into it,
 ///   the canvas over a running design;
 /// - `edit design.json [file.wav]` — a design file (a new design if there is
 ///   no file yet), and with a recording, `Open in sim` runs it;
@@ -47,8 +47,8 @@ let private opening (argv: string[]) : FuncCanvas.Opening =
           file = None }
 
     match argv with
-    | [| "patch"; wavPath |] ->
-        let live = Patch.openGain wavPath (AudioSink.available ())
+    | [| "play"; wavPath |] ->
+        let live = Session.openGain wavPath (AudioSink.available ())
         { none with graph = gainGraph; live = Some live; opener = Some live.reopen }
     | [| "edit"; designPath |]
     | [| "edit"; designPath; _ |] ->
@@ -66,7 +66,7 @@ let private opening (argv: string[]) : FuncCanvas.Opening =
                     (recording |> Option.map (fun w -> float w.sampleRate) |> Option.defaultValue defaultSampleRate)
             | Error why -> failwith why
 
-        let opener = recording |> Option.map (fun w -> Patch.wavOpenerOf argv[2] w (AudioSink.available ()))
+        let opener = recording |> Option.map (fun w -> Session.wavOpenerOf argv[2] w (AudioSink.available ()))
         { graph = g; live = None; opener = opener; file = Some designPath }
     | _ -> none
 

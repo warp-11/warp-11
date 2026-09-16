@@ -1750,7 +1750,7 @@ let windowSweep =
     // The window's own output shape: three widened rows per beat (8 cells
     // plus one wrap column each side), named as `lineWindow` names them.
     let windowedRows: Layout<Expr list> =
-        { fields = [ for i in 0..2 -> $"row%d{i}", 10 ]
+        { fields = [ for i in 0..2 -> $"row%d{i}", unsignedInt 10 ]
           pack = fun rows -> rows
           unpack = fun nets -> nets }
 

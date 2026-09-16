@@ -8,13 +8,13 @@
 /// The printer is honest only if what it prints elaborates to the bytes the
 /// graph does, and that is its one check (UD11): the source is compiled and
 /// its Verilog compared. It walks the beat exactly as `Elaborate` does.
-module Warp11.Placement.Export
+module Warp11.Export
 
-open Warp11.Placement.Fu
-open Warp11.Placement.Factories
-open Warp11.Placement.Graph
-open Warp11.Placement.Edit
-open Warp11.Placement.Elaborate
+open Warp11.Fu
+open Warp11.Factories
+open Warp11.Graph
+open Warp11.Edit
+open Warp11.Elaborate
 
 /// F# keywords a pin or port may be called, escaped in the source.
 let private keywords =
@@ -30,7 +30,7 @@ let private ident (name: string) = if keywords.Contains name then $"``{name}``" 
 
 let private showFormat (f: NumberFormat) =
     if f.fracBits = 0 then
-        (if f.signed then $"sint %d{f.totalWidth}" else $"uint %d{f.totalWidth}")
+        (if f.signed then $"signedInt %d{f.totalWidth}" else $"unsignedInt %d{f.totalWidth}")
     else
         let signed = if f.signed then "true" else "false"
         $"({{ totalWidth = %d{f.totalWidth}; fracBits = %d{f.fracBits}; signed = {signed} }}: NumberFormat)"
@@ -92,8 +92,8 @@ let export (g: Graph) : Result<string, string> =
             let outs = [ for i in 1 .. g.streams -> $"out%d{i}" ]
 
             let ioFactory =
-                [ for i in ins -> $"streamInputPorts p \"{i}\" (lower ({inPins}))" ]
-                @ [ for o in outs -> $"streamOutputPorts p \"{o}\" (lower ({outPins}))" ]
+                [ for i in ins -> $"streamInputPorts p \"{i}\" ({inPins})" ]
+                @ [ for o in outs -> $"streamOutputPorts p \"{o}\" ({outPins})" ]
                 @ [ for n, f in ports -> $"p.inPort \"{n}\" %d{f.totalWidth}" ]
 
             let ioPattern = tuple (ins @ outs @ [ for n, _ in ports -> ident n ])
@@ -116,7 +116,7 @@ let export (g: Graph) : Result<string, string> =
                     let indexOf (source: PinRef) =
                         slots |> List.findIndex (fun (_, _, s) -> s = source)
 
-                    let operandIdx = [ for n, _ in unit.operands.pins -> indexOf (sourceOf (pin b.name n)) ]
+                    let operandIdx = [ for n, _ in unit.operands.fields -> indexOf (sourceOf (pin b.name n)) ]
 
                     let controls =
                         [ for n, f in unit.controls ->
@@ -130,7 +130,7 @@ let export (g: Graph) : Result<string, string> =
                                   | None -> failwith $"{showPin e.from}: a control wired from a unit's box is not built" ]
 
                     let carried = slots |> List.indexed |> List.filter (fun (_, (_, _, s)) -> neededAfter b s)
-                    let results = [ for n, f in unit.results.pins -> n, f, pin b.name n ]
+                    let results = [ for n, f in unit.results.fields -> n, f, pin b.name n ]
                     let nextSlots = results @ List.map snd carried
                     let carriedIdx = carried |> List.map fst |> set
 
@@ -172,7 +172,7 @@ let export (g: Graph) : Result<string, string> =
                         []
                     else
                         let pattern = names |> List.mapi (fun i n -> if List.contains i outIdx then ident n else "_")
-                        [ $"            |> List.map (streamMapTo (lower ({outPins})) (fun {tuple pattern} -> {tupleValue [ for i in outIdx -> ident names[i] ]}))" ]
+                        [ $"            |> List.map (streamMapTo ({outPins}) (fun {tuple pattern} -> {tupleValue [ for i in outIdx -> ident names[i] ]}))" ]
 
                 let sources = ins |> List.map (fun i -> $"streamSource {i}") |> String.concat "; "
                 let sinks = String.concat "; " outs
@@ -184,11 +184,10 @@ let export (g: Graph) : Result<string, string> =
                        $"module Exported.{g.name}"
                        ""
                        "open Warp11"
-                       "open Warp11.Placement.Fu"
-                       "open Warp11.Placement.Placement"
-                       "open Warp11.Placement.Units"
-                       "open Warp11.Placement.Pedal"
-                       "open Warp11.Placement.Factories"
+                       "open Warp11.Fu"
+                       "open Warp11.Units"
+                       "open Warp11.Pedal"
+                       "open Warp11.Factories"
                        ""
                        $"let sampleRate = {showFloat g.sampleRate}"
                        ""

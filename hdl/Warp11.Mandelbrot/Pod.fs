@@ -20,7 +20,7 @@ let private q9_55 = Number.q9_55
 /// Pixel coordinates are integers — the `fracBits = 0` case of the same numeric
 /// layer the Q4.28 coordinates use, so `px * step` needs no integer-times-fixed
 /// special case.
-let private pixelIndex = Number.signedInt 7
+let private pixelIndex = signedInt 7
 
 let internal mandelWidth = 64
 let internal mandelHeight = 48

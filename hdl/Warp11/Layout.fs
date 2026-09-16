@@ -2,12 +2,31 @@
 module Warp11.Layout
 
 /// The witness that turns a typed payload into ports and back: field names and
-/// widths for declaring, pack/unpack for wiring. Hand-written per shape — the
+/// formats for declaring, pack/unpack for wiring. Hand-written per shape — the
 /// no-reflection answer, one line per layout via the layoutN helpers below.
+///
+/// A field carries its `NumberFormat`, not only a width: what a palette reads
+/// to decide whether two pins connect, and what an export prints. The ports a
+/// layout declares are still width-only — the reading belongs to the unit
+/// that computes on the field, as it always has.
 type Layout<'p> =
-    { fields: (string * int) list
+    { fields: (string * NumberFormat) list
       pack: 'p -> Expr list
       unpack: Expr list -> 'p }
+
+/// A field's width, for the places that declare and slice.
+let fieldWidth (_: string, f: NumberFormat) = f.totalWidth
+
+/// Fields named with a width only, read as unsigned — the width-only
+/// spelling of a hand-built layout.
+let fieldsOfWidths (fields: (string * int) list) : (string * NumberFormat) list =
+    [ for n, w in fields -> n, unsignedInt w ]
+
+/// The format an expression already has: its width and its reading.
+let formatOf (e: Expr) : NumberFormat =
+    { totalWidth = width e
+      fracBits = 0
+      signed = isSigned e }
 
 /// A ready/valid stream endpoint, generic over its payload — one Expr, a tuple of
 /// named fields, whatever the layout says. `payload` and `valid` are driven by the
@@ -75,7 +94,7 @@ let layoutJoin (a: Layout<'a>) (b: Layout<'b>) : Layout<'a * 'b> =
 /// One named field. The payload *is* the `Expr`, so a single-field stream
 /// carries a value rather than a one-tuple.
 let layout1 (an: string, aw: int) : Layout<Expr> =
-    { fields = [ (an, aw) ]
+    { fields = [ (an, unsignedInt aw) ]
       pack = fun x -> [ x ]
       unpack =
         fun nets ->
@@ -85,7 +104,7 @@ let layout1 (an: string, aw: int) : Layout<Expr> =
 
 /// Two named fields, as a pair.
 let layout2 (an: string, aw: int) (bn: string, bw: int) : Layout<Expr * Expr> =
-    { fields = [ (an, aw); (bn, bw) ]
+    { fields = [ (an, unsignedInt aw); (bn, unsignedInt bw) ]
       pack = fun (x, y) -> [ x; y ]
       unpack =
         fun nets ->
@@ -95,7 +114,7 @@ let layout2 (an: string, aw: int) (bn: string, bw: int) : Layout<Expr * Expr> =
 
 /// Three named fields, as a triple.
 let layout3 (an: string, aw: int) (bn: string, bw: int) (cn: string, cw: int) : Layout<Expr * Expr * Expr> =
-    { fields = [ (an, aw); (bn, bw); (cn, cw) ]
+    { fields = [ (an, unsignedInt aw); (bn, unsignedInt bw); (cn, unsignedInt cw) ]
       pack = fun (x, y, z) -> [ x; y; z ]
       unpack =
         fun nets ->
@@ -111,13 +130,90 @@ let layout4
     (cn: string, cw: int)
     (dn: string, dw: int)
     : Layout<Expr * Expr * Expr * Expr> =
-    { fields = [ (an, aw); (bn, bw); (cn, cw); (dn, dw) ]
+    { fields = [ (an, unsignedInt aw); (bn, unsignedInt bw); (cn, unsignedInt cw); (dn, unsignedInt dw) ]
       pack = fun (x, y, z, u) -> [ x; y; z; u ]
       unpack =
         fun nets ->
             match nets with
             | [ x; y; z; u ] -> x, y, z, u
             | _ -> failwith $"layout4 {an},{bn},{cn},{dn}: expected 4 nets" }
+
+// ---------------------------------------------------------------------------
+// The same layouts with each field's reading said: what a unit's pins are
+// declared with, so a palette can refuse a wire by format and an export can
+// print the type. `layoutN` above is the width-only spelling of the same thing.
+
+/// One pin; the payload is the `Expr` itself.
+let pins1 (an: string, af: NumberFormat) : Layout<Expr> =
+    { fields = [ an, af ]
+      pack = fun x -> [ x ]
+      unpack =
+        fun nets ->
+            match nets with
+            | [ x ] -> x
+            | _ -> failwith $"pins1 {an}: expected 1 net" }
+
+/// Two pins, as a pair.
+let pins2 (an: string, af: NumberFormat) (bn: string, bf: NumberFormat) : Layout<Expr * Expr> =
+    { fields = [ an, af; bn, bf ]
+      pack = fun (x, y) -> [ x; y ]
+      unpack =
+        fun nets ->
+            match nets with
+            | [ x; y ] -> x, y
+            | _ -> failwith $"pins2 {an},{bn}: expected 2 nets" }
+
+/// Three pins, as a triple.
+let pins3 (an: string, af: NumberFormat) (bn: string, bf: NumberFormat) (cn: string, cf: NumberFormat) : Layout<Expr * Expr * Expr> =
+    { fields = [ an, af; bn, bf; cn, cf ]
+      pack = fun (x, y, z) -> [ x; y; z ]
+      unpack =
+        fun nets ->
+            match nets with
+            | [ x; y; z ] -> x, y, z
+            | _ -> failwith $"pins3 {an},{bn},{cn}: expected 3 nets" }
+
+/// Four pins, as a 4-tuple.
+let pins4 (an: string, af: NumberFormat) (bn: string, bf: NumberFormat) (cn: string, cf: NumberFormat) (dn: string, df: NumberFormat) : Layout<Expr * Expr * Expr * Expr> =
+    { fields = [ an, af; bn, bf; cn, cf; dn, df ]
+      pack = fun (a, b, c, d) -> [ a; b; c; d ]
+      unpack =
+        fun nets ->
+            match nets with
+            | [ a; b; c; d ] -> a, b, c, d
+            | _ -> failwith $"pins4 {an},{bn},{cn},{dn}: expected 4 nets" }
+
+/// Five pins, as a 5-tuple.
+let pins5 (an: string, af: NumberFormat) (bn: string, bf: NumberFormat) (cn: string, cf: NumberFormat) (dn: string, df: NumberFormat) (en: string, ef: NumberFormat) : Layout<Expr * Expr * Expr * Expr * Expr> =
+    { fields = [ an, af; bn, bf; cn, cf; dn, df; en, ef ]
+      pack = fun (a, b, c, d, e) -> [ a; b; c; d; e ]
+      unpack =
+        fun nets ->
+            match nets with
+            | [ a; b; c; d; e ] -> a, b, c, d, e
+            | _ -> failwith $"pins5 {an},{bn},{cn},{dn},{en}: expected 5 nets" }
+
+/// Six pins, as a 6-tuple — as wide as a beat goes in the typed form.
+let pins6 (an: string, af: NumberFormat) (bn: string, bf: NumberFormat) (cn: string, cf: NumberFormat) (dn: string, df: NumberFormat) (en: string, ef: NumberFormat) (fn: string, ff: NumberFormat) : Layout<Expr * Expr * Expr * Expr * Expr * Expr> =
+    { fields = [ an, af; bn, bf; cn, cf; dn, df; en, ef; fn, ff ]
+      pack = fun (a, b, c, d, e, f) -> [ a; b; c; d; e; f ]
+      unpack =
+        fun nets ->
+            match nets with
+            | [ a; b; c; d; e; f ] -> a, b, c, d, e, f
+            | _ -> failwith $"pins6 {an},{bn},{cn},{dn},{en},{fn}: expected 6 nets" }
+
+/// Pins with no typed payload: the nets themselves, in order. What a graph
+/// works in, and what a typed unit erases to.
+let layoutOfList (pins: (string * NumberFormat) list) : Layout<Expr list> =
+    { fields = pins
+      pack = id
+      unpack =
+        fun nets ->
+            if nets.Length <> pins.Length then
+                failwith $"layoutOfList: expected %d{pins.Length} nets, got %d{nets.Length}"
+
+            nets }
 
 /// The transporter for a payload that has to cross as ONE flat bus — a wide
 /// port, a run payload riding a dispatch tree, anything the wire cannot carry
@@ -149,7 +245,7 @@ type Union2<'a, 'b> =
       variant0: Layout<'a>
       variant1: Layout<'b> }
 
-let private packedWidth (l: Layout<_>) = l.fields |> List.sumBy snd
+let private packedWidth (l: Layout<_>) = l.fields |> List.sumBy fieldWidth
 
 /// A two-variant union over two layouts. One tag bit, and a data field as wide
 /// as the larger variant — the narrower one is zero-padded, so both variants
@@ -176,7 +272,7 @@ let private packInto dataWidth (l: Layout<'p>) (payload: 'p) =
 
 let private variantView (l: Layout<'p>) (data: Expr) : 'p =
     (0, l.fields)
-    ||> List.mapFold (fun offset (_, w) -> slice (offset + w - 1) offset data, offset + w)
+    ||> List.mapFold (fun offset (_, f) -> slice (offset + f.totalWidth - 1) offset data, offset + f.totalWidth)
     |> fst
     |> l.unpack
 
@@ -211,7 +307,7 @@ let variant1 (u: Union2<'a, 'b>) data : 'b = variantView u.variant1 data
 /// The stream layout of a union beat, so union streams ride the generic stream
 /// machinery unchanged — stages, maps, the handshake, all of it.
 let unionLayout (u: Union2<'a, 'b>) : Layout<UnionBeat> =
-    { fields = [ ("tag", u.tagWidth); ("data", u.dataWidth) ]
+    { fields = fieldsOfWidths [ ("tag", u.tagWidth); ("data", u.dataWidth) ]
       pack = fun b -> [ b.tag; b.data ]
       unpack =
         fun nets ->

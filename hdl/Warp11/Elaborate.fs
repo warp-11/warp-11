@@ -12,12 +12,12 @@
 /// Everything a GUI would draw as a red wire is refused here first, naming
 /// the box and the pin: a pin that is not there, a wire between kinds or
 /// formats, an input nobody wired, a result nobody reads, a cycle.
-module Warp11.Placement.Elaborate
+module Warp11.Elaborate
 
 open Warp11
-open Warp11.Placement.Fu
-open Warp11.Placement.Graph
-open Warp11.Placement.Edit
+open Warp11.Fu
+open Warp11.Graph
+open Warp11.Edit
 
 /// One field of the beat, and the pin it came from.
 type private Slot =
@@ -136,7 +136,7 @@ let probeName (g: Graph) (p: PinRef) (side: Side) : string option =
     | _ -> None
 
 /// The net that says a box's pins on one side carry a beat this cycle.
-let validName (g: Graph) (box: string) (side: Side) : string =
+let validName (_: Graph) (box: string) (side: Side) : string =
     match box, side with
     | "input", _ -> "in1_valid"
     | "output", _ -> "out1_valid"
@@ -172,8 +172,8 @@ let elaborateWith (probes: bool) (g: Graph) : TypedModule<GraphPorts> =
     defModule
         g.name
         (fun p ->
-            { ins = [ for i in 1 .. g.streams -> streamInputPorts p $"in%d{i}" (lower (pinsOfList g.inputs)) ]
-              outs = [ for i in 1 .. g.streams -> streamOutputPorts p $"out%d{i}" (lower (pinsOfList g.outputs)) ]
+            { ins = [ for i in 1 .. g.streams -> streamInputPorts p $"in%d{i}" (layoutOfList g.inputs) ]
+              outs = [ for i in 1 .. g.streams -> streamOutputPorts p $"out%d{i}" (layoutOfList g.outputs) ]
               controls = [ for n, f in controlPorts g -> n, p.inPort n f.totalWidth ] })
         (fun io ->
             let controlPorts = Map.ofList io.controls
@@ -200,7 +200,7 @@ let elaborateWith (probes: bool) (g: Graph) : TypedModule<GraphPorts> =
                         | Some i -> i
                         | None -> failwith $"{show source}: not available at {b.name} — it comes from a later box"
 
-                    let operandIdx = [ for n, _ in unit.operands.pins -> indexOf (sourceOf (pin b.name n)) ]
+                    let operandIdx = [ for n, _ in unit.operands.fields -> indexOf (sourceOf (pin b.name n)) ]
 
                     // A control inlet's value: the design's port it was wired
                     // from, a number box's port, a constant's literal, or the
@@ -217,14 +217,14 @@ let elaborateWith (probes: bool) (g: Graph) : TypedModule<GraphPorts> =
                                   | None -> failwith $"{show e.from} → {show (pin b.name n)}: a control wired from a unit's box is not built" ]
 
                     let carried = slots |> List.indexed |> List.filter (fun (_, s) -> neededAfter b s.source)
-                    let results = [ for n, f in unit.results.pins -> { name = n; format = f; source = pin b.name n } ]
+                    let results = [ for n, f in unit.results.fields -> { name = n; format = f; source = pin b.name n } ]
 
                     for r in results do
                         if carried |> List.exists (fun (_, s) -> s.name = r.name) then
                             failwith $"{b.name}: its result '{r.name}' has the same name as a field still carried past it"
 
                     let nextSlots = results @ List.map snd carried
-                    let outPins = pinsOfList [ for s in nextSlots -> s.name, s.format ]
+                    let outPins = layoutOfList [ for s in nextSlots -> s.name, s.format ]
                     let carriedIdx = List.map fst carried
 
                     let staged =
@@ -243,10 +243,10 @@ let elaborateWith (probes: bool) (g: Graph) : TypedModule<GraphPorts> =
                         before.valid ==> wireBit (validName g b.name In)
                         after.valid ==> wireBit (validName g b.name Out)
 
-                        for (n, f), i in List.zip unit.operands.pins operandIdx do
+                        for (n, f), i in List.zip unit.operands.fields operandIdx do
                             before.payload[i] ==> wire $"{b.name}_in_{n}" f.totalWidth
 
-                        for i, (n, f) in List.indexed unit.results.pins do
+                        for i, (n, f) in List.indexed unit.results.fields do
                             after.payload[i] ==> wire $"{b.name}_out_{n}" f.totalWidth
 
                     staged, nextSlots)
@@ -261,7 +261,7 @@ let elaborateWith (probes: bool) (g: Graph) : TypedModule<GraphPorts> =
                       | Some i -> i
                       | None -> failwith $"{show src}: not available at the output" ]
 
-            let outLayout = lower (pinsOfList g.outputs)
+            let outLayout = layoutOfList g.outputs
 
             let finished =
                 if outIdx = [ 0 .. slots.Length - 1 ] then
