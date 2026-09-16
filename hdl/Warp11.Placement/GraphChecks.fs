@@ -7,6 +7,7 @@ open Warp11.Placement.Fu
 open Warp11.Placement.Units
 open Warp11.Placement.Placement
 open Warp11.Placement.Graph
+open Warp11.Placement.Edit
 open Warp11.Placement.Elaborate
 open Warp11.Placement.Devices
 
@@ -137,3 +138,124 @@ let wavPlaysThroughTheGraph () : bool =
     && refuses (macGraph 1 1 1) { source = tone; controls = []; outputPath = None } [ "Mac1s1x1"; "input"; "left" ]
     // a control the mapping forgot
     && refuses gainGraph { source = tone; controls = [ "volume", gainUnity ]; outputPath = None } [ "mute" ]
+
+// ---------------------------------------------------------------------------
+// UD6 — The editor's changes are functions on the graph, and they compose
+// into a design. The gain design built from an empty graph by the same
+// edits a canvas makes — boundary pins, a box, wires — elaborates to the
+// bytes of the typed gain patch. Every refusal names the pin; removing a box
+// takes its wires; undo is exact.
+
+// CHECK
+let editsBuildTheGainDesign () : bool =
+    let stereo = [ "left", sint sampleWidth; "right", sint sampleWidth ]
+
+    let step (change: Graph -> Result<Graph, string>) (h: History) =
+        match apply change h with
+        | h, None -> h
+        | _, Some why -> failwith why
+
+    let wire (a: string) (b: string) =
+        let ends (s: string) =
+            match s.Split '.' with
+            | [| box; p |] -> pin box p
+            | _ -> failwith s
+
+        addWire (ends a, Out) (ends b, In)
+
+    let built =
+        history (emptyGraph "GainPatch")
+        |> step (addInputPin stereo[0])
+        |> step (addInputPin stereo[1])
+        |> step (addControl ("volume", uint 16))
+        |> step (addControl ("mute", uint 1))
+        |> step (addOutputPin stereo[0])
+        |> step (addOutputPin stereo[1])
+        |> step (addBox "gain" (320.0, 120.0) >> Result.map fst)
+        |> step (wire "input.left" "gain.left")
+        |> step (wire "input.right" "gain.right")
+        |> step (wire "input.volume" "gain.volume")
+        |> step (wire "input.mute" "gain.mute")
+        |> step (wire "gain.left" "output.left")
+        |> step (wire "gain.right" "output.right")
+
+    let g = built.present
+
+    let refuses (change: Graph -> Result<Graph, string>) (names: string list) =
+        match change g with
+        | Ok _ -> false
+        | Error why -> names |> List.forall (fun n -> why.Contains n)
+
+    // The first box of a unit takes the unit's name; the next is numbered.
+    let withSecond, second = addBox "gain" (0.0, 0.0) g |> Result.defaultWith failwith
+    // Renaming carries the wires.
+    let renamed = renameBox "gain" "amp" g |> Result.defaultWith failwith
+    // Removing the box takes its six wires with it.
+    let removed = removeBox "gain" g |> Result.defaultWith failwith
+
+    emitDesign (elaborate g).def = emitDesign gainPatch.def
+    && g.boxes = gainGraph.boxes
+    && g.edges = gainGraph.edges
+    && built.past.Length = 13
+    && (built |> undo |> undo).present.edges.Length = 4
+    && (built |> undo |> undo |> redo |> redo).present = g
+    && second = "gain2"
+    && withSecond.boxes.Length = 2
+    && renamed.edges |> List.forall (fun e -> e.from.box <> "gain" && e.``to``.box <> "gain")
+    && emitDesign (elaborate renamed).def <> emitDesign gainPatch.def
+    && removed.edges = []
+    && removed.boxes = []
+    // both ends inputs
+    && refuses (addWire (pin "gain" "left", In) (pin "output" "left", In)) [ "inputs" ]
+    // a box feeding itself
+    && refuses (addWire (pin "gain" "left", Out) (pin "gain" "right", In)) [ "gain"; "itself" ]
+    // a signal into a control inlet
+    && refuses (addWire (pin "input" "left", Out) (pin "gain" "volume", In)) [ "input.left"; "signal"; "gain.volume"; "control" ]
+    // the input already has its wire
+    && refuses (addWire (pin "input" "right", Out) (pin "gain" "left", In)) [ "gain.left"; "already" ]
+    // a pin that is not there
+    && refuses (addWire (pin "input" "centre", Out) (pin "gain" "left", In)) [ "input.centre" ]
+    // a control named like an input pin shares the input box with it
+    && refuses (addControl ("left", uint 8)) [ "left" ]
+    // a box cannot be named for the boundary, and a unit must be in the palette
+    && refuses (renameBox "gain" "output") [ "output" ]
+    && refuses (addBox "biquad" (0.0, 0.0) >> Result.map fst) [ "biquad"; "palette" ]
+
+// ---------------------------------------------------------------------------
+// UD7 — A saved design opens as it was, positions included, and elaborates
+// to the same bytes. The palette is the type authority: a unit the palette
+// does not have, or a wire onto a pin it no longer has, refuses the file by
+// name rather than opening it wrong.
+
+// CHECK
+let savedDesignOpensAsItWas () : bool =
+    let laidOut =
+        { gainGraph with
+            positions = Map.ofList [ "input", (60.0, 120.0); "gain", (320.5, 140.25); "output", (580.0, 120.0) ] }
+
+    let text = DesignFile.write laidOut
+
+    let reopened =
+        match DesignFile.parse text with
+        | Ok g -> g
+        | Error why -> failwith why
+
+    let refuses (edit: string -> string) (names: string list) =
+        match DesignFile.parse (edit text) with
+        | Ok _ -> false
+        | Error why -> names |> List.forall (fun n -> why.Contains n)
+
+    reopened = laidOut
+    && emitDesign (elaborate reopened).def = emitDesign gainPatch.def
+    && (match DesignFile.parse (DesignFile.write (macGraph 3 3 3)) with
+        | Ok g -> g = macGraph 3 3 3
+        | Error _ -> false)
+    // a unit the palette does not have
+    && refuses (fun t -> t.Replace("\"unit\": \"gain\"", "\"unit\": \"biquad\"")) [ "gain"; "biquad"; "palette" ]
+    // a wire onto a pin the unit does not have
+    && refuses (fun t -> t.Replace("\"to\": \"gain.mute\"", "\"to\": \"gain.bypass\"")) [ "gain.bypass" ]
+    // a wire whose format the unit no longer agrees with
+    && refuses (fun t -> t.Replace("\"name\": \"volume\",\n      \"width\": 16", "\"name\": \"volume\",\n      \"width\": 8")) [ "volume"; "8w"; "16w" ]
+    // not a design at all
+    && refuses (fun _ -> "{ \"name\": 3 }") [ "name" ]
+    && refuses (fun _ -> "nonsense") [ "JSON" ]

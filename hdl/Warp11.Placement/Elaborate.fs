@@ -24,47 +24,12 @@ type private Slot =
       format: NumberFormat
       source: PinRef }
 
-type private PinKind =
-    | SignalIn
-    | SignalOut
-    | ControlIn
-    | ControlOut
-
-let private describeFormat (f: NumberFormat) =
-    let sign = if f.signed then "signed" else "unsigned"
-    $"%d{f.totalWidth}w/%d{f.fracBits}f/{sign}"
-
-let private show (p: PinRef) = $"{p.box}.{p.pin}"
-
-let private boxExists (g: Graph) (name: string) =
-    name = "input" || name = "output" || g.boxes |> List.exists (fun b -> b.name = name)
-
-/// What a pin is, or why it is not. A wire's `from` end is looked up among a
-/// box's outputs and its `to` end among its inputs — a box may call an input
-/// and an output by the same name, as `gain` calls both `left`.
-let private kindOf (g: Graph) (asSource: bool) (p: PinRef) : Result<PinKind * NumberFormat, string> =
-    if not (boxExists g p.box) then
-        Error $"{show p}: no such box"
-    else
-        let signalIns, signalOuts = pinsOf g p.box
-        let controls = controlsOf g p.box
-        let find pins = pins |> List.tryFind (fun (n, _) -> n = p.pin) |> Option.map snd
-
-        if asSource then
-            match find signalOuts, (if p.box = "input" then find controls else None) with
-            | Some f, _ -> Ok(SignalOut, f)
-            | _, Some f -> Ok(ControlOut, f)
-            | _ -> Error $"{show p}: no such output pin"
-        else
-            match find signalIns, (if p.box = "input" then None else find controls) with
-            | Some f, _ -> Ok(SignalIn, f)
-            | _, Some f -> Ok(ControlIn, f)
-            | _ -> Error $"{show p}: no such input pin"
+let private show = showPin
 
 /// Every wire, checked at both ends.
 let private checkEdges (g: Graph) =
     for e in g.edges do
-        match kindOf g true e.from, kindOf g false e.``to`` with
+        match lookupPin g Out e.from, lookupPin g In e.``to`` with
         | Error why, _
         | _, Error why -> failwith why
         | Ok(SignalOut, fa), Ok(SignalIn, fb)

@@ -4,7 +4,8 @@
          builds over the library as it is and changes nothing in it. `Fu.fs`
          is the surface under trial, `Units.fs` the units that cost cycles,
          `Placement.fs` the use cases that judge them, `Graph.fs` the design
-         as data, `Elaborate.fs` the data back into a design, `Devices.fs` what
+         as data, `Edit.fs` every change an editor makes to it, `DesignFile.fs`
+         the design as a file, `Elaborate.fs` the data back into a design, `Devices.fs` what
          satisfies its boundary in the simulator, and `GraphChecks.fs` the
          proof that data and typed forms meet at the bytes. -->
     <PropertyGroup>
@@ -18,6 +19,8 @@
         <Compile Include="Units.fs"/>
         <Compile Include="Placement.fs"/>
         <Compile Include="Graph.fs"/>
+        <Compile Include="Edit.fs"/>
+        <Compile Include="DesignFile.fs"/>
         <Compile Include="Elaborate.fs"/>
         <Compile Include="Devices.fs"/>
         <Compile Include="GraphChecks.fs"/>

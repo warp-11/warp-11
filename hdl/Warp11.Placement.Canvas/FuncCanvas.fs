@@ -1,13 +1,18 @@
 /// The canvas, in FuncUI: a `Graph` drawn as boxes, pins and wires, and
-/// edited in place. Everything renders from the state — the graph, where the
-/// boxes are, the pan and zoom, what is selected, what is being dragged —
+/// edited in place. Everything renders from the state — the graph and its
+/// history, the pan and zoom, what is selected, what is being dragged —
 /// which is the property the debugger needs: a snapshot of the design's
-/// signals will one day be one more input to the same render.
+/// signals is one more input to the same render.
+///
+/// Every change goes through `Edit`: the canvas asks for a change, shows
+/// what came back, and shows the reason when it was refused. It decides
+/// nothing about the design itself.
 ///
 /// Geometry lives in world coordinates; one transform on the inner canvas
 /// puts it on screen, and pointer positions come back through its inverse.
 /// Hit-testing is our own arithmetic over the same geometry, pins before
-/// boxes, so nothing depends on which child control caught the event.
+/// wires before boxes, so nothing depends on which child control caught
+/// the event.
 module Warp11.Placement.Canvas.FuncCanvas
 
 open System.Globalization
@@ -22,6 +27,7 @@ open Avalonia.Media
 open Avalonia.VisualTree
 open Warp11.Placement.Fu
 open Warp11.Placement.Graph
+open Warp11.Placement.Edit
 
 // ---------------------------------------------------------------------------
 // Geometry, in world units.
@@ -31,111 +37,132 @@ let headerHeight = 34.0
 let rowHeight = 26.0
 let pinRadius = 6.0
 let pinHitRadius = 10.0
+let wireHitDistance = 6.0
+
+/// One row of pins on a box's side: signal pins first, then the controls —
+/// control inlets on a box's left, the design's controls as outlets on the
+/// input box's right. Pure Data's two kinds of inlet, one under the other.
+type PinRow =
+    { pin: string
+      format: NumberFormat
+      control: bool }
+
+let pinRows (g: Graph) (box: string) (side: Side) : PinRow list =
+    let inputs, outputs = pinsOf g box
+    let controls = controlsOf g box
+
+    let signals, controls =
+        match side, box with
+        | In, "input" -> [], []
+        | In, _ -> inputs, controls
+        | Out, "input" -> outputs, controls
+        | Out, _ -> outputs, []
+
+    [ for n, f in signals -> { pin = n; format = f; control = false } ]
+    @ [ for n, f in controls -> { pin = n; format = f; control = true } ]
 
 /// A box's height, from its taller pin column.
 let boxHeight (g: Graph) (box: string) =
-    let inputs, outputs = pinsOf g box
-    headerHeight + float (max inputs.Length outputs.Length) * rowHeight + 10.0
+    headerHeight + float (max (pinRows g box In).Length (pinRows g box Out).Length) * rowHeight + 10.0
 
 /// Where a pin sits, relative to its box's top-left: inputs down the left
 /// edge, outputs down the right.
 let private pinOffset (g: Graph) (p: PinRef) (side: Side) : (float * float) option =
-    let inputs, outputs = pinsOf g p.box
-
-    let row (pins: (string * NumberFormat) list) =
-        pins |> List.tryFindIndex (fun (n, _) -> n = p.pin)
-
-    match side with
-    | In -> row inputs |> Option.map (fun r -> 0.0, headerHeight + float r * rowHeight + rowHeight / 2.0)
-    | Out -> row outputs |> Option.map (fun r -> boxWidth, headerHeight + float r * rowHeight + rowHeight / 2.0)
+    let row = pinRows g p.box side |> List.tryFindIndex (fun r -> r.pin = p.pin)
+    let x = match side with In -> 0.0 | Out -> boxWidth
+    row |> Option.map (fun r -> x, headerHeight + float r * rowHeight + rowHeight / 2.0)
 
 /// A pin's centre in world coordinates.
-let pinCentre (g: Graph) (positions: Map<string, float * float>) (p: PinRef) (side: Side) : (float * float) option =
-    match Map.tryFind p.box positions, pinOffset g p side with
+let pinCentre (g: Graph) (p: PinRef) (side: Side) : (float * float) option =
+    match Map.tryFind p.box g.positions, pinOffset g p side with
     | Some(bx, by), Some(dx, dy) -> Some(bx + dx, by + dy)
     | _ -> None
 
 /// Boxes in the order a chain reads: input, the design's boxes, output.
 let boxOrder (g: Graph) = "input" :: (g.boxes |> List.map (fun b -> b.name)) @ [ "output" ]
 
-/// The first layout: one column per box, left to right. Positions are canvas
-/// state for now (Q: they belong in the `Graph` once a GUI saves one).
-let initialPositions (g: Graph) : Map<string, float * float> =
-    boxOrder g |> List.mapi (fun i name -> name, (60.0 + float i * 260.0, 120.0)) |> Map.ofList
+/// A position for every box that has none: one column per box, left to
+/// right. A graph written in F# arrives with none; a saved one with all.
+let withLayout (g: Graph) : Graph =
+    let positions =
+        (g.positions, List.indexed (boxOrder g))
+        ||> List.fold (fun ps (i, name) ->
+            if ps.ContainsKey name then
+                ps
+            else
+                ps |> Map.add name (60.0 + float i * 260.0, 120.0))
+
+    { g with positions = positions }
 
 // ---------------------------------------------------------------------------
-// What the pointer can be doing.
+// What the pointer can be doing, and what is selected.
 
 type Drag =
-    | MovingBox of box: string * grabOffset: (float * float)
+    /// The graph as it was when the box was picked up, so the move is one
+    /// history entry on release rather than one per pixel.
+    | MovingBox of box: string * grabOffset: (float * float) * before: Graph
     | Panning of lastScreen: (float * float)
     | Wiring of from: (PinRef * Side) * atWorld: (float * float)
 
-/// A pin under the pointer, or a box, or nothing — pins first, because a pin
-/// sits on its box's edge and a wire is the rarer, more deliberate gesture.
+type Selection =
+    | SelectedBox of string
+    | SelectedWire of Edge
+
+/// A pin under the pointer, or a wire, or a box, or nothing — pins first,
+/// because a pin sits on its box's edge and a wire is the rarer, more
+/// deliberate gesture; wires before boxes because a wire is thin.
 type Hit =
     | HitPin of PinRef * Side
+    | HitWire of Edge
     | HitBox of string
     | HitNothing
 
-let hitTest (g: Graph) (positions: Map<string, float * float>) (wx: float, wy: float) : Hit =
+/// A point on the wire's cubic, `t` from 0 to 1.
+let private cubicAt (x1: float, y1: float) (x2: float, y2: float) (t: float) =
+    let dx = max 40.0 (abs (x2 - x1) / 2.0)
+    let cx1, cy1, cx2, cy2 = x1 + dx, y1, x2 - dx, y2
+    let u = 1.0 - t
+
+    u * u * u * x1 + 3.0 * u * u * t * cx1 + 3.0 * u * t * t * cx2 + t * t * t * x2,
+    u * u * u * y1 + 3.0 * u * u * t * cy1 + 3.0 * u * t * t * cy2 + t * t * t * y2
+
+let private nearWire (a: float * float) (b: float * float) (wx: float, wy: float) =
+    [ 0..24 ]
+    |> List.exists (fun i ->
+        let x, y = cubicAt a b (float i / 24.0)
+        (x - wx) ** 2.0 + (y - wy) ** 2.0 <= wireHitDistance ** 2.0)
+
+let hitTest (g: Graph) (wx: float, wy: float) : Hit =
     let pins =
         [ for box in boxOrder g do
-              let inputs, outputs = pinsOf g box
+              for side in [ In; Out ] do
+                  for r in pinRows g box side do
+                      let p = pin box r.pin
 
-              for pins, side in [ inputs, In; outputs, Out ] do
-                  for n, _ in pins do
-                      let p = pin box n
-
-                      match pinCentre g positions p side with
+                      match pinCentre g p side with
                       | Some(px, py) when (px - wx) ** 2.0 + (py - wy) ** 2.0 <= pinHitRadius ** 2.0 -> yield p, side
                       | _ -> () ]
 
-    match pins with
-    | (p, side) :: _ -> HitPin(p, side)
-    | [] ->
+    let wire =
+        g.edges
+        |> List.tryFind (fun e ->
+            match pinCentre g e.from Out, pinCentre g e.``to`` In with
+            | Some a, Some b -> nearWire a b (wx, wy)
+            | _ -> false)
+
+    match pins, wire with
+    | (p, side) :: _, _ -> HitPin(p, side)
+    | [], Some e -> HitWire e
+    | [], None ->
         // Later boxes draw on top, so they win a hit.
         boxOrder g
         |> List.rev
         |> List.tryFind (fun box ->
-            match Map.tryFind box positions with
+            match Map.tryFind box g.positions with
             | Some(bx, by) -> wx >= bx && wx <= bx + boxWidth && wy >= by && wy <= by + boxHeight g box
             | None -> false)
         |> Option.map HitBox
         |> Option.defaultValue HitNothing
-
-// ---------------------------------------------------------------------------
-// The wire check: what the elaborator would refuse, said before the wire is
-// drawn. Direction, format, and one wire per input.
-
-let private formatOf (g: Graph) (p: PinRef) (side: Side) : NumberFormat option =
-    let inputs, outputs = pinsOf g p.box
-    (match side with In -> inputs | Out -> outputs) |> List.tryFind (fun (n, _) -> n = p.pin) |> Option.map snd
-
-let private describeFormat (f: NumberFormat) =
-    let sign = if f.signed then "signed" else "unsigned"
-    $"%d{f.totalWidth}w/%d{f.fracBits}f/{sign}"
-
-/// Either the edge to add, or why not. An edge always runs output → input,
-/// whichever end the gesture started from.
-let connect (g: Graph) (a: PinRef, sa: Side) (b: PinRef, sb: Side) : Result<Edge, string> =
-    match formatOf g a sa, formatOf g b sb with
-    | None, _ -> Error $"{a.box}.{a.pin}: no such pin"
-    | _, None -> Error $"{b.box}.{b.pin}: no such pin"
-    | Some fa, Some fb ->
-        if sa = sb then
-            Error(if sa = In then "both pins are inputs" else "both pins are outputs")
-        elif a.box = b.box then
-            Error $"{a.box}: a box cannot feed itself"
-        else
-            let src, dst = if sa = In then b, a else a, b
-
-            if fa <> fb then
-                Error $"{src.box}.{src.pin} is {describeFormat fa}, {dst.box}.{dst.pin} is {describeFormat fb}"
-            elif g.edges |> List.exists (fun e -> e.``to`` = dst) then
-                Error $"{dst.box}.{dst.pin} already has a wire"
-            else
-                Ok { from = src; ``to`` = dst }
 
 // ---------------------------------------------------------------------------
 // Drawing.
@@ -151,26 +178,29 @@ let wirePath (x1: float, y1: float) (x2: float, y2: float) =
 let private wireBrush = SolidColorBrush(Color.FromRgb(200uy, 40uy, 40uy))
 let private pendingBrush = SolidColorBrush(Color.FromRgb(120uy, 120uy, 140uy))
 let private faintBrush = SolidColorBrush(Color.FromRgb(225uy, 190uy, 190uy))
+let private selectedWireBrush = SolidColorBrush(Color.FromRgb(30uy, 120uy, 220uy))
 let private boxFill = SolidColorBrush(Color.FromRgb(250uy, 250uy, 252uy))
+let private boundaryFill = SolidColorBrush(Color.FromRgb(240uy, 244uy, 250uy))
 let private boxStroke = SolidColorBrush(Color.FromRgb(120uy, 130uy, 160uy))
 let private selectedStroke = SolidColorBrush(Color.FromRgb(30uy, 120uy, 220uy))
 let private pinFill = Brushes.White
 let private pinStroke = Brushes.Black
 
-let private wireView (_key: string) (brush: IBrush) (a: float * float) (b: float * float) : Types.IView =
+let private wireView (brush: IBrush) (thickness: float) (a: float * float) (b: float * float) : Types.IView =
     Path.create
         [ Path.data (Geometry.Parse(wirePath a b))
           Path.stroke brush
-          Path.strokeThickness 2.0
+          Path.strokeThickness thickness
           Path.isHitTestVisible false ]
     :> Types.IView
 
-let private boxView (g: Graph) (selected: string option) (name: string) (bx: float, by: float) : Types.IView list =
-    let inputs, outputs = pinsOf g name
+let private boxView (g: Graph) (selected: Selection option) (name: string) (bx: float, by: float) : Types.IView list =
+    let isBoundary = name = "input" || name = "output"
+    let isSelected = selected = Some(SelectedBox name)
 
     let title, subtitle =
         match name with
-        | "input" -> "input", $"%d{g.streams} stream(s)"
+        | "input" -> "input", $"%d{g.streams} stream(s), %d{g.controls.Length} control(s)"
         | "output" -> "output", ""
         | _ ->
             let b = g.boxes |> List.find (fun b -> b.name = name)
@@ -188,9 +218,9 @@ let private boxView (g: Graph) (selected: string option) (name: string) (bx: flo
               Canvas.top by
               Border.width boxWidth
               Border.height (boxHeight g name)
-              Border.background boxFill
-              Border.borderBrush (if selected = Some name then selectedStroke :> IBrush else boxStroke :> IBrush)
-              Border.borderThickness (Thickness(if selected = Some name then 2.0 else 1.0))
+              Border.background (if isBoundary then boundaryFill :> IBrush else boxFill :> IBrush)
+              Border.borderBrush (if isSelected then selectedStroke :> IBrush else boxStroke :> IBrush)
+              Border.borderThickness (Thickness(if isSelected then 2.0 else 1.0))
               Border.cornerRadius (CornerRadius 6.0)
               Border.isHitTestVisible false
               Border.child (
@@ -206,30 +236,47 @@ let private boxView (g: Graph) (selected: string option) (name: string) (bx: flo
         :> Types.IView
 
     let pinViews =
-        [ for pins, isInput in [ inputs, true; outputs, false ] do
-              for row, (pinName, _) in List.indexed pins do
+        [ for side in [ In; Out ] do
+              for row, r in List.indexed (pinRows g name side) do
+                  let isInput = side = In
                   let px = bx + (if isInput then 0.0 else boxWidth)
                   let py = by + headerHeight + float row * rowHeight + rowHeight / 2.0
 
-                  yield
-                      Ellipse.create
-                          [ Canvas.left (px - pinRadius)
-                            Canvas.top (py - pinRadius)
-                            Ellipse.width (2.0 * pinRadius)
-                            Ellipse.height (2.0 * pinRadius)
-                            Ellipse.fill pinFill
-                            Ellipse.stroke pinStroke
-                            Ellipse.strokeThickness 1.5
-                            Ellipse.isHitTestVisible false ]
-                      :> Types.IView
+                  // A signal pin is a circle; a control pin a square, as a
+                  // control wire is the thinner one.
+                  if r.control then
+                      yield
+                          Rectangle.create
+                              [ Canvas.left (px - pinRadius + 1.0)
+                                Canvas.top (py - pinRadius + 1.0)
+                                Rectangle.width (2.0 * pinRadius - 2.0)
+                                Rectangle.height (2.0 * pinRadius - 2.0)
+                                Rectangle.fill pinFill
+                                Rectangle.stroke pinStroke
+                                Rectangle.strokeThickness 1.5
+                                Rectangle.isHitTestVisible false ]
+                          :> Types.IView
+                  else
+                      yield
+                          Ellipse.create
+                              [ Canvas.left (px - pinRadius)
+                                Canvas.top (py - pinRadius)
+                                Ellipse.width (2.0 * pinRadius)
+                                Ellipse.height (2.0 * pinRadius)
+                                Ellipse.fill pinFill
+                                Ellipse.stroke pinStroke
+                                Ellipse.strokeThickness 1.5
+                                Ellipse.isHitTestVisible false ]
+                          :> Types.IView
 
                   // The pin's name, inside the box beside it.
                   yield
                       TextBlock.create
-                          [ Canvas.left (if isInput then px + pinRadius + 4.0 else px - pinRadius - 4.0 - 7.0 * float pinName.Length)
+                          [ Canvas.left (if isInput then px + pinRadius + 4.0 else px - pinRadius - 4.0 - 7.0 * float r.pin.Length)
                             Canvas.top (py - 7.0)
-                            TextBlock.text pinName
+                            TextBlock.text r.pin
                             TextBlock.fontSize 11.0
+                            TextBlock.fontStyle (if r.control then FontStyle.Italic else FontStyle.Normal)
                             TextBlock.foreground Brushes.DimGray
                             TextBlock.isHitTestVisible false ]
                       :> Types.IView ]
@@ -237,7 +284,7 @@ let private boxView (g: Graph) (selected: string option) (name: string) (bx: flo
     body :: pinViews
 
 // ---------------------------------------------------------------------------
-// A running patch behind the canvas.
+// A running design behind the canvas.
 
 /// The recording on the boundary, as the canvas reads it: progress, and
 /// what has been heard so far.
@@ -267,10 +314,20 @@ type Live =
       savePath: string option
       /// Frames a second at real time — one frame is one beat is one cycle here.
       framesPerSecond: int
-      /// The same patch from the start, with these control values: a fresh
-      /// session with the recording rewound. `Reset` is this, since a device
-      /// has no rewind of its own — and the knobs stay where they were.
-      reopen: (string * uint64) list -> Live }
+      /// A design from the start, with these control values: a fresh session
+      /// with the recording rewound. `Reset` is this on the same graph, since
+      /// a device has no rewind of its own; an edited design is this on the
+      /// new graph, since a change to the design is a new design.
+      reopen: Graph -> (string * uint64) list -> Live }
+
+/// What the canvas opens on: a graph, the design running behind it if one
+/// is, how to run one when there is not (a mapping without a session yet),
+/// and the file the design is saved to.
+type Opening =
+    { graph: Graph
+      live: Live option
+      opener: (Graph -> (string * uint64) list -> Live) option
+      file: string option }
 
 let private valueOf (snapshot: Warp11.Debug.Snapshot) (name: string) : System.Numerics.BigInteger option =
     snapshot.values |> List.tryFind (fun v -> v.name = name) |> Option.map (fun v -> v.value)
@@ -289,25 +346,66 @@ let private showValue (f: NumberFormat) (v: System.Numerics.BigInteger) =
         (float signed / float (1L <<< f.fracBits)).ToString("0.####", CultureInfo.InvariantCulture)
 
 let private formatOfPin (g: Graph) (p: PinRef) (side: Side) : NumberFormat option =
-    let ins, outs = pinsOf g p.box
-    (match side with In -> ins | Out -> outs) |> List.tryFind (fun (n, _) -> n = p.pin) |> Option.map snd
+    match lookupPin g side p with
+    | Ok(_, f) -> Some f
+    | Error _ -> None
+
+let private isControlWire (g: Graph) (e: Edge) =
+    match lookupPin g In e.``to`` with
+    | Ok(ControlIn, _) -> true
+    | _ -> false
 
 // ---------------------------------------------------------------------------
 // The component.
 
-/// The canvas over a graph. `initial` is what it opens on; the graph the user
-/// edits is the component's own state from then on. With `live`, the design
-/// is running behind the canvas: values are painted on the wires, a box's
-/// signals are listed when it is selected, and the toolbar drives the run.
-let view (initial: Graph) (live: Live option) : Control =
+let private mono = FontFamily "monospace"
+
+let private button (label: string) (act: unit -> unit) =
+    Button.create [ Button.content label; Button.margin (Thickness(2.0, 0.0)); Button.onClick ((fun _ -> act ()), SubPatchOptions.Always) ]
+    :> Types.IView
+
+let private label (text: string) =
+    TextBlock.create [ TextBlock.text text; TextBlock.verticalAlignment Layout.VerticalAlignment.Center; TextBlock.margin (Thickness(4.0, 0.0)) ]
+    :> Types.IView
+
+/// A one-line entry: its text is state, Enter commits it.
+let private entry (width: float) (text: string) (onChanged: string -> unit) (onEnter: unit -> unit) =
+    TextBox.create
+        [ TextBox.width width
+          TextBox.text text
+          TextBox.onTextChanged (onChanged, SubPatchOptions.Always)
+          TextBox.onKeyDown (
+              (fun e ->
+                  if e.Key = Key.Enter then
+                      e.Handled <- true
+                      onEnter ()),
+              SubPatchOptions.Always
+          ) ]
+    :> Types.IView
+
+/// The canvas over a design. The graph the user edits is the component's
+/// own state from the opening on; with a design running behind it, values
+/// are painted on the wires, a box's signals are listed when it is
+/// selected, and the toolbar drives the run.
+let view (opening: Opening) : Control =
     Component(fun ctx ->
-        let graph = ctx.useState initial
-        let positions = ctx.useState (initialPositions initial)
+        let history = ctx.useState (history (withLayout opening.graph))
         let pan = ctx.useState ((0.0, 0.0))
         let zoom = ctx.useState 1.0
-        let selected = ctx.useState<string option> None
+        let selection = ctx.useState<Selection option> None
         let drag = ctx.useState<Drag option> None
         let message = ctx.useState ""
+        /// Double-click on the canvas: where, and what has been typed so far.
+        let typing = ctx.useState<((float * float) * string) option> None
+        let filePath = ctx.useState (opening.file |> Option.defaultValue "")
+        // The property panel's entries.
+        let nameText = ctx.useState ""
+        let designName = ctx.useState opening.graph.name
+        let copiesText = ctx.useState ""
+        let pinName = ctx.useState ""
+        let pinWidth = ctx.useState "24"
+        let pinFraction = ctx.useState "0"
+        let pinSigned = ctx.useState true
 
         let blankSnapshot: Warp11.Debug.Snapshot =
             { cycle = 0
@@ -322,9 +420,10 @@ let view (initial: Graph) (live: Live option) : Control =
               capacity = 0
               hit = None }
 
-        // The running patch is state, because `Reset` replaces it.
-        let liveState = ctx.useState live
-        let snapshot = ctx.useState (live |> Option.map (fun l -> l.session.Latest) |> Option.defaultValue blankSnapshot)
+        // The running design is state, because `Reset` replaces it and an
+        // edit to the design drops it.
+        let liveState = ctx.useState opening.live
+        let snapshot = ctx.useState (opening.live |> Option.map (fun l -> l.session.Latest) |> Option.defaultValue blankSnapshot)
         let controlText = ctx.useState Map.empty<string, string>
         // Playing: the timer steps the session as many frames as real time
         // has passed — Pure Data's "DSP on" — so a knob turned mid-file is
@@ -339,9 +438,9 @@ let view (initial: Graph) (live: Live option) : Control =
         ctx.useEffect (
             handler =
                 (fun () ->
-                    match live with
-                    | None -> ()
-                    | Some _ ->
+                    match opening.live, opening.opener with
+                    | None, None -> ()
+                    | _ ->
                         Avalonia.Threading.DispatcherTimer.Run(
                             (fun () ->
                                 match liveState.Current with
@@ -372,9 +471,86 @@ let view (initial: Graph) (live: Live option) : Control =
             triggers = [ EffectTrigger.AfterInit ]
         )
 
-        // Every read of the patch below goes through the state, so a reset
-        // is seen by the next render and the next tick alike.
+        // Every read of the running design below goes through the state, so
+        // a reset is seen by the next render and the next tick alike.
         let live = liveState.Current
+        let g = history.Current.present
+
+        let stopLive () =
+            live
+            |> Option.iter (fun l ->
+                l.session.Pause()
+                l.audio |> Option.iter (fun a -> a.Stop()))
+
+            playing.Set false
+            liveState.Set None
+            snapshot.Set blankSnapshot
+
+        // ---- changes: through `Edit`, with the refusal shown. A change to
+        // the design is a new design, so the session running the old one
+        // stops; the toolbar opens the new one on request.
+        let change (what: Graph -> Result<Graph, string>) : bool =
+            match apply what history.Current with
+            | h, None when obj.ReferenceEquals(h, history.Current) -> true
+            | h, None ->
+                history.Set h
+
+                if live.IsSome then
+                    stopLive ()
+                    message.Set "the design changed — Open in sim runs it again"
+                else
+                    message.Set ""
+
+                true
+            | _, Some why ->
+                message.Set $"refused: {why}"
+                false
+
+        let select (s: Selection option) =
+            selection.Set s
+
+            match s with
+            | Some(SelectedBox name) ->
+                let current = history.Current.present
+                nameText.Set name
+                copiesText.Set(current.boxes |> List.tryFind (fun b -> b.name = name) |> Option.map (fun b -> string b.copies) |> Option.defaultValue "")
+                live |> Option.iter (fun l -> l.signalsOf name |> List.iter l.session.Watch)
+            | _ -> ()
+
+        let deleteSelection () =
+            match selection.Current with
+            | Some(SelectedBox name) when name <> "input" && name <> "output" ->
+                if change (removeBox name) then
+                    select None
+                    message.Set $"removed {name}"
+            | Some(SelectedBox name) -> message.Set $"the {name} box is the design's own boundary"
+            | Some(SelectedWire e) ->
+                if change (removeWire e >> Ok) then
+                    select None
+                    message.Set $"removed the wire {showPin e.from} → {showPin e.``to``}"
+            | None -> ()
+
+        let stepHistory (what: string) (step: History -> History) =
+            let h = step history.Current
+
+            if not (obj.ReferenceEquals(h, history.Current)) then
+                history.Set h
+                designName.Set h.present.name
+                select None
+                message.Set what
+
+                if live.IsSome then
+                    stopLive ()
+
+        let undoLast () = stepHistory "undone" undo
+        let redoLast () = stepHistory "redone" redo
+
+        /// A new box of `unit` at `at`, selected.
+        let placeBox (unit: string) (at: float * float) =
+            let mutable placed = None
+
+            if change (addBox unit at >> Result.map (fun (g, name) -> placed <- Some name; g)) then
+                placed |> Option.iter (fun name -> select (Some(SelectedBox name)); message.Set $"added {name}")
 
         // Pointer positions are screen coordinates of the OUTER canvas; the
         // inner one is transformed, so the inverse takes them to the world.
@@ -399,29 +575,46 @@ let view (initial: Graph) (live: Live option) : Control =
                 Some(canvas, (p.X, p.Y), ((p.X - px) / z, (p.Y - py) / z))
             | None -> None
 
+        /// The world point at the middle of what is on screen, or near it:
+        /// where a palette click puts a box, stepped so boxes do not stack.
+        let somewhereVisible () =
+            let px, py = pan.Current
+            let z = zoom.Current
+            let k = float g.boxes.Length
+            (-px / z + 120.0 + 30.0 * k, -py / z + 260.0 + 30.0 * k)
+
         let onPressed (e: PointerPressedEventArgs) =
             match toWorld e with
             | None -> ()
             | Some(canvas, screen, world) ->
+                canvas.Focus() |> ignore
                 e.Pointer.Capture canvas
+                typing.Set None
 
-                match hitTest graph.Current positions.Current world with
+                match hitTest g world with
                 | HitPin(p, side) ->
                     drag.Set(Some(Wiring((p, side), world)))
                     message.Set $"wiring from {p.box}.{p.pin}"
+                | HitWire edge ->
+                    select (Some(SelectedWire edge))
+                    message.Set $"wire {showPin edge.from} → {showPin edge.``to``}"
                 | HitBox name ->
-                    let bx, by = positions.Current[name]
-                    selected.Set(Some name)
-                    live |> Option.iter (fun l -> l.signalsOf name |> List.iter l.session.Watch)
-                    drag.Set(Some(MovingBox(name, (fst world - bx, snd world - by))))
+                    let bx, by = g.positions[name]
+                    select (Some(SelectedBox name))
+                    drag.Set(Some(MovingBox(name, (fst world - bx, snd world - by), g)))
                 | HitNothing ->
-                    selected.Set None
-                    drag.Set(Some(Panning screen))
+                    select None
+
+                    if e.ClickCount = 2 then
+                        typing.Set(Some(world, ""))
+                    else
+                        drag.Set(Some(Panning screen))
 
         let onMoved (e: PointerEventArgs) =
             match drag.Current, toWorld e with
-            | Some(MovingBox(name, (ox, oy))), Some(_, _, (wx, wy)) ->
-                positions.Set(positions.Current |> Map.add name (wx - ox, wy - oy))
+            | Some(MovingBox(name, (ox, oy), _)), Some(_, _, (wx, wy)) ->
+                // The move is not history until the box is put down.
+                history.Set { history.Current with present = moveBox name (wx - ox, wy - oy) history.Current.present }
             | Some(Panning(lx, ly)), Some(_, (sx, sy), _) ->
                 let px, py = pan.Current
                 pan.Set((px + sx - lx, py + sy - ly))
@@ -432,14 +625,16 @@ let view (initial: Graph) (live: Live option) : Control =
         let onReleased (e: PointerReleasedEventArgs) =
             match drag.Current, toWorld e with
             | Some(Wiring(from, _)), Some(_, _, world) ->
-                match hitTest graph.Current positions.Current world with
+                match hitTest g world with
                 | HitPin(target, side) ->
-                    match connect graph.Current from (target, side) with
-                    | Ok edge ->
-                        graph.Set { graph.Current with edges = graph.Current.edges @ [ edge ] }
-                        message.Set $"wired {edge.from.box}.{edge.from.pin} → {edge.``to``.box}.{edge.``to``.pin}"
-                    | Error why -> message.Set $"refused: {why}"
+                    if change (addWire from (target, side)) then
+                        message.Set $"wired {showPin (fst from)} — {showPin target}"
                 | _ -> message.Set "wire dropped"
+            | Some(MovingBox(name, _, before)), _ ->
+                let h = history.Current
+
+                if h.present.positions[name] <> before.positions[name] then
+                    history.Set { h with past = before :: h.past; future = [] }
             | _ -> ()
 
             e.Pointer.Capture null
@@ -455,8 +650,41 @@ let view (initial: Graph) (live: Live option) : Control =
                 pan.Set((sx - wx * z, sy - wy * z))
                 e.Handled <- true
 
-        let g = graph.Current
-        let pos = positions.Current
+        let onKey (e: KeyEventArgs) =
+            let ctrl = e.KeyModifiers.HasFlag KeyModifiers.Control
+            let shift = e.KeyModifiers.HasFlag KeyModifiers.Shift
+
+            match e.Key with
+            | Key.Delete
+            | Key.Back ->
+                deleteSelection ()
+                e.Handled <- true
+            | Key.Z when ctrl && shift ->
+                redoLast ()
+                e.Handled <- true
+            | Key.Z when ctrl ->
+                undoLast ()
+                e.Handled <- true
+            | Key.Y when ctrl ->
+                redoLast ()
+                e.Handled <- true
+            | Key.D when ctrl ->
+                match selection.Current with
+                | Some(SelectedBox name) when name <> "input" && name <> "output" ->
+                    let bx, by = g.positions[name]
+                    let mutable placed = None
+
+                    if change (duplicateBox name (bx + 40.0, by + 40.0) >> Result.map (fun (g, n) -> placed <- Some n; g)) then
+                        placed |> Option.iter (fun n -> select (Some(SelectedBox n)); message.Set $"duplicated {name} as {n}")
+                | _ -> ()
+
+                e.Handled <- true
+            | Key.Escape ->
+                typing.Set None
+                select None
+                e.Handled <- true
+            | _ -> ()
+
         let px, py = pan.Current
         let z = zoom.Current
 
@@ -485,11 +713,13 @@ let view (initial: Graph) (live: Live option) : Control =
                 (if valid then wireBrush :> IBrush else faintBrush :> IBrush), label
 
         let wires =
-            [ for i, e in List.indexed g.edges do
-                  match pinCentre g pos e.from Out, pinCentre g pos e.``to`` In with
+            [ for e in g.edges do
+                  match pinCentre g e.from Out, pinCentre g e.``to`` In with
                   | Some a, Some b ->
                       let brush, label = wireState e
-                      yield wireView $"wire:%d{i}" brush a b
+                      let isSelected = selection.Current = Some(SelectedWire e)
+                      let thickness = if isControlWire g e then 1.2 else 2.0
+                      yield wireView (if isSelected then selectedWireBrush :> IBrush else brush) (if isSelected then thickness + 1.5 else thickness) a b
 
                       match label with
                       | Some text ->
@@ -501,7 +731,7 @@ let view (initial: Graph) (live: Live option) : Control =
                                     Canvas.top ((ay + by) / 2.0 - 16.0)
                                     TextBlock.text text
                                     TextBlock.fontSize 11.0
-                                    TextBlock.fontFamily (FontFamily "monospace")
+                                    TextBlock.fontFamily mono
                                     TextBlock.foreground Brushes.DarkRed
                                     TextBlock.isHitTestVisible false ]
                               :> Types.IView
@@ -511,12 +741,153 @@ let view (initial: Graph) (live: Live option) : Control =
         let pending =
             match drag.Current with
             | Some(Wiring((from, side), at)) ->
-                match pinCentre g pos from side with
-                | Some a -> [ wireView "wire:pending" pendingBrush a at ]
+                match pinCentre g from side with
+                | Some a -> [ wireView pendingBrush 2.0 a at ]
                 | None -> []
             | _ -> []
 
-        let boxes = [ for name in boxOrder g do yield! boxView g selected.Current name pos[name] ]
+        let boxes = [ for name in boxOrder g do yield! boxView g selection.Current name g.positions[name] ]
+
+        // ---- type to create: a box at the double-click, named from the
+        // palette as it is typed. Enter takes the first match.
+        let typingView =
+            match typing.Current with
+            | None -> []
+            | Some((wx, wy), text) ->
+                let matches =
+                    palette.Keys
+                    |> Seq.filter (fun n -> text = "" || n.StartsWith(text, System.StringComparison.OrdinalIgnoreCase))
+                    |> Seq.sort
+                    |> List.ofSeq
+
+                let create () =
+                    match matches with
+                    | first :: _ ->
+                        let exact = matches |> List.tryFind (fun n -> n = text) |> Option.defaultValue first
+                        typing.Set None
+                        placeBox exact (wx, wy)
+                    | [] -> message.Set $"no unit called '{text}'"
+
+                [ StackPanel.create
+                      [ Canvas.left (wx * z + px)
+                        Canvas.top (wy * z + py)
+                        StackPanel.children (
+                            [ TextBox.create
+                                  [ TextBox.width 160.0
+                                    TextBox.text text
+                                    TextBox.placeHolderText "unit name"
+                                    TextBox.onLoaded ((fun e -> (e.Source :?> TextBox).Focus() |> ignore), SubPatchOptions.Always)
+                                    TextBox.onTextChanged ((fun t -> typing.Set(Some((wx, wy), t))), SubPatchOptions.Always)
+                                    TextBox.onKeyDown (
+                                        (fun e ->
+                                            match e.Key with
+                                            | Key.Enter ->
+                                                e.Handled <- true
+                                                create ()
+                                            | Key.Escape ->
+                                                e.Handled <- true
+                                                typing.Set None
+                                            | _ -> ()),
+                                        SubPatchOptions.Always
+                                    ) ]
+                              :> Types.IView ]
+                            @ [ for n in List.truncate 6 matches ->
+                                    TextBlock.create
+                                        [ TextBlock.text n
+                                          TextBlock.fontSize 12.0
+                                          TextBlock.margin (Thickness(6.0, 1.0))
+                                          TextBlock.foreground Brushes.DimGray ]
+                                    :> Types.IView ]
+                        ) ]
+                  :> Types.IView ]
+
+        // ---- the palette: every unit, a click adds a box of it.
+        let paletteView =
+            StackPanel.create
+                [ DockPanel.dock Dock.Left
+                  StackPanel.width 130.0
+                  StackPanel.margin (Thickness 6.0)
+                  StackPanel.children (
+                      [ TextBlock.create [ TextBlock.text "palette"; TextBlock.fontWeight FontWeight.Bold; TextBlock.margin (Thickness(4.0, 2.0)) ] :> Types.IView ]
+                      @ [ for name in palette.Keys |> Seq.sort ->
+                              Button.create
+                                  [ Button.content name
+                                    Button.horizontalAlignment Layout.HorizontalAlignment.Stretch
+                                    Button.margin (Thickness(2.0, 1.0))
+                                    Button.onClick ((fun _ -> placeBox name (somewhereVisible ())), SubPatchOptions.Always) ]
+                              :> Types.IView ]
+                  ) ]
+            :> Types.IView
+
+        // ---- the toolbar: the file and the history on the first row; the
+        // run controls, with a number box per control, on the second.
+        let openInSim () =
+            match opening.opener with
+            | None -> ()
+            | Some opener ->
+                let knobs =
+                    [ for name, _ in g.controls ->
+                          let typed =
+                              controlText.Current
+                              |> Map.tryFind name
+                              |> Option.bind (fun t ->
+                                  match System.UInt64.TryParse t with
+                                  | true, v -> Some v
+                                  | _ -> None)
+
+                          let last = valueOf snap name |> Option.map uint64
+                          name, (typed |> Option.orElse last |> Option.defaultValue 0UL) ]
+
+                try
+                    let fresh = opener g knobs
+                    liveState.Set(Some fresh)
+                    snapshot.Set fresh.session.Latest
+                    message.Set "opened in the simulator: the recording plays from the start"
+                with e ->
+                    message.Set $"refused: {e.Message}"
+
+        let fileRow =
+            StackPanel.create
+                [ DockPanel.dock Dock.Top
+                  StackPanel.orientation Layout.Orientation.Horizontal
+                  StackPanel.margin (Thickness(10.0, 6.0, 10.0, 0.0))
+                  StackPanel.children
+                      [ button "New" (fun () ->
+                            stopLive ()
+                            history.Set(Warp11.Placement.Edit.history (withLayout (emptyGraph "Untitled")))
+                            select None
+                            message.Set "a new design")
+                        button "Open" (fun () ->
+                            match Warp11.Placement.DesignFile.load filePath.Current with
+                            | Ok g ->
+                                stopLive ()
+                                history.Set(Warp11.Placement.Edit.history (withLayout g))
+                                select None
+                                message.Set $"opened {filePath.Current}: {g.name}, %d{g.boxes.Length} boxes, %d{g.edges.Length} wires"
+                            | Error why -> message.Set $"refused: {why}")
+                        button "Save" (fun () ->
+                            if filePath.Current = "" then
+                                message.Set "a path to save to, first"
+                            else
+                                try
+                                    Warp11.Placement.DesignFile.save filePath.Current g
+                                    message.Set $"saved {filePath.Current}"
+                                with e ->
+                                    message.Set $"could not save: {e.Message}")
+                        entry 260.0 filePath.Current filePath.Set ignore
+                        button "Undo" undoLast
+                        button "Redo" redoLast
+                        button "Delete" deleteSelection
+                        (match live, opening.opener with
+                         | None, Some _ -> button "Open in sim" openInSim
+                         | _ -> TextBlock.create [] :> Types.IView)
+                        TextBlock.create
+                            [ TextBlock.margin (Thickness(10.0, 0.0))
+                              TextBlock.verticalAlignment Layout.VerticalAlignment.Center
+                              TextBlock.fontFamily mono
+                              TextBlock.text
+                                  $"{g.name} — {g.boxes.Length} boxes, {g.edges.Length} wires — %d{history.Current.past.Length} to undo — zoom {inv z}" ] ] ]
+            :> Types.IView
 
         // Play: with a speaker, start it and free-run — the speaker paces the
         // session. Without one, the timer paces `Step`s. Stop undoes either.
@@ -538,16 +909,10 @@ let view (initial: Graph) (live: Live option) : Control =
                     playing.Set false
                 | None, _ -> playing.Set(not playing.Current)
 
-        // ---- the toolbar: run controls, the recording's progress, a number
-        // box per control — Pure Data's number box wired to a control inlet.
-        let toolbar =
+        let runRow =
             match live with
             | None -> []
             | Some l ->
-                let button (label: string) (act: unit -> unit) =
-                    Button.create [ Button.content label; Button.margin (Thickness(2.0, 0.0)); Button.onClick ((fun _ -> act ()), SubPatchOptions.Always) ]
-                    :> Types.IView
-
                 let progress =
                     (match l.recording with
                      | Some r -> $"  frames %d{r.framesOffered ()} offered, %d{r.remaining ()} to go"
@@ -560,10 +925,10 @@ let view (initial: Graph) (live: Live option) : Control =
                     let text = controlText.Current |> Map.tryFind name |> Option.defaultValue (valueOf snap name |> Option.map string |> Option.defaultValue "")
 
                     StackPanel.create
-                        [ StackPanel.orientation Avalonia.Layout.Orientation.Horizontal
+                        [ StackPanel.orientation Layout.Orientation.Horizontal
                           StackPanel.margin (Thickness(0.0, 0.0, 8.0, 0.0))
                           StackPanel.children
-                              [ TextBlock.create [ TextBlock.text $"{name} "; TextBlock.verticalAlignment Avalonia.Layout.VerticalAlignment.Center ]
+                              [ label name
                                 TextBox.create
                                     [ TextBox.width 70.0
                                       TextBox.text text
@@ -582,7 +947,7 @@ let view (initial: Graph) (live: Live option) : Control =
 
                 [ StackPanel.create
                       [ DockPanel.dock Dock.Top
-                        StackPanel.orientation Avalonia.Layout.Orientation.Horizontal
+                        StackPanel.orientation Layout.Orientation.Horizontal
                         StackPanel.margin (Thickness(10.0, 6.0))
                         // Knobs first, so they never move as the counters grow.
                         StackPanel.children
@@ -612,7 +977,7 @@ let view (initial: Graph) (live: Live option) : Control =
 
                                              name, (typed |> Option.orElse last |> Option.defaultValue 0UL) ]
 
-                                   let fresh = l.reopen knobs
+                                   let fresh = l.reopen g knobs
                                    liveState.Set(Some fresh)
                                    snapshot.Set fresh.session.Latest
                                    message.Set "reset: the recording plays again from the start")
@@ -627,23 +992,34 @@ let view (initial: Graph) (live: Live option) : Control =
                                 | _ -> TextBlock.create [] :> Types.IView)
                                TextBlock.create
                                    [ TextBlock.margin (Thickness(10.0, 0.0))
-                                     TextBlock.verticalAlignment Avalonia.Layout.VerticalAlignment.Center
-                                     TextBlock.fontFamily (FontFamily "monospace")
+                                     TextBlock.verticalAlignment Layout.VerticalAlignment.Center
+                                     TextBlock.fontFamily mono
                                      TextBlock.text $"cycle %d{snap.cycle}{progress}" ] ]) ]
                   :> Types.IView ]
 
-        // ---- the side panel: the selected box's pins and its own signals,
-        // with this cycle's values.
-        let sidePanel =
-            match live, selected.Current with
-            | Some l, Some box ->
+        // ---- the property panel: what is selected. A box's name and copies;
+        // the boundary's pins, added and removed here; a wire's ends. And
+        // when the design is running, the pins' values and the box's own
+        // signals.
+        let row (name: string, value: string) =
+            TextBlock.create [ TextBlock.fontFamily mono; TextBlock.fontSize 12.0; TextBlock.text $"%-28s{name} {value}" ] :> Types.IView
+
+        let heading (text: string) =
+            TextBlock.create [ TextBlock.text text; TextBlock.fontWeight FontWeight.Bold; TextBlock.margin (Thickness(0.0, 8.0, 0.0, 2.0)) ]
+            :> Types.IView
+
+        let liveRows (box: string) =
+            match live with
+            | None -> []
+            | Some l ->
                 let ins, outs = pinsOf g box
                 let controls = controlsOf g box
 
                 let pinRows =
                     [ for pins, side, tag in [ ins, In, "in"; outs, Out, "out" ] do
                           match box with
-                          | "input" | "output" -> ()
+                          | "input"
+                          | "output" -> ()
                           | _ -> yield $"{tag} valid", (valueOf snap (l.validOf box side) |> Option.map string |> Option.defaultValue "—")
 
                           for n, f in pins do
@@ -663,55 +1039,195 @@ let view (initial: Graph) (live: Live option) : Control =
                               yield $"ctl {n}", shown ]
 
                 let ownRows =
-                    [ for name in l.signalsOf box ->
-                          name, (valueOf snap name |> Option.map string |> Option.defaultValue "—") ]
+                    [ for name in l.signalsOf box -> name, (valueOf snap name |> Option.map string |> Option.defaultValue "—") ]
 
-                let row (name: string, value: string) =
-                    TextBlock.create
-                        [ TextBlock.fontFamily (FontFamily "monospace")
-                          TextBlock.fontSize 12.0
-                          TextBlock.text $"%-28s{name} {value}" ]
-                    :> Types.IView
+                [ heading "this cycle" ] @ (pinRows |> List.map row) @ (ownRows |> List.map row)
 
-                [ ScrollViewer.create
-                      [ DockPanel.dock Dock.Right
-                        ScrollViewer.width 320.0
-                        ScrollViewer.content (
-                            StackPanel.create
-                                [ StackPanel.margin (Thickness 10.0)
-                                  StackPanel.children (
-                                      [ TextBlock.create [ TextBlock.text box; TextBlock.fontWeight FontWeight.Bold ] :> Types.IView ]
-                                      @ (pinRows |> List.map row)
-                                      @ (if ownRows.IsEmpty then [] else [ TextBlock.create [ TextBlock.text " "; TextBlock.fontSize 6.0 ] :> Types.IView ])
-                                      @ (ownRows |> List.map row)
+        let pinFormat () =
+            match System.Int32.TryParse pinWidth.Current, System.Int32.TryParse pinFraction.Current with
+            | (true, w), (true, f) when w > 0 && f >= 0 && f <= w -> Ok({ totalWidth = w; fracBits = f; signed = pinSigned.Current }: NumberFormat)
+            | _ -> Error $"a pin's format is a width and a fraction, not '{pinWidth.Current}' and '{pinFraction.Current}'"
+
+        let addPin (add: string * NumberFormat -> Graph -> Result<Graph, string>) =
+            match pinFormat () with
+            | Ok f ->
+                if change (add (pinName.Current, f)) then
+                    message.Set $"added {pinName.Current}"
+                    pinName.Set ""
+            | Error why -> message.Set $"refused: {why}"
+
+        let boundaryRows (box: string) =
+            let pinRow (kind: string) (n: string, f: NumberFormat) =
+                StackPanel.create
+                    [ StackPanel.orientation Layout.Orientation.Horizontal
+                      StackPanel.children
+                          [ button "×" (fun () -> if change (removeBoundaryPin (pin box n)) then message.Set $"removed {box}.{n}")
+                            TextBlock.create
+                                [ TextBlock.fontFamily mono
+                                  TextBlock.fontSize 12.0
+                                  TextBlock.verticalAlignment Layout.VerticalAlignment.Center
+                                  TextBlock.text $"{kind} {n}: {describeFormat f}" ] ] ]
+                :> Types.IView
+
+            let signals, controls =
+                match box with
+                | "input" -> g.inputs, g.controls
+                | _ -> g.outputs, []
+
+            [ heading "pins" ]
+            @ (signals |> List.map (pinRow "signal"))
+            @ (controls |> List.map (pinRow "control"))
+            @ [ heading "add a pin"
+                StackPanel.create
+                    [ StackPanel.orientation Layout.Orientation.Horizontal
+                      StackPanel.children
+                          [ label "name"
+                            entry 110.0 pinName.Current pinName.Set ignore
+                            label "width"
+                            entry 44.0 pinWidth.Current pinWidth.Set ignore ] ]
+                :> Types.IView
+                StackPanel.create
+                    [ StackPanel.orientation Layout.Orientation.Horizontal
+                      StackPanel.margin (Thickness(0.0, 4.0))
+                      StackPanel.children
+                          [ label "fraction"
+                            entry 44.0 pinFraction.Current pinFraction.Set ignore
+                            CheckBox.create
+                                [ CheckBox.content "signed"
+                                  CheckBox.isChecked pinSigned.Current
+                                  CheckBox.onIsCheckedChanged (
+                                      (fun e ->
+                                          match e.Source with
+                                          | :? Avalonia.Controls.Primitives.ToggleButton as t -> pinSigned.Set(t.IsChecked.GetValueOrDefault())
+                                          | _ -> ()),
+                                      SubPatchOptions.Always
                                   ) ]
-                        ) ]
-                  :> Types.IView ]
-            | _ -> []
+                            (if box = "input" then
+                                 button "add signal" (fun () -> addPin addInputPin)
+                             else
+                                 button "add signal" (fun () -> addPin addOutputPin))
+                            (if box = "input" then
+                                 button "add control" (fun () -> addPin addControl)
+                             else
+                                 TextBlock.create [] :> Types.IView) ] ]
+                :> Types.IView ]
+
+        let boxRows (name: string) =
+            let b = g.boxes |> List.find (fun b -> b.name = name)
+            let u = palette[b.unit]
+
+            let lawText =
+                match u.law with
+                | Sequential _ -> "sequential"
+                | Combinational _ -> "combinational"
+
+            let controlRow (n: string, f: NumberFormat) =
+                let from =
+                    g.edges
+                    |> List.tryFind (fun e -> e.``to`` = pin name n)
+                    |> Option.map (fun e -> $"from {showPin e.from}")
+                    |> Option.defaultValue "unwired"
+
+                row (n, $"{describeFormat f}  {from}")
+
+            [ StackPanel.create
+                  [ StackPanel.orientation Layout.Orientation.Horizontal
+                    StackPanel.children
+                        [ label "name"
+                          entry 120.0 nameText.Current nameText.Set (fun () ->
+                              if change (renameBox name nameText.Current) then
+                                  select (Some(SelectedBox nameText.Current))
+                                  message.Set $"renamed {name} to {nameText.Current}") ] ]
+              :> Types.IView
+              StackPanel.create
+                  [ StackPanel.orientation Layout.Orientation.Horizontal
+                    StackPanel.margin (Thickness(0.0, 4.0))
+                    StackPanel.children
+                        [ label "copies"
+                          entry 50.0 copiesText.Current copiesText.Set (fun () ->
+                              match System.Int32.TryParse copiesText.Current with
+                              | true, n -> if change (setCopies name n) then message.Set $"{name}: %d{n} copies"
+                              | _ -> message.Set $"refused: copies is a number, not '{copiesText.Current}'") ] ]
+              :> Types.IView
+              row ("unit", $"{b.unit}, {lawText}")
+              heading "signal inlets" ]
+            @ (u.operands.pins |> List.map (fun (n, f) -> row (n, describeFormat f)))
+            @ [ heading "signal outlets" ]
+            @ (u.results.pins |> List.map (fun (n, f) -> row (n, describeFormat f)))
+            @ [ heading "control inlets" ]
+            @ (u.controls |> List.map controlRow)
+
+        let propertyPanel =
+            let title, rows =
+                match selection.Current with
+                | Some(SelectedBox("input" | "output" as box)) -> box, boundaryRows box @ liveRows box
+                | Some(SelectedBox box) -> box, boxRows box @ liveRows box
+                | Some(SelectedWire e) ->
+                    "wire",
+                    [ row ("from", showPin e.from)
+                      row ("to", showPin e.``to``)
+                      button "Delete" deleteSelection ]
+                | None ->
+                    // Nothing selected: the design itself.
+                    "design",
+                    [ StackPanel.create
+                          [ StackPanel.orientation Layout.Orientation.Horizontal
+                            StackPanel.children
+                                [ label "name"
+                                  entry 160.0 designName.Current designName.Set (fun () ->
+                                      if change (rename designName.Current) then
+                                          message.Set $"the design is {designName.Current}") ] ]
+                      :> Types.IView
+                      row ("streams", string g.streams)
+                      TextBlock.create
+                          [ TextBlock.margin (Thickness(0.0, 12.0, 0.0, 0.0))
+                            TextBlock.text "select a box or a wire; double-click the canvas to add a box"
+                            TextBlock.foreground Brushes.Gray
+                            TextBlock.textWrapping TextWrapping.Wrap ]
+                      :> Types.IView ]
+
+            ScrollViewer.create
+                [ DockPanel.dock Dock.Right
+                  ScrollViewer.width 390.0
+                  ScrollViewer.content (
+                      StackPanel.create
+                          [ StackPanel.margin (Thickness 10.0)
+                            StackPanel.children (
+                                [ TextBlock.create [ TextBlock.text title; TextBlock.fontWeight FontWeight.Bold; TextBlock.fontSize 14.0 ] :> Types.IView ]
+                                @ rows
+                            ) ]
+                  ) ]
+            :> Types.IView
 
         DockPanel.create
             [ DockPanel.children (
                   [ TextBlock.create
                         [ DockPanel.dock Dock.Top
-                          TextBlock.margin (Thickness(10.0, 6.0))
-                          TextBlock.fontFamily (FontFamily "monospace")
-                          TextBlock.text
-                              $"{g.name} — {g.boxes.Length} boxes, {g.edges.Length} wires — zoom {inv z}  {message.Current}" ]
-                    :> Types.IView ]
-                  @ toolbar
-                  @ sidePanel
+                          TextBlock.margin (Thickness(10.0, 6.0, 10.0, 0.0))
+                          TextBlock.fontFamily mono
+                          TextBlock.foreground (if message.Current.StartsWith "refused" then Brushes.DarkRed else Brushes.Black)
+                          TextBlock.text (if message.Current = "" then " " else message.Current) ]
+                    :> Types.IView
+                    fileRow ]
+                  @ runRow
+                  @ [ paletteView; propertyPanel ]
                   @ [ Canvas.create
                           [ Canvas.background (SolidColorBrush(Color.FromRgb(255uy, 255uy, 255uy)))
                             Canvas.clipToBounds true
+                            Canvas.focusable true
                             Canvas.onPointerPressed (onPressed, SubPatchOptions.Always)
                             Canvas.onPointerMoved (onMoved, SubPatchOptions.Always)
                             Canvas.onPointerReleased (onReleased, SubPatchOptions.Always)
                             Canvas.onPointerWheelChanged (onWheel, SubPatchOptions.Always)
-                            Canvas.children
+                            Canvas.onKeyDown (onKey, SubPatchOptions.Always)
+                            Canvas.children (
                                 [ Canvas.create
                                       [ Canvas.renderTransformOrigin (RelativePoint(0.0, 0.0, RelativeUnit.Absolute))
                                         Canvas.renderTransform transform
-                                        // Wires over boxes, as a patch is read.
-                                        Canvas.children (boxes @ wires @ pending) ] ] ]
+                                        // Wires over boxes, as a design is read.
+                                        Canvas.children (boxes @ wires @ pending) ]
+                                  :> Types.IView ]
+                                @ typingView
+                            ) ]
                       :> Types.IView ]
               ) ])

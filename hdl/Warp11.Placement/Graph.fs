@@ -28,7 +28,11 @@ type PinRef = { box: string; pin: string }
 /// design's output pins likewise; every control pin exactly one.
 type Edge = { from: PinRef; ``to``: PinRef }
 
-/// The design: its own pins, the boxes, the wires.
+/// The design: its own pins, the boxes, the wires, and where a canvas last
+/// put each box. Positions are part of the design so a saved design opens as
+/// it was left; the elaborator never reads them, so a graph with none — every
+/// graph written in F# — elaborates to the same bytes as the same graph laid
+/// out by hand.
 type Graph =
     { name: string
       streams: int
@@ -36,9 +40,21 @@ type Graph =
       controls: (string * NumberFormat) list
       outputs: (string * NumberFormat) list
       boxes: Box list
-      edges: Edge list }
+      edges: Edge list
+      positions: Map<string, float * float> }
 
 let pin (box: string) (pin: string) : PinRef = { box = box; pin = pin }
+
+/// A design with nothing in it yet: no boundary pins, no boxes.
+let emptyGraph (name: string) : Graph =
+    { name = name
+      streams = 1
+      inputs = []
+      controls = []
+      outputs = []
+      boxes = []
+      edges = []
+      positions = Map.empty }
 
 /// Which side of a box a pin is on. A box may call an input and an output by
 /// the same name (`gain` has `left` on both sides), so wherever a pin is
@@ -70,7 +86,8 @@ let macGraph (streams: int) (multipliers: int) (adders: int) : Graph =
           // Skips `product`: the elaborator holds `c` while the multiply is out.
           { from = pin "input" "c"; ``to`` = pin "sum" "y" }
           // The rename: the box's `sum` is the design's `out`.
-          { from = pin "sum" "sum"; ``to`` = pin "output" "out" } ] }
+          { from = pin "sum" "sum"; ``to`` = pin "output" "out" } ]
+      positions = Map.empty }
 
 /// The first patch: a stereo stream through `gain`, volume and mute from the
 /// design's controls.
@@ -89,7 +106,8 @@ let gainGraph: Graph =
           { from = pin "input" "volume"; ``to`` = pin "gain" "volume" }
           { from = pin "input" "mute"; ``to`` = pin "gain" "mute" }
           { from = pin "gain" "left"; ``to`` = pin "output" "left" }
-          { from = pin "gain" "right"; ``to`` = pin "output" "right" } ] }
+          { from = pin "gain" "right"; ``to`` = pin "output" "right" } ]
+      positions = Map.empty }
 
 let private boxOf (g: Graph) (name: string) = g.boxes |> List.tryFind (fun b -> b.name = name)
 
@@ -113,3 +131,43 @@ let controlsOf (g: Graph) (box: string) : (string * NumberFormat) list =
         match boxOf g name with
         | Some b -> palette[b.unit].controls
         | None -> []
+
+/// What a pin is: a field of the beat in or out of a box, or a control held
+/// beside it, sourced from the design's own controls.
+type PinKind =
+    | SignalIn
+    | SignalOut
+    | ControlIn
+    | ControlOut
+
+let describeFormat (f: NumberFormat) =
+    let sign = if f.signed then "signed" else "unsigned"
+    $"%d{f.totalWidth}w/%d{f.fracBits}f/{sign}"
+
+let showPin (p: PinRef) = $"{p.box}.{p.pin}"
+
+let boxExists (g: Graph) (name: string) =
+    name = "input" || name = "output" || g.boxes |> List.exists (fun b -> b.name = name)
+
+/// What a pin is, or why it is not. A wire's `from` end is looked up among a
+/// box's outputs and its `to` end among its inputs — a box may call an input
+/// and an output by the same name, as `gain` calls both `left`.
+let lookupPin (g: Graph) (side: Side) (p: PinRef) : Result<PinKind * NumberFormat, string> =
+    if not (boxExists g p.box) then
+        Error $"{showPin p}: no such box"
+    else
+        let signalIns, signalOuts = pinsOf g p.box
+        let controls = controlsOf g p.box
+        let find pins = pins |> List.tryFind (fun (n, _) -> n = p.pin) |> Option.map snd
+
+        match side with
+        | Out ->
+            match find signalOuts, (if p.box = "input" then find controls else None) with
+            | Some f, _ -> Ok(SignalOut, f)
+            | _, Some f -> Ok(ControlOut, f)
+            | _ -> Error $"{showPin p}: no such output pin"
+        | In ->
+            match find signalIns, (if p.box = "input" then None else find controls) with
+            | Some f, _ -> Ok(SignalIn, f)
+            | _, Some f -> Ok(ControlIn, f)
+            | _ -> Error $"{showPin p}: no such input pin"

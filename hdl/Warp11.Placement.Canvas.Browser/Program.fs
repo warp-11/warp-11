@@ -30,7 +30,8 @@ type App() =
             match this.ApplicationLifetime with
             | :? ISingleViewApplicationLifetime as single ->
                 System.Console.WriteLine "spike: building view"
-                single.MainView <- ContentControl(Content = Warp11.Placement.Canvas.FuncCanvas.view (macGraph 1 1 1) None)
+                single.MainView <- ContentControl(Content = Warp11.Placement.Canvas.FuncCanvas.view
+                        { graph = macGraph 1 1 1; live = None; opener = None; file = None })
                 System.Console.WriteLine "spike: view set"
             | _ -> System.Console.WriteLine "spike: no single-view lifetime"
         with e ->

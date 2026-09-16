@@ -35,6 +35,19 @@ let main argv =
         let peak (w: WavData) = w.samples |> Array.map (fun s -> abs (int s)) |> Array.max
         printfn $"{inPath}: %d{source.FrameCount} frames, peak %d{peak source} → {outPath}: %d{heard.FrameCount} frames, peak %d{peak heard}, volume %d{volume}/256"
         0
+    // The Verilog of a saved design, or of the typed gain patch — so the two
+    // can be diffed: `emit design.json`, `emit gain`.
+    | [| "emit"; "gain" |] ->
+        printf $"{Warp11.Verilog.emitDesign gainPatch.def}"
+        0
+    | [| "emit"; path |] ->
+        match Warp11.Placement.DesignFile.load path with
+        | Ok g ->
+            printf $"{Warp11.Verilog.emitDesign (Warp11.Placement.Elaborate.elaborate g).def}"
+            0
+        | Error why ->
+            eprintfn $"{path}: {why}"
+            1
     | [| "throughput" |] ->
         printfn $"{throughputReport ()}"
         0
@@ -52,4 +65,6 @@ let main argv =
     run "UD3 palette is the units" paletteIsTheUnits
     run "UD4 gain graph is the gain patch" gainGraphIsTheGainPatch
     run "UD5 wav plays through the graph" wavPlaysThroughTheGraph
+    run "UD6 edits build the gain design" editsBuildTheGainDesign
+    run "UD7 a saved design opens as it was" savedDesignOpensAsItWas
     0

@@ -5,18 +5,19 @@ open Avalonia
 open Avalonia.Controls.ApplicationLifetimes
 open Avalonia.FuncUI.Hosts
 open Avalonia.Themes.Fluent
+open Warp11.Placement
 open Warp11.Placement.Graph
 
-type SpikeWindow(g: Graph, live: FuncCanvas.Live option) as this =
+type CanvasWindow(o: FuncCanvas.Opening) as this =
     inherit HostWindow()
 
     do
-        this.Title <- "warp11 — canvas spike"
-        this.Width <- 1200.0
-        this.Height <- 700.0
-        this.Content <- FuncCanvas.view g live
+        this.Title <- "warp11 — design canvas"
+        this.Width <- 1400.0
+        this.Height <- 800.0
+        this.Content <- FuncCanvas.view o
 
-type App(g: Graph, live: FuncCanvas.Live option) =
+type App(o: FuncCanvas.Opening) =
     inherit Application()
 
     override this.Initialize() =
@@ -25,28 +26,42 @@ type App(g: Graph, live: FuncCanvas.Live option) =
 
     override this.OnFrameworkInitializationCompleted() =
         match this.ApplicationLifetime with
-        | :? IClassicDesktopStyleApplicationLifetime as desktop -> desktop.MainWindow <- SpikeWindow(g, live)
+        | :? IClassicDesktopStyleApplicationLifetime as desktop -> desktop.MainWindow <- CanvasWindow o
         | _ -> ()
 
         base.OnFrameworkInitializationCompleted()
 
-/// `--unwired` opens the graph with one wire missing — the skip wire
-/// `input.c → sum.y` — so that drawing a wire can be tried by hand.
-let private startingGraph (argv: string[]) =
-    let g = macGraph 1 1 1
+/// What to open:
+///
+/// - `patch file.wav` — the gain design with the recording playing into it,
+///   the canvas over a running design;
+/// - `edit design.json [file.wav]` — a design file (a new design if there is
+///   no file yet), and with a recording, `Open in sim` runs it;
+/// - nothing — `mac`, to look at.
+let private opening (argv: string[]) : FuncCanvas.Opening =
+    let none: FuncCanvas.Opening =
+        { graph = macGraph 1 1 1
+          live = None
+          opener = None
+          file = None }
 
-    if Array.contains "--unwired" argv then
-        { g with edges = g.edges |> List.filter (fun e -> e.``to`` <> pin "sum" "y") }
-    else
-        g
+    match argv with
+    | [| "patch"; wavPath |] ->
+        let live = Patch.openGain wavPath (AudioSink.available ())
+        { none with graph = gainGraph; live = Some live; opener = Some live.reopen }
+    | [| "edit"; designPath |]
+    | [| "edit"; designPath; _ |] ->
+        let g =
+            match DesignFile.load designPath with
+            | Ok g -> g
+            | Error why when not (System.IO.File.Exists designPath) -> ignore why; emptyGraph (System.IO.Path.GetFileNameWithoutExtension designPath)
+            | Error why -> failwith why
 
-/// `patch file.wav` opens the gain patch with the recording playing into it
-/// — the canvas over a running design. Anything else opens `mac`, still.
+        let opener = if argv.Length = 3 then Some(Patch.wavOpener argv[2] (AudioSink.available ())) else None
+        { graph = g; live = None; opener = opener; file = Some designPath }
+    | _ -> none
+
 [<EntryPoint>]
 let main argv =
-    let g, live =
-        match argv with
-        | [| "patch"; wavPath |] -> gainGraph, Some(Patch.openGain wavPath (AudioSink.available ()))
-        | _ -> startingGraph argv, None
-
-    AppBuilder.Configure<App>(fun () -> App(g, live)).UsePlatformDetect().StartWithClassicDesktopLifetime argv
+    let o = opening argv
+    AppBuilder.Configure<App>(fun () -> App(o)).UsePlatformDetect().StartWithClassicDesktopLifetime argv

@@ -37,8 +37,10 @@ let rec openWith (g: Graph) (recording: WavData) (controls: (string * uint64) li
     let session =
         new DebugSession(design.def, ownThread = not (System.OperatingSystem.IsBrowser()), devices = [ attach ]) :> IDebugSession
 
+    // Only the controls this graph has: an edited design may have lost one.
     for name, value in controls do
-        session.Poke(name, System.Numerics.BigInteger value)
+        if g.controls |> List.exists (fun (n, _) -> n = name) then
+            session.Poke(name, System.Numerics.BigInteger value)
 
     for name in probeNames g do
         session.Watch name
@@ -74,12 +76,17 @@ let rec openWith (g: Graph) (recording: WavData) (controls: (string * uint64) li
             |> List.sort
       savePath = savePath
       framesPerSecond = recording.sampleRate
-      reopen = fun knobs -> openWith g recording knobs savePath sink }
+      reopen = fun g knobs -> openWith g recording knobs savePath sink }
 
-/// The first patch: `wav in → gain → wav out`, unity gain, unmuted, through
-/// the speakers when there are any.
-let openGain (wavPath: string) (audible: bool) : Live =
+/// The simulator's mapping for a WAV file: a recording in, what was heard
+/// written beside it, and the speakers when there are any. What the canvas
+/// calls to run the design it holds.
+let wavOpener (wavPath: string) (audible: bool) : Graph -> (string * uint64) list -> Live =
     let heardPath = System.IO.Path.ChangeExtension(wavPath, ".heard.wav")
     let recording = readWavFile wavPath
     let sink = if audible then Some(AudioSink.AudioSink recording.sampleRate) else None
-    openWith gainGraph recording [ "volume", gainUnity; "mute", 0UL ] (Some heardPath) sink
+    fun g knobs -> openWith g recording knobs (Some heardPath) sink
+
+/// The first design: `wav in → gain → wav out`, unity gain, unmuted.
+let openGain (wavPath: string) (audible: bool) : Live =
+    wavOpener wavPath audible gainGraph [ "volume", gainUnity; "mute", 0UL ]
