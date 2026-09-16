@@ -36,8 +36,8 @@ type App(o: FuncCanvas.Opening) =
 ///
 /// - `play file.wav` — the gain design with the recording playing into it,
 ///   the canvas over a running design;
-/// - `edit design.json [file.wav]` — a design file (a new design if there is
-///   no file yet), and with a recording, `Open in sim` runs it;
+/// - `edit design.json [file.wav|.pgm|.csv]` — a design file (a new design
+///   if there is no file yet), and with a source, `Open in sim` runs it;
 /// - nothing — `mac`, to look at.
 let private opening (argv: string[]) : FuncCanvas.Opening =
     let none: FuncCanvas.Opening =
@@ -52,21 +52,19 @@ let private opening (argv: string[]) : FuncCanvas.Opening =
         { none with graph = gainGraph; live = Some live; opener = Some live.reopen }
     | [| "edit"; designPath |]
     | [| "edit"; designPath; _ |] ->
-        // With a recording, a new design is made for the recording's rate.
-        let recording = if argv.Length = 3 then Some(readWavFile argv[2]) else None
+        // With a source — a recording, an image, a table — `Open in sim` runs
+        // the design on it; a new design is made for a recording's rate.
+        let source = if argv.Length = 3 then Some(Session.sourceOf argv[2] (AudioSink.available ())) else None
 
         let g =
             match DesignFile.load designPath with
             | Ok g -> g
             | Error why when not (System.IO.File.Exists designPath) ->
                 ignore why
-
-                emptyGraph
-                    (System.IO.Path.GetFileNameWithoutExtension designPath)
-                    (recording |> Option.map (fun w -> float w.sampleRate) |> Option.defaultValue defaultSampleRate)
+                emptyGraph (System.IO.Path.GetFileNameWithoutExtension designPath) (if argv.Length = 3 then Session.rateOf argv[2] else defaultSampleRate)
             | Error why -> failwith why
 
-        let opener = recording |> Option.map (fun w -> Session.wavOpenerOf argv[2] w (AudioSink.available ()))
+        let opener = source |> Option.map (fun (source, heard) -> fun g knobs -> Session.openWith g source knobs (Some heard))
         { graph = g; live = None; opener = opener; file = Some designPath }
     | _ -> none
 

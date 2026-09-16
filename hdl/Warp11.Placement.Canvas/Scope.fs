@@ -20,6 +20,9 @@ let private at (s: TraceSignal) (i: int) : BigInteger =
 /// not in the trace.
 let beats (trace: Trace) (valid: string) (signal: string) : int64[] =
     match trace.signals |> List.tryFind (fun s -> s.name = valid), trace.signals |> List.tryFind (fun s -> s.name = signal) with
+    // A field wider than a machine word is not a sample — a packed row of
+    // pixels, a word of a table — and has no amplitude to draw.
+    | Some _, Some s when s.width > 64 -> [||]
     | Some v, Some s ->
         let half = BigInteger.One <<< (s.width - 1)
         let full = BigInteger.One <<< s.width

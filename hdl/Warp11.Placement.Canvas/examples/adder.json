@@ -1,0 +1,67 @@
+{
+  "name": "Adder",
+  "streams": 1,
+  "sampleRate": 48000,
+  "inputs": [
+    {
+      "name": "x",
+      "width": 32,
+      "fraction": 0,
+      "signed": false
+    },
+    {
+      "name": "y",
+      "width": 32,
+      "fraction": 0,
+      "signed": false
+    }
+  ],
+  "controls": [],
+  "outputs": [
+    {
+      "name": "sum",
+      "width": 33,
+      "fraction": 0,
+      "signed": false
+    }
+  ],
+  "boxes": [
+    {
+      "name": "add32",
+      "unit": "add32",
+      "copies": 1,
+      "arguments": {},
+      "settings": {}
+    }
+  ],
+  "controlBoxes": [],
+  "wires": [
+    {
+      "from": "input.x",
+      "to": "add32.x"
+    },
+    {
+      "from": "input.y",
+      "to": "add32.y"
+    },
+    {
+      "from": "add32.sum",
+      "to": "output.sum"
+    }
+  ],
+  "positions": {
+    "add32": [
+      320,
+      120
+    ],
+    "input": [
+      60,
+      120
+    ],
+    "output": [
+      580,
+      120
+    ]
+  },
+  "designs": {}
+}

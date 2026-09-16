@@ -11,9 +11,9 @@ cd hdl
 dotnet run --project Warp11.Placement -- examples Warp11.Placement.Canvas/examples
 ```
 
-Open one with a recording playing into it (the recordings beside
-`Warp11.Effects` are at 48 828 Hz, which is the rate the examples are made
-for):
+Open one with a source on its boundary — a recording, a `.pgm` image or a
+`.csv` table; the recordings beside `Warp11.Effects` are at 48 828 Hz, which
+is the rate the audio examples are made for:
 
 ```sh
 dotnet run --project Warp11.Placement.Canvas -- edit Warp11.Placement.Canvas/examples/twice.json Warp11.Effects/sine.wav
@@ -27,6 +27,8 @@ then **Open in sim**, then **Play** (or **Run**, which is not paced).
 | `three-band-eq.json` | three `eq` boxes with creation arguments; select one and change `fc` or `gain` in the panel — Enter or clicking away commits it (a change is a new design — Open in sim again) |
 | `controls.json` | `volume` is an unwired inlet holding a setting (`volume = 256` on the box, an entry in the panel that pokes live); a toggle box on `mute` |
 | `twice.json` | the three-band EQ imported and placed twice in series: **double-click** a `ThreeBandEq` box to drill into it with the values live, the breadcrumb steps back out; the palette's *designs* section places it again |
+| `blur.json` | an image design: rows in, a 3×3 blur, rows out. Open it with `gradient.pgm`, Run, **Save heard** writes `gradient.heard.pgm` |
+| `adder.json` | a table design: columns `x` and `y` in, `sum` out. Open it with `numbers.csv`, Run, Save heard writes `numbers.heard.csv` |
 
 With a design running, a box's panel shows its outlets as a waveform over
 the last beats, every signal wire carries a level bar, and the toolbar's

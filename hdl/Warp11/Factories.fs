@@ -318,6 +318,20 @@ let allpassSection: Factory =
         (fun _ capacity -> allpass capacity)
         (fun capacity -> $"allpass %d{capacity}")
 
+let blur: Factory =
+    factory
+        "blur"
+        [ { name = "columns"; kind = IntParameter; ``default`` = "64"; about = "pixels in a row" }
+          { name = "rows"; kind = IntParameter; ``default`` = "64"; about = "rows in a frame" } ]
+        (fun _ args ->
+            match intArg "columns" args, intArg "rows" args with
+            | Ok columns, Ok rows when columns >= 1 && rows >= 1 -> Ok(columns, rows)
+            | Ok columns, Ok rows -> Error $"columns and rows are at least 1, not %d{columns} and %d{rows}"
+            | Error e, _
+            | _, Error e -> Error e)
+        (fun _ (columns, rows) -> blurUnit columns rows)
+        (fun (columns, rows) -> $"blurUnit %d{columns} %d{rows}")
+
 /// Every unit the GUI may offer. `erase` is the only way a unit gets in, so
 /// a palette cannot disagree with the unit the typed API elaborates.
 let palette: Map<string, Factory> =
@@ -334,6 +348,7 @@ let palette: Map<string, Factory> =
       plain "mixer" mixer
       plain "waveshaper" waveshaper
       plain "tremolo" tremolo
-      allpassSection ]
+      allpassSection
+      blur ]
     |> List.map (fun f -> f.name, f)
     |> Map.ofList

@@ -90,4 +90,6 @@ let main argv =
     run "UD11 the export is the design" exportIsTheDesign
     run "UD12 a design is a box" designIsABox
     run "UD13 streams are stages" streamsAreStages
+    run "UD14 an image on the boundary" imageOnTheBoundary
+    run "UD15 a table on the boundary" tableOnTheBoundary
     0

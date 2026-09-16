@@ -64,6 +64,8 @@
         <Compile Include="Audio.fs"/>
         <Compile Include="SimI2s.fs"/>
         <Compile Include="Wav.fs"/>
+        <Compile Include="Pgm.fs"/>
+        <Compile Include="Csv.fs"/>
         <Compile Include="Fu.fs"/>
         <Compile Include="Units.fs"/>
         <Compile Include="Pedal.fs"/>

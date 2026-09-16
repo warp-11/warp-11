@@ -331,12 +331,12 @@ let private boxView (g: Graph) (selected: Selection option) (name: string) (bx: 
 // ---------------------------------------------------------------------------
 // A running design behind the canvas.
 
-/// The recording on the boundary, as the canvas reads it: progress, and
-/// what has been heard so far.
+/// The source on the boundary, as the canvas reads it: progress, and how
+/// to save what has come out so far.
 type Recording =
     { framesOffered: unit -> int
       remaining: unit -> int
-      heard: unit -> WavData option }
+      save: string -> string }
 
 /// What the canvas needs to paint a design that is running: the session to
 /// drive and read, the recording playing into it (if one is), a speaker (if
@@ -376,7 +376,11 @@ let private valueOf (snapshot: Warp11.Debug.Snapshot) (name: string) : System.Nu
     snapshot.values |> List.tryFind (fun v -> v.name = name) |> Option.map (fun v -> v.value)
 
 /// A value as the pin's format reads it: signed two's complement, or plain.
+/// A field wider than a word — a packed row, a table's word — is not a
+/// number to read, and says its width instead.
 let private showValue (f: NumberFormat) (v: System.Numerics.BigInteger) =
+    if f.totalWidth > 64 then $"%d{f.totalWidth} bits" else
+
     let signed =
         if f.signed && (v >>> (f.totalWidth - 1)) &&& System.Numerics.BigInteger.One = System.Numerics.BigInteger.One then
             v - (System.Numerics.BigInteger.One <<< f.totalWidth)
@@ -1164,7 +1168,7 @@ let view (opening: Opening) : Control =
             | Some l ->
                 let progress =
                     (match l.recording with
-                     | Some r -> $"  frames %d{r.framesOffered ()} offered, %d{r.remaining ()} to go"
+                     | Some r -> $"  beats %d{r.framesOffered ()} offered, %d{r.remaining ()} to go"
                      | None -> "")
                     + (match l.audio with
                        | Some a when a.Listening -> $"  heard %d{a.Sent}"
@@ -1231,13 +1235,7 @@ let view (opening: Opening) : Control =
                                    snapshot.Set fresh.session.Latest
                                    message.Set "reset: the recording plays again from the start")
                                (match l.recording, l.savePath with
-                                | Some tape, Some path ->
-                                    button "Save heard" (fun () ->
-                                        match tape.heard () with
-                                        | Some heard ->
-                                            writeWavFile path heard
-                                            message.Set $"wrote {path}: %d{heard.FrameCount} frames"
-                                        | None -> message.Set "nothing heard yet")
+                                | Some tape, Some path -> button "Save heard" (fun () -> message.Set(tape.save path))
                                 | _ -> TextBlock.create [] :> Types.IView)
                                TextBlock.create
                                    [ TextBlock.margin (Thickness(10.0, 0.0))

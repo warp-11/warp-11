@@ -90,3 +90,102 @@ let add32 = fu "add32" (pins2 ("x", unsignedInt 32) ("y", unsignedInt 32)) (pins
 let shiftAddMultiply16 =
     fuSequential "smul16" (pins2 ("a", unsignedInt 16) ("b", unsignedInt 16)) (pins1 ("product", unsignedInt 32)) (fun instance -> shiftAddMultiplier instance 16)
 
+// ---------------------------------------------------------------------------
+// Image units: a row of 8-bit pixels is one beat, and a stencil reads a
+// window of rows. `lineWindow` leaves the vertical halo to the loader — a
+// frame is `rows + 2` beats, the first and last rows repeated for a clamp —
+// and a unit is one beat in, one beat out, so the unit supplies the halo
+// itself and a frame on its boundary is exactly its rows.
+
+/// The clamp halo, supplied inside the unit: the first row of every frame
+/// goes out twice before the frame, the last twice after it, so `rows` beats
+/// in become `rows + 2` beats for a 3-row window and the window's `rows`
+/// results are one per row that came in. A branching machine, not a count:
+/// a row is held one cycle to be sent again.
+let clampHalo (name: string) (rows: int) (s: Stream<Expr>) : Stream<Expr> =
+    let w = width s.payload
+    let countBits = bitsToHold rows
+    let count = reg $"{name}_count" countBits
+    let held = reg $"{name}_held" w
+    let copying = regBit $"{name}_copying"
+    let haloSent = regBit $"{name}_halo_sent"
+    let ready = wireBit $"{name}_ready"
+    registerStreamReady ready
+
+    let atFirst = eq count (lit 0UL countBits) &&& bnot haloSent
+    let atLast = eq count (lit (uint64 (rows - 1)) countBits)
+
+    // The source is taken when its row goes out as itself: not while a copy
+    // goes out, and not while the first row goes out as the halo before it.
+    (ready &&& bnot copying &&& bnot atFirst) ==> s.ready
+
+    let outValid = copying ||| s.valid
+    let fired = outValid &&& ready
+
+    ifElse
+        [ (fired &&& copying,
+           fun () ->
+               lit 0UL 1 ==> copying
+               lit 0UL countBits ==> count
+               lit 0UL 1 ==> haloSent)
+          (fired &&& atFirst, fun () -> lit 1UL 1 ==> haloSent)
+          (fired &&& atLast,
+           fun () ->
+               s.payload ==> held
+               lit 1UL 1 ==> copying)
+          (fired, fun () -> count + lit 1UL countBits ==> count) ]
+
+    // A declared row out: the window slices its columns, and a slice takes
+    // a named signal.
+    let row = wire $"{name}_row" w
+    mux copying held s.payload ==> row
+
+    { payload = row
+      valid = outValid
+      ready = ready
+      layout = s.layout }
+
+/// A 3×3 box blur over rows of `columns` pixels, borders replicated: each
+/// output pixel the mean of its neighbourhood, `sum >>> 3` standing in for
+/// /9 as blurs on silicon do. `Warp11.Designs`' `pixelBlur` for any width,
+/// and any frame height, as a module of its own so a design may place it
+/// more than once.
+let pixelBlurDef (name: string) (columns: int) (rows: int) : TypedModule<StreamInputPorts<Expr> * StreamOutputPorts<Expr>> =
+    let rowLayout = layout1 ("row", columns * 8)
+
+    defModule
+        name
+        (fun p -> streamInputPorts p "in" rowLayout, streamOutputPorts p "out" rowLayout)
+        (fun (inPorts, outPorts) ->
+            let blurRow (win: Expr list) =
+                match win with
+                | [ above; centre; below ] ->
+                    catAll
+                        [ for c in columns - 1 .. -1 .. 0 ->
+                              let cells =
+                                  [ for row in [ above; centre; below ] do
+                                        for k in 0..2 -> slice ((c + k) * 8 + 7) ((c + k) * 8) row ]
+
+                              let sum = wire $"blur_sum%d{c}" 12
+                              (cells |> List.map (pad 12) |> List.reduce (+)) ==> sum
+                              slice 10 3 sum ]
+                | _ -> failwith "pixelBlur: a 3-row window"
+
+            streamSource inPorts
+            |> clampHalo "halo" rows
+            |> lineWindow
+                { rows = 3
+                  edgeColumns = 1
+                  cellBits = 8
+                  edge = Edge.Clamp }
+                rows
+            |> Stream.mapTo rowLayout blurRow
+            |> streamSink outPorts)
+
+/// The blur as a unit: a row in, a row out, the halo its own.
+let blurUnit (columns: int) (rows: int) : Fu<Expr, Expr> =
+    let rowPins = pins1 ("row", unsignedInt (columns * 8))
+
+    moduleUnit "blur" rowPins rowPins [] (fun instance _ s ->
+        let inPorts, outPorts = (pixelBlurDef "PixelBlur" columns rows).NewNamed instance
+        streamThroughInstance inPorts outPorts s)

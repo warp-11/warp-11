@@ -91,16 +91,66 @@ let twice (rate: float) : Graph =
         .present
     |> inARow [ "input"; "ThreeBandEq"; "ThreeBandEq2"; "output" ]
 
+/// M6's image design: rows of `columns` pixels through a 3×3 blur. Opened
+/// with a PGM of that width, the mapping supplies the halo rows.
+let imageBlur (columns: int) (rows: int) : Graph =
+    (history (emptyGraph "ImageBlur" defaultSampleRate)
+     |> step (addInputPin (Warp11.Devices.rowPin columns))
+     |> step (addOutputPin (Warp11.Devices.rowPin columns))
+     |> step (addBox "blur" (0.0, 0.0) >> Result.map fst)
+     |> step (setArgument "blur" "columns" (string columns))
+     |> step (setArgument "blur" "rows" (string rows))
+     |> step (wire (pin "input" "row") (pin "blur" "row"))
+     |> step (wire (pin "blur" "row") (pin "output" "row")))
+        .present
+    |> inARow [ "input"; "blur"; "output" ]
+
+/// M6's table design: two integer columns in, their sum out — a CSV a row
+/// a beat.
+let adder: Graph =
+    (history (emptyGraph "Adder" defaultSampleRate)
+     |> step (addInputPin ("x", unsignedInt 32))
+     |> step (addInputPin ("y", unsignedInt 32))
+     |> step (addOutputPin ("sum", unsignedInt 33))
+     |> step (addBox "add32" (0.0, 0.0) >> Result.map fst)
+     |> step (wire (pin "input" "x") (pin "add32" "x"))
+     |> step (wire (pin "input" "y") (pin "add32" "y"))
+     |> step (wire (pin "add32" "sum") (pin "output" "sum")))
+        .present
+    |> inARow [ "input"; "add32"; "output" ]
+
+/// A 64×64 test image: a diagonal gradient with a bright square, so a blur
+/// has edges to soften.
+let gradient: Grey =
+    let side = 64
+
+    { width = side
+      height = side
+      pixels =
+        [| for r in 0 .. side - 1 do
+               for c in 0 .. side - 1 ->
+                   if r >= 20 && r < 44 && c >= 20 && c < 44 then 255uy else byte ((r + c) * 2 % 256) |] }
+
+/// A few rows for the adder.
+let numbers: Table =
+    { columns = [ "x"; "y" ]
+      rows = [ for i in 1..8 -> [ string (i * 100); string (i * i) ] ] }
+
 /// Every example, with the file it is written to.
 let all (rate: float) : (string * Graph) list =
     [ "gain.json", gain rate
       "three-band-eq.json", threeBandEq rate
       "controls.json", controls rate
-      "twice.json", twice rate ]
+      "twice.json", twice rate
+      "blur.json", imageBlur gradient.width gradient.height
+      "adder.json", adder ]
 
-/// Write every example into `dir`.
+/// Write every example into `dir`, and the image and table they open with.
 let write (dir: string) =
     System.IO.Directory.CreateDirectory dir |> ignore
 
     for file, g in all recordingRate do
         Warp11.DesignFile.save (System.IO.Path.Combine(dir, file)) g
+
+    writePgm (System.IO.Path.Combine(dir, "gradient.pgm")) gradient
+    writeCsv (System.IO.Path.Combine(dir, "numbers.csv")) numbers

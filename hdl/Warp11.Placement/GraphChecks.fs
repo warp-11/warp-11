@@ -828,3 +828,109 @@ let streamsAreStages () : bool =
     && (match setStreams 0 two with
         | Error why -> why.Contains "at least one"
         | Ok _ -> false)
+
+// ---------------------------------------------------------------------------
+// UD14 — An image on the boundary. Rows in, rows out: the blur design built
+// by edits, an image played through it by the image mapping a row a beat,
+// the halo the unit's own, and what comes out is the 3×3 clamp blur
+// computed by hand. The graph elaborates byte-identical to the typed form — the blur
+// module as a unit, one stage. A PGM round-trips through the file, and an
+// image of another width is refused naming the pin.
+
+// CHECK
+let imageOnTheBoundary () : bool =
+    let columns, rows = 16, 8
+    let g = Examples.imageBlur columns rows
+    let seed = System.Random 7
+
+    let image =
+        { width = columns
+          height = rows
+          pixels = Array.init (columns * rows) (fun _ -> byte (seed.Next 256)) }
+
+    let expected =
+        [| for r in 0 .. rows - 1 do
+               for c in 0 .. columns - 1 ->
+                   let mutable sum = 0
+
+                   for dr in -1..1 do
+                       for dc in -1..1 do
+                           let rr = max 0 (min (rows - 1) (r + dr))
+                           let cc = max 0 (min (columns - 1) (c + dc))
+                           sum <- sum + int image.pixels[rr * columns + cc]
+
+                   byte ((sum >>> 3) &&& 0xFF) |]
+
+    let heard = runImageInSim 10_000 g { image = image; outputPath = None }
+
+    let typed =
+        let rowPins = pins1 (Warp11.Devices.rowPin columns)
+
+        defModule
+            "ImageBlur"
+            (fun p -> streamInputPorts p "in1" rowPins, streamOutputPorts p "out1" rowPins)
+            (fun (inPorts, outPorts) ->
+                [ streamSource inPorts ]
+                |> fuStagesWith [] (blurUnit columns rows) "blur" rowPins id (fun r _ -> r)
+                |> List.iter2 streamSink [ outPorts ])
+
+    let dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"warp11-pgm-{System.Guid.NewGuid()}.pgm")
+    writePgm dir image
+    let reread = readPgm dir
+    System.IO.File.Delete dir
+
+    let refused =
+        try
+            runImageInSim 100 g { image = { image with width = columns + 1; pixels = Array.zeroCreate ((columns + 1) * rows) }; outputPath = None } |> ignore
+            false
+        with e ->
+            e.Message.Contains "row" && e.Message.Contains (string ((columns + 1) * 8))
+
+    heard.pixels = expected
+    && heard.width = columns
+    && heard.height = rows
+    && emitDesign (elaborate g).def = emitDesign typed.def
+    && reread = image
+    && refused
+
+// ---------------------------------------------------------------------------
+// UD15 — A table on the boundary. Rows in, a row a beat, columns by pin
+// name: the adder design fed the numbers table sums every row. A cell reads
+// in its pin's format and writes back the same way — a negative fixed-point
+// value round-trips through the text — and a table missing a column is
+// refused naming it.
+
+// CHECK
+let tableOnTheBoundary () : bool =
+    let out = runCsvInSim 10_000 Examples.adder { table = Examples.numbers; controls = []; outputPath = None }
+
+    let sums =
+        Examples.numbers.rows |> List.map (fun row -> string (int row[0] + int row[1]))
+
+    let q = signedFixed 16 4
+
+    let roundTrips =
+        [ "-3.25"; "0"; "12.5"; "-2047.9375" ]
+        |> List.forall (fun text ->
+            match parseCell q text with
+            | Ok bits -> formatCell q bits = text
+            | Error _ -> false)
+
+    let refuses (text: string) (names: string list) =
+        match parseCell q text with
+        | Error why -> names |> List.forall (fun n -> why.Contains n)
+        | Ok _ -> false
+
+    let missing =
+        try
+            runCsvInSim 100 Examples.adder { table = { columns = [ "x" ]; rows = [ [ "1" ] ] }; controls = []; outputPath = None } |> ignore
+            false
+        with e ->
+            e.Message.Contains "'y'"
+
+    out.columns = [ "sum" ]
+    && (out.rows |> List.map List.head) = sums
+    && roundTrips
+    && refuses "2048" [ "2048"; "16w/4f/signed" ]
+    && refuses "lots" [ "lots"; "not a number" ]
+    && missing

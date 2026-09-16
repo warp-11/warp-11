@@ -1,0 +1,60 @@
+{
+  "name": "ImageBlur",
+  "streams": 1,
+  "sampleRate": 48000,
+  "inputs": [
+    {
+      "name": "row",
+      "width": 512,
+      "fraction": 0,
+      "signed": false
+    }
+  ],
+  "controls": [],
+  "outputs": [
+    {
+      "name": "row",
+      "width": 512,
+      "fraction": 0,
+      "signed": false
+    }
+  ],
+  "boxes": [
+    {
+      "name": "blur",
+      "unit": "blur",
+      "copies": 1,
+      "arguments": {
+        "columns": "64",
+        "rows": "64"
+      },
+      "settings": {}
+    }
+  ],
+  "controlBoxes": [],
+  "wires": [
+    {
+      "from": "input.row",
+      "to": "blur.row"
+    },
+    {
+      "from": "blur.row",
+      "to": "output.row"
+    }
+  ],
+  "positions": {
+    "blur": [
+      320,
+      120
+    ],
+    "input": [
+      60,
+      120
+    ],
+    "output": [
+      580,
+      120
+    ]
+  },
+  "designs": {}
+}
