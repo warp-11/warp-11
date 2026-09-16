@@ -11,6 +11,7 @@
 
     <ItemGroup>
         <Compile Include="NodeEditorSpike.fs"/>
+        <Compile Include="AudioSink.fs"/>
         <Compile Include="FuncCanvas.fs"/>
         <Compile Include="Patch.fs"/>
         <Compile Include="Program.fs"/>

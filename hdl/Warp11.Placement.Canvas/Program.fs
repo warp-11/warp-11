@@ -48,7 +48,7 @@ let private startingGraph (argv: string[]) =
 let main argv =
     let g, live =
         match argv with
-        | [| "patch"; wavPath |] -> gainGraph, Some(Patch.openGain wavPath)
+        | [| "patch"; wavPath |] -> gainGraph, Some(Patch.openGain wavPath (AudioSink.available ()))
         | _ -> startingGraph argv, None
 
     AppBuilder.Configure<App>(fun () -> App(g, live)).UsePlatformDetect().StartWithClassicDesktopLifetime argv

@@ -239,12 +239,22 @@ let private boxView (g: Graph) (selected: string option) (name: string) (bx: flo
 // ---------------------------------------------------------------------------
 // A running patch behind the canvas.
 
+/// The recording on the boundary, as the canvas reads it: progress, and
+/// what has been heard so far.
+type Recording =
+    { framesOffered: unit -> int
+      remaining: unit -> int
+      heard: unit -> WavData option }
+
 /// What the canvas needs to paint a design that is running: the session to
-/// drive and read, the recording playing into it (if one is), the design's
-/// controls, and the nets each pin rides on.
+/// drive and read, the recording playing into it (if one is), a speaker (if
+/// there is one), the design's controls, and the nets each pin rides on.
 type Live =
     { session: Warp11.Debug.IDebugSession
-      source: WavStreamSource option
+      recording: Recording option
+      /// A speaker behind the output box. With one, Play is a free run the
+      /// speaker paces; without, the timer paces it.
+      audio: AudioSink.AudioSink option
       controls: (string * NumberFormat) list
       /// The net a pin's value is on, for the watch list.
       probeOf: PinRef -> Side -> string option
@@ -257,9 +267,10 @@ type Live =
       savePath: string option
       /// Frames a second at real time — one frame is one beat is one cycle here.
       framesPerSecond: int
-      /// The same patch from the start: a fresh session with the recording
-      /// rewound. `Reset` is this, since a device has no rewind of its own.
-      reopen: unit -> Live }
+      /// The same patch from the start, with these control values: a fresh
+      /// session with the recording rewound. `Reset` is this, since a device
+      /// has no rewind of its own — and the knobs stay where they were.
+      reopen: (string * uint64) list -> Live }
 
 let private valueOf (snapshot: Warp11.Debug.Snapshot) (name: string) : System.Numerics.BigInteger option =
     snapshot.values |> List.tryFind (fun v -> v.name = name) |> Option.map (fun v -> v.value)
@@ -335,8 +346,20 @@ let view (initial: Graph) (live: Live option) : Control =
                             (fun () ->
                                 match liveState.Current with
                                 | Some l ->
-                                    if playing.Current && not l.session.Latest.running then
+                                    // Timer pacing only without a speaker; with one, the
+                                    // session free-runs and the speaker holds it back.
+                                    if playing.Current && l.audio.IsNone && not l.session.Latest.running then
                                         l.session.Step(int (float l.framesPerSecond * tickMs / 1000.0))
+
+                                    // The recording's end is the end of Play.
+                                    let finished =
+                                        l.recording |> Option.map (fun r -> r.remaining () = 0) |> Option.defaultValue false
+
+                                    if playing.Current && finished then
+                                        l.session.Pause()
+                                        l.audio |> Option.iter (fun a -> a.Stop())
+                                        playing.Set false
+                                        message.Set "end of the recording"
 
                                     l.session.Pump() |> ignore
                                     snapshot.Set l.session.Latest
@@ -495,6 +518,26 @@ let view (initial: Graph) (live: Live option) : Control =
 
         let boxes = [ for name in boxOrder g do yield! boxView g selected.Current name pos[name] ]
 
+        // Play: with a speaker, start it and free-run — the speaker paces the
+        // session. Without one, the timer paces `Step`s. Stop undoes either.
+        let togglePlay () =
+            match live with
+            | None -> ()
+            | Some l ->
+                match l.audio, playing.Current with
+                | Some a, false ->
+                    (match a.Start() with
+                     | Ok player ->
+                         playing.Set true
+                         l.session.Run()
+                         message.Set $"listening through {player}"
+                     | Error why -> message.Set why)
+                | Some a, true ->
+                    l.session.Pause()
+                    a.Stop()
+                    playing.Set false
+                | None, _ -> playing.Set(not playing.Current)
+
         // ---- the toolbar: run controls, the recording's progress, a number
         // box per control — Pure Data's number box wired to a control inlet.
         let toolbar =
@@ -506,9 +549,12 @@ let view (initial: Graph) (live: Live option) : Control =
                     :> Types.IView
 
                 let progress =
-                    match l.source with
-                    | Some src -> $"  frames %d{src.FramesOffered} offered, %d{src.Remaining} to go"
-                    | None -> ""
+                    (match l.recording with
+                     | Some r -> $"  frames %d{r.framesOffered ()} offered, %d{r.remaining ()} to go"
+                     | None -> "")
+                    + (match l.audio with
+                       | Some a when a.Listening -> $"  heard %d{a.Sent}"
+                       | _ -> "")
 
                 let numberBox (name: string, f: NumberFormat) =
                     let text = controlText.Current |> Map.tryFind name |> Option.defaultValue (valueOf snap name |> Option.map string |> Option.defaultValue "")
@@ -542,20 +588,38 @@ let view (initial: Graph) (live: Live option) : Control =
                         StackPanel.children
                             ((l.controls |> List.map numberBox)
                              @ [
-                               button (if playing.Current then "Stop" else "Play") (fun () -> playing.Set(not playing.Current))
+                               button (if playing.Current then "Stop" else "Play") togglePlay
                                button (if snap.running then "Pause" else "Run") (fun () -> if snap.running then l.session.Pause() else l.session.Run())
                                button "Step" (fun () -> l.session.Step 1)
                                button "Step 100" (fun () -> l.session.Step 100)
                                button "Reset" (fun () ->
                                    playing.Set false
-                                   let fresh = l.reopen ()
+                                   l.audio |> Option.iter (fun a -> a.Stop())
+
+                                   // What each box says now — typed text if it parses, else
+                                   // the value the design last had — goes into the new session.
+                                   let knobs =
+                                       [ for name, _ in l.controls ->
+                                             let typed =
+                                                 controlText.Current
+                                                 |> Map.tryFind name
+                                                 |> Option.bind (fun t ->
+                                                     match System.UInt64.TryParse t with
+                                                     | true, v -> Some v
+                                                     | _ -> None)
+
+                                             let last = valueOf snap name |> Option.map uint64
+
+                                             name, (typed |> Option.orElse last |> Option.defaultValue 0UL) ]
+
+                                   let fresh = l.reopen knobs
                                    liveState.Set(Some fresh)
                                    snapshot.Set fresh.session.Latest
                                    message.Set "reset: the recording plays again from the start")
-                               (match l.source, l.savePath with
-                                | Some src, Some path ->
+                               (match l.recording, l.savePath with
+                                | Some tape, Some path ->
                                     button "Save heard" (fun () ->
-                                        match src.Output with
+                                        match tape.heard () with
                                         | Some heard ->
                                             writeWavFile path heard
                                             message.Set $"wrote {path}: %d{heard.FrameCount} frames"

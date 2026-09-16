@@ -11,14 +11,31 @@ open Warp11.Placement.Canvas.FuncCanvas
 
 /// A graph running in the simulator with a WAV playing into it. The session
 /// runs on its own thread except in a browser, where the canvas pumps it.
-let rec openWith (g: Graph) (recording: WavData) (controls: (string * uint64) list) (savePath: string option) : Live =
+let rec openWith (g: Graph) (recording: WavData) (controls: (string * uint64) list) (savePath: string option) (sink: AudioSink.AudioSink option) : Live =
     let design = elaborateWith true g
+    let inPins, outPins = streamPins "in1" (lower (pinsOfList g.inputs)), streamPins "out1" (lower (pinsOfList g.outputs))
 
-    let source =
-        WavStreamSource(streamPins "in1" (lower (pinsOfList g.inputs)), streamPins "out1" (lower (pinsOfList g.outputs)), recording)
+    // With a speaker, the device that hears also plays; without, the
+    // library's own recording device.
+    let attach, view =
+        match sink with
+        | Some sink ->
+            let src = AudioSink.AudibleWavSource(inPins, outPins, recording, sink)
+
+            src.Attach,
+            { framesOffered = fun () -> src.FramesOffered
+              remaining = fun () -> src.Remaining
+              heard = fun () -> src.Output }
+        | None ->
+            let src = WavStreamSource(inPins, outPins, recording)
+
+            src.Attach,
+            { framesOffered = fun () -> src.FramesOffered
+              remaining = fun () -> src.Remaining
+              heard = fun () -> src.Output }
 
     let session =
-        new DebugSession(design.def, ownThread = not (System.OperatingSystem.IsBrowser()), devices = [ source.Attach ]) :> IDebugSession
+        new DebugSession(design.def, ownThread = not (System.OperatingSystem.IsBrowser()), devices = [ attach ]) :> IDebugSession
 
     for name, value in controls do
         session.Poke(name, System.Numerics.BigInteger value)
@@ -42,7 +59,8 @@ let rec openWith (g: Graph) (recording: WavData) (controls: (string * uint64) li
     let probes = set (probeNames g)
 
     { session = session
-      source = Some source
+      recording = Some view
+      audio = sink
       controls = g.controls
       probeOf = probeName g
       validOf = validName g
@@ -56,9 +74,12 @@ let rec openWith (g: Graph) (recording: WavData) (controls: (string * uint64) li
             |> List.sort
       savePath = savePath
       framesPerSecond = recording.sampleRate
-      reopen = fun () -> openWith g recording controls savePath }
+      reopen = fun knobs -> openWith g recording knobs savePath sink }
 
-/// The first patch: `wav in → gain → wav out`, unity gain, unmuted.
-let openGain (wavPath: string) : Live =
+/// The first patch: `wav in → gain → wav out`, unity gain, unmuted, through
+/// the speakers when there are any.
+let openGain (wavPath: string) (audible: bool) : Live =
     let heardPath = System.IO.Path.ChangeExtension(wavPath, ".heard.wav")
-    openWith gainGraph (readWavFile wavPath) [ "volume", gainUnity; "mute", 0UL ] (Some heardPath)
+    let recording = readWavFile wavPath
+    let sink = if audible then Some(AudioSink.AudioSink recording.sampleRate) else None
+    openWith gainGraph recording [ "volume", gainUnity; "mute", 0UL ] (Some heardPath) sink
