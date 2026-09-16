@@ -362,17 +362,9 @@ let private sequentialStage
     let ctxLayout = prefixed "beat" s.layout
     let src = streamMapTo (layoutJoin opLayout ctxLayout) (fun p -> operands p, p) s
 
-    // One elastic register after the unit. `withContext` zips the unit's
-    // result with the context FIFO, and the FIFO fills on the same edge the
-    // unit accepts — so a unit whose result appears in the cycle it accepted
-    // (`audioGain`, which passes the handshake straight through) would wait
-    // on a FIFO that cannot fill until it stops waiting. The register puts
-    // one cycle between the two. A unit that already takes cycles pays a
-    // register it did not need; the library-level fix is a zip that does not
-    // hold a ready hostage to the other side's valid.
     let copy (i: int) =
         let instance = if k = 1 then $"{name}_{unit.name}" else $"{name}_{unit.name}%d{i}"
-        withContext instance 2 opLayout resLayout ctxLayout (fun s -> law instance s |> streamStageFor resLayout)
+        withContext instance 2 opLayout resLayout ctxLayout (law instance)
 
     orderedFarm name k copy src |> streamMapTo (lower outPins) (fun (r, p) -> finish r p)
 

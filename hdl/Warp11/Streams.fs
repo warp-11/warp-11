@@ -619,6 +619,10 @@ let streamZip (joined: Layout<'z>) (combine: 'a -> 'b -> 'z) (a: Stream<'a>) (b:
 /// The stage must produce in the order it accepted. That is true of a single
 /// unit and false of a `farm`, which is why `farm` carries context itself
 /// rather than being wrapped in this.
+///
+/// A stage that answers in the cycle it accepted — a combinational module
+/// spliced through a stream — works too: its context pairs with it directly
+/// rather than through the FIFO. See the bypass in the body.
 let withContext
     (name: string)
     (depth: int)
@@ -628,15 +632,68 @@ let withContext
     (stage: Stream<'a> -> Stream<'b>)
     (s: Stream<'a * 'c>)
     : Stream<'b * 'c> =
-    match streamBroadcast 2 s with
-    | [ toStage; toContext ] ->
-        // One beat, two destinations, and it moves only when both can take it —
-        // so the FIFO holds exactly the contexts of the beats in flight.
-        let stageOut = stage (streamMapTo operands fst toStage)
-        let held = streamFifo $"{name}_context" depth (streamMapTo context snd toContext)
+    let b = current ()
+    let fresh (what: string) = b.FreshName $"{name}_{what}"
 
-        streamZip (layoutJoin results context) (fun r c -> r, c) stageOut held
-    | _ -> failwith $"withContext '{name}': broadcast 2 gave the wrong arity"
+    // The fork, written out rather than `streamBroadcast`: the stage's lane
+    // is gated on the FIFO having room and the context's lane on the stage
+    // taking the beat — one direction of gating, not both, which is what
+    // keeps the bypass below out of a combinational loop. One beat, two
+    // destinations, and it still moves only when both can take it, so the
+    // FIFO holds exactly the contexts of the beats in flight.
+    let stageReady = wireBit (fresh "stage_ready")
+    b.RegisterStreamReady stageReady
+    let contextInReady = wireBit (fresh "context_in_ready")
+    b.RegisterStreamReady contextInReady
+    let direct = wireBit (fresh "context_direct")
+
+    let stageOut =
+        stage
+            { payload = fst s.payload
+              valid = s.valid &&& contextInReady
+              ready = stageReady
+              layout = operands }
+
+    let held =
+        streamFifo
+            $"{name}_context"
+            depth
+            { payload = snd s.payload
+              valid = s.valid &&& stageReady &&& bnot direct
+              ready = contextInReady
+              layout = context }
+
+    // A stage that answers in the cycle it accepted has its result before the
+    // FIFO has the context: the FIFO fills on the edge, the pairing below
+    // would wait on it, and the source would wait on the pairing. The way
+    // out is the invariant the FIFO keeps: it holds exactly the contexts of
+    // the beats in flight, so while it is EMPTY, a result can only be this
+    // cycle's beat's, and its context is the one arriving now. So the pairing
+    // reads the context from the FIFO's head when it has one and from the
+    // source when it has none, and a beat paired that way is never pushed.
+    //
+    // No ready here depends on a valid. It could not: a farm's dispatch makes
+    // a lane's valid depend on its ready, and the two together would loop.
+    let empty = bnot held.valid
+    (empty &&& stageOut.valid) ==> direct
+
+    let contextPayload =
+        List.map2 (fun incoming kept -> mux empty incoming kept) (context.pack (snd s.payload)) (context.pack held.payload)
+        |> context.unpack
+
+    // The pairing: the stage's result goes when downstream can take it, and
+    // the FIFO's head goes with it whenever it is the head that was read.
+    let outReady = wireBit (fresh "zip_ready")
+    b.RegisterStreamReady outReady
+
+    outReady ==> stageOut.ready
+    (outReady &&& stageOut.valid &&& bnot empty) ==> held.ready
+    (stageReady &&& contextInReady) ==> s.ready
+
+    { payload = stageOut.payload, contextPayload
+      valid = stageOut.valid
+      ready = outReady
+      layout = layoutJoin results context }
 
 /// Dispatch fan-out: each beat goes to exactly ONE consumer — the lowest-index
 /// ready one. The source's ready is the OR of consumer readies, so a beat
