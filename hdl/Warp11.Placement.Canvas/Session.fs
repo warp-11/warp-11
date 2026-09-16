@@ -13,11 +13,13 @@ open Warp11.Placement.Canvas.FuncCanvas
 /// runs on its own thread except in a browser, where the canvas pumps it.
 let rec openWith (g: Graph) (recording: WavData) (controls: (string * uint64) list) (savePath: string option) (sink: AudioSink.AudioSink option) : Live =
     let design = elaborateWith true g
-    let inPins, outPins = streamPins "in1" (layoutOfList g.inputs), streamPins "out1" (layoutOfList g.outputs)
 
-    // With a speaker, the device that hears also plays; without, the
-    // library's own recording device.
+    // The recording into every stream; with a speaker, the first stream's
+    // device is the one that also plays, the rest are the library's own
+    // recording device. The canvas follows the first.
     let attach, view =
+        let inPins, outPins = Warp11.Devices.streamPinsOf g 1
+
         match sink with
         | Some sink ->
             let src = AudioSink.AudibleWavSource(inPins, outPins, recording, sink)
@@ -34,8 +36,13 @@ let rec openWith (g: Graph) (recording: WavData) (controls: (string * uint64) li
               remaining = fun () -> src.Remaining
               heard = fun () -> src.Output }
 
+    let others =
+        [ for i in 2 .. g.streams ->
+              let inPins, outPins = Warp11.Devices.streamPinsOf g i
+              WavStreamSource(inPins, outPins, recording).Attach ]
+
     let session =
-        new DebugSession(design.def, ownThread = not (System.OperatingSystem.IsBrowser()), devices = [ attach ]) :> IDebugSession
+        new DebugSession(design.def, ownThread = not (System.OperatingSystem.IsBrowser()), devices = attach :: others) :> IDebugSession
 
     // Number boxes and unwired inlets start at their own values; then the
     // knobs — only the controls this graph has, since an edited design may
@@ -49,17 +56,19 @@ let rec openWith (g: Graph) (recording: WavData) (controls: (string * uint64) li
     for name in probeNames g do
         session.Watch name
 
-    for name, _ in g.inputs do
-        session.Watch $"in1_{name}"
+    for i in 1 .. g.streams do
+        for name, _ in g.inputs do
+            session.Watch $"in%d{i}_{name}"
 
-    for name, _ in g.outputs do
-        session.Watch $"out1_{name}"
+        for name, _ in g.outputs do
+            session.Watch $"out%d{i}_{name}"
 
-    session.Watch "in1_valid"
-    session.Watch "out1_valid"
+        session.Watch $"in%d{i}_valid"
+        session.Watch $"out%d{i}_valid"
 
     for name, _ in controlPorts g do
         session.Watch name
+
 
     let inventory = session.Inventory
     let probes = set (probeNames g)

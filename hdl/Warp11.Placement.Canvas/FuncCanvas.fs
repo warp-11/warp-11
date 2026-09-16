@@ -484,11 +484,17 @@ let view (opening: Opening) : Control =
         let liveState = ctx.useState opening.live
         let snapshot = ctx.useState (opening.live |> Option.map (fun l -> l.session.Latest) |> Option.defaultValue blankSnapshot)
         let controlText = ctx.useState Map.empty<string, string>
+        /// The recent trace: the last `scopeSamples` cycles of the watched
+        /// signals, refreshed each tick while a design runs.
+        let slice = ctx.useState<Warp11.Debug.Trace> { firstCycle = 0; signals = [] }
+        let breakText = ctx.useState ""
+        let streamsText = ctx.useState (string opening.graph.streams)
         // Playing: the timer steps the session as many frames as real time
         // has passed — Pure Data's "DSP on" — so a knob turned mid-file is
         // heard mid-file. `Run` is the free-running alternative.
         let playing = ctx.useState false
         let tickMs = 33.0
+        let scopeSamples = 900
 
         // Polling the latest snapshot at frame rate, as the debugger does: the
         // session decides how often a snapshot is worth taking, and nothing is
@@ -520,7 +526,20 @@ let view (opening: Opening) : Control =
                                         message.Set "end of the recording"
 
                                     l.session.Pump() |> ignore
-                                    snapshot.Set l.session.Latest
+                                    let latest = l.session.Latest
+                                    snapshot.Set latest
+
+                                    // The trace ring fills with the watched signals, so a
+                                    // box's waveform and a wire's level are there as soon as
+                                    // beats are. Started here rather than at the opening:
+                                    // the watches reach the session's thread as commands,
+                                    // and a recording asked for before they land has nothing
+                                    // to record.
+                                    if not latest.recording && not latest.values.IsEmpty then
+                                        l.session.StartRecording false |> ignore
+
+                                    if latest.recorded > 0 then
+                                        slice.Set(l.session.TraceSlice(max 0 (latest.recorded - scopeSamples), scopeSamples))
                                 | None -> ()
 
                                 true),
@@ -837,6 +856,16 @@ let view (opening: Opening) : Control =
 
                 (if valid then wireBrush :> IBrush else faintBrush :> IBrush), label
 
+        /// How loud a signal wire has been lately: the peak of its beats over
+        /// the recent trace, as a fraction of full scale. Nothing for a control
+        /// wire, or before anything ran.
+        let levelOf (e: Edge) =
+            match live, probeOf e.from Out, formatOfPin g e.from Out with
+            | Some _, Some net, Some f when not (isControlWire g e) ->
+                let values = Scope.beats slice.Current (validOf e.from.box Out) net
+                if values.Length = 0 then None else Some(Scope.level f.totalWidth values)
+            | _ -> None
+
         let wires =
             [ for e in g.edges do
                   match pinCentre g e.from Out, pinCentre g e.``to`` In with
@@ -844,7 +873,35 @@ let view (opening: Opening) : Control =
                       let brush, label = wireState e
                       let isSelected = selection.Current = Some(SelectedWire e)
                       let thickness = if isControlWire g e then 1.2 else 2.0
+
+                      // One strand per stream: the same wire carries a beat on
+                      // each, and the elaborator places a stage on each.
+                      for k in 1 .. g.streams - 1 do
+                          let (ax, ay), (bx, by) = a, b
+                          yield wireView faintBrush 1.0 (ax, ay + 3.0 * float k) (bx, by + 3.0 * float k)
+
                       yield wireView (if isSelected then selectedWireBrush :> IBrush else brush) (if isSelected then thickness + 1.5 else thickness) a b
+
+                      // The level, as a bar under the wire's middle: green to
+                      // red as it nears full scale.
+                      match levelOf e with
+                      | Some level ->
+                          let (ax, ay), (bx, by) = a, b
+
+                          yield
+                              Rectangle.create
+                                  [ Canvas.left ((ax + bx) / 2.0 - 30.0)
+                                    Canvas.top ((ay + by) / 2.0 + 4.0)
+                                    Rectangle.width (max 1.0 (60.0 * level))
+                                    Rectangle.height 3.0
+                                    Rectangle.fill (
+                                        if level > 0.9 then Brushes.Red :> IBrush
+                                        elif level > 0.6 then Brushes.Orange :> IBrush
+                                        else Brushes.Green :> IBrush
+                                    )
+                                    Rectangle.isHitTestVisible false ]
+                              :> Types.IView
+                      | None -> ()
 
                       match label with
                       | Some text ->
@@ -1186,7 +1243,37 @@ let view (opening: Opening) : Control =
                                    [ TextBlock.margin (Thickness(10.0, 0.0))
                                      TextBlock.verticalAlignment Layout.VerticalAlignment.Center
                                      TextBlock.fontFamily mono
-                                     TextBlock.text $"cycle %d{snap.cycle}{progress}" ] ]) ]
+                                     TextBlock.text (
+                                         $"cycle %d{snap.cycle}{progress}"
+                                         + (match snap.hit with
+                                            | Some hit -> $"  — stopped: {hit}"
+                                            | None -> "")
+                                     ) ] ]) ]
+                  :> Types.IView
+                  // Breakpoints: a condition over the design's nets — the names the
+                  // panel shows — and Run stops the cycle it holds.
+                  StackPanel.create
+                      [ DockPanel.dock Dock.Top
+                        StackPanel.orientation Layout.Orientation.Horizontal
+                        StackPanel.margin (Thickness(10.0, 0.0, 10.0, 6.0))
+                        StackPanel.children (
+                            [ label "break when"
+                              entry 260.0 breakText.Current breakText.Set (fun typed ->
+                                  if typed <> "" then
+                                      match l.session.AddBreakpoint typed with
+                                      | Ok() ->
+                                          breakText.Set ""
+                                          message.Set $"breaks when {typed}"
+                                      | Error why -> message.Set $"refused: {why}") ]
+                            @ [ for b in snap.breakpoints ->
+                                    // A TextBlock as the content: a button's bare text reads
+                                    // an underscore as a mnemonic and drops it.
+                                    Button.create
+                                        [ Button.content (TextBlock.create [ TextBlock.text $"× {b.text}  (%d{b.hits})"; TextBlock.fontFamily mono ])
+                                          Button.margin (Thickness(2.0, 0.0))
+                                          Button.onClick ((fun _ -> l.session.RemoveBreakpoint b.text), SubPatchOptions.Always) ]
+                                    :> Types.IView ]
+                        ) ]
                   :> Types.IView ]
 
         // ---- the property panel: what is selected. A box's name and copies;
@@ -1233,7 +1320,35 @@ let view (opening: Opening) : Control =
                 let ownRows =
                     [ for name in l.signalsOf (prefix + box) -> name, (valueOf snap name |> Option.map string |> Option.defaultValue "—") ]
 
-                [ heading "this cycle" ] @ (pinRows |> List.map row) @ (ownRows |> List.map row)
+                // The box's signal outlets over the recent trace, one colour
+                // each: the waveform, full scale the lane's height.
+                let lane =
+                    let traces =
+                        [ for i, (n, f) in List.indexed outs do
+                              match probeOf (pin box n) Out with
+                              | Some net when i < Scope.colours.Length ->
+                                  let values = Scope.beats slice.Current (validOf box Out) net
+                                  if values.Length > 0 then yield values, Scope.colours[i], f.totalWidth
+                              | _ -> () ]
+
+                    match traces with
+                    | [] -> []
+                    | (_, _, width) :: _ ->
+                        [ heading "the last beats out"
+                          Image.create
+                              [ Image.source (Scope.render [ for v, c, _ in traces -> v, c ] 360 90 width)
+                                Image.width 360.0
+                                Image.height 90.0
+                                Image.stretch Stretch.None
+                                Image.horizontalAlignment Layout.HorizontalAlignment.Left ]
+                          :> Types.IView
+                          TextBlock.create
+                              [ TextBlock.fontSize 10.0
+                                TextBlock.foreground Brushes.Gray
+                                TextBlock.text (String.concat ", " [ for i, (n, _) in List.indexed outs do if i < Scope.colours.Length then yield n ]) ]
+                          :> Types.IView ]
+
+                lane @ [ heading "this cycle" ] @ (pinRows |> List.map row) @ (ownRows |> List.map row)
 
         let pinFormat () =
             match System.Int32.TryParse pinWidth.Current, System.Int32.TryParse pinFraction.Current with
@@ -1548,7 +1663,16 @@ let view (opening: Opening) : Control =
                                       | _ -> message.Set $"refused: '{typed}' is not a rate")
                                   label "Hz" ] ]
                       :> Types.IView
-                      row ("streams", string g.streams)
+                      StackPanel.create
+                          [ StackPanel.orientation Layout.Orientation.Horizontal
+                            StackPanel.margin (Thickness(0.0, 4.0))
+                            StackPanel.children
+                                [ label "streams"
+                                  entry 50.0 streamsText.Current streamsText.Set (fun typed ->
+                                      match System.Int32.TryParse typed with
+                                      | true, n -> if change (setStreams n) then message.Set $"%d{n} streams — a sequential box needs a copy per stream"
+                                      | _ -> message.Set $"refused: '{typed}' is not a count") ] ]
+                      :> Types.IView
                       TextBlock.create
                           [ TextBlock.margin (Thickness(0.0, 12.0, 0.0, 0.0))
                             TextBlock.text "select a box or a wire; double-click the canvas to add a box"

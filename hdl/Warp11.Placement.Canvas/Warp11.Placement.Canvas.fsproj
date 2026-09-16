@@ -9,6 +9,7 @@
 
     <ItemGroup>
         <Compile Include="AudioSink.fs"/>
+        <Compile Include="Scope.fs"/>
         <Compile Include="FuncCanvas.fs"/>
         <Compile Include="Session.fs"/>
         <Compile Include="Program.fs"/>

@@ -89,4 +89,5 @@ let main argv =
     run "UD10 controls hold values, boxes share them" controlsHoldValues
     run "UD11 the export is the design" exportIsTheDesign
     run "UD12 a design is a box" designIsABox
+    run "UD13 streams are stages" streamsAreStages
     0

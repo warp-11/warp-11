@@ -383,6 +383,11 @@ let removeBoundaryPin (p: PinRef) (g: Graph) : Result<Graph, string> =
     | "output" -> Error $"{showPin p}: no such pin"
     | _ -> Error $"{p.box}: a box's pins are its unit's; only the design's own pins are added and removed"
 
+/// How many streams the design carries through every box: a beat on each,
+/// the boxes' copies counted against them. A mapping drives all of them.
+let setStreams (n: int) (g: Graph) : Result<Graph, string> =
+    if n < 1 then Error $"a design has at least one stream, not %d{n}" else Ok { g with streams = n }
+
 let rename (name: string) (g: Graph) : Result<Graph, string> =
     checkName "design" name |> Result.map (fun () -> { g with name = name })
 

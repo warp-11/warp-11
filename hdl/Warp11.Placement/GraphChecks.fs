@@ -787,3 +787,44 @@ let designIsABox () : bool =
     && refuses (atPath [ "input" ] (rename "x")) [ "input"; "not a box that is a design" ]
     // a design's box has no arguments
     && refuses (setArgument "ThreeBandEq" "fc" "1") [ "ThreeBandEq"; "no creation arguments" ]
+
+// ---------------------------------------------------------------------------
+// UD13 — Streams are stages. The gain design on two streams elaborates to
+// the bytes of the typed form — two stream boundaries, one `fuStagesWith`
+// over both — and a mapping drives both: the tone comes out doubled on
+// each. A design has at least one stream.
+
+// CHECK
+let streamsAreStages () : bool =
+    // A sequential unit is one copy per stream: two streams, two copies.
+    let two =
+        { gainGraph with
+            name = "GainTwo"
+            streams = 2
+            boxes = gainGraph.boxes |> List.map (fun b -> { b with copies = 2 }) }
+
+    let typed =
+        defModule
+            "GainTwo"
+            (fun p ->
+                streamInputPorts p "in1" stereoPins,
+                streamInputPorts p "in2" stereoPins,
+                streamOutputPorts p "out1" stereoPins,
+                streamOutputPorts p "out2" stereoPins,
+                p.inPort "volume" 16,
+                p.inPort "mute" 1)
+            (fun (in1, in2, out1, out2, volume, mute) ->
+                [ streamSource in1; streamSource in2 ]
+                |> fuStagesWith [ volume; mute ] (copies 2 gainModule) "gain" stereoPins (fun (l, r) -> l, r) (fun (l, r) _ -> l, r)
+                |> List.iter2 streamSink [ out1; out2 ])
+
+    let tone = toneWav (int defaultSampleRate) 200 440.0 0.25
+    let heard = runInSimAll 10_000 two { source = tone; controls = [ "volume", 2UL * gainUnity; "mute", 0UL ]; outputPath = None }
+    let doubled = tone.samples |> Array.map (fun s -> s * 2s)
+
+    emitDesign (elaborate two).def = emitDesign typed.def
+    && heard.Length = 2
+    && heard |> List.forall (fun w -> w.samples = doubled)
+    && (match setStreams 0 two with
+        | Error why -> why.Contains "at least one"
+        | Ok _ -> false)
