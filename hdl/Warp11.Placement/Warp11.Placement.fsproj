@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+    <!-- The placement trial, kept self-contained until the API settles: it
+         builds over the library as it is and changes nothing in it. `Fu.fs`
+         is the surface under trial, `Units.fs` the units that cost cycles,
+         `Placement.fs` the use cases that judge them, `Graph.fs` the design
+         as data, `Elaborate.fs` the data back into a design, `Devices.fs` what
+         satisfies its boundary in the simulator, and `GraphChecks.fs` the
+         proof that data and typed forms meet at the bytes. -->
+    <PropertyGroup>
+        <OutputType>Exe</OutputType>
+        <TargetFramework>net10.0</TargetFramework>
+        <WarningsAsErrors>FS0025</WarningsAsErrors>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <Compile Include="Fu.fs"/>
+        <Compile Include="Units.fs"/>
+        <Compile Include="Placement.fs"/>
+        <Compile Include="Graph.fs"/>
+        <Compile Include="Elaborate.fs"/>
+        <Compile Include="Devices.fs"/>
+        <Compile Include="GraphChecks.fs"/>
+        <Compile Include="Main.fs"/>
+    </ItemGroup>
+
+    <ItemGroup>
+        <ProjectReference Include="../Warp11/Warp11.fsproj"/>
+    </ItemGroup>
+
+</Project>

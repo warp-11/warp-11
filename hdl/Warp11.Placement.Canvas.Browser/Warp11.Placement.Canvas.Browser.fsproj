@@ -1,0 +1,56 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+    <!-- The canvas spike's browser head: the same `Canvas.view` under a
+         single-view lifetime on WebAssembly. Question three of the spike. -->
+    <PropertyGroup>
+        <TargetFramework>net10.0-browser</TargetFramework>
+        <RuntimeIdentifier>browser-wasm</RuntimeIdentifier>
+        <OutputType>Exe</OutputType>
+        <WasmMainJSPath>wwwroot/main.js</WasmMainJSPath>
+        <WarningsAsErrors>FS0025</WarningsAsErrors>
+        <!-- Same reasoning as Warp11.Tutorial.Browser: the symbol map is fetched
+             eagerly at boot and cannot be withheld at deploy time. -->
+        <WasmEmitSymbolMap>false</WasmEmitSymbolMap>
+        <!-- Warp11.Placement is an executable (its checks); a self-contained wasm
+             head may still reference its assembly — see aka.ms/netsdk1150. -->
+        <ValidateExecutableReferencesMatchSelfContained>false</ValidateExecutableReferencesMatchSelfContained>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <!-- Source-linked from the desktop spike: that project carries
+             Avalonia.Desktop, whose native backends the wasm build cannot
+             scan, so the view is compiled here rather than referenced. -->
+        <Compile Include="../Warp11.Placement.Canvas/NodeEditorSpike.fs"/>
+        <Compile Include="../Warp11.Placement.Canvas/FuncCanvas.fs"/>
+        <Compile Include="Program.fs"/>
+    </ItemGroup>
+
+    <!-- The wasm publish trims; a control library's compiled XAML is reached
+         only by name at run time, so the trimmer must be told to keep it. -->
+    <ItemGroup>
+        <TrimmerRootAssembly Include="NodeEditorAvalonia"/>
+        <TrimmerRootAssembly Include="NodeEditorAvalonia.Model"/>
+        <TrimmerRootAssembly Include="NodeEditorAvalonia.Mvvm"/>
+        <TrimmerRootAssembly Include="PanAndZoom"/>
+    </ItemGroup>
+
+    <ItemGroup>
+        <WasmExtraFilesToDeploy Include="wwwroot/index.html"/>
+    </ItemGroup>
+
+    <ItemGroup>
+        <PackageReference Include="Avalonia" Version="12.1.0"/>
+        <PackageReference Include="Avalonia.Browser" Version="12.1.0"/>
+        <PackageReference Include="Avalonia.Themes.Fluent" Version="12.1.0"/>
+        <PackageReference Include="Avalonia.FuncUI" Version="2.0.0"/>
+    </ItemGroup>
+
+    <ItemGroup>
+        <ProjectReference Include="../Warp11.Placement/Warp11.Placement.fsproj"/>
+        <!-- Vendored — see hdl/vendor/README.md. -->
+        <ProjectReference Include="../vendor/NodeEditor/src/NodeEditorAvalonia.Model/NodeEditorAvalonia.Model.csproj"/>
+        <ProjectReference Include="../vendor/NodeEditor/src/NodeEditorAvalonia.Mvvm/NodeEditorAvalonia.Mvvm.csproj"/>
+        <ProjectReference Include="../vendor/NodeEditor/src/NodeEditorAvalonia/NodeEditorAvalonia.csproj"/>
+    </ItemGroup>
+
+</Project>

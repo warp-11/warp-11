@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+    <!-- The canvas over a `Graph`: `FuncCanvas.fs` is the one being built;
+         `NodeEditorSpike.fs` is the library spike it replaced, kept compiled
+         a little longer as the reference. -->
+    <PropertyGroup>
+        <OutputType>Exe</OutputType>
+        <TargetFramework>net10.0</TargetFramework>
+        <WarningsAsErrors>FS0025</WarningsAsErrors>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <Compile Include="NodeEditorSpike.fs"/>
+        <Compile Include="FuncCanvas.fs"/>
+        <Compile Include="Patch.fs"/>
+        <Compile Include="Program.fs"/>
+    </ItemGroup>
+
+    <ItemGroup>
+        <PackageReference Include="Avalonia" Version="12.1.0"/>
+        <PackageReference Include="Avalonia.Desktop" Version="12.1.0"/>
+        <PackageReference Include="Avalonia.Themes.Fluent" Version="12.1.0"/>
+        <PackageReference Include="Avalonia.FuncUI" Version="2.0.0"/>
+    </ItemGroup>
+
+    <ItemGroup>
+        <ProjectReference Include="../Warp11.Placement/Warp11.Placement.fsproj"/>
+        <!-- Vendored: `hdl/vendor/NodeEditor` is a submodule of our fork's `avalonia-12`
+             branch (upstream PR #75). The published NodeEditorAvalonia 12.0.0 crashes on
+             every Avalonia 12 — see hdl/vendor/README.md. -->
+        <ProjectReference Include="../vendor/NodeEditor/src/NodeEditorAvalonia.Model/NodeEditorAvalonia.Model.csproj"/>
+        <ProjectReference Include="../vendor/NodeEditor/src/NodeEditorAvalonia.Mvvm/NodeEditorAvalonia.Mvvm.csproj"/>
+        <ProjectReference Include="../vendor/NodeEditor/src/NodeEditorAvalonia/NodeEditorAvalonia.csproj"/>
+    </ItemGroup>
+
+</Project>
