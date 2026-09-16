@@ -70,6 +70,182 @@ let private through (g: Graph) (control: string -> Expr -> Expr) (i2s: I2sLink) 
     |> Stream.mapTo sampleLayout (fun fields -> fields[0], fields[1])
     |> i2s.send
 
+/// Which way a design's boundary reaches the world on this board: the
+/// converter on the board's pins, or the host's memory — rows in a DMA buffer
+/// the fabric reads, runs the design over, and writes back.
+type DataPath =
+    | Pins
+    | HostMemory
+
+/// The registers the host-memory path adds ahead of the design's controls:
+/// the batch contract every such top speaks, so one driver runs any of them.
+type BatchRegs =
+    { id: RegEntry
+      start: RegEntry
+      busy: RegEntry
+      doneIrq: RegEntry
+      srcAddr: RegEntry
+      dstAddr: RegEntry
+      /// Rows, not bytes — the host stages a row a frame.
+      frameCount: RegEntry }
+
+/// The identity every batch top answers with, so a driver can refuse a
+/// bitstream that is not one; the layout hash beside it says which design.
+let batchId = 0x7A11BA7CUL
+
+/// A lane is a host word: a field of a row sign-extended into 32 bits, so
+/// the host reads a plain `i32` and gets the number the fabric computed.
+let laneWidth = 32
+
+/// Beats per burst. At 128 bits a burst is 256 bytes, so a 256-byte-aligned
+/// base can never cross AXI's 4 KB boundary — the rule `axiMasterReaderBurst`
+/// leaves to its caller, satisfied by making it unreachable.
+let beatsPerBurst = 16
+
+/// How a row of the boundary sits in a beat: one lane per field, padded to a
+/// power of two so rows tile beats evenly. Said as numbers a host and a
+/// check can both derive.
+type RowShape =
+    { lanesPerRow: int
+      rowsPerBeat: int
+      rowsPerBurst: int
+      bytesPerRow: int }
+
+/// The shape a boundary's rows take in beats of `beatWidth` bits, or why they
+/// cannot.
+let rowShape (beatWidth: int) (pins: (string * NumberFormat) list) : RowShape =
+    let lanesPerBeat = beatWidth / laneWidth
+
+    for name, f in pins do
+        if f.totalWidth > laneWidth then
+            failwith $"a lane is %d{laneWidth} bits and '{name}' is %d{f.totalWidth} — the host-memory path is not built for wider fields"
+
+    let lanes = pins.Length
+
+    if lanes < 1 || lanes > lanesPerBeat then
+        failwith $"a row of %d{lanes} fields does not fit a %d{beatWidth}-bit beat — the host-memory path is not built for that"
+
+    let lanesPerRow = 1 <<< ceilLog2 lanes
+    let rowsPerBeat = lanesPerBeat / lanesPerRow
+
+    { lanesPerRow = lanesPerRow
+      rowsPerBeat = rowsPerBeat
+      rowsPerBurst = rowsPerBeat * beatsPerBurst
+      bytesPerRow = lanesPerRow * laneWidth / 8 }
+
+/// The batch registers, then one read-write register per control port.
+let private batchRegistersOf (g: Graph) : BatchRegs * (string * RegEntry) list * RegMap =
+    let starting = startingValues g |> Map.ofList
+
+    let (batch, controls), map =
+        buildRegMapPinned apertureAddrWidth (fun r ->
+            let id, start = r.Word(fun w -> w.Const("id", batchId), w.Pulse "start")
+            r.LayoutHash "layoutHash"
+
+            let batch =
+                { id = id
+                  start = start
+                  busy = r.Word(fun w -> w.Field("busy", 1))
+                  doneIrq = r.Word(fun w -> w.W1c "doneIrq")
+                  srcAddr = r.RwReg("srcAddr", 32, 0UL)
+                  dstAddr = r.RwReg("dstAddr", 32, 0UL)
+                  frameCount = r.RwReg("frameCount", 32, 0UL) }
+
+            let controls =
+                [ for name, f in controlPorts g ->
+                      name, r.RwReg(name, f.totalWidth, (starting |> Map.tryFind name |> Option.defaultValue 0UL)) ]
+
+            batch, controls)
+
+    batch, controls, map
+
+/// One beat becomes its rows, a row a cycle. The beat is not copied: `ready`
+/// is asserted as the last row leaves, and the read master holds its payload
+/// until then, so the handshake does the storing.
+let private beatsToRows (shape: RowShape) (pins: (string * NumberFormat) list) (beats: Stream<Expr * Expr>) : Stream<Expr list> =
+    let data, _last = beats.payload
+    let beatWidth = width data
+    let beat = wire "unpack_beat" beatWidth
+    data ==> beat
+
+    let outReady = wireBit "unpack_out_ready"
+    registerStreamReady outReady
+    let fire = beats.valid &&& outReady
+
+    let laneAt (lane: int) (w: int) = slice (lane * laneWidth + w - 1) (lane * laneWidth) beat
+
+    let fields =
+        if shape.rowsPerBeat = 1 then
+            fire ==> beats.ready
+            [ for i, (_, f) in List.indexed pins -> laneAt i f.totalWidth ]
+        else
+            let phaseWidth = ceilLog2 shape.rowsPerBeat
+            let phase = reg "unpack_phase" phaseWidth
+            let last = eq phase (lit (uint64 (shape.rowsPerBeat - 1)) phaseWidth)
+            (fire &&& last) ==> beats.ready
+
+            If fire (fun () -> mux last (lit 0UL phaseWidth) (phase + lit 1UL phaseWidth) ==> phase)
+
+            [ for i, (_, f) in List.indexed pins ->
+                  selectIndexed phase [ for row in 0 .. shape.rowsPerBeat - 1 -> laneAt (row * shape.lanesPerRow + i) f.totalWidth ] ]
+
+    { payload = fields
+      valid = beats.valid
+      ready = outReady
+      layout = layoutOfList pins }
+
+/// Rows become a beat. All but the last row of a beat are held in registers
+/// — unavoidable, because the producer has already been told its row was
+/// taken.
+let private rowsToBeats (shape: RowShape) (pins: (string * NumberFormat) list) (beatWidth: int) (rows: Stream<Expr list>) : Stream<Expr> =
+    let lane (f: NumberFormat) (e: Expr) =
+        if f.signed then asUInt (pad laneWidth (asSInt e)) else pad laneWidth e
+
+    let lanes = List.map2 (fun (_, f) e -> lane f e) pins rows.payload
+
+    let rowBits =
+        let padding = shape.lanesPerRow - lanes.Length
+        let padded = lanes @ List.replicate padding (lit 0UL laneWidth)
+        // Lane 0 at the low end.
+        padded |> List.rev |> List.reduce cat
+
+    let rowWidth = shape.lanesPerRow * laneWidth
+    let outValid = wireBit "pack_out_valid"
+    let outReady = wireBit "pack_out_ready"
+    registerStreamReady outReady
+
+    if shape.rowsPerBeat = 1 then
+        rows.valid ==> outValid
+        outReady ==> rows.ready
+
+        { payload = rowBits
+          valid = outValid
+          ready = outReady
+          layout = layout1 ("data", beatWidth) }
+    else
+        let phaseWidth = ceilLog2 shape.rowsPerBeat
+        let phase = reg "pack_phase" phaseWidth
+        let last = eq phase (lit (uint64 (shape.rowsPerBeat - 1)) phaseWidth)
+        let held = [ for k in 0 .. shape.rowsPerBeat - 2 -> reg $"pack_held%d{k}" rowWidth ]
+
+        // Every row but the last is always accepted; the last only when the
+        // beat can leave.
+        (bnot last ||| outReady) ==> rows.ready
+        (rows.valid &&& last) ==> outValid
+
+        let fire = rows.valid &&& (bnot last ||| outReady)
+
+        If fire (fun () ->
+            mux last (lit 0UL phaseWidth) (phase + lit 1UL phaseWidth) ==> phase
+
+            held
+            |> List.iteri (fun k h -> If (eq phase (lit (uint64 k) phaseWidth)) (fun () -> rowBits ==> h)))
+
+        { payload = List.fold (fun acc h -> cat acc h) rowBits (List.rev held)
+          valid = outValid
+          ready = outReady
+          layout = layout1 ("data", beatWidth) }
+
 /// A design on a board, ready to build: the top module, the register map
 /// and its entries by port name.
 type BoardTop =
@@ -80,6 +256,8 @@ type BoardTop =
       /// Empty when the board has no host: the controls are then baked at
       /// their starting values.
       registers: (string * RegEntry) list
+      /// The batch contract's registers, on the host-memory path.
+      batch: BatchRegs option
       map: RegMap
       /// The Verilog target the board's toolchain wants.
       target: Target }
@@ -90,14 +268,13 @@ let targetOf (part: Part) =
     | UltraScalePlus -> Xilinx
     | Ice40UltraPlus -> Ice40
 
-/// The design on a board: the converter on the board's I2S pins, the
-/// registers reached the way the board's host reaches them.
+/// The design on the board's I2S pins, the registers reached the way the
+/// board's host reaches them.
 ///
 /// The top's name says the host path — `GainPatchAxi`, `GainPatchUart`,
 /// `GainPatchTop` — because that is what changes its port list; the board
 /// is the file's business, not the module's.
-let boardTop (board: Board) (g: Graph) : BoardTop =
-    checkBoard board
+let private pinsTop (board: Board) (g: Graph) : BoardTop =
     check board g
     let entries, map = registersOf g
     let rate = int (round g.sampleRate)
@@ -156,8 +333,168 @@ let boardTop (board: Board) (g: Graph) : BoardTop =
       name = name
       top = top
       registers = registers
+      batch = None
       map = map
       target = targetOf board.part }
+
+/// The design on the host's memory: rows at `srcAddr`, through the design,
+/// rows at `dstAddr`. The batch contract is `Warp11.Effects.Batch`'s, with
+/// the row shape derived from the boundary rather than fixed at stereo:
+/// `frameCount` rows, a multiple of the rows a burst holds, both addresses
+/// 256-byte aligned — the host driver pads and checks, because a design
+/// that silently processed a truncated block would be worse than one that
+/// refused.
+let private hostMemoryTop (board: Board) (g: Graph) : BoardTop =
+    let memory =
+        match board.hostMemory with
+        | Some m -> m
+        | None -> failwith $"{g.name}: the {board.name} has no host memory — the design's rows have nowhere to go but the pins"
+
+    match board.host with
+    | AxiLiteAt _ -> ()
+    | _ -> failwith $"{g.name}: the host-memory path needs an AXI-Lite host to be told where the rows are, and the {board.name} has none"
+
+    if g.streams <> 1 then
+        failwith $"{g.name}: the host-memory path carries one stream, and the design declares %d{g.streams}"
+
+    let batch, entries, map = batchRegistersOf g
+    let inShape = rowShape memory.width g.inputs
+    let outShape = rowShape memory.width g.outputs
+    let beatBytes = memory.width / 8
+    let burstBytes = beatsPerBurst * beatBytes
+    let name = $"{g.name}Batch"
+
+    let top =
+        defModuleClocked
+            axiClock
+            name
+            (fun p ->
+                axiLiteSlavePorts p map.apertureAddrWidth,
+                axiReadBusPorts p "m_axi" 32 memory.width,
+                axiWriteBusPorts p "m_axi" 32 memory.width)
+            (fun (slavePorts, readBusPorts, writeBusPorts) ->
+                let regs = regMapSlave slavePorts map
+                let byName = Map.ofList entries
+                let io = (elaborate g).NewNamed "drawn"
+
+                for n, port in io.controls do
+                    regs.value byName[n] ==> port
+
+                let frameCount = regs.value batch.frameCount
+
+                // Rows → bursts on the way in, rows → beats on the way out;
+                // both shapes are powers of two, so each is a shift.
+                let bursts = wire "bursts" 32
+                let burstShift = ceilLog2 inShape.rowsPerBurst
+                pad 32 (slice 31 burstShift frameCount) ==> bursts
+
+                let beatsTotal = wire "beats_total" 32
+                let outShift = ceilLog2 outShape.rowsPerBeat
+                pad 32 (slice 31 outShift frameCount) ==> beatsTotal
+
+                let running = regBit "running"
+                let arIssued = reg "ar_issued" 32
+                let beatsWritten = reg "beats_written" 32
+
+                // --- the read side: one descriptor per burst ---------------
+                let reqReady = wireBit "req_ready"
+                let arMore = wireBit "ar_more"
+                (running &&& lt arIssued bursts) ==> arMore
+
+                let reqAddr = wire "req_addr" 32
+                let burstAddrShift = ceilLog2 burstBytes
+                (regs.value batch.srcAddr + asUInt (shl burstAddrShift (slice (31 - burstAddrShift) 0 arIssued))) ==> reqAddr
+
+                let requests: Stream<Expr * Expr> =
+                    { payload = (reqAddr, lit (uint64 (beatsPerBurst - 1)) 8)
+                      valid = arMore
+                      ready = reqReady
+                      layout = layout2 ("addr", 32) ("len", 8) }
+
+                If (arMore &&& reqReady) (fun () -> arIssued + lit 1UL 32 ==> arIssued)
+
+                let beats = axiMasterReaderBurstOn (axiReadBusOf readBusPorts) 4 beatsPerBurst requests
+
+                // --- the design ---------------------------------------------
+                let outBeats =
+                    beats
+                    |> beatsToRows inShape g.inputs
+                    |> streamThroughInstance io.ins.Head io.outs.Head
+                    |> rowsToBeats outShape g.outputs memory.width
+
+                // --- the write side -----------------------------------------
+                let wrAddr = wire "wr_addr" 32
+                let beatAddrShift = ceilLog2 beatBytes
+                (regs.value batch.dstAddr + asUInt (shl beatAddrShift (slice (31 - beatAddrShift) 0 beatsWritten))) ==> wrAddr
+
+                let wrReady = wireBit "wr_ready"
+
+                let writeBeats: Stream<Expr * Expr * Expr> =
+                    { payload = (wrAddr, outBeats.payload, lit ((1UL <<< beatBytes) - 1UL) beatBytes)
+                      valid = outBeats.valid
+                      ready = wrReady
+                      layout = axiWriteBeatLayout 32 memory.width }
+
+                wrReady ==> outBeats.ready
+
+                let writerIdle = axiMasterWriterWithIdleOn (axiWriteBusOf writeBusPorts) 4 writeBeats
+
+                If (outBeats.valid &&& wrReady) (fun () -> beatsWritten + lit 1UL 32 ==> beatsWritten)
+
+                // --- control ------------------------------------------------
+                let finished = wireBit "finished"
+                (running &&& eq beatsWritten beatsTotal &&& writerIdle) ==> finished
+
+                ifElse
+                    [ (regs.pulse batch.start,
+                       fun () ->
+                           lit 1UL 1 ==> running
+                           lit 0UL 32 ==> arIssued
+                           lit 0UL 32 ==> beatsWritten)
+                      (otherwise, fun () -> If finished (fun () -> lit 0UL 1 ==> running)) ]
+
+                regs.drive batch.busy running
+                regs.setBit batch.doneIrq finished
+
+                // The caller's half of the contract, said out loud: checked
+                // every cycle in simulation, compiled out of the silicon.
+                let aligned (e: RegEntry) =
+                    bnot running ||| eq (slice (burstAddrShift - 1) 0 (regs.value e)) (lit 0UL burstAddrShift)
+
+                assertThat (aligned batch.srcAddr) $"srcAddr must be %d{burstBytes}-byte aligned"
+                assertThat (aligned batch.dstAddr) $"dstAddr must be %d{burstBytes}-byte aligned"
+
+                let rowsPerBurst = max inShape.rowsPerBurst outShape.rowsPerBurst
+                let rowShift = ceilLog2 rowsPerBurst
+
+                assertThat
+                    (bnot running ||| eq (slice (rowShift - 1) 0 frameCount) (lit 0UL rowShift))
+                    $"frameCount must be a multiple of the rows a burst holds (%d{rowsPerBurst})")
+
+    { board = board
+      name = name
+      top = top.def
+      registers =
+        [ "id", batch.id
+          "start", batch.start
+          "busy", batch.busy
+          "doneIrq", batch.doneIrq
+          "srcAddr", batch.srcAddr
+          "dstAddr", batch.dstAddr
+          "frameCount", batch.frameCount ]
+        @ entries
+      batch = Some batch
+      map = map
+      target = targetOf board.part }
+
+/// The design on a board, the way the path says: the converter on the pins,
+/// or the host's memory.
+let boardTop (board: Board) (path: DataPath) (g: Graph) : BoardTop =
+    checkBoard board
+
+    match path with
+    | Pins -> pinsTop board g
+    | HostMemory -> hostMemoryTop board g
 
 /// The register map as the Rust seam prints it, headed for the top it serves.
 let seamLines (t: BoardTop) : string list =

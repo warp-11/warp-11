@@ -153,14 +153,14 @@ let writeWavFile (path: string) (w: WavData) = File.WriteAllBytes(path, writeWav
 
 /// A 16-bit sample widened to the design's 24-bit sample, as raw two's
 /// complement bits ready to poke.
-let private toSampleBits (v: int16) : uint64 =
+let toSampleBits (v: int16) : uint64 =
     // Left-justify: 16-bit full scale should be 24-bit full scale, not a
     // signal 256x too quiet.
     uint64 ((int v) <<< 8) &&& ((1UL <<< sampleWidth) - 1UL)
 
 /// The design's 24-bit output back to 16 bits, rounding rather than truncating
 /// so a null test comes out exact instead of biased half an LSB low.
-let private fromSampleBits (bits: uint64) : int16 =
+let fromSampleBits (bits: uint64) : int16 =
     let signed =
         if bits >= (1UL <<< (sampleWidth - 1)) then
             int64 bits - (1L <<< sampleWidth)

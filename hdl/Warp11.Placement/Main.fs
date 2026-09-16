@@ -77,7 +77,7 @@ let main argv =
             1
         | Ok g, Ok board ->
             try
-                let top = Warp11.BoardTop.boardTop board g
+                let top = Warp11.BoardTop.boardTop board Warp11.BoardTop.Pins g
 
                 for file in Warp11.BoardTop.write dir top do
                     printfn $"wrote {file}"
@@ -118,4 +118,5 @@ let main argv =
     run "UD15 a table on the boundary" tableOnTheBoundary
     run "UD16 a written unit travels with the design" writtenUnitTravels
     run "UD17 the design on a board" designOnABoard
+    run "UD18 the design on the host's memory" designOnHostMemory
     0

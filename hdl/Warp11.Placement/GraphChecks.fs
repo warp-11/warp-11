@@ -1040,7 +1040,7 @@ let writtenUnitTravels () : bool =
 // CHECK
 let designOnABoard () : bool =
     let onKv260 = { gainGraph with name = "GainBoard"; sampleRate = stockSampleRate }
-    let top = Warp11.BoardTop.boardTop kv260 onKv260
+    let top = Warp11.BoardTop.boardTop kv260 Warp11.BoardTop.Pins onKv260
     let sim = Sim top.top
     let axi = SimAxi.client sim
     let volume = top.registers |> List.find (fun (n, _) -> n = "volume") |> snd
@@ -1059,19 +1059,19 @@ let designOnABoard () : bool =
 
     let iceBoard = iceBreakerAt 24_000_000
     let onIce = { onKv260 with name = "GainIce"; sampleRate = Warp11.BoardTop.boardRate iceBoard 48_000.0 }
-    let ice = Warp11.BoardTop.boardTop iceBoard onIce
-    let bare = Warp11.BoardTop.boardTop { iceBoard with host = NoHost } onIce
+    let ice = Warp11.BoardTop.boardTop iceBoard Warp11.BoardTop.Pins onIce
+    let bare = Warp11.BoardTop.boardTop { iceBoard with host = NoHost } Warp11.BoardTop.Pins onIce
 
     let refused =
         try
-            Warp11.BoardTop.boardTop kv260 { onKv260 with sampleRate = 48_000.0 } |> ignore
+            Warp11.BoardTop.boardTop kv260 Warp11.BoardTop.Pins { onKv260 with sampleRate = 48_000.0 } |> ignore
             false
         with e ->
             e.Message.Contains "48000" && e.Message.Contains "48828.125"
 
     let impossible =
         try
-            Warp11.BoardTop.boardTop { iceBoard with host = AxiLiteAt 0UL } onIce |> ignore
+            Warp11.BoardTop.boardTop { iceBoard with host = AxiLiteAt 0UL } Warp11.BoardTop.Pins onIce |> ignore
             false
         with e ->
             e.Message.Contains "no processing system"
@@ -1086,3 +1086,72 @@ let designOnABoard () : bool =
     && (emitDesignFor bare.target bare.top).Contains "module GainIceTop"
     && refused
     && impossible
+
+// UD18 — The design on the host's memory. The same gain design takes the
+// batch shape on the KV260: rows staged in DDR at `srcAddr`, read in
+// bursts, unpacked a row a cycle through the design, packed and written to
+// `dstAddr`, with `volume` a register like any control. In the simulator,
+// against the behavioural DDR, what comes back is what the WAV mapping
+// hears — sample for sample — so the DDR plumbing and the converter path
+// agree on the design between them. A board with no host memory refuses.
+
+// CHECK
+let designOnHostMemory () : bool =
+    let g = { gainGraph with name = "GainMemory"; sampleRate = stockSampleRate }
+    let top = Warp11.BoardTop.boardTop kv260 Warp11.BoardTop.HostMemory g
+    let batch = top.batch.Value
+    let sim = Sim top.top
+    let ddr = SimAxiDdr(sim, 0x20000)
+    let axi = SimAxi.clientWith sim ddr.Cycle
+
+    let frames = 64
+    let source = toneWav (int (round stockSampleRate)) frames 1000.0 0.25
+    let src = 0x1000
+    let dst = 0x9000
+
+    for i in 0 .. frames - 1 do
+        ddr.WriteWord(src + i * 8, uint32 (int source.samples[2 * i] <<< 8))
+        ddr.WriteWord(src + i * 8 + 4, uint32 (int source.samples[2 * i + 1] <<< 8))
+
+    let idOk = axi.read32 batch.id.offset = Warp11.BoardTop.batchId
+    let volume = top.registers |> List.find (fun (n, _) -> n = "volume") |> snd
+    axi.write32 volume.offset (2UL * gainUnity)
+    axi.write32 batch.srcAddr.offset (uint64 src)
+    axi.write32 batch.dstAddr.offset (uint64 dst)
+    axi.write32 batch.frameCount.offset (uint64 frames)
+    axi.write32 batch.start.offset 1UL
+
+    let mutable spins = 0
+
+    while axi.read32 batch.busy.offset <> 0UL && spins < 400_000 do
+        ddr.Cycle()
+        spins <- spins + 1
+
+    let mask = (1UL <<< sampleWidth) - 1UL
+
+    let heard =
+        [| for i in 0 .. frames - 1 do
+               fromSampleBits (uint64 (ddr.ReadWord(dst + i * 8)) &&& mask)
+               fromSampleBits (uint64 (ddr.ReadWord(dst + i * 8 + 4)) &&& mask) |]
+
+    let expected =
+        Warp11.Devices.runInSim
+            10_000
+            g
+            { source = source
+              controls = [ "volume", 2UL * gainUnity; "mute", 0UL ]
+              outputPath = None }
+
+    let refused =
+        try
+            Warp11.BoardTop.boardTop (iceBreakerAt 24_000_000) Warp11.BoardTop.HostMemory g |> ignore
+            false
+        with e ->
+            e.Message.Contains "no host memory"
+
+    idOk
+    && spins < 400_000
+    && heard = expected.samples
+    && top.name = "GainMemoryBatch"
+    && (top.registers |> List.map fst |> List.take 7) = [ "id"; "start"; "busy"; "doneIrq"; "srcAddr"; "dstAddr"; "frameCount" ]
+    && refused
