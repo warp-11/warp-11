@@ -1154,6 +1154,8 @@ let designOnHostMemory () : bool =
     && heard = expected.samples
     && top.name = "GainMemoryBatch"
     && (top.registers |> List.map fst |> List.take 7) = [ "id"; "start"; "busy"; "doneIrq"; "srcAddr"; "dstAddr"; "frameCount" ]
+    // The contract the Rust driver is written against, offset by offset.
+    && (top.registers |> List.map (fun (_, e) -> e.offset) |> List.take 7) = [ 0UL; 0UL; 0x8UL; 0xcUL; 0x10UL; 0x14UL; 0x18UL ]
     && refused
 
 // UD19 — The build directory, Vivado. The gain design on the KV260, both

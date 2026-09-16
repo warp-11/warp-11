@@ -518,3 +518,54 @@ let write (dir: string) (t: BoardTop) : string list =
     let seam = System.IO.Path.Combine(dir, $"{snake}_layout.rs")
     System.IO.File.WriteAllText(seam, String.concat "\n" (seamLines t) + "\n")
     [ verilog; seam ]
+
+/// The F# half of the batch bridge: the host-memory top in the Sim, its
+/// DDR the behavioural model, spoken to over stdin the way `SimAxi.serve`
+/// is — `R`/`W` are AXI-Lite transactions, `C <hexn>` runs free cycles,
+/// `D <hexoff> <hexlen>` dumps DDR as hex, `L <hexoff> <hex>` loads it, and
+/// `M` names the design's registers with their offsets, so a host tool
+/// needs no seam file to set a control by name. The same Rust driver then
+/// runs against this before any bitstream exists.
+let batchServe (t: BoardTop) =
+    let memory =
+        match t.batch, t.board.hostMemory with
+        | Some _, Some m -> m
+        | _ -> failwith $"{t.name}: the batch bridge serves a host-memory top"
+
+    let sim = Sim t.top
+    let ddr = SimAxiDdr(sim, memory.arenaBytes, dataBytes = memory.width / 8)
+    let axi = SimAxi.clientWith sim ddr.Cycle
+    let out = System.Console.Out
+    out.WriteLine "BATCHSERVE"
+    out.Flush()
+
+    let mutable line = System.Console.In.ReadLine()
+
+    while line <> null do
+        (match line.Split(' ') with
+         | [| "R"; off |] -> out.WriteLine(sprintf "%08x" (axi.read32 (System.Convert.ToUInt64(off, 16))))
+         | [| "W"; off; value |] ->
+             axi.write32 (System.Convert.ToUInt64(off, 16)) (System.Convert.ToUInt64(value, 16))
+             out.WriteLine "OK"
+         | [| "C"; n |] ->
+             for _ in 1 .. int (System.Convert.ToUInt64(n, 16)) do
+                 ddr.Cycle()
+
+             out.WriteLine "OK"
+         | [| "D"; off; len |] ->
+             let start = int (System.Convert.ToUInt64(off, 16))
+             let count = int (System.Convert.ToUInt64(len, 16))
+             out.WriteLine(ddr.Memory[start .. start + count - 1] |> Array.map (sprintf "%02x") |> String.concat "")
+         | [| "L"; off; hex |] ->
+             let start = int (System.Convert.ToUInt64(off, 16))
+
+             for i in 0 .. hex.Length / 2 - 1 do
+                 ddr.Memory[start + i] <- System.Convert.ToByte(hex.Substring(i * 2, 2), 16)
+
+             out.WriteLine "OK"
+         | [| "M" |] ->
+             out.WriteLine(t.registers |> List.map (fun (n, e) -> sprintf "%s:%x" n e.offset) |> String.concat " ")
+         | _ -> out.WriteLine "ERR")
+
+        out.Flush()
+        line <- System.Console.In.ReadLine()

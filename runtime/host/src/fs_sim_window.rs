@@ -40,12 +40,19 @@ impl FsSimWindow {
     /// is the full-scale wrapper's bridge, whose protocol adds `C` (free
     /// cycles) and `D` (DDR dump) to `R`/`W`.
     pub fn spawn_mode(fsproj: &Path, mode: &str, marker: &str) -> Result<Self, FsSimError> {
+        Self::spawn_with(fsproj, &[mode], marker)
+    }
+
+    /// Spawn a serve mode that takes arguments — `batchserve design.json
+    /// kv260` — and wait for its ready marker.
+    pub fn spawn_with(fsproj: &Path, args: &[&str], marker: &str) -> Result<Self, FsSimError> {
+        let mode = args.first().copied().unwrap_or("");
         let mut child = Command::new("dotnet")
             .arg("run")
             .arg("--project")
             .arg(fsproj)
             .arg("--")
-            .arg(mode)
+            .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -97,6 +104,39 @@ impl FsSimWindow {
             .map(|i| {
                 u8::from_str_radix(&reply[i * 2..i * 2 + 2], 16)
                     .map_err(|_| FsSimError::Protocol(reply.clone()))
+            })
+            .collect()
+    }
+
+    /// Load bytes into the fake DDR — the staging the register aperture
+    /// cannot carry, standing in for the board's mmap of a `u-dma-buf`
+    /// (batchserve only).
+    pub fn write_ddr(&mut self, offset: usize, bytes: &[u8]) -> Result<(), FsSimError> {
+        // Long lines are fine on a pipe, but a bounded chunk keeps a stray
+        // error reply readable.
+        for (i, chunk) in bytes.chunks(4096).enumerate() {
+            let hex: String = chunk.iter().map(|b| format!("{b:02x}")).collect();
+            let reply = self.round_trip(&format!("L {:x} {hex}", offset + i * 4096))?;
+            if reply != "OK" {
+                return Err(FsSimError::Protocol(reply));
+            }
+        }
+        Ok(())
+    }
+
+    /// The design's registers by name and offset (batchserve only): what a
+    /// seam file would say, asked of the design itself.
+    pub fn register_map(&mut self) -> Result<Vec<(String, usize)>, FsSimError> {
+        let reply = self.round_trip("M")?;
+        reply
+            .split_whitespace()
+            .map(|entry| {
+                let (name, offset) = entry
+                    .split_once(':')
+                    .ok_or_else(|| FsSimError::Protocol(reply.clone()))?;
+                let offset = usize::from_str_radix(offset, 16)
+                    .map_err(|_| FsSimError::Protocol(reply.clone()))?;
+                Ok((name.to_string(), offset))
             })
             .collect()
     }

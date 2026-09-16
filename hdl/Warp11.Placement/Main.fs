@@ -29,8 +29,11 @@ let main argv =
         let volume = if argv.Length = 4 then uint64 argv[3] else gainUnity
         let source = readWavFile inPath
 
+        // The design is made for the recording's rate, as a canvas would make it.
+        let design = { Warp11.Graph.gainGraph with sampleRate = float source.sampleRate }
+
         let heard =
-            runInSim 100_000 Warp11.Graph.gainGraph { source = source; controls = [ "volume", volume; "mute", 0UL ]; outputPath = Some outPath }
+            runInSim 100_000 design { source = source; controls = [ "volume", volume; "mute", 0UL ]; outputPath = Some outPath }
 
         let peak (w: WavData) = w.samples |> Array.map (fun s -> abs (int s)) |> Array.max
         printfn $"{inPath}: %d{source.FrameCount} frames, peak %d{peak source} → {outPath}: %d{heard.FrameCount} frames, peak %d{peak heard}, volume %d{volume}/256"
@@ -65,6 +68,19 @@ let main argv =
             printfn $"{System.IO.Path.Combine(dir, file)}"
 
         0
+    // The batch bridge: `batchserve design.json <preset>` serves the design's
+    // host-memory top in the Sim to a Rust driver on stdin.
+    | [| "batchserve"; path; which |] ->
+        match Warp11.DesignFile.load path, preset which with
+        | Error why, _ ->
+            eprintfn $"{path}: {why}"
+            1
+        | _, Error why ->
+            eprintfn $"{why}"
+            1
+        | Ok g, Ok board ->
+            Warp11.BoardTop.batchServe (Warp11.BoardTop.boardTop board Warp11.BoardTop.HostMemory g)
+            0
     // A saved design's build directory: `build design.json <preset> pins|memory <dir>`
     // writes everything the board's toolchain needs and says how to run it.
     | [| "build"; path; which; way; dir |] ->

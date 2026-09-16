@@ -15,6 +15,7 @@
 
 #![no_std]
 
+pub mod batch;
 pub mod gep;
 pub mod mandel;
 pub mod mandel_frame;
