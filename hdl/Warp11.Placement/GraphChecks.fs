@@ -1155,3 +1155,130 @@ let designOnHostMemory () : bool =
     && top.name = "GainMemoryBatch"
     && (top.registers |> List.map fst |> List.take 7) = [ "id"; "start"; "busy"; "doneIrq"; "srcAddr"; "dstAddr"; "frameCount" ]
     && refused
+
+// UD19 — The build directory, Vivado. The gain design on the KV260, both
+// ways: the generator writes the block design around the top (the module
+// reference, one port per pin, the aperture at the board's base), the
+// constraints from the connector table, the flow with its timing gate, the
+// overlay with the uio node and the clock the design was elaborated for,
+// and the packaging. The host-memory way adds the PS slave port at its
+// width, the master's smartconnect and DDR segment, the arena node, and
+// the bus-interface attribute on the emitted clock. A board whose connector
+// lacks a pin the top needs is refused naming the port, before any file.
+
+// CHECK
+let buildDirectoryVivado () : bool =
+    let g = { gainGraph with name = "GainBuild"; sampleRate = stockSampleRate }
+    let dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"warp11-build-{System.Guid.NewGuid()}")
+
+    let read (sub: string) (file: string) =
+        System.IO.File.ReadAllText(System.IO.Path.Combine(dir, sub, file))
+
+    try
+        let pins = Warp11.Build.write (System.IO.Path.Combine(dir, "pins")) (Warp11.BoardTop.boardTop kv260 Warp11.BoardTop.Pins g)
+        let memory = Warp11.Build.write (System.IO.Path.Combine(dir, "memory")) (Warp11.BoardTop.boardTop kv260 Warp11.BoardTop.HostMemory g)
+
+        let bd = read "pins" "gain_build_axi_bd.tcl"
+        let xdc = read "pins" "gain_build_axi_pins.xdc"
+        let dts = read "pins" "gain_build_axi.dts"
+        let flow = read "pins" "build.tcl"
+        let sh = read "pins" "build.sh"
+
+        let bdM = read "memory" "gain_build_batch_bd.tcl"
+        let dtsM = read "memory" "gain_build_batch.dts"
+        let vM = read "memory" "GainBuildBatch.v"
+
+        let pinsOk =
+            bd.Contains "create_bd_cell -type module -reference GainBuildAxi GainBuildAxi_0"
+            && bd.Contains "apply_board_preset"
+            && bd.Contains "assign_bd_address -offset 0xB0000000 -range 0x00001000"
+            && bd.Contains "PL0_REF_CTRL__FREQMHZ {100}"
+            && [ "mclk"; "lrclk"; "sclk"; "sdin"; "mclk2"; "lrclk2"; "sclk2" ]
+               |> List.forall (fun p -> bd.Contains $"create_bd_port -dir O {p}")
+            && bd.Contains "create_bd_port -dir I sdout"
+            && not (bd.Contains "S_AXI_HPC0_FPD")
+            && xdc.Contains "set_property -dict {PACKAGE_PIN B11 IOSTANDARD LVCMOS33} [get_ports sdout]"
+            && dts.Contains "reg = <0x0 0xb0000000 0x0 0x1000>"
+            && dts.Contains "assigned-clock-rates = <100000000>"
+            && dts.Contains "firmware-name = \"xilinx/gain-build-axi/gain_build_axi_bd_wrapper.bit.bin\""
+            && not (dts.Contains "u-dma-buf")
+            && flow.Contains "set_property board_part xilinx.com:kv260_som:part0:1.4"
+            && flow.Contains "gain_build_axi_pins.xdc"
+            && flow.Contains "warp11_assert_timing_met impl_1"
+            && sh.Contains "xmutil loadapp gain-build-axi"
+            && pins.run.EndsWith "build.sh"
+
+        let memoryOk =
+            bdM.Contains "CONFIG.PSU__USE__S_AXI_GP0 {1}"
+            && bdM.Contains "CONFIG.PSU__SAXIGP0__DATA_WIDTH {128}"
+            && bdM.Contains "[get_bd_intf_pins zynq_ultra_ps_e_0/S_AXI_HPC0_FPD]"
+            && bdM.Contains "SAXIGP0/HPC0_DDR_LOW"
+            && bdM.Contains "saxihpc0_fpd_aclk"
+            && not (bdM.Contains "create_bd_port")
+            && dtsM.Contains "size = <0x00800000>"
+            && dtsM.Contains "device-name = \"udmabuf-gain-build-batch\""
+            && vM.Contains "ASSOCIATED_BUSIF s_axi:m_axi"
+            && not (memory.files |> List.exists (fun f -> f.EndsWith ".xdc"))
+
+        let shortBoard =
+            { kv260 with
+                connectors =
+                    [ { role = I2sSeparateCodecs
+                        pins = (connectorFor I2sSeparateCodecs kv260).Value |> List.filter (fun (p, _) -> p <> "sdout") } ] }
+
+        let refused =
+            try
+                Warp11.Build.write (System.IO.Path.Combine(dir, "short")) (Warp11.BoardTop.boardTop shortBoard Warp11.BoardTop.Pins g)
+                |> ignore
+
+                false
+            with e ->
+                e.Message.Contains "no pin for sdout"
+
+        pinsOk && memoryOk && refused
+    finally
+        if System.IO.Directory.Exists dir then
+            System.IO.Directory.Delete(dir, true)
+
+// UD20 — The build directory, the open flow. The gain design on the
+// iCEBreaker at the board's rate: the generator computes the PLL that takes
+// the crystal to the fabric clock the way `icepll` does, writes the wrapper
+// around the design with that PLL and a reset released on lock, the pin map
+// from the connector table with the crystal and the UART on it, and the
+// flow script with the part, package and clock as values.
+
+// CHECK
+let buildDirectoryOpenFlow () : bool =
+    let pll = Warp11.Build.icePll 12_000_000 24_000_000
+    let board = iceBreakerAt 24_000_000
+    let g = { gainGraph with name = "GainIce"; sampleRate = Warp11.BoardTop.boardRate board 48_000.0 }
+    let dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"warp11-ice-{System.Guid.NewGuid()}")
+
+    let read (file: string) =
+        System.IO.File.ReadAllText(System.IO.Path.Combine(dir, file))
+
+    try
+        let out = Warp11.Build.write dir (Warp11.BoardTop.boardTop board Warp11.BoardTop.Pins g)
+        let wrapper = read "gain_ice_uart_top.v"
+        let pins = read "gain_ice_uart_top.pcf"
+        let sh = read "build.sh"
+
+        (pll.divr, pll.divf, pll.divq, pll.filterRange) = (0, 63, 5, 1)
+        && pll.achievedHz = 24_000_000.0
+        && wrapper.Contains "module gain_ice_uart_top ("
+        && wrapper.Contains ".DIVF(7'b0111111)"
+        && wrapper.Contains ".PACKAGEPIN(clk12)"
+        && wrapper.Contains "GainIceUart design ("
+        && wrapper.Contains ".host_rx(host_rx)"
+        && pins.Contains "set_io clk12 35"
+        && pins.Contains "set_io host_rx 6"
+        && pins.Contains "set_io sdout 44"
+        && not (pins.Contains "ledr_n")
+        && sh.Contains "part=up5k"
+        && sh.Contains "package=sg48"
+        && sh.Contains "freq=24"
+        && out.run.EndsWith "build.sh"
+        && (out.files |> List.exists (fun f -> f.EndsWith "gain_ice_uart_layout.rs"))
+    finally
+        if System.IO.Directory.Exists dir then
+            System.IO.Directory.Delete(dir, true)

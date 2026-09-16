@@ -65,6 +65,39 @@ let main argv =
             printfn $"{System.IO.Path.Combine(dir, file)}"
 
         0
+    // A saved design's build directory: `build design.json <preset> pins|memory <dir>`
+    // writes everything the board's toolchain needs and says how to run it.
+    | [| "build"; path; which; way; dir |] ->
+        let dataPath =
+            match way with
+            | "pins" -> Ok Warp11.BoardTop.Pins
+            | "memory" -> Ok Warp11.BoardTop.HostMemory
+            | other -> Error $"a data path is pins or memory, not '{other}'"
+
+        match Warp11.DesignFile.load path, preset which, dataPath with
+        | Error why, _, _ ->
+            eprintfn $"{path}: {why}"
+            1
+        | _, Error why, _
+        | _, _, Error why ->
+            eprintfn $"{why}"
+            1
+        | Ok g, Ok board, Ok dataPath ->
+            try
+                let top = Warp11.BoardTop.boardTop board dataPath g
+                let out = Warp11.Build.write dir top
+
+                for file in out.files do
+                    printfn $"wrote {file}"
+
+                for name, entry in top.registers do
+                    printfn $"  register {name} at 0x%02x{entry.offset}"
+
+                printfn $"build with: {out.run}"
+                0
+            with e ->
+                eprintfn $"{e.Message}"
+                1
     // A saved design on a board: `board design.json <preset> <dir>` writes
     // the top's Verilog and the Rust seam for one of the preset boards.
     | [| "board"; path; which; dir |] ->
@@ -119,4 +152,6 @@ let main argv =
     run "UD16 a written unit travels with the design" writtenUnitTravels
     run "UD17 the design on a board" designOnABoard
     run "UD18 the design on the host's memory" designOnHostMemory
+    run "UD19 the build directory, Vivado" buildDirectoryVivado
+    run "UD20 the build directory, the open flow" buildDirectoryOpenFlow
     0
