@@ -568,6 +568,31 @@ let controlsHoldValues () : bool =
     // a control box has no inlets
     && refuses (addWire (pin "input" "left", Out) (pin "vol" "in", In)) [ "vol.in"; "no inlets" ]
 
+/// The three-band EQ, as the examples build it, at 48 kHz.
+let private threeBandEq () : Graph = Examples.threeBandEq 48_000.0
+
+/// The typed three-band EQ: the same three sections, coefficients designed
+/// by hand, over a tuple io — what an exported design looks like.
+let private typedThreeBandEq =
+    let rate = 48_000.0
+
+    let section (shape: EqType) (fc: float) (gainDb: float) =
+        let coefficients = toQ230 (rbjDesign shape fc 0.707 gainDb rate) |> List.map (fun v -> lit v biquadCoeffWidth)
+        moduleUnit "eq" stereoPins stereoPins [] (fun instance _ s -> audioEqBand "AudioEqBand" instance coefficients s)
+
+    defModule
+        "ThreeBandEq"
+        (fun p -> streamInputPorts p "in1" stereoPins, streamOutputPorts p "out1" stereoPins)
+        (fun (inPorts, outPorts) ->
+            [ streamSource inPorts ]
+            |> fuStagesWith [] (section LowShelf 200.0 6.0) "low" stereoPins id (fun r _ -> r)
+            |> fuStagesWith [] (section Peaking 1000.0 -4.0) "mid" stereoPins id (fun r _ -> r)
+            |> fuStagesWith [] (section HighShelf 5000.0 3.0) "high" stereoPins id (fun r _ -> r)
+            |> List.iter2 streamSink [ outPorts ])
+
+/// The three-band EQ placed twice in series, as the examples build it.
+let private twiceThreeBand () : Graph = Examples.twice 48_000.0
+
 // ---------------------------------------------------------------------------
 // UD11 — The export is the design. Five designs printed as typed F#, the
 // source compiled by `dotnet fsi` against these very assemblies, and each
@@ -581,8 +606,6 @@ let controlsHoldValues () : bool =
 
 // CHECK
 let exportIsTheDesign () : bool =
-    let stereo = stereoPins.fields
-
     let step (change: Graph -> Result<Graph, string>) (h: History) =
         match apply change h with
         | h, None -> h
@@ -590,32 +613,7 @@ let exportIsTheDesign () : bool =
 
     let wire (a: PinRef) (b: PinRef) = addWire (a, Out) (b, In)
 
-    let threeBand =
-        let band (name: string) (shape: string) (fc: string) (gain: string) (h: History) =
-            h
-            |> step (addBox "eq" (0.0, 0.0) >> Result.map fst)
-            |> step (renameBox "eq" name)
-            |> step (setArgument name "shape" shape)
-            |> step (setArgument name "fc" fc)
-            |> step (setArgument name "gain" gain)
-
-        (history (emptyGraph "ThreeBandEq" 48_000.0)
-         |> step (addInputPin stereo[0])
-         |> step (addInputPin stereo[1])
-         |> step (addOutputPin stereo[0])
-         |> step (addOutputPin stereo[1])
-         |> band "low" "lowshelf" "200" "6"
-         |> band "mid" "peaking" "1000" "-4"
-         |> band "high" "highshelf" "5000" "3"
-         |> step (wire (pin "input" "left") (pin "low" "left"))
-         |> step (wire (pin "input" "right") (pin "low" "right"))
-         |> step (wire (pin "low" "left") (pin "mid" "left"))
-         |> step (wire (pin "low" "right") (pin "mid" "right"))
-         |> step (wire (pin "mid" "left") (pin "high" "left"))
-         |> step (wire (pin "mid" "right") (pin "high" "right"))
-         |> step (wire (pin "high" "left") (pin "output" "left"))
-         |> step (wire (pin "high" "right") (pin "output" "right")))
-            .present
+    let threeBand = threeBandEq ()
 
     let unwired =
         { gainGraph with
@@ -652,7 +650,7 @@ let exportIsTheDesign () : bool =
                     else
                         e) }
 
-    let designs = [ gainGraph; macGraph 3 3 3; threeBand; shared; swapped ]
+    let designs = [ gainGraph; macGraph 3 3 3; threeBand; shared; swapped; twiceThreeBand () ]
 
     let sources =
         designs
@@ -718,3 +716,74 @@ let exportIsTheDesign () : bool =
 
     compiled.Length = designs.Length
     && List.forall2 (fun (c: string) (e: string) -> c = e) compiled expected
+
+// ---------------------------------------------------------------------------
+// UD12 — A design is a box. The three-band EQ imported into a parent and
+// placed twice in series elaborates to the bytes of the typed form: the
+// hand-written three-band module as a `designUnit`, two stages over it. The
+// file carries the design inside the design; a tone at the peaking band's
+// centre comes out at twice its cut; a change made at the path of a box
+// changes the design behind it; and a design cannot use itself, shadow a
+// palette unit, or be taken out while a box still is it.
+
+// CHECK
+let designIsABox () : bool =
+    let twice = twiceThreeBand ()
+
+    let typed =
+        let subUnit = designUnit "ThreeBandEq" stereoPins stereoPins [] typedThreeBandEq (fun (in1, out1) -> [ in1 ], [ out1 ], [])
+
+        defModule
+            "Twice"
+            (fun p -> streamInputPorts p "in1" stereoPins, streamOutputPorts p "out1" stereoPins)
+            (fun (inPorts, outPorts) ->
+                [ streamSource inPorts ]
+                |> fuStagesWith [] subUnit "ThreeBandEq" stereoPins id (fun r _ -> r)
+                |> fuStagesWith [] subUnit "ThreeBandEq2" stereoPins id (fun r _ -> r)
+                |> List.iter2 streamSink [ outPorts ])
+
+    let reopened =
+        match DesignFile.parse (DesignFile.write twice) with
+        | Ok g -> g
+        | Error why -> failwith why
+
+    // 1 kHz through two peaking cuts of 4 dB: 8 dB down, the shelves a little
+    // up. The left channel: `toneWav` puts the right an octave up.
+    let tone = toneWav 48_000 4000 1000.0 0.25
+    let left (w: WavData) = w.samples |> Array.indexed |> Array.filter (fun (i, _) -> i % 2 = 0) |> Array.map snd
+    let peak (samples: int16[]) = samples |> Array.map (fun s -> abs (int s)) |> Array.max
+    let settledPeak (w: WavData) = let l = left w in peak l[l.Length * 9 / 10 ..]
+    let heard = runInSim 100_000 twice { source = tone; controls = []; outputPath = None }
+    let settled = settledPeak heard
+    let expected = float (peak (left tone)) * 10.0 ** (-8.0 / 20.0)
+
+    // The mid band's gain changed through the box's path: a new parent, whose
+    // design now cuts less.
+    let softer =
+        match atPath [ "ThreeBandEq" ] (setArgument "mid" "gain" "-1") twice with
+        | Ok g -> g
+        | Error why -> failwith why
+
+    let settledSofter = settledPeak (runInSim 100_000 softer { source = tone; controls = []; outputPath = None })
+
+    let refuses (change: Graph -> Result<Graph, string>) (names: string list) =
+        match change twice with
+        | Ok _ -> false
+        | Error why -> names |> List.forall (fun n -> why.Contains n)
+
+    emitDesign (elaborate twice).def = emitDesign typed.def
+    && reopened = twice
+    && (controlPorts twice) = []
+    && abs (float settled - expected) < 0.08 * expected
+    && settledSofter > settled * 3 / 2
+    && (graphAt [ "ThreeBandEq2" ] twice |> Option.map (fun g -> g.name)) = Some "ThreeBandEq"
+    // a palette name
+    && refuses (importDesign { gainGraph with name = "gain" }) [ "gain"; "palette" ]
+    // itself
+    && refuses (importDesign { twice with designs = Map.empty }) [ "itself" ]
+    // still placed
+    && refuses (removeDesign "ThreeBandEq") [ "ThreeBandEq"; "placed" ]
+    // a box that is not a design
+    && refuses (atPath [ "input" ] (rename "x")) [ "input"; "not a box that is a design" ]
+    // a design's box has no arguments
+    && refuses (setArgument "ThreeBandEq" "fc" "1") [ "ThreeBandEq"; "no creation arguments" ]

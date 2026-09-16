@@ -1,0 +1,96 @@
+{
+  "name": "Controls",
+  "streams": 1,
+  "sampleRate": 48828,
+  "inputs": [
+    {
+      "name": "left",
+      "width": 24,
+      "fraction": 0,
+      "signed": true
+    },
+    {
+      "name": "right",
+      "width": 24,
+      "fraction": 0,
+      "signed": true
+    }
+  ],
+  "controls": [],
+  "outputs": [
+    {
+      "name": "left",
+      "width": 24,
+      "fraction": 0,
+      "signed": true
+    },
+    {
+      "name": "right",
+      "width": 24,
+      "fraction": 0,
+      "signed": true
+    }
+  ],
+  "boxes": [
+    {
+      "name": "gain",
+      "unit": "gain",
+      "copies": 1,
+      "arguments": {},
+      "settings": {
+        "volume": "256"
+      }
+    }
+  ],
+  "controlBoxes": [
+    {
+      "name": "toggle",
+      "width": 1,
+      "fraction": 0,
+      "signed": false,
+      "kind": "number",
+      "value": "0"
+    }
+  ],
+  "wires": [
+    {
+      "from": "input.left",
+      "to": "gain.left"
+    },
+    {
+      "from": "input.right",
+      "to": "gain.right"
+    },
+    {
+      "from": "gain.left",
+      "to": "output.left"
+    },
+    {
+      "from": "gain.right",
+      "to": "output.right"
+    },
+    {
+      "from": "toggle.out",
+      "to": "gain.mute"
+    }
+  ],
+  "positions": {
+    "gain": [
+      320,
+      120
+    ],
+    "input": [
+      60,
+      120
+    ],
+    "output": [
+      580,
+      120
+    ],
+    "toggle": [
+      320,
+      320
+    ]
+  },
+  "designs": {}
+}

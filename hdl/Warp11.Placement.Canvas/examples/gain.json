@@ -1,0 +1,98 @@
+{
+  "name": "GainPatch",
+  "streams": 1,
+  "sampleRate": 48828,
+  "inputs": [
+    {
+      "name": "left",
+      "width": 24,
+      "fraction": 0,
+      "signed": true
+    },
+    {
+      "name": "right",
+      "width": 24,
+      "fraction": 0,
+      "signed": true
+    }
+  ],
+  "controls": [
+    {
+      "name": "volume",
+      "width": 16,
+      "fraction": 0,
+      "signed": false
+    },
+    {
+      "name": "mute",
+      "width": 1,
+      "fraction": 0,
+      "signed": false
+    }
+  ],
+  "outputs": [
+    {
+      "name": "left",
+      "width": 24,
+      "fraction": 0,
+      "signed": true
+    },
+    {
+      "name": "right",
+      "width": 24,
+      "fraction": 0,
+      "signed": true
+    }
+  ],
+  "boxes": [
+    {
+      "name": "gain",
+      "unit": "gain",
+      "copies": 1,
+      "arguments": {},
+      "settings": {}
+    }
+  ],
+  "controlBoxes": [],
+  "wires": [
+    {
+      "from": "input.left",
+      "to": "gain.left"
+    },
+    {
+      "from": "input.right",
+      "to": "gain.right"
+    },
+    {
+      "from": "input.volume",
+      "to": "gain.volume"
+    },
+    {
+      "from": "input.mute",
+      "to": "gain.mute"
+    },
+    {
+      "from": "gain.left",
+      "to": "output.left"
+    },
+    {
+      "from": "gain.right",
+      "to": "output.right"
+    }
+  ],
+  "positions": {
+    "gain": [
+      320,
+      120
+    ],
+    "input": [
+      60,
+      120
+    ],
+    "output": [
+      580,
+      120
+    ]
+  },
+  "designs": {}
+}

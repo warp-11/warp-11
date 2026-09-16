@@ -57,6 +57,14 @@ let main argv =
         | Error why ->
             eprintfn $"{path}: {why}"
             1
+    // The example designs as files: `examples <dir>`.
+    | [| "examples"; dir |] ->
+        Warp11.Placement.Examples.write dir
+
+        for file, _ in Warp11.Placement.Examples.all Warp11.Placement.Examples.recordingRate do
+            printfn $"{System.IO.Path.Combine(dir, file)}"
+
+        0
     | [| "throughput" |] ->
         printfn $"{throughputReport ()}"
         0
@@ -80,4 +88,5 @@ let main argv =
     run "UD9 the pedal units do what they say" pedalUnitsDoWhatTheySay
     run "UD10 controls hold values, boxes share them" controlsHoldValues
     run "UD11 the export is the design" exportIsTheDesign
+    run "UD12 a design is a box" designIsABox
     0

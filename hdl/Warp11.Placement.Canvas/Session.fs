@@ -42,7 +42,7 @@ let rec openWith (g: Graph) (recording: WavData) (controls: (string * uint64) li
     // have lost one.
     let ports = controlPorts g
 
-    for name, value in Warp11.Devices.startingValues g @ controls do
+    for name, value in Warp11.Edit.startingValues g @ controls do
         if ports |> List.exists (fun (n, _) -> n = name) then
             session.Poke(name, System.Numerics.BigInteger value)
 
@@ -68,8 +68,6 @@ let rec openWith (g: Graph) (recording: WavData) (controls: (string * uint64) li
       recording = Some view
       audio = sink
       controls = g.controls
-      probeOf = probeName g
-      validOf = validName g
       signalsOf =
         fun box ->
             // The stage's own nets are `{box}{i}_…`, its instance's

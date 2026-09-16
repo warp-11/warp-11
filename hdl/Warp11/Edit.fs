@@ -38,33 +38,37 @@ let freshBoxName (g: Graph) (unit: string) : string =
 /// placed at `at`. The box's name comes back with the graph so the caller
 /// can select it.
 let addBox (unit: string) (at: Position) (g: Graph) : Result<Graph * string, string> =
-    match palette.TryFind unit with
-    | None -> Error $"no unit called '{unit}' in the palette"
-    | Some factory ->
+    let arguments =
+        match palette.TryFind unit, g.designs.TryFind unit with
+        | Some factory, _ -> Ok(defaults factory)
+        | None, Some _ -> Ok Map.empty
+        | None, None -> Error $"no unit called '{unit}' in the palette or among the design's own designs"
+
+    arguments
+    |> Result.map (fun arguments ->
         let name = freshBoxName g unit
 
-        Ok(
-            { g with
-                boxes = g.boxes @ [ { name = name; unit = unit; copies = 1; arguments = defaults factory; settings = Map.empty } ]
-                positions = g.positions |> Map.add name at },
-            name
-        )
+        { g with
+            boxes = g.boxes @ [ { name = name; unit = unit; copies = 1; arguments = arguments; settings = Map.empty } ]
+            positions = g.positions |> Map.add name at },
+        name)
 
 /// The factory's verdict on a box as it would be: made for the rate with
-/// these arguments, or refused naming the box and the parameter.
-let private checkBox (rate: float) (b: Box) : Result<unit, string> =
-    palette[b.unit].make rate (complete palette[b.unit] b.arguments)
-    |> Result.map ignore
-    |> Result.mapError (fun why -> $"{b.name}: {why}")
+/// these arguments, or refused naming the box and the parameter. A box that
+/// is a design has no arguments to refuse.
+let private checkBox (g: Graph) (rate: float) (b: Box) : Result<unit, string> =
+    match palette.TryFind b.unit, g.designs.TryFind b.unit with
+    | Some factory, _ -> factory.make rate (complete factory b.arguments) |> Result.map ignore |> Result.mapError (fun why -> $"{b.name}: {why}")
+    | None, Some _ -> Ok()
+    | None, None -> Error $"{b.name}: no unit called '{b.unit}'"
 
 /// One creation argument of a box, as typed. The factory checks it before
 /// the box holds it; a change is a new design.
 let setArgument (name: string) (parameter: string) (value: string) (g: Graph) : Result<Graph, string> =
-    match g.boxes |> List.tryFind (fun b -> b.name = name) with
-    | None -> Error $"no box called '{name}'"
-    | Some b ->
-        let factory = palette[b.unit]
-
+    match g.boxes |> List.tryFind (fun b -> b.name = name), g.boxes |> List.tryFind (fun b -> b.name = name) |> Option.bind (fun b -> palette.TryFind b.unit) with
+    | None, _ -> Error $"no box called '{name}'"
+    | Some _, None -> Error $"{name}: a design has no creation arguments — open it to change it"
+    | Some b, Some factory ->
         if not (factory.parameters |> List.exists (fun p -> p.name = parameter)) then
             let names =
                 match factory.parameters |> List.map (fun p -> p.name) with
@@ -75,18 +79,83 @@ let setArgument (name: string) (parameter: string) (value: string) (g: Graph) : 
         else
             let changed = { b with arguments = b.arguments |> Map.add parameter value }
 
-            checkBox g.sampleRate changed
+            checkBox g g.sampleRate changed
             |> Result.map (fun () -> { g with boxes = g.boxes |> List.map (fun x -> if x.name = name then changed else x) })
 
-/// The rate the design is made for. Every box is re-made for it first, so a
-/// corner above the new rate's half refuses here, naming the box.
-let setSampleRate (rate: float) (g: Graph) : Result<Graph, string> =
+/// The rate the design is made for, and for every design inside it — a
+/// design used as a box runs at its parent's rate. Every box is re-made for
+/// it first, so a corner above the new rate's half refuses here, naming the
+/// box.
+let rec setSampleRate (rate: float) (g: Graph) : Result<Graph, string> =
     if rate <= 0.0 then
         Error $"a sample rate is above zero, not %g{rate}"
     else
+        let boxes =
+            g.boxes |> List.fold (fun acc b -> acc |> Result.bind (fun () -> checkBox g rate b)) (Ok())
+
+        let designs =
+            (Ok Map.empty, g.designs |> Map.toList)
+            ||> List.fold (fun acc (name, sub) ->
+                acc
+                |> Result.bind (fun (m: Map<string, Graph>) ->
+                    setSampleRate rate sub |> Result.mapError (fun why -> $"{name}: {why}") |> Result.map (fun sub -> Map.add name sub m)))
+
+        match boxes, designs with
+        | Ok(), Ok designs -> Ok { g with sampleRate = rate; designs = designs }
+        | Error e, _
+        | _, Error e -> Error e
+
+/// A design brought in as a unit this design may place: made for this
+/// design's rate, named so a box can name it. Refused when the palette or
+/// this design already has the name.
+let importDesign (sub: Graph) (g: Graph) : Result<Graph, string> =
+    if palette.ContainsKey sub.name then
+        Error $"'{sub.name}' is a unit in the palette"
+    elif g.designs.ContainsKey sub.name then
+        Error $"there is already a design called '{sub.name}' in this one"
+    elif sub.name = g.name then
+        Error $"a design cannot use itself"
+    elif sub.streams <> 1 then
+        Error $"'{sub.name}' has %d{sub.streams} streams, and a design used as a box has one"
+    else
+        setSampleRate g.sampleRate sub
+        |> Result.mapError (fun why -> $"'{sub.name}' at %g{g.sampleRate} Hz: {why}")
+        |> Result.map (fun sub -> { g with designs = g.designs |> Map.add sub.name sub })
+
+/// A design this one uses, taken out again — refused while a box still is it.
+let removeDesign (name: string) (g: Graph) : Result<Graph, string> =
+    if not (g.designs.ContainsKey name) then
+        Error $"no design called '{name}' in this one"
+    else
+        match g.boxes |> List.filter (fun b -> b.unit = name) with
+        | [] -> Ok { g with designs = g.designs |> Map.remove name }
+        | boxes ->
+            let placed = boxes |> List.map (fun b -> b.name) |> String.concat ", "
+            Error $"'{name}' is still placed: {placed}"
+
+/// A change applied to the design a path of boxes leads to — `[]` is this
+/// design, `[ "reverb" ]` the design the box `reverb` is — so an editor
+/// drilled into a box edits the design behind it, and the parent is a new
+/// design for it.
+let rec atPath (path: string list) (change: Graph -> Result<Graph, string>) (g: Graph) : Result<Graph, string> =
+    match path with
+    | [] -> change g
+    | box :: rest ->
+        match g.boxes |> List.tryFind (fun b -> b.name = box) |> Option.bind (fun b -> g.designs.TryFind b.unit |> Option.map (fun sub -> b, sub)) with
+        | None -> Error $"'{box}' is not a box that is a design"
+        | Some(b, sub) ->
+            atPath rest change sub
+            |> Result.map (fun sub -> { g with designs = g.designs |> Map.add b.unit sub })
+
+/// The design a path of boxes leads to.
+let rec graphAt (path: string list) (g: Graph) : Graph option =
+    match path with
+    | [] -> Some g
+    | box :: rest ->
         g.boxes
-        |> List.fold (fun acc b -> acc |> Result.bind (fun () -> checkBox rate b)) (Ok())
-        |> Result.map (fun () -> { g with sampleRate = rate })
+        |> List.tryFind (fun b -> b.name = box)
+        |> Option.bind (fun b -> g.designs.TryFind b.unit)
+        |> Option.bind (graphAt rest)
 
 /// A box — a unit's or a control's — and every wire on it.
 let removeBox (name: string) (g: Graph) : Result<Graph, string> =
@@ -218,6 +287,23 @@ let controlValueBits (c: ControlBox) : uint64 =
     match controlBits c.name c.format c.value with
     | Ok v -> v
     | Error _ -> 0UL
+
+/// What the design's own control ports start at: each number box's value
+/// and each unwired inlet's setting — and for an inlet of a box that is a
+/// design, nothing typed here means the value that design starts its own
+/// port at. The design's own controls are the mapping's to give.
+let rec startingValues (g: Graph) : (string * uint64) list =
+    [ for c in g.controlBoxes do
+          if c.kind = NumberBox then
+              yield c.name, controlValueBits c
+      for b, n, f in implicitControls g ->
+          let value =
+              match b.settings |> Map.tryFind n, designOf g b with
+              | Some _, _ -> settingBits b (n, f)
+              | None, Some sub -> startingValues sub |> List.tryFind (fun (port, _) -> port = n) |> Option.map snd |> Option.defaultValue 0UL
+              | None, None -> 0UL
+
+          implicitPortName b.name n, value ]
 
 /// A wire between two pins, either end first: the edge always runs from
 /// the output to the input. Refused, naming the pin, when the ends are the

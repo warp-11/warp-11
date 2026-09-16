@@ -1,0 +1,227 @@
+{
+  "name": "Twice",
+  "streams": 1,
+  "sampleRate": 48828,
+  "inputs": [
+    {
+      "name": "left",
+      "width": 24,
+      "fraction": 0,
+      "signed": true
+    },
+    {
+      "name": "right",
+      "width": 24,
+      "fraction": 0,
+      "signed": true
+    }
+  ],
+  "controls": [],
+  "outputs": [
+    {
+      "name": "left",
+      "width": 24,
+      "fraction": 0,
+      "signed": true
+    },
+    {
+      "name": "right",
+      "width": 24,
+      "fraction": 0,
+      "signed": true
+    }
+  ],
+  "boxes": [
+    {
+      "name": "ThreeBandEq",
+      "unit": "ThreeBandEq",
+      "copies": 1,
+      "arguments": {},
+      "settings": {}
+    },
+    {
+      "name": "ThreeBandEq2",
+      "unit": "ThreeBandEq",
+      "copies": 1,
+      "arguments": {},
+      "settings": {}
+    }
+  ],
+  "controlBoxes": [],
+  "wires": [
+    {
+      "from": "input.left",
+      "to": "ThreeBandEq.left"
+    },
+    {
+      "from": "input.right",
+      "to": "ThreeBandEq.right"
+    },
+    {
+      "from": "ThreeBandEq.left",
+      "to": "ThreeBandEq2.left"
+    },
+    {
+      "from": "ThreeBandEq.right",
+      "to": "ThreeBandEq2.right"
+    },
+    {
+      "from": "ThreeBandEq2.left",
+      "to": "output.left"
+    },
+    {
+      "from": "ThreeBandEq2.right",
+      "to": "output.right"
+    }
+  ],
+  "positions": {
+    "ThreeBandEq": [
+      320,
+      120
+    ],
+    "ThreeBandEq2": [
+      580,
+      120
+    ],
+    "input": [
+      60,
+      120
+    ],
+    "output": [
+      840,
+      120
+    ]
+  },
+  "designs": {
+    "ThreeBandEq": {
+      "name": "ThreeBandEq",
+      "streams": 1,
+      "sampleRate": 48828,
+      "inputs": [
+        {
+          "name": "left",
+          "width": 24,
+          "fraction": 0,
+          "signed": true
+        },
+        {
+          "name": "right",
+          "width": 24,
+          "fraction": 0,
+          "signed": true
+        }
+      ],
+      "controls": [],
+      "outputs": [
+        {
+          "name": "left",
+          "width": 24,
+          "fraction": 0,
+          "signed": true
+        },
+        {
+          "name": "right",
+          "width": 24,
+          "fraction": 0,
+          "signed": true
+        }
+      ],
+      "boxes": [
+        {
+          "name": "low",
+          "unit": "eq",
+          "copies": 1,
+          "arguments": {
+            "fc": "200",
+            "gain": "6",
+            "q": "0.707",
+            "shape": "lowshelf"
+          },
+          "settings": {}
+        },
+        {
+          "name": "mid",
+          "unit": "eq",
+          "copies": 1,
+          "arguments": {
+            "fc": "1000",
+            "gain": "-4",
+            "q": "0.707",
+            "shape": "peaking"
+          },
+          "settings": {}
+        },
+        {
+          "name": "high",
+          "unit": "eq",
+          "copies": 1,
+          "arguments": {
+            "fc": "5000",
+            "gain": "3",
+            "q": "0.707",
+            "shape": "highshelf"
+          },
+          "settings": {}
+        }
+      ],
+      "controlBoxes": [],
+      "wires": [
+        {
+          "from": "input.left",
+          "to": "low.left"
+        },
+        {
+          "from": "input.right",
+          "to": "low.right"
+        },
+        {
+          "from": "low.left",
+          "to": "mid.left"
+        },
+        {
+          "from": "low.right",
+          "to": "mid.right"
+        },
+        {
+          "from": "mid.left",
+          "to": "high.left"
+        },
+        {
+          "from": "mid.right",
+          "to": "high.right"
+        },
+        {
+          "from": "high.left",
+          "to": "output.left"
+        },
+        {
+          "from": "high.right",
+          "to": "output.right"
+        }
+      ],
+      "positions": {
+        "high": [
+          840,
+          120
+        ],
+        "input": [
+          60,
+          120
+        ],
+        "low": [
+          320,
+          120
+        ],
+        "mid": [
+          580,
+          120
+        ],
+        "output": [
+          1100,
+          120
+        ]
+      },
+      "designs": {}
+    }
+  }
+}

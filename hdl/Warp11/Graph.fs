@@ -80,7 +80,12 @@ type Graph =
       boxes: Box list
       controlBoxes: ControlBox list
       edges: Edge list
-      positions: Map<string, float * float> }
+      positions: Map<string, float * float>
+      /// The designs this design uses as units, by name — Pure Data's
+      /// abstractions, embedded so a saved file is complete. A box whose
+      /// `unit` names one is that design as a box: its inputs and outputs the
+      /// signal pins, every control port of its own a control inlet.
+      designs: Map<string, Graph> }
 
 let pin (box: string) (pin: string) : PinRef = { box = box; pin = pin }
 
@@ -99,7 +104,8 @@ let emptyGraph (name: string) (sampleRate: float) : Graph =
       boxes = []
       controlBoxes = []
       edges = []
-      positions = Map.empty }
+      positions = Map.empty
+      designs = Map.empty }
 
 /// Which side of a box a pin is on. A box may call an input and an output by
 /// the same name (`gain` has `left` on both sides), so wherever a pin is
@@ -128,7 +134,8 @@ let macGraph (streams: int) (multipliers: int) (adders: int) : Graph =
           { from = pin "input" "c"; ``to`` = pin "sum" "y" }
           // The rename: the box's `sum` is the design's `out`.
           { from = pin "sum" "sum"; ``to`` = pin "output" "out" } ]
-      positions = Map.empty }
+      positions = Map.empty
+      designs = Map.empty }
 
 /// The first patch: a stereo stream through `gain`, volume and mute from the
 /// design's controls.
@@ -150,42 +157,75 @@ let gainGraph: Graph =
           { from = pin "input" "mute"; ``to`` = pin "gain" "mute" }
           { from = pin "gain" "left"; ``to`` = pin "output" "left" }
           { from = pin "gain" "right"; ``to`` = pin "output" "right" } ]
-      positions = Map.empty }
+      positions = Map.empty
+      designs = Map.empty }
 
 let private boxOf (g: Graph) (name: string) = g.boxes |> List.tryFind (fun b -> b.name = name)
 
-/// The unit a box is, made by its factory for the design's rate: arguments
-/// the box does not state are the factory's defaults. A box whose arguments
-/// the factory refuses cannot be elaborated, and says which one.
-let unitOf (g: Graph) (b: Box) : ErasedFu =
-    let factory = palette[b.unit]
+let implicitPortName (box: string) (pin: string) = $"{box}_{pin}"
 
-    match factory.make g.sampleRate (complete factory b.arguments) with
-    | Ok unit -> unit
-    | Error why -> failwith $"{b.name}: {why}"
+/// The design a box is, when its unit names one of this design's own.
+let designOf (g: Graph) (b: Box) : Graph option = g.designs |> Map.tryFind b.unit
 
-/// A box's signal pins, inputs and outputs, from the palette — or the design's
-/// own boundary boxes, whose pins are the design's.
-let pinsOf (g: Graph) (box: string) : (string * NumberFormat) list * (string * NumberFormat) list =
+/// The unit a palette box is, made by its factory for the design's rate:
+/// arguments the box does not state are the factory's defaults. A box whose
+/// arguments the factory refuses cannot be elaborated, and says which one.
+/// A box that is a design is `Elaborate.unitOf`'s to make.
+let paletteUnitOf (g: Graph) (b: Box) : ErasedFu =
+    match palette.TryFind b.unit with
+    | None -> failwith $"{b.name}: no unit called '{b.unit}' in the palette or among the design's own designs"
+    | Some factory ->
+        match factory.make g.sampleRate (complete factory b.arguments) with
+        | Ok unit -> unit
+        | Error why -> failwith $"{b.name}: {why}"
+
+/// A box's signal pins, inputs and outputs — from the palette, or from the
+/// design the box is — or the design's own boundary boxes, whose pins are
+/// the design's.
+let rec pinsOf (g: Graph) (box: string) : (string * NumberFormat) list * (string * NumberFormat) list =
     match box with
     | "input" -> [], g.inputs
     | "output" -> g.outputs, []
     | name ->
         match boxOf g name with
         | Some b ->
-            let unit = unitOf g b
-            unit.operands.fields, unit.results.fields
+            match designOf g b with
+            | Some sub -> sub.inputs, sub.outputs
+            | None ->
+                let unit = paletteUnitOf g b
+                unit.operands.fields, unit.results.fields
         | None -> [], []
 
-/// A box's control pins: sinks on a box, sources on the `input` box.
-let controlsOf (g: Graph) (box: string) : (string * NumberFormat) list =
+/// A box's control pins: sinks on a box, sources on the `input` box. A box
+/// that is a design has every control port of that design as an inlet.
+let rec controlsOf (g: Graph) (box: string) : (string * NumberFormat) list =
     match box with
     | "input" -> g.controls
     | "output" -> []
     | name ->
         match boxOf g name with
-        | Some b -> (unitOf g b).controls
+        | Some b ->
+            match designOf g b with
+            | Some sub -> controlPorts sub
+            | None -> (paletteUnitOf g b).controls
         | None -> []
+
+/// A box's control inlets nobody wired, and the port each gets.
+and implicitControls (g: Graph) : (Box * string * NumberFormat) list =
+    [ for b in g.boxes do
+          for n, f in controlsOf g b.name do
+              if not (g.edges |> List.exists (fun e -> e.``to`` = pin b.name n)) then
+                  yield b, n, f ]
+
+/// Every control port the design has, in port order: its own, its number
+/// boxes, and the implicit ones. A mapping pokes these; a parent design that
+/// uses this one as a box sees them as its control inlets.
+and controlPorts (g: Graph) : (string * NumberFormat) list =
+    g.controls
+    @ [ for c in g.controlBoxes do
+            if c.kind = NumberBox then
+                yield c.name, c.format ]
+    @ [ for b, n, f in implicitControls g -> implicitPortName b.name n, f ]
 
 /// What a pin is: a field of the beat in or out of a box, or a control held
 /// beside it, sourced from the design's own controls.
@@ -205,14 +245,7 @@ let boxExists (g: Graph) (name: string) =
     || g.boxes |> List.exists (fun b -> b.name = name)
     || (controlBoxOf g name).IsSome
 
-/// A box's control inlets nobody wired, and the port each gets.
-let implicitControls (g: Graph) : (Box * string * NumberFormat) list =
-    [ for b in g.boxes do
-          for n, f in controlsOf g b.name do
-              if not (g.edges |> List.exists (fun e -> e.``to`` = pin b.name n)) then
-                  yield b, n, f ]
 
-let implicitPortName (box: string) (pin: string) = $"{box}_{pin}"
 
 /// What a pin is, or why it is not. A wire's `from` end is looked up among a
 /// box's outputs and its `to` end among its inputs — a box may call an input

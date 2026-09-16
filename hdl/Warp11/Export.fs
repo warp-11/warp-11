@@ -58,8 +58,15 @@ let private tupleValue (names: string list) =
 let private valueName (name: string) =
     ident (string (System.Char.ToLowerInvariant name[0]) + name.Substring 1)
 
-/// The source, or why it cannot be written.
-let export (g: Graph) : Result<string, string> =
+/// The names a design's io tuple binds: `in1 … inM, out1 … outM`, then a
+/// port per control. What its own module destructures, and what a parent
+/// destructures to reach the streams and controls of an instance.
+let private ioNames (g: Graph) =
+    [ for i in 1 .. g.streams -> $"in%d{i}" ], [ for i in 1 .. g.streams -> $"out%d{i}" ], [ for n, _ in controlPorts g -> ident n ]
+
+/// One design as a `let`: the typed form, its sub-designs already printed
+/// above it under their own names.
+let rec private printDesign (g: Graph) : Result<string, string> =
     try
         checkEdges g
         let order = wireOrder g
@@ -68,13 +75,34 @@ let export (g: Graph) : Result<string, string> =
         let collect (rs: Result<'a, string> list) : Result<'a list, string> =
             (Ok [], rs) ||> List.fold (fun acc r -> match acc, r with | Ok xs, Ok x -> Ok(x :: xs) | Error e, _ | _, Error e -> Error e) |> Result.map List.rev
 
-        // One `let` per box: the unit, its arguments as values, and its copies.
+        // One `let` per box: the unit, its arguments as values, and its copies —
+        // or, for a box that is a design, that design's module as a unit.
         let units =
             order
             |> List.map (fun b ->
-                let factory = palette[b.unit]
+                let printed =
+                    match designOf g b with
+                    | Some sub ->
+                        let ins, outs, controls = ioNames sub
+                        let ctlFormats = [ for n, f in controlPorts sub -> $"\"{n}\", {showFormat f}" ] |> String.concat "; "
+                        let ctlList = if ctlFormats = "" then "[]" else $"[ {ctlFormats} ]"
+                        let ctlNames = if controls.IsEmpty then "[]" else "[ " + String.concat "; " controls + " ]"
 
-                factory.print g.sampleRate (complete factory b.arguments)
+                        let inList = String.concat "; " ins
+                        let outList = String.concat "; " outs
+                        let pattern = tuple (ins @ outs @ controls)
+                        let value = valueName sub.name
+
+                        match showPins $"{sub.name}'s inputs" sub.inputs, showPins $"{sub.name}'s outputs" sub.outputs with
+                        | Ok inPins, Ok outPins ->
+                            Ok $"designUnit \"{sub.name}\" ({inPins}) ({outPins}) {ctlList} {value} (fun {pattern} -> [ {inList} ], [ {outList} ], {ctlNames})"
+                        | Error e, _
+                        | _, Error e -> Error e
+                    | None ->
+                        let factory = palette[b.unit]
+                        factory.print g.sampleRate (complete factory b.arguments)
+
+                printed
                 |> Result.map (fun printed ->
                     let unit = if b.copies = 1 then printed else $"copies %d{b.copies} ({printed})"
                     $"    let {ident b.name}Unit = {unit}"))
@@ -88,8 +116,7 @@ let export (g: Graph) : Result<string, string> =
         | _, Error e, _
         | _, _, Error e -> Error e
         | Ok units, Ok inPins, Ok outPins ->
-            let ins = [ for i in 1 .. g.streams -> $"in%d{i}" ]
-            let outs = [ for i in 1 .. g.streams -> $"out%d{i}" ]
+            let ins, outs, _ = ioNames g
 
             let ioFactory =
                 [ for i in ins -> $"streamInputPorts p \"{i}\" ({inPins})" ]
@@ -179,19 +206,7 @@ let export (g: Graph) : Result<string, string> =
 
                 String.concat
                     "\n"
-                    ([ $"/// {g.name}, exported from the design canvas: the typed form of the drawn"
-                       "/// design, elaborating to the same bytes."
-                       $"module Exported.{g.name}"
-                       ""
-                       "open Warp11"
-                       "open Warp11.Fu"
-                       "open Warp11.Units"
-                       "open Warp11.Pedal"
-                       "open Warp11.Factories"
-                       ""
-                       $"let sampleRate = {showFloat g.sampleRate}"
-                       ""
-                       $"let {valueName g.name} =" ]
+                    ([ $"let {valueName g.name} =" ]
                      @ units
                      @ [ (if units.IsEmpty then "    defModule" else "\n    defModule")
                          $"        \"{g.name}\""
@@ -201,7 +216,38 @@ let export (g: Graph) : Result<string, string> =
                          $"            [ {sources} ]" ]
                      @ stages
                      @ projection
-                     @ [ $"            |> List.iter2 streamSink [ {sinks} ])" ])
-                + "\n")
+                     @ [ $"            |> List.iter2 streamSink [ {sinks} ])" ]))
     with e ->
         Error e.Message
+
+/// Every design a design uses, deepest first and each once, then the design
+/// itself — the order the source needs them in.
+let rec private designsInOrder (g: Graph) : Graph list =
+    let inner = [ for KeyValue(_, sub) in g.designs do yield! designsInOrder sub ]
+    (inner |> List.distinctBy (fun d -> d.name)) @ [ g ]
+
+/// The source, or why it cannot be written: one module, the design's rate,
+/// the designs it uses as values above it, and the design itself.
+let export (g: Graph) : Result<string, string> =
+    designsInOrder g
+    |> List.distinctBy (fun d -> d.name)
+    |> List.map printDesign
+    |> List.fold (fun acc r -> match acc, r with | Ok xs, Ok x -> Ok(xs @ [ x ]) | Error e, _ | _, Error e -> Error e) (Ok [])
+    |> Result.map (fun blocks ->
+        String.concat
+            "\n"
+            ([ $"/// {g.name}, exported from the design canvas: the typed form of the drawn"
+               "/// design, elaborating to the same bytes."
+               $"module Exported.{g.name}"
+               ""
+               "open Warp11"
+               "open Warp11.Fu"
+               "open Warp11.Units"
+               "open Warp11.Pedal"
+               "open Warp11.Factories"
+               "open Warp11.Elaborate"
+               ""
+               $"let sampleRate = {showFloat g.sampleRate}"
+               "" ]
+             @ [ String.concat "\n\n" blocks ])
+        + "\n")

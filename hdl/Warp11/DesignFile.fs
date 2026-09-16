@@ -34,8 +34,8 @@ let private formatNode (name: string, f: NumberFormat) : JsonNode =
 
 let private pinText (p: PinRef) = $"{p.box}.{p.pin}"
 
-/// The graph as JSON text.
-let write (g: Graph) : string =
+/// The graph as a JSON node.
+let rec private node (g: Graph) : JsonObject =
     let root = JsonObject()
     root["name"] <- JsonValue.Create g.name
     root["streams"] <- JsonValue.Create g.streams
@@ -90,7 +90,17 @@ let write (g: Graph) : string =
         positions[box] <- JsonArray(JsonValue.Create x, JsonValue.Create y)
 
     root["positions"] <- positions
-    root.ToJsonString(JsonSerializerOptions(WriteIndented = true))
+    let designs = JsonObject()
+
+    for KeyValue(name, sub) in g.designs do
+        designs[name] <- node sub
+
+    root["designs"] <- designs
+    root
+
+/// The graph as JSON text.
+let write (g: Graph) : string =
+    (node g).ToJsonString(JsonSerializerOptions(WriteIndented = true))
 
 // ---------------------------------------------------------------------------
 // Reading. Every field is asked for by name and refused by name when it is
@@ -179,20 +189,14 @@ let private readArguments (box: string) (factory: Factory) (n: JsonNode) : Resul
         |> Result.map (Map.ofList >> complete factory)
     | _ -> Error $"box '{box}': 'arguments' should be an object"
 
-let private readBox (rate: float) (n: JsonNode) : Result<Box, string> =
+let private readBox (rate: float) (designs: Map<string, Graph>) (n: JsonNode) : Result<Box, string> =
     let get name f = field n name |> Result.bind (f $"a box's '{name}'")
 
     match get "name" asString, get "unit" asString, get "copies" asInt with
     | Ok name, Ok unit, Ok copies ->
-        match palette.TryFind unit with
-        | None -> Error $"box '{name}': no unit called '{unit}' in the palette"
-        | Some factory ->
-            // A file written before a unit had arguments has none: the defaults.
-            let arguments =
-                match field n "arguments" with
-                | Ok node -> readArguments name factory node
-                | Error _ -> Ok(defaults factory)
-
+        match palette.TryFind unit, designs.TryFind unit with
+        | None, None -> Error $"box '{name}': no unit called '{unit}' in the palette or among the design's designs"
+        | factory, _ ->
             let settings =
                 match field n "settings" with
                 | Ok(:? JsonObject as o) ->
@@ -200,14 +204,22 @@ let private readBox (rate: float) (n: JsonNode) : Result<Box, string> =
                 | Ok _ -> Error $"box '{name}': 'settings' should be an object"
                 | Error _ -> Ok Map.empty
 
-            match arguments, settings with
-            | Ok arguments, Ok settings ->
-                // The factory's verdict, so a file never opens a box it cannot make.
-                factory.make rate arguments
-                |> Result.mapError (fun why -> $"box '{name}': {why}")
-                |> Result.map (fun _ -> { name = name; unit = unit; copies = copies; arguments = arguments; settings = settings })
-            | Error e, _
+            match factory, settings with
             | _, Error e -> Error e
+            | None, Ok settings -> Ok { name = name; unit = unit; copies = copies; arguments = Map.empty; settings = settings }
+            | Some factory, Ok settings ->
+                // A file written before a unit had arguments has none: the defaults.
+                let arguments =
+                    match field n "arguments" with
+                    | Ok node -> readArguments name factory node
+                    | Error _ -> Ok(defaults factory)
+
+                arguments
+                |> Result.bind (fun arguments ->
+                    // The factory's verdict, so a file never opens a box it cannot make.
+                    factory.make rate arguments
+                    |> Result.mapError (fun why -> $"box '{name}': {why}")
+                    |> Result.map (fun _ -> { name = name; unit = unit; copies = copies; arguments = arguments; settings = settings }))
     | Error e, _, _
     | _, Error e, _
     | _, _, Error e -> Error e
@@ -263,16 +275,8 @@ let private checkWires (g: Graph) : Result<Graph, string> =
         | Ok _, Ok _ -> Ok e)
     |> Result.map (fun _ -> g)
 
-/// The JSON text as a graph, or the first thing wrong with it.
-let parse (text: string) : Result<Graph, string> =
-    let root =
-        try
-            Ok(JsonNode.Parse text)
-        with e ->
-            Error $"not JSON: {e.Message}"
-
-    root
-    |> Result.bind (fun root ->
+/// A JSON node as a graph, or the first thing wrong with it.
+let rec private readGraph (root: JsonNode) : Result<Graph, string> =
         let get name f = field root name |> Result.bind f
         let formats name = get name (asArray $"'{name}'") |> Result.bind (each (readFormat name))
 
@@ -281,20 +285,28 @@ let parse (text: string) : Result<Graph, string> =
         get "name" (asString "'name'")
         |> Result.bind (fun _ -> get "sampleRate" (asFloat "'sampleRate'"))
         |> Result.bind (fun rate ->
+            // The designs before the boxes, since a box may be one of them.
+            let designs =
+                match field root "designs" with
+                | Ok(:? JsonObject as o) ->
+                    o |> List.ofSeq |> each (fun (KeyValue(k, v)) -> readGraph v |> Result.mapError (fun why -> $"design '{k}': {why}") |> Result.map (fun sub -> k, sub)) |> Result.map Map.ofList
+                | Ok _ -> Error "'designs': expected an object"
+                | Error _ -> Ok Map.empty
+
             match
                 get "name" (asString "'name'"),
                 get "streams" (asInt "'streams'"),
                 formats "inputs",
                 formats "controls",
                 formats "outputs",
-                get "boxes" (asArray "'boxes'") |> Result.bind (each (readBox rate)),
+                designs |> Result.bind (fun designs -> get "boxes" (asArray "'boxes'") |> Result.bind (each (readBox rate designs)) |> Result.map (fun boxes -> boxes, designs)),
                 (match field root "controlBoxes" with
                  | Ok node -> asArray "'controlBoxes'" node |> Result.bind (each readControlBox)
                  | Error _ -> Ok []),
                 get "wires" (asArray "'wires'") |> Result.bind (each readWire),
                 get "positions" readPositions
             with
-            | Ok name, Ok streams, Ok inputs, Ok controls, Ok outputs, Ok boxes, Ok controlBoxes, Ok wires, Ok positions ->
+            | Ok name, Ok streams, Ok inputs, Ok controls, Ok outputs, Ok(boxes, designs), Ok controlBoxes, Ok wires, Ok positions ->
                 checkWires
                     { name = name
                       streams = streams
@@ -305,7 +317,8 @@ let parse (text: string) : Result<Graph, string> =
                       boxes = boxes
                       controlBoxes = controlBoxes
                       edges = wires
-                      positions = positions }
+                      positions = positions
+                      designs = designs }
             | Error e, _, _, _, _, _, _, _, _
             | _, Error e, _, _, _, _, _, _, _
             | _, _, Error e, _, _, _, _, _, _
@@ -314,7 +327,14 @@ let parse (text: string) : Result<Graph, string> =
             | _, _, _, _, _, Error e, _, _, _
             | _, _, _, _, _, _, Error e, _, _
             | _, _, _, _, _, _, _, Error e, _
-            | _, _, _, _, _, _, _, _, Error e -> Error e))
+            | _, _, _, _, _, _, _, _, Error e -> Error e)
+
+/// The JSON text as a graph, or the first thing wrong with it.
+let parse (text: string) : Result<Graph, string> =
+    try
+        readGraph (JsonNode.Parse text)
+    with e ->
+        Error $"not JSON: {e.Message}"
 
 let save (path: string) (g: Graph) : unit = System.IO.File.WriteAllText(path, write g)
 

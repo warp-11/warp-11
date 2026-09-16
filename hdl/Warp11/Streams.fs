@@ -176,6 +176,24 @@ let streamSink (sp: StreamOutputPorts<'p>) (s: Stream<'p>) =
     s.valid ==> sp.valid
     sp.ready ==> s.ready
 
+/// A stream through an INSTANCE's boundary — the ports handed back by
+/// `.NewNamed`, where the instance's inputs are ours to drive and its
+/// outputs ours to read: the payload and valid go in, the instance's ready
+/// comes back to the stream, and what leaves is a live stream whose ready
+/// this body registers. The generic form of every `stereoSplice`.
+let streamThroughInstance (ins: StreamInputPorts<'p>) (outs: StreamOutputPorts<'q>) (s: Stream<'p>) : Stream<'q> =
+    for target, value in List.zip (ins.layout.pack ins.payload) (s.layout.pack s.payload) do
+        value ==> target
+
+    s.valid ==> ins.valid
+    ins.ready ==> s.ready
+    registerStreamReady outs.ready
+
+    { payload = outs.layout.unpack outs.targets
+      valid = outs.valid
+      ready = outs.ready
+      layout = outs.layout }
+
 /// Land a stream the body BUILT ITSELF on a produced boundary: each field
 /// driven from the payload, valid driven, and nothing handed backwards.
 ///

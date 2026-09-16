@@ -99,14 +99,7 @@ type GraphPorts =
       outs: StreamOutputPorts<Expr list> list
       controls: (string * Expr) list }
 
-/// Every control port the design has, in port order: its own, its number
-/// boxes, and the implicit ones. A mapping pokes these.
-let controlPorts (g: Graph) : (string * NumberFormat) list =
-    g.controls
-    @ [ for c in g.controlBoxes do
-            if c.kind = NumberBox then
-                yield c.name, c.format ]
-    @ [ for b, n, f in implicitControls g -> implicitPortName b.name n, f ]
+
 
 /// The net a pin's value rides on, when the design was elaborated with
 /// probes — what a debugger watches to paint the pin. The boundary boxes'
@@ -143,9 +136,18 @@ let validName (_: Graph) (box: string) (side: Side) : string =
     | box, In -> $"{box}_in_valid"
     | box, Out -> $"{box}_out_valid"
 
+/// The prefix a box's instance puts on every net inside it, as the
+/// simulator flattens them: the stage is `{box}0` (the first stream), the
+/// instance `{stage}_{unit}`, with the copy's index when there are copies.
+/// What a debugger drilled into a box that is a design adds to that
+/// design's own net names.
+let instancePrefix (b: Box) : string =
+    if b.copies = 1 then $"{b.name}0_{b.unit}_" else $"{b.name}0_{b.unit}0_"
+
 /// Every probe a design elaborated with probes declares, for a debugger to
-/// watch them all at once.
-let probeNames (g: Graph) : string list =
+/// watch them all at once — and, through a box that is a design, that
+/// design's probes under the instance's prefix.
+let rec probeNames (g: Graph) : string list =
     [ for b in g.boxes do
           let ins, outs = pinsOf g b.name
           yield validName g b.name In
@@ -155,7 +157,58 @@ let probeNames (g: Graph) : string list =
               yield $"{b.name}_in_{n}"
 
           for n, _ in outs do
-              yield $"{b.name}_out_{n}" ]
+              yield $"{b.name}_out_{n}"
+
+          match designOf g b with
+          | Some sub ->
+              let prefix = instancePrefix b
+
+              for n in probeNames sub do
+                  yield prefix + n
+
+              for n, _ in sub.inputs do
+                  yield $"{prefix}in1_{n}"
+
+              for n, _ in sub.outputs do
+                  yield $"{prefix}out1_{n}"
+
+              yield $"{prefix}in1_valid"
+              yield $"{prefix}out1_valid"
+
+              for n, _ in controlPorts sub do
+                  yield prefix + n
+          | None -> () ]
+
+/// A module whose boundary is a stream in, a stream out and control ports,
+/// as a unit: the shape every design elaborates to, and the shape a design
+/// used as a box has. `ports` says where those are on the module's io — the
+/// elaborator's own record, or the tuple an exported design declares — so
+/// the graph's path and the typed one make the same connects in the same
+/// order and emit the same bytes.
+let private throughDesign
+    (ins: StreamInputPorts<'a> list)
+    (outs: StreamOutputPorts<'r> list)
+    (controlPorts: Expr list)
+    (controls: Expr list)
+    (s: Stream<'a>)
+    : Stream<'r> =
+    match ins, outs with
+    | [ input ], [ output ] ->
+        List.iter2 (fun port value -> value ==> port) controlPorts controls
+        streamThroughInstance input output s
+    | _ -> failwith "a design used as a unit has one stream in and one out"
+
+let designUnit
+    (name: string)
+    (operands: Layout<'a>)
+    (results: Layout<'r>)
+    (controls: (string * NumberFormat) list)
+    (m: TypedModule<'io>)
+    (ports: 'io -> StreamInputPorts<'a> list * StreamOutputPorts<'r> list * Expr list)
+    : Fu<'a, 'r> =
+    moduleUnit name operands results controls (fun instance controlValues s ->
+        let ins, outs, controlPorts = ports (m.NewNamed instance)
+        throughDesign ins outs controlPorts controlValues s)
 
 /// The graph as a module. Every box is one `fuStagesWith`; the beat between
 /// boxes is its results and what a later box still needs.
@@ -165,7 +218,7 @@ let probeNames (g: Graph) : string list =
 /// debugger can watch a pin by name. Nothing reads them, so they change no
 /// behaviour; the production elaboration leaves them out and stays
 /// byte-identical to the typed form.
-let elaborateWith (probes: bool) (g: Graph) : TypedModule<GraphPorts> =
+let rec elaborateWith (probes: bool) (g: Graph) : TypedModule<GraphPorts> =
     checkEdges g
     let order = wireOrder g
 
@@ -194,7 +247,7 @@ let elaborateWith (probes: bool) (g: Graph) : TypedModule<GraphPorts> =
             let streams, slots =
                 (((io.ins |> List.map streamSource), firstBeat), order)
                 ||> List.fold (fun (streams, slots) b ->
-                    let unit = unitOf g b |> copies b.copies
+                    let unit = unitOfWith probes g b |> copies b.copies
                     let indexOf (source: PinRef) =
                         match slots |> List.tryFindIndex (fun s -> s.source = source) with
                         | Some i -> i
@@ -270,6 +323,24 @@ let elaborateWith (probes: bool) (g: Graph) : TypedModule<GraphPorts> =
                     streams |> List.map (streamMapTo outLayout (fun fields -> [ for i in outIdx -> fields[i] ]))
 
             List.iter2 streamSink io.outs finished)
+
+/// A design as a unit — the graph's path to what `designUnit` is to the
+/// typed one: the same connects, from `elaborate` of the design. With
+/// `probes`, the design inside is elaborated with them too, so a debugger
+/// drilled into the box sees its pins.
+and graphUnit (probes: bool) (sub: Graph) : ErasedFu =
+    moduleUnit sub.name (layoutOfList sub.inputs) (layoutOfList sub.outputs) (controlPorts sub) (fun instance controlValues s ->
+        let io = (elaborateWith probes sub).NewNamed instance
+        throughDesign io.ins io.outs (List.map snd io.controls) controlValues s)
+
+/// The unit a box is: a palette unit made by its factory, or the design the
+/// box is.
+and unitOfWith (probes: bool) (g: Graph) (b: Box) : ErasedFu =
+    match designOf g b with
+    | Some sub -> graphUnit probes sub
+    | None -> paletteUnitOf g b
+
+let unitOf (g: Graph) (b: Box) : ErasedFu = unitOfWith false g b
 
 /// The production form: no probes.
 let elaborate (g: Graph) : TypedModule<GraphPorts> = elaborateWith false g

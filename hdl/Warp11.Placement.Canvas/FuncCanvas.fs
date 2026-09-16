@@ -29,6 +29,7 @@ open Warp11.Fu
 open Warp11.Factories
 open Warp11.Graph
 open Warp11.Edit
+open Warp11.Elaborate
 
 // ---------------------------------------------------------------------------
 // Geometry, in world units.
@@ -228,6 +229,11 @@ let private boxView (g: Graph) (selected: Selection option) (name: string) (bx: 
             name, $"{kind} {c.value}"
         | _ ->
             let b = g.boxes |> List.find (fun b -> b.name = name)
+
+            match designOf g b with
+            | Some sub -> name, $"design {sub.name} × %d{b.copies} — double-click to open"
+            | None ->
+
             let u = unitOf g b
 
             let sequential =
@@ -342,12 +348,10 @@ type Live =
       /// speaker paces; without, the timer paces it.
       audio: AudioSink.AudioSink option
       controls: (string * NumberFormat) list
-      /// The net a pin's value is on, for the watch list.
-      probeOf: PinRef -> Side -> string option
-      /// The net that says a box's pins on one side carry a beat this cycle.
-      validOf: string -> Side -> string
-      /// Every signal of the design that belongs to a box, by the box's name —
-      /// its stage's registers and the module instance inside it.
+      /// Every signal of the design that belongs to a box, by the box's
+      /// flattened name — its stage's registers and the module instance
+      /// inside it. A box inside a design inside the design is named with
+      /// its instance prefix.
       signalsOf: string -> string list
       /// Where "save what was heard" writes.
       savePath: string option
@@ -407,22 +411,27 @@ let private label (text: string) =
     TextBlock.create [ TextBlock.text text; TextBlock.verticalAlignment Layout.VerticalAlignment.Center; TextBlock.margin (Thickness(4.0, 0.0)) ]
     :> Types.IView
 
-/// A one-line entry: its text is state, Enter commits it. The handler gets
-/// the box's text as it is at that keystroke rather than the state's, since
-/// a re-render is scheduled and a fast Enter can land before it.
+/// A one-line entry: its text is state; Enter commits it, and so does
+/// clicking away — a value typed and left is a value meant. The handler
+/// gets the box's text as it is at that moment rather than the state's,
+/// since a re-render is scheduled and a fast Enter can land before it; a
+/// commit of what is already held is a change of nothing.
 let private entry (width: float) (text: string) (onChanged: string -> unit) (onEnter: string -> unit) =
+    let commit (source: obj) =
+        match source with
+        | :? TextBox as t -> onEnter (if isNull t.Text then "" else t.Text)
+        | _ -> ()
+
     TextBox.create
         [ TextBox.width width
           TextBox.text text
           TextBox.onTextChanged (onChanged, SubPatchOptions.Always)
+          TextBox.onLostFocus ((fun e -> commit e.Source), SubPatchOptions.Always)
           TextBox.onKeyDown (
               (fun e ->
                   if e.Key = Key.Enter then
                       e.Handled <- true
-
-                      match e.Source with
-                      | :? TextBox as t -> onEnter (if isNull t.Text then "" else t.Text)
-                      | _ -> ()),
+                      commit e.Source),
               SubPatchOptions.Always
           ) ]
     :> Types.IView
@@ -434,6 +443,9 @@ let private entry (width: float) (text: string) (onChanged: string -> unit) (onE
 let view (opening: Opening) : Control =
     Component(fun ctx ->
         let history = ctx.useState (history (withLayout opening.graph))
+        /// The boxes drilled into, from the top: the view is over the design
+        /// the last of them is. Empty is the design itself.
+        let path = ctx.useState<string list> []
         let pan = ctx.useState ((0.0, 0.0))
         let zoom = ctx.useState 1.0
         let selection = ctx.useState<Selection option> None
@@ -442,6 +454,7 @@ let view (opening: Opening) : Control =
         /// Double-click on the canvas: where, and what has been typed so far.
         let typing = ctx.useState<((float * float) * string) option> None
         let filePath = ctx.useState (opening.file |> Option.defaultValue "")
+        let importText = ctx.useState ""
         // The property panel's entries.
         let nameText = ctx.useState ""
         let designName = ctx.useState opening.graph.name
@@ -520,7 +533,32 @@ let view (opening: Opening) : Control =
         // Every read of the running design below goes through the state, so
         // a reset is seen by the next render and the next tick alike.
         let live = liveState.Current
-        let g = history.Current.present
+        let root = history.Current.present
+
+        // The design under the view: the one the path leads to, laid out if
+        // it never was. A path an undo has invalidated falls back to the top.
+        let g =
+            match graphAt path.Current root with
+            | Some g -> withLayout g
+            | None -> root
+
+        /// A change to the design under the view is a change to the design
+        /// at the path — the parent is a new design for it.
+        let here (what: Graph -> Result<Graph, string>) : Graph -> Result<Graph, string> = atPath path.Current what
+
+        /// The prefix the simulator puts on every net inside the boxes the
+        /// path drills through.
+        let rec prefixFor (g: Graph) (path: string list) =
+            match path with
+            | [] -> ""
+            | box :: rest ->
+                match g.boxes |> List.tryFind (fun b -> b.name = box) with
+                | Some b -> instancePrefix b + (designOf g b |> Option.map (fun sub -> prefixFor sub rest) |> Option.defaultValue "")
+                | None -> ""
+
+        let prefix = prefixFor root path.Current
+        let probeOf (p: PinRef) (side: Side) = probeName g p side |> Option.map (fun n -> prefix + n)
+        let validOf (box: string) (side: Side) = prefix + validName g box side
 
         let stopLive () =
             live
@@ -536,7 +574,7 @@ let view (opening: Opening) : Control =
         // the design is a new design, so the session running the old one
         // stops; the toolbar opens the new one on request.
         let change (what: Graph -> Result<Graph, string>) : bool =
-            match apply what history.Current with
+            match apply (here what) history.Current with
             | h, None when obj.ReferenceEquals(h, history.Current) -> true
             | h, None ->
                 history.Set h
@@ -555,14 +593,14 @@ let view (opening: Opening) : Control =
         // A value — a setting, a number box — is not a new design: the port
         // exists either way, so the session keeps running and is poked.
         let changeValue (what: Graph -> Result<Graph, string>) (poke: (string * uint64) option) : bool =
-            match apply what history.Current with
+            match apply (here what) history.Current with
             | h, None ->
                 history.Set h
 
                 match live, poke with
                 | Some l, Some(name, v) ->
-                    l.session.Poke(name, System.Numerics.BigInteger v)
-                    message.Set $"{name} = %d{v}"
+                    l.session.Poke(prefix + name, System.Numerics.BigInteger v)
+                    message.Set $"{prefix}{name} = %d{v}"
                 | _ -> message.Set ""
 
                 true
@@ -575,11 +613,11 @@ let view (opening: Opening) : Control =
 
             match s with
             | Some(SelectedBox name) ->
-                let current = history.Current.present
+                let current = graphAt path.Current history.Current.present |> Option.defaultValue history.Current.present
                 nameText.Set name
                 copiesText.Set(current.boxes |> List.tryFind (fun b -> b.name = name) |> Option.map (fun b -> string b.copies) |> Option.defaultValue "")
                 argumentText.Set(current.boxes |> List.tryFind (fun b -> b.name = name) |> Option.map (fun b -> b.arguments) |> Option.defaultValue Map.empty)
-                live |> Option.iter (fun l -> l.signalsOf name |> List.iter l.session.Watch)
+                live |> Option.iter (fun l -> l.signalsOf (prefix + name) |> List.iter l.session.Watch)
             | _ -> ()
 
         let deleteSelection () =
@@ -600,7 +638,11 @@ let view (opening: Opening) : Control =
 
             if not (obj.ReferenceEquals(h, history.Current)) then
                 history.Set h
-                designName.Set h.present.name
+
+                if (graphAt path.Current h.present).IsNone then
+                    path.Set []
+
+                designName.Set(graphAt path.Current h.present |> Option.map (fun g -> g.name) |> Option.defaultValue h.present.name)
                 rateText.Set(h.present.sampleRate.ToString(CultureInfo.InvariantCulture))
                 select None
                 message.Set what
@@ -665,9 +707,23 @@ let view (opening: Opening) : Control =
                     select (Some(SelectedWire edge))
                     message.Set $"wire {showPin edge.from} → {showPin edge.``to``}"
                 | HitBox name ->
-                    let bx, by = g.positions[name]
-                    select (Some(SelectedBox name))
-                    drag.Set(Some(MovingBox(name, (fst world - bx, snd world - by), g)))
+                    let isDesign = g.boxes |> List.tryFind (fun b -> b.name = name) |> Option.bind (designOf g) |> Option.isSome
+
+                    if e.ClickCount = 2 && isDesign then
+                        // Into the design the box is: the same view over it.
+                        let deeper = path.Current @ [ name ]
+
+                        match graphAt deeper root with
+                        | Some sub ->
+                            path.Set deeper
+                            designName.Set sub.name
+                            select None
+                            message.Set $"in {name}"
+                        | None -> ()
+                    else
+                        let bx, by = g.positions[name]
+                        select (Some(SelectedBox name))
+                        drag.Set(Some(MovingBox(name, (fst world - bx, snd world - by), root)))
                 | HitNothing ->
                     select None
 
@@ -680,7 +736,9 @@ let view (opening: Opening) : Control =
             match drag.Current, toWorld e with
             | Some(MovingBox(name, (ox, oy), _)), Some(_, _, (wx, wy)) ->
                 // The move is not history until the box is put down.
-                history.Set { history.Current with present = moveBox name (wx - ox, wy - oy) history.Current.present }
+                match here (moveBox name (wx - ox, wy - oy) >> Ok) history.Current.present with
+                | Ok moved -> history.Set { history.Current with present = moved }
+                | Error _ -> ()
             | Some(Panning(lx, ly)), Some(_, (sx, sy), _) ->
                 let px, py = pan.Current
                 pan.Set((px + sx - lx, py + sy - ly))
@@ -698,8 +756,9 @@ let view (opening: Opening) : Control =
                 | _ -> message.Set "wire dropped"
             | Some(MovingBox(name, _, before)), _ ->
                 let h = history.Current
+                let at (r: Graph) = graphAt path.Current r |> Option.bind (fun g -> g.positions |> Map.tryFind name)
 
-                if h.present.positions[name] <> before.positions[name] then
+                if at h.present <> at before then
                     history.Set { h with past = before :: h.past; future = [] }
             | _ -> ()
 
@@ -767,12 +826,12 @@ let view (opening: Opening) : Control =
         let wireState (e: Edge) =
             match live with
             | None -> wireBrush :> IBrush, None
-            | Some l ->
+            | Some _ ->
                 let valid =
-                    valueOf snap (l.validOf e.from.box Out) |> Option.map (fun v -> not v.IsZero) |> Option.defaultValue false
+                    valueOf snap (validOf e.from.box Out) |> Option.map (fun v -> not v.IsZero) |> Option.defaultValue false
 
                 let label =
-                    match l.probeOf e.from Out, formatOfPin g e.from Out with
+                    match probeOf e.from Out, formatOfPin g e.from Out with
                     | Some net, Some f -> valueOf snap net |> Option.map (showValue f)
                     | _ -> None
 
@@ -821,7 +880,7 @@ let view (opening: Opening) : Control =
             | None -> []
             | Some((wx, wy), text) ->
                 let matches =
-                    palette.Keys
+                    Seq.append palette.Keys g.designs.Keys
                     |> Seq.filter (fun n -> text = "" || n.StartsWith(text, System.StringComparison.OrdinalIgnoreCase))
                     |> Seq.sort
                     |> List.ofSeq
@@ -882,6 +941,25 @@ let view (opening: Opening) : Control =
                                     Button.margin (Thickness(2.0, 1.0))
                                     Button.onClick ((fun _ -> placeBox name (somewhereVisible ())), SubPatchOptions.Always) ]
                               :> Types.IView ]
+                      @ [ TextBlock.create [ TextBlock.text "designs"; TextBlock.fontWeight FontWeight.Bold; TextBlock.margin (Thickness(4.0, 8.0, 4.0, 2.0)) ] :> Types.IView ]
+                      @ [ for name in g.designs.Keys |> Seq.sort ->
+                              Button.create
+                                  [ Button.content name
+                                    Button.horizontalAlignment Layout.HorizontalAlignment.Stretch
+                                    Button.margin (Thickness(2.0, 1.0))
+                                    Button.onClick ((fun _ -> placeBox name (somewhereVisible ())), SubPatchOptions.Always) ]
+                              :> Types.IView ]
+                      @ [ entry 118.0 importText.Current importText.Set (fun typed ->
+                              match Warp11.DesignFile.load typed with
+                              | Ok sub -> if change (importDesign sub) then message.Set $"imported {sub.name}: place it from the palette"
+                              | Error why -> message.Set $"refused: {why}")
+                          TextBlock.create
+                              [ TextBlock.text "a design file's path, Enter imports it"
+                                TextBlock.fontSize 10.0
+                                TextBlock.foreground Brushes.Gray
+                                TextBlock.textWrapping TextWrapping.Wrap
+                                TextBlock.margin (Thickness(4.0, 0.0)) ]
+                          :> Types.IView ]
                       @ [ TextBlock.create [ TextBlock.text "controls"; TextBlock.fontWeight FontWeight.Bold; TextBlock.margin (Thickness(4.0, 8.0, 4.0, 2.0)) ] :> Types.IView ]
                       @ [ for label, kind, format, value in [ "number", NumberBox, unsignedInt 16, "0"; "toggle", NumberBox, unsignedInt 1, "0"; "constant", ConstantBox, unsignedInt 16, "0" ] ->
                               Button.create
@@ -975,12 +1053,32 @@ let view (opening: Opening) : Control =
                         (match live, opening.opener with
                          | None, Some _ -> button "Open in sim" openInSim
                          | _ -> TextBlock.create [] :> Types.IView)
+                        // Where the view is: the design, then each box drilled into,
+                        // each a step back out.
+                        StackPanel.create
+                            [ StackPanel.orientation Layout.Orientation.Horizontal
+                              StackPanel.margin (Thickness(10.0, 0.0, 0.0, 0.0))
+                              StackPanel.children
+                                  [ for i, name in List.indexed (root.name :: path.Current) ->
+                                        Button.create
+                                            [ Button.content (if i = 0 then name else $"› {name}")
+                                              Button.margin (Thickness(0.0, 0.0, 2.0, 0.0))
+                                              Button.background (if i = path.Current.Length then Brushes.LightSteelBlue :> IBrush else Brushes.Transparent :> IBrush)
+                                              Button.onClick (
+                                                  (fun _ ->
+                                                      let shorter = List.truncate i path.Current
+                                                      path.Set shorter
+                                                      graphAt shorter root |> Option.iter (fun g -> designName.Set g.name)
+                                                      select None),
+                                                  SubPatchOptions.Always
+                                              ) ]
+                                        :> Types.IView ] ]
                         TextBlock.create
                             [ TextBlock.margin (Thickness(10.0, 0.0))
                               TextBlock.verticalAlignment Layout.VerticalAlignment.Center
                               TextBlock.fontFamily mono
                               TextBlock.text
-                                  $"{g.name} — {g.boxes.Length} boxes, {g.edges.Length} wires — %d{history.Current.past.Length} to undo — zoom {inv z}" ] ] ]
+                                  $"{g.boxes.Length} boxes, {g.edges.Length} wires — %d{history.Current.past.Length} to undo — zoom {inv z}" ] ] ]
             :> Types.IView
 
         // Play: with a speaker, start it and free-run — the speaker paces the
@@ -1114,11 +1212,11 @@ let view (opening: Opening) : Control =
                           match box with
                           | "input"
                           | "output" -> ()
-                          | _ -> yield $"{tag} valid", (valueOf snap (l.validOf box side) |> Option.map string |> Option.defaultValue "—")
+                          | _ -> yield $"{tag} valid", (valueOf snap (validOf box side) |> Option.map string |> Option.defaultValue "—")
 
                           for n, f in pins do
                               let shown =
-                                  match l.probeOf (pin box n) side with
+                                  match probeOf (pin box n) side with
                                   | Some net -> valueOf snap net |> Option.map (showValue f) |> Option.defaultValue "—"
                                   | None -> "—"
 
@@ -1126,14 +1224,14 @@ let view (opening: Opening) : Control =
                       for n, f in controls do
                           if box <> "input" then
                               let shown =
-                                  match l.probeOf (pin box n) In with
+                                  match probeOf (pin box n) In with
                                   | Some net -> valueOf snap net |> Option.map (showValue f) |> Option.defaultValue "—"
                                   | None -> "—"
 
                               yield $"ctl {n}", shown ]
 
                 let ownRows =
-                    [ for name in l.signalsOf box -> name, (valueOf snap name |> Option.map string |> Option.defaultValue "—") ]
+                    [ for name in l.signalsOf (prefix + box) -> name, (valueOf snap name |> Option.map string |> Option.defaultValue "—") ]
 
                 [ heading "this cycle" ] @ (pinRows |> List.map row) @ (ownRows |> List.map row)
 
@@ -1210,9 +1308,49 @@ let view (opening: Opening) : Control =
             @ (signals |> List.map (pinRow "signal"))
             @ (controls |> List.map (pinRow "control"))
 
+        /// What the placement decided for a box: how its copies sit against
+        /// the design's streams, and what the stage puts around the unit.
+        let placementOf (b: Box) (u: ErasedFu) =
+            let m, n = g.streams, b.copies
+
+            match u.law with
+            | Combinational _ when n = m -> "in place: the law inside the beat, no net declared"
+            | Combinational _ when n = 1 -> $"shared: %d{m} streams on one copy behind an arbiter, a client stage each"
+            | Combinational _ -> $"%d{n} copies for %d{m} streams: the elaborator will refuse this"
+            | Sequential _ when n = m -> "one copy per stream, a context FIFO holding the rest of the beat beside it"
+            | Sequential _ when n > m && n % m = 0 -> $"a farm of %d{n / m} copies per stream, in order, a context FIFO each"
+            | Sequential _ -> $"%d{n} copies over %d{m} streams: the elaborator will refuse this"
+
         let boxRows (name: string) =
             let b = g.boxes |> List.find (fun b -> b.name = name)
             let u = unitOf g b
+
+            match designOf g b with
+            | Some sub ->
+                [ StackPanel.create
+                      [ StackPanel.orientation Layout.Orientation.Horizontal
+                        StackPanel.children
+                            [ label "name"
+                              entry 120.0 nameText.Current nameText.Set (fun typed ->
+                                  if change (renameBox name typed) then
+                                      select (Some(SelectedBox typed))
+                                      message.Set $"renamed {name} to {typed}") ] ]
+                  :> Types.IView
+                  row ("design", $"{sub.name}: %d{sub.boxes.Length} boxes, %d{sub.edges.Length} wires")
+                  row ("placement", placementOf b u)
+                  button "Open" (fun () ->
+                      path.Set(path.Current @ [ name ])
+                      designName.Set sub.name
+                      select None
+                      message.Set $"in {name}")
+                  heading "signal inlets" ]
+                @ (sub.inputs |> List.map (fun (n, f) -> row (n, describeFormat f)))
+                @ [ heading "signal outlets" ]
+                @ (sub.outputs |> List.map (fun (n, f) -> row (n, describeFormat f)))
+                @ [ heading "control inlets — the design's own ports" ]
+                @ (controlPorts sub |> List.map (fun (n, f) -> row (n, describeFormat f)))
+            | None ->
+
             let factory = palette[b.unit]
 
             // A creation argument: typed, committed on Enter, refused by the
@@ -1308,7 +1446,8 @@ let view (opening: Opening) : Control =
                               | true, n -> if change (setCopies name n) then message.Set $"{name}: %d{n} copies"
                               | _ -> message.Set $"refused: copies is a number, not '{typed}'") ] ]
               :> Types.IView
-              row ("unit", $"{b.unit}, {lawText}") ]
+              row ("unit", $"{b.unit}, {lawText}")
+              row ("placement", placementOf b u) ]
             @ (if factory.parameters.IsEmpty then [] else heading "creation arguments" :: (factory.parameters |> List.map argumentRow))
             @ [ heading "signal inlets" ]
             @ (u.operands.fields |> List.map (fun (n, f) -> row (n, describeFormat f)))
@@ -1368,19 +1507,25 @@ let view (opening: Opening) : Control =
               :> Types.IView
               row ("outlet", $"{controlOutlet}: {describeFormat c.format}") ]
 
+        // The panel is keyed by what it shows: the view diff patches by
+        // position, and a panel of another shape would otherwise inherit the
+        // last one's entries, text and all.
         let propertyPanel =
-            let title, rows =
+            let key, title, rows =
                 match selection.Current with
-                | Some(SelectedBox("input" | "output" as box)) -> box, boundaryRows box @ liveRows box
-                | Some(SelectedBox box) when (controlBoxOf g box).IsSome -> box, controlBoxRows (controlBoxOf g box).Value
-                | Some(SelectedBox box) -> box, boxRows box @ liveRows box
+                | Some(SelectedBox("input" | "output" as box)) -> $"boundary:{box}", box, boundaryRows box @ liveRows box
+                | Some(SelectedBox box) when (controlBoxOf g box).IsSome -> $"control:{box}", box, controlBoxRows (controlBoxOf g box).Value
+                | Some(SelectedBox box) -> $"box:{box}", box, boxRows box @ liveRows box
                 | Some(SelectedWire e) ->
+                    "wire",
                     "wire",
                     [ row ("from", showPin e.from)
                       row ("to", showPin e.``to``)
                       button "Delete" deleteSelection ]
                 | None ->
                     // Nothing selected: the design itself.
+                    let where = String.concat "/" path.Current
+                    $"design:{where}",
                     "design",
                     [ StackPanel.create
                           [ StackPanel.orientation Layout.Orientation.Horizontal
@@ -1415,12 +1560,14 @@ let view (opening: Opening) : Control =
                 [ DockPanel.dock Dock.Right
                   ScrollViewer.width 390.0
                   ScrollViewer.content (
-                      StackPanel.create
-                          [ StackPanel.margin (Thickness 10.0)
-                            StackPanel.children (
-                                [ TextBlock.create [ TextBlock.text title; TextBlock.fontWeight FontWeight.Bold; TextBlock.fontSize 14.0 ] :> Types.IView ]
-                                @ rows
-                            ) ]
+                      View.withKey
+                          key
+                          (StackPanel.create
+                              [ StackPanel.margin (Thickness 10.0)
+                                StackPanel.children (
+                                    [ TextBlock.create [ TextBlock.text title; TextBlock.fontWeight FontWeight.Bold; TextBlock.fontSize 14.0 ] :> Types.IView ]
+                                    @ rows
+                                ) ])
                   ) ]
             :> Types.IView
 

@@ -58,15 +58,6 @@ let private check (g: Graph) (m: SimMapping) =
         if not (m.controls |> List.exists (fun (n, _) -> n = name)) then
             failwith $"{g.name}: the mapping gives no value for control '{name}'"
 
-/// What the design's own control ports start at: each number box's value
-/// and each unwired inlet's setting. The design's own controls are the
-/// mapping's to give.
-let startingValues (g: Graph) : (string * uint64) list =
-    [ for c in g.controlBoxes do
-          if c.kind = NumberBox then
-              yield c.name, controlValueBits c
-      for b, n, f in implicitControls g -> implicitPortName b.name n, settingBits b (n, f) ]
-
 /// Play the mapping's recording through the graph's design in the simulator
 /// and return what the output box heard. `idleLimit` bounds the wait for a
 /// beat that never comes, so a patch that deadlocks fails rather than hangs.
