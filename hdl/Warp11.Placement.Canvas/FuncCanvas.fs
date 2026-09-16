@@ -30,6 +30,7 @@ open Warp11.Factories
 open Warp11.Graph
 open Warp11.Edit
 open Warp11.Elaborate
+open Warp11.Devices
 
 // ---------------------------------------------------------------------------
 // Geometry, in world units.
@@ -459,6 +460,9 @@ let view (opening: Opening) : Control =
         let typing = ctx.useState<((float * float) * string) option> None
         let filePath = ctx.useState (opening.file |> Option.defaultValue "")
         let importText = ctx.useState ""
+        /// A unit being written: its source, compiled on request.
+        let unitSource = ctx.useState Compiler.template
+        let unitPanelOpen = ctx.useState false
         // The property panel's entries.
         let nameText = ctx.useState ""
         let designName = ctx.useState opening.graph.name
@@ -1020,6 +1024,13 @@ let view (opening: Opening) : Control =
                                 TextBlock.foreground Brushes.Gray
                                 TextBlock.textWrapping TextWrapping.Wrap
                                 TextBlock.margin (Thickness(4.0, 0.0)) ]
+                          :> Types.IView ]
+                      @ [ TextBlock.create [ TextBlock.text "write a unit"; TextBlock.fontWeight FontWeight.Bold; TextBlock.margin (Thickness(4.0, 8.0, 4.0, 2.0)) ] :> Types.IView
+                          Button.create
+                              [ Button.content (if unitPanelOpen.Current then "close" else "new unit…")
+                                Button.horizontalAlignment Layout.HorizontalAlignment.Stretch
+                                Button.margin (Thickness(2.0, 1.0))
+                                Button.onClick ((fun _ -> unitPanelOpen.Set(not unitPanelOpen.Current)), SubPatchOptions.Always) ]
                           :> Types.IView ]
                       @ [ TextBlock.create [ TextBlock.text "controls"; TextBlock.fontWeight FontWeight.Bold; TextBlock.margin (Thickness(4.0, 8.0, 4.0, 2.0)) ] :> Types.IView ]
                       @ [ for label, kind, format, value in [ "number", NumberBox, unsignedInt 16, "0"; "toggle", NumberBox, unsignedInt 1, "0"; "constant", ConstantBox, unsignedInt 16, "0" ] ->
@@ -1623,8 +1634,62 @@ let view (opening: Opening) : Control =
         // The panel is keyed by what it shows: the view diff patches by
         // position, and a panel of another shape would otherwise inherit the
         // last one's entries, text and all.
+        // A unit written here: F# in a box, compiled by the compiler service
+        // against the library this canvas runs on, added to the palette for
+        // the session and its source kept with the design.
+        let unitRows =
+            // Compiled on a worker: the compiler service waits on its own
+            // work inside, and on the UI thread that wait meets the
+            // dispatcher and neither moves. The verdict comes back posted.
+            let compile () =
+                match Compiler.definedName unitSource.Current with
+                | None -> message.Set "refused: the source needs a `let` to name the unit by"
+                | Some name ->
+                    let source = unitSource.Current
+                    let rate = g.sampleRate
+                    message.Set $"compiling {name}…"
+
+                    System.Threading.Tasks.Task.Run(fun () -> Compiler.compileUnit name source)
+                    |> fun task ->
+                        task.ContinueWith(fun (t: System.Threading.Tasks.Task<Result<Factory, string>>) ->
+                            Avalonia.Threading.Dispatcher.UIThread.Post(fun () ->
+                                match t.Result with
+                                | Error why -> message.Set $"refused: {why}"
+                                | Ok factory ->
+                                    match addSessionUnit factory with
+                                    | Error why -> message.Set $"refused: {why}"
+                                    | Ok() ->
+                                        match factory.make rate Map.empty with
+                                        | Ok u ->
+                                            if change (defineUnit name source) then
+                                                message.Set $"unit {name}: in [{describePins u.operands.fields}] out [{describePins u.results.fields}] — in the palette"
+                                        | Error why -> message.Set $"refused: {why}"))
+                        |> ignore
+
+            [ TextBlock.create
+                  [ TextBlock.text "F# defining one value, a unit over typed pins (`fu`, `fuSequential`, `moduleUnit`). The library is open. Compile adds it to the palette and keeps the source with the design."
+                    TextBlock.fontSize 11.0
+                    TextBlock.foreground Brushes.Gray
+                    TextBlock.textWrapping TextWrapping.Wrap ]
+              :> Types.IView
+              TextBox.create
+                  [ TextBox.text unitSource.Current
+                    TextBox.acceptsReturn true
+                    TextBox.acceptsTab true
+                    TextBox.fontFamily mono
+                    TextBox.fontSize 12.0
+                    TextBox.height 220.0
+                    TextBox.textWrapping TextWrapping.NoWrap
+                    TextBox.onTextChanged (unitSource.Set, SubPatchOptions.Always) ]
+              :> Types.IView
+              button "Compile" compile ]
+
         let propertyPanel =
             let key, title, rows =
+                match selection.Current, unitPanelOpen.Current with
+                | None, true -> "unit", "a unit", unitRows
+                | _ ->
+
                 match selection.Current with
                 | Some(SelectedBox("input" | "output" as box)) -> $"boundary:{box}", box, boundaryRows box @ liveRows box
                 | Some(SelectedBox box) when (controlBoxOf g box).IsSome -> $"control:{box}", box, controlBoxRows (controlBoxOf g box).Value

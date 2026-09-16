@@ -46,7 +46,12 @@ type Factory =
       /// the export prints, so a design leaves the GUI naming its units the
       /// way a hand-written one does. `make` and `print` parse the arguments
       /// once between them, so they cannot disagree.
-      print: float -> Arguments -> Result<string, string> }
+      print: float -> Arguments -> Result<string, string>
+      /// For a unit written in the GUI: the F# that defines it, printed above
+      /// a design that uses it when the design is exported, and carried by
+      /// the design's file so the design can be opened again where there is
+      /// a compiler. `None` for the units the library ships.
+      definition: string option }
 
 /// What a fresh box of the factory holds.
 let defaults (f: Factory) : Arguments =
@@ -65,7 +70,8 @@ let plain (symbol: string) (unit: Fu<'a, 'r>) : Factory =
     { name = unit.name
       parameters = []
       make = fun _ _ -> Ok erased
-      print = fun _ _ -> Ok symbol }
+      print = fun _ _ -> Ok symbol
+      definition = None }
 
 /// A factory over a typed constructor: `parse` reads the arguments once,
 /// `build` makes the unit from what it read, `show` prints the same call.
@@ -73,7 +79,8 @@ let private factory (name: string) (parameters: Parameter list) (parse: float ->
     { name = name
       parameters = parameters
       make = fun rate args -> parse rate args |> Result.map (build rate >> erase)
-      print = fun rate args -> parse rate args |> Result.map show }
+      print = fun rate args -> parse rate args |> Result.map show
+      definition = None }
 
 /// A float as F# source, always with a point so it reads as a float.
 let showFloat (x: float) : string =
@@ -332,9 +339,18 @@ let blur: Factory =
         (fun _ (columns, rows) -> blurUnit columns rows)
         (fun (columns, rows) -> $"blurUnit %d{columns} %d{rows}")
 
-/// Every unit the GUI may offer. `erase` is the only way a unit gets in, so
+/// A unit written in the GUI, compiled by the head that has a compiler: the
+/// erased unit, the name it goes by, and the source that defines it.
+let written (symbol: string) (unit: ErasedFu) (definition: string) : Factory =
+    { name = unit.name
+      parameters = []
+      make = fun _ _ -> Ok unit
+      print = fun _ _ -> Ok symbol
+      definition = Some definition }
+
+/// The units the library ships. `erase` is the only way a unit gets in, so
 /// a palette cannot disagree with the unit the typed API elaborates.
-let palette: Map<string, Factory> =
+let builtIn: Map<string, Factory> =
     [ plain "multiply16" multiply16
       plain "add32" add32
       plain "shiftAddMultiply16" shiftAddMultiply16
@@ -352,3 +368,23 @@ let palette: Map<string, Factory> =
       blur ]
     |> List.map (fun f -> f.name, f)
     |> Map.ofList
+
+/// Every unit the GUI may offer: the library's, and the ones written in
+/// this session. Mutable so a head with a compiler can add to it; the units
+/// it starts with are the built-in ones.
+let mutable palette: Map<string, Factory> = builtIn
+
+/// A unit written in this session, offered from now on. Refused when the
+/// name is a library unit's.
+let addSessionUnit (f: Factory) : Result<unit, string> =
+    if builtIn.ContainsKey f.name then
+        Error $"'{f.name}' is a unit the library ships"
+    else
+        palette <- palette |> Map.add f.name f
+        Ok()
+
+/// How this head compiles a unit's source into a factory, when it can: the
+/// desktop canvas sets this over the compiler service; a head without a
+/// compiler leaves it, and a design that carries a written unit refuses to
+/// open there, naming the unit.
+let mutable compileUnit: (string -> string -> Result<Factory, string>) option = None

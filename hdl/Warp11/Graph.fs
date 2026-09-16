@@ -85,7 +85,11 @@ type Graph =
       /// abstractions, embedded so a saved file is complete. A box whose
       /// `unit` names one is that design as a box: its inputs and outputs the
       /// signal pins, every control port of its own a control inlet.
-      designs: Map<string, Graph> }
+      designs: Map<string, Graph>
+      /// The units written in the GUI that this design uses, by name: the F#
+      /// that defines each, so the file is complete and a head with a
+      /// compiler opens it again.
+      units: Map<string, string> }
 
 let pin (box: string) (pin: string) : PinRef = { box = box; pin = pin }
 
@@ -105,7 +109,8 @@ let emptyGraph (name: string) (sampleRate: float) : Graph =
       controlBoxes = []
       edges = []
       positions = Map.empty
-      designs = Map.empty }
+      designs = Map.empty
+      units = Map.empty }
 
 /// Which side of a box a pin is on. A box may call an input and an output by
 /// the same name (`gain` has `left` on both sides), so wherever a pin is
@@ -135,7 +140,8 @@ let macGraph (streams: int) (multipliers: int) (adders: int) : Graph =
           // The rename: the box's `sum` is the design's `out`.
           { from = pin "sum" "sum"; ``to`` = pin "output" "out" } ]
       positions = Map.empty
-      designs = Map.empty }
+      designs = Map.empty
+      units = Map.empty }
 
 /// The first patch: a stereo stream through `gain`, volume and mute from the
 /// design's controls.
@@ -158,7 +164,8 @@ let gainGraph: Graph =
           { from = pin "gain" "left"; ``to`` = pin "output" "left" }
           { from = pin "gain" "right"; ``to`` = pin "output" "right" } ]
       positions = Map.empty
-      designs = Map.empty }
+      designs = Map.empty
+      units = Map.empty }
 
 let private boxOf (g: Graph) (name: string) = g.boxes |> List.tryFind (fun b -> b.name = name)
 

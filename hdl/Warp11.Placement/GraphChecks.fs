@@ -593,6 +593,42 @@ let private typedThreeBandEq =
 /// The three-band EQ placed twice in series, as the examples build it.
 let private twiceThreeBand () : Graph = Examples.twice 48_000.0
 
+/// A unit as a person would write it in the GUI: the source, and the value
+/// the source defines, made here without a compiler so the library's own
+/// checks can hold a written unit.
+let private swapSource =
+    String.concat
+        "\n"
+        [ "let swap ="
+          "    fu \"swap\" (pins2 (\"left\", signedInt 24) (\"right\", signedInt 24)) (pins2 (\"left\", signedInt 24) (\"right\", signedInt 24))"
+          "        (fun (l, r) -> r, l)" ]
+
+let private swap =
+    fu "swap" (pins2 ("left", signedInt 24) ("right", signedInt 24)) (pins2 ("left", signedInt 24) ("right", signedInt 24)) (fun (l, r) -> r, l)
+
+/// The gain design with the channels swapped by a written unit before the
+/// gain: what a session with `swap` compiled into its palette holds.
+let private writtenSwap () : Graph =
+    addSessionUnit (written "swap" (erase swap) swapSource) |> ignore
+
+    let step (change: Graph -> Result<Graph, string>) (h: History) =
+        match apply change h with
+        | h, None -> h
+        | _, Some why -> failwith why
+
+    let wire (a: PinRef) (b: PinRef) = addWire (a, Out) (b, In)
+
+    (history { gainGraph with name = "SwappedGain" }
+     |> step (defineUnit "swap" swapSource)
+     |> step (removeWire { from = pin "input" "left"; ``to`` = pin "gain" "left" } >> Ok)
+     |> step (removeWire { from = pin "input" "right"; ``to`` = pin "gain" "right" } >> Ok)
+     |> step (addBox "swap" (0.0, 0.0) >> Result.map fst)
+     |> step (wire (pin "input" "left") (pin "swap" "left"))
+     |> step (wire (pin "input" "right") (pin "swap" "right"))
+     |> step (wire (pin "swap" "left") (pin "gain" "left"))
+     |> step (wire (pin "swap" "right") (pin "gain" "right")))
+        .present
+
 // ---------------------------------------------------------------------------
 // UD11 — The export is the design. Five designs printed as typed F#, the
 // source compiled by `dotnet fsi` against these very assemblies, and each
@@ -650,7 +686,7 @@ let exportIsTheDesign () : bool =
                     else
                         e) }
 
-    let designs = [ gainGraph; macGraph 3 3 3; threeBand; shared; swapped; twiceThreeBand () ]
+    let designs = [ gainGraph; macGraph 3 3 3; threeBand; shared; swapped; twiceThreeBand (); writtenSwap () ]
 
     let sources =
         designs
@@ -934,3 +970,58 @@ let tableOnTheBoundary () : bool =
     && refuses "2048" [ "2048"; "16w/4f/signed" ]
     && refuses "lots" [ "lots"; "not a number" ]
     && missing
+
+// ---------------------------------------------------------------------------
+// UD16 — A unit written in the GUI travels with the design. Its source is
+// in the file; a head with a compiler opens the file and has the unit; a
+// head without one refuses, naming the unit. The compiler here is a stand-in
+// that knows one unit — the compiler service is the desktop canvas's, and
+// its verb `unit file.fs` is the check of that — and the export prints the
+// definition above the design (UD11 compiles it).
+
+// CHECK
+let writtenUnitTravels () : bool =
+    let g = writtenSwap ()
+    let text = DesignFile.write g
+
+    // Without a compiler and without the unit in the palette: refused.
+    let before = palette
+    palette <- builtIn
+    compileUnit <- None
+
+    let refused =
+        match DesignFile.parse text with
+        | Error why -> why.Contains "swap" && why.Contains "compiler"
+        | Ok _ -> false
+
+    // With a stand-in compiler: the unit comes back and the design reopens.
+    compileUnit <-
+        Some(fun name source ->
+            if name = "swap" && source = swapSource then
+                Ok(written "swap" (erase swap) swapSource)
+            else
+                Error $"the stand-in compiler knows only swap, not {name}")
+
+    let reopened =
+        match DesignFile.parse text with
+        | Ok g2 -> g2 = g && palette.ContainsKey "swap"
+        | Error _ -> false
+
+    compileUnit <- None
+    palette <- before
+
+    // The exported source carries the definition, once, above the design.
+    let exported =
+        match Warp11.Export.export g with
+        | Ok source -> source
+        | Error why -> failwith why
+
+    let heard = runInSim 10_000 g { source = toneWav (int defaultSampleRate) 100 440.0 0.25; controls = [ "volume", gainUnity; "mute", 0UL ]; outputPath = None }
+    let tone = toneWav (int defaultSampleRate) 100 440.0 0.25
+    let swappedTone = [| for i in 0 .. tone.samples.Length / 2 - 1 do yield tone.samples[2 * i + 1]; yield tone.samples[2 * i] |]
+
+    refused
+    && reopened
+    && (exported.Split("let swap =").Length = 2)
+    && exported.IndexOf "let swap =" < exported.IndexOf "let swappedGain ="
+    && heard.samples = swappedTone

@@ -37,5 +37,10 @@ panel shows, comparing as bits — `in1_valid && in1_left > 1000000` stops
 Run at the next such cycle). The design panel's **streams** count puts a
 beat on each stream; a sequential box then needs a copy per stream.
 
+**Write a unit** in the palette column opens a box for F# defining one value,
+a unit over typed pins; Compile adds it to the palette for the session and
+keeps its source with the design, so the file opens again on a desktop
+canvas (and refuses in a browser, which has no compiler).
+
 **Export F#** writes the typed source beside the file; `dotnet run --project
 Warp11.Placement -- export <file>` prints it, and `-- emit <file>` the Verilog.

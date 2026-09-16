@@ -122,6 +122,15 @@ let importDesign (sub: Graph) (g: Graph) : Result<Graph, string> =
         |> Result.mapError (fun why -> $"'{sub.name}' at %g{g.sampleRate} Hz: {why}")
         |> Result.map (fun sub -> { g with designs = g.designs |> Map.add sub.name sub })
 
+/// A unit written in the GUI, its source kept with the design so the file
+/// is complete. The factory itself is the session's, added by the head that
+/// compiled it; this records what it was compiled from.
+let defineUnit (name: string) (source: string) (g: Graph) : Result<Graph, string> =
+    if not (palette.ContainsKey name) then
+        Error $"'{name}' is not a unit this session knows — compile it first"
+    else
+        Ok { g with units = g.units |> Map.add name source }
+
 /// A design this one uses, taken out again — refused while a box still is it.
 let removeDesign (name: string) (g: Graph) : Result<Graph, string> =
     if not (g.designs.ContainsKey name) then

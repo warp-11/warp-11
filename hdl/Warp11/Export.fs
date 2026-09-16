@@ -226,14 +226,28 @@ let rec private designsInOrder (g: Graph) : Graph list =
     let inner = [ for KeyValue(_, sub) in g.designs do yield! designsInOrder sub ]
     (inner |> List.distinctBy (fun d -> d.name)) @ [ g ]
 
+/// The units written in the GUI that a design and the designs inside it
+/// use: their definitions, each once, printed above everything.
+let rec private definitionsOf (g: Graph) : string list =
+    let own =
+        [ for b in g.boxes do
+              match palette.TryFind b.unit with
+              | Some { definition = Some source } -> yield source
+              | _ -> () ]
+
+    (own @ [ for KeyValue(_, sub) in g.designs do yield! definitionsOf sub ]) |> List.distinct
+
 /// The source, or why it cannot be written: one module, the design's rate,
-/// the designs it uses as values above it, and the design itself.
+/// the units written for it, the designs it uses as values above it, and
+/// the design itself.
 let export (g: Graph) : Result<string, string> =
     designsInOrder g
     |> List.distinctBy (fun d -> d.name)
     |> List.map printDesign
     |> List.fold (fun acc r -> match acc, r with | Ok xs, Ok x -> Ok(xs @ [ x ]) | Error e, _ | _, Error e -> Error e) (Ok [])
     |> Result.map (fun blocks ->
+        let blocks = definitionsOf g @ blocks
+
         String.concat
             "\n"
             ([ $"/// {g.name}, exported from the design canvas: the typed form of the drawn"

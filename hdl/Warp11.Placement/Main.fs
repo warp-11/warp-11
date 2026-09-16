@@ -92,4 +92,5 @@ let main argv =
     run "UD13 streams are stages" streamsAreStages
     run "UD14 an image on the boundary" imageOnTheBoundary
     run "UD15 a table on the boundary" tableOnTheBoundary
+    run "UD16 a written unit travels with the design" writtenUnitTravels
     0

@@ -96,6 +96,12 @@ let rec private node (g: Graph) : JsonObject =
         designs[name] <- node sub
 
     root["designs"] <- designs
+    let units = JsonObject()
+
+    for KeyValue(name, source) in g.units do
+        units[name] <- JsonValue.Create source
+
+    root["units"] <- units
     root
 
 /// The graph as JSON text.
@@ -285,6 +291,26 @@ let rec private readGraph (root: JsonNode) : Result<Graph, string> =
         get "name" (asString "'name'")
         |> Result.bind (fun _ -> get "sampleRate" (asFloat "'sampleRate'"))
         |> Result.bind (fun rate ->
+            // The units written in the GUI before the boxes, since a box may
+            // be one: compiled here when this head can, refused when it cannot.
+            let units =
+                match field root "units" with
+                | Ok(:? JsonObject as o) ->
+                    o
+                    |> List.ofSeq
+                    |> each (fun (KeyValue(k, v)) ->
+                        asString $"unit '{k}'" v
+                        |> Result.bind (fun source ->
+                            if palette.ContainsKey k then
+                                Ok(k, source)
+                            else
+                                match compileUnit with
+                                | None -> Error $"unit '{k}' was written in the GUI, and this head has no compiler to open it with"
+                                | Some compile -> compile k source |> Result.bind addSessionUnit |> Result.map (fun () -> k, source)))
+                    |> Result.map Map.ofList
+                | Ok _ -> Error "'units': expected an object"
+                | Error _ -> Ok Map.empty
+
             // The designs before the boxes, since a box may be one of them.
             let designs =
                 match field root "designs" with
@@ -299,14 +325,14 @@ let rec private readGraph (root: JsonNode) : Result<Graph, string> =
                 formats "inputs",
                 formats "controls",
                 formats "outputs",
-                designs |> Result.bind (fun designs -> get "boxes" (asArray "'boxes'") |> Result.bind (each (readBox rate designs)) |> Result.map (fun boxes -> boxes, designs)),
+                units |> Result.bind (fun units -> designs |> Result.bind (fun designs -> get "boxes" (asArray "'boxes'") |> Result.bind (each (readBox rate designs)) |> Result.map (fun boxes -> boxes, designs, units))),
                 (match field root "controlBoxes" with
                  | Ok node -> asArray "'controlBoxes'" node |> Result.bind (each readControlBox)
                  | Error _ -> Ok []),
                 get "wires" (asArray "'wires'") |> Result.bind (each readWire),
                 get "positions" readPositions
             with
-            | Ok name, Ok streams, Ok inputs, Ok controls, Ok outputs, Ok(boxes, designs), Ok controlBoxes, Ok wires, Ok positions ->
+            | Ok name, Ok streams, Ok inputs, Ok controls, Ok outputs, Ok(boxes, designs, units), Ok controlBoxes, Ok wires, Ok positions ->
                 checkWires
                     { name = name
                       streams = streams
@@ -318,7 +344,8 @@ let rec private readGraph (root: JsonNode) : Result<Graph, string> =
                       controlBoxes = controlBoxes
                       edges = wires
                       positions = positions
-                      designs = designs }
+                      designs = designs
+                      units = units }
             | Error e, _, _, _, _, _, _, _, _
             | _, Error e, _, _, _, _, _, _, _
             | _, _, Error e, _, _, _, _, _, _

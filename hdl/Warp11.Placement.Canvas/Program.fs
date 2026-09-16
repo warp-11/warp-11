@@ -8,6 +8,7 @@ open Avalonia.Themes.Fluent
 open Warp11
 open Warp11.Placement
 open Warp11.Graph
+open Warp11.Devices
 
 type CanvasWindow(o: FuncCanvas.Opening) as this =
     inherit HostWindow()
@@ -70,5 +71,33 @@ let private opening (argv: string[]) : FuncCanvas.Opening =
 
 [<EntryPoint>]
 let main argv =
+    // This head has a compiler: a design carrying a written unit opens here.
+    Warp11.Factories.compileUnit <- Some Compiler.compileUnit
+
+    match argv with
+    // `unit file.fs`: compile a unit's source and say what it is — the
+    // smoke test of the compiler service, from the shell.
+    | [| "unit"; path |] ->
+        let source = System.IO.File.ReadAllText path
+
+        match Compiler.definedName source with
+        | None ->
+            eprintfn $"{path}: no `let` to name the unit by"
+            1
+        | Some name ->
+            match Compiler.compileUnit name source with
+            | Ok f ->
+                match f.make defaultSampleRate Map.empty with
+                | Ok u ->
+                    printfn $"{u.name}: in [{describePins u.operands.fields}] out [{describePins u.results.fields}] controls [{describePins u.controls}]"
+                    0
+                | Error why ->
+                    eprintfn $"{why}"
+                    1
+            | Error why ->
+                eprintfn $"{path}: {why}"
+                1
+    | _ ->
+
     let o = opening argv
     AppBuilder.Configure<App>(fun () -> App(o)).UsePlatformDetect().StartWithClassicDesktopLifetime argv

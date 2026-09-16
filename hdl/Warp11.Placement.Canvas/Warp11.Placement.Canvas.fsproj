@@ -8,22 +8,25 @@
     </PropertyGroup>
 
     <ItemGroup>
-        <Compile Include="AudioSink.fs"/>
-        <Compile Include="Scope.fs"/>
-        <Compile Include="FuncCanvas.fs"/>
-        <Compile Include="Session.fs"/>
-        <Compile Include="Program.fs"/>
+        <Compile Include="AudioSink.fs" />
+        <Compile Include="Scope.fs" />
+        <Compile Include="Compiler.fs" />
+        <Compile Include="FuncCanvas.fs" />
+        <Compile Include="Session.fs" />
+        <Compile Include="Program.fs" />
     </ItemGroup>
 
     <ItemGroup>
-        <PackageReference Include="Avalonia" Version="12.1.0"/>
-        <PackageReference Include="Avalonia.Desktop" Version="12.1.0"/>
-        <PackageReference Include="Avalonia.Themes.Fluent" Version="12.1.0"/>
-        <PackageReference Include="Avalonia.FuncUI" Version="2.0.0"/>
+        <PackageReference Include="Avalonia" Version="12.1.0" />
+        <PackageReference Include="Avalonia.Desktop" Version="12.1.0" />
+        <PackageReference Include="Avalonia.Themes.Fluent" Version="12.1.0" />
+        <PackageReference Include="Avalonia.FuncUI" Version="2.0.0" />
+        <PackageReference Include="FSharp.Compiler.Service" Version="43.12.401" />
+        <PackageReference Include="FSharp.Core" Version="10.1.401" />
     </ItemGroup>
 
     <ItemGroup>
-        <ProjectReference Include="../Warp11.Placement/Warp11.Placement.fsproj"/>
+        <ProjectReference Include="../Warp11.Placement/Warp11.Placement.fsproj" />
     </ItemGroup>
 
 </Project>
