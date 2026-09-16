@@ -7,11 +7,12 @@
 /// wrong.
 ///
 /// ```json
-/// { "name": "GainPatch", "streams": 1,
+/// { "name": "GainPatch", "streams": 1, "sampleRate": 48000,
 ///   "inputs":   [ { "name": "left", "width": 24, "fraction": 0, "signed": true }, … ],
 ///   "controls": [ { "name": "volume", "width": 16, "fraction": 0, "signed": false }, … ],
 ///   "outputs":  [ … ],
-///   "boxes":    [ { "name": "gain", "unit": "gain", "copies": 1 } ],
+///   "boxes":    [ { "name": "eq", "unit": "eq", "copies": 1,
+///                   "arguments": { "shape": "lowshelf", "fc": "200", "q": "0.707", "gain": "6" } } ],
 ///   "wires":    [ { "from": "input.left", "to": "gain.left" }, … ],
 ///   "positions": { "input": [60, 120], "gain": [320, 120], "output": [580, 120] } }
 /// ```
@@ -20,6 +21,7 @@ module Warp11.Placement.DesignFile
 open System.Text.Json
 open System.Text.Json.Nodes
 open Warp11.Placement.Fu
+open Warp11.Placement.Factories
 open Warp11.Placement.Graph
 
 let private formatNode (name: string, f: NumberFormat) : JsonNode =
@@ -37,6 +39,7 @@ let write (g: Graph) : string =
     let root = JsonObject()
     root["name"] <- JsonValue.Create g.name
     root["streams"] <- JsonValue.Create g.streams
+    root["sampleRate"] <- JsonValue.Create g.sampleRate
     root["inputs"] <- JsonArray(g.inputs |> List.map formatNode |> Array.ofList)
     root["controls"] <- JsonArray(g.controls |> List.map formatNode |> Array.ofList)
     root["outputs"] <- JsonArray(g.outputs |> List.map formatNode |> Array.ofList)
@@ -48,6 +51,12 @@ let write (g: Graph) : string =
                    o["name"] <- JsonValue.Create b.name
                    o["unit"] <- JsonValue.Create b.unit
                    o["copies"] <- JsonValue.Create b.copies
+                   let arguments = JsonObject()
+
+                   for KeyValue(k, v) in b.arguments do
+                       arguments[k] <- JsonValue.Create v
+
+                   o["arguments"] <- arguments
                    o :> JsonNode |]
         )
 
@@ -142,15 +151,39 @@ let private readPin (where: string) (text: string) : Result<PinRef, string> =
     | [| box; pin |] when box <> "" && pin <> "" -> Ok { box = box; pin = pin }
     | _ -> Error $"{where}: '{text}' is not box.pin"
 
-let private readBox (n: JsonNode) : Result<Box, string> =
+let private readArguments (box: string) (factory: Factory) (n: JsonNode) : Result<Arguments, string> =
+    match n with
+    | :? JsonObject as o ->
+        o
+        |> List.ofSeq
+        |> each (fun (KeyValue(k, v)) ->
+            if not (factory.parameters |> List.exists (fun p -> p.name = k)) then
+                Error $"box '{box}': {factory.name} has no parameter called '{k}'"
+            else
+                asString $"box '{box}': argument '{k}'" v |> Result.map (fun text -> k, text))
+        |> Result.map (Map.ofList >> complete factory)
+    | _ -> Error $"box '{box}': 'arguments' should be an object"
+
+let private readBox (rate: float) (n: JsonNode) : Result<Box, string> =
     let get name f = field n name |> Result.bind (f $"a box's '{name}'")
 
     match get "name" asString, get "unit" asString, get "copies" asInt with
     | Ok name, Ok unit, Ok copies ->
-        if palette.ContainsKey unit then
-            Ok { name = name; unit = unit; copies = copies }
-        else
-            Error $"box '{name}': no unit called '{unit}' in the palette"
+        match palette.TryFind unit with
+        | None -> Error $"box '{name}': no unit called '{unit}' in the palette"
+        | Some factory ->
+            // A file written before a unit had arguments has none: the defaults.
+            let arguments =
+                match field n "arguments" with
+                | Ok node -> readArguments name factory node
+                | Error _ -> Ok(defaults factory)
+
+            arguments
+            |> Result.bind (fun arguments ->
+                // The factory's verdict, so a file never opens a box it cannot make.
+                factory.make rate arguments
+                |> Result.mapError (fun why -> $"box '{name}': {why}")
+                |> Result.map (fun _ -> { name = name; unit = unit; copies = copies; arguments = arguments }))
     | Error e, _, _
     | _, Error e, _
     | _, _, Error e -> Error e
@@ -207,34 +240,40 @@ let parse (text: string) : Result<Graph, string> =
         let get name f = field root name |> Result.bind f
         let formats name = get name (asArray $"'{name}'") |> Result.bind (each (readFormat name))
 
-        match
-            get "name" (asString "'name'"),
-            get "streams" (asInt "'streams'"),
-            formats "inputs",
-            formats "controls",
-            formats "outputs",
-            get "boxes" (asArray "'boxes'") |> Result.bind (each readBox),
-            get "wires" (asArray "'wires'") |> Result.bind (each readWire),
-            get "positions" readPositions
-        with
-        | Ok name, Ok streams, Ok inputs, Ok controls, Ok outputs, Ok boxes, Ok wires, Ok positions ->
-            checkWires
-                { name = name
-                  streams = streams
-                  inputs = inputs
-                  controls = controls
-                  outputs = outputs
-                  boxes = boxes
-                  edges = wires
-                  positions = positions }
-        | Error e, _, _, _, _, _, _, _
-        | _, Error e, _, _, _, _, _, _
-        | _, _, Error e, _, _, _, _, _
-        | _, _, _, Error e, _, _, _, _
-        | _, _, _, _, Error e, _, _, _
-        | _, _, _, _, _, Error e, _, _
-        | _, _, _, _, _, _, Error e, _
-        | _, _, _, _, _, _, _, Error e -> Error e)
+        // The name first, so a file that is not a design is refused by the
+        // field a person looks for first.
+        get "name" (asString "'name'")
+        |> Result.bind (fun _ -> get "sampleRate" (asFloat "'sampleRate'"))
+        |> Result.bind (fun rate ->
+            match
+                get "name" (asString "'name'"),
+                get "streams" (asInt "'streams'"),
+                formats "inputs",
+                formats "controls",
+                formats "outputs",
+                get "boxes" (asArray "'boxes'") |> Result.bind (each (readBox rate)),
+                get "wires" (asArray "'wires'") |> Result.bind (each readWire),
+                get "positions" readPositions
+            with
+            | Ok name, Ok streams, Ok inputs, Ok controls, Ok outputs, Ok boxes, Ok wires, Ok positions ->
+                checkWires
+                    { name = name
+                      streams = streams
+                      sampleRate = rate
+                      inputs = inputs
+                      controls = controls
+                      outputs = outputs
+                      boxes = boxes
+                      edges = wires
+                      positions = positions }
+            | Error e, _, _, _, _, _, _, _
+            | _, Error e, _, _, _, _, _, _
+            | _, _, Error e, _, _, _, _, _
+            | _, _, _, Error e, _, _, _, _
+            | _, _, _, _, Error e, _, _, _
+            | _, _, _, _, _, Error e, _, _
+            | _, _, _, _, _, _, Error e, _
+            | _, _, _, _, _, _, _, Error e -> Error e))
 
 let save (path: string) (g: Graph) : unit = System.IO.File.WriteAllText(path, write g)
 

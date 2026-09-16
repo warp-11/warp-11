@@ -168,7 +168,7 @@ let elaborateWith (probes: bool) (g: Graph) : TypedModule<GraphPorts> =
             let streams, slots =
                 (((io.ins |> List.map streamSource), firstBeat), order)
                 ||> List.fold (fun (streams, slots) b ->
-                    let unit = palette[b.unit] |> copies b.copies
+                    let unit = unitOf g b |> copies b.copies
                     let indexOf (source: PinRef) =
                         match slots |> List.tryFindIndex (fun s -> s.source = source) with
                         | Some i -> i

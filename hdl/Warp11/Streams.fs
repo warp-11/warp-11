@@ -677,8 +677,13 @@ let withContext
     let empty = bnot held.valid
     (empty &&& stageOut.valid) ==> direct
 
+    // A context field is bits while it waits: the FIFO hands it back
+    // width-only whatever reading it arrived with, so the bypass reads the
+    // arriving field the same way rather than refusing a signed one.
+    let widthOnly (e: Expr) = if isSigned e then asUInt e else e
+
     let contextPayload =
-        List.map2 (fun incoming kept -> mux empty incoming kept) (context.pack (snd s.payload)) (context.pack held.payload)
+        List.map2 (fun incoming kept -> mux empty (widthOnly incoming) (widthOnly kept)) (context.pack (snd s.payload)) (context.pack held.payload)
         |> context.unpack
 
     // The pairing: the stage's result goes when downstream can take it, and

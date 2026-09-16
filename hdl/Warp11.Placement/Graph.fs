@@ -16,9 +16,15 @@ open Warp11
 open Warp11.Placement.Fu
 open Warp11.Placement.Units
 open Warp11.Placement.Placement
+open Warp11.Placement.Factories
 
-/// One box: a unit by name, and how many copies.
-type Box = { name: string; unit: string; copies: int }
+/// One box: a factory by name, the creation arguments typed into it, and
+/// how many copies.
+type Box =
+    { name: string
+      unit: string
+      copies: int
+      arguments: Arguments }
 
 /// A pin on a box — or on the design's own boundary, where the box is
 /// `"input"` (its signal inputs and controls, as sources) or `"output"`.
@@ -28,14 +34,24 @@ type PinRef = { box: string; pin: string }
 /// design's output pins likewise; every control pin exactly one.
 type Edge = { from: PinRef; ``to``: PinRef }
 
-/// The design: its own pins, the boxes, the wires, and where a canvas last
-/// put each box. Positions are part of the design so a saved design opens as
-/// it was left; the elaborator never reads them, so a graph with none — every
-/// graph written in F# — elaborates to the same bytes as the same graph laid
-/// out by hand.
+/// The design: its own pins, the boxes, the wires, the sample rate it is
+/// made for, and where a canvas last put each box.
+///
+/// The rate is the design's because a filter's coefficients fix a frequency
+/// in cycles per *sample*: a box designed for 1 kHz holds that only at the
+/// rate it was designed for, so the rate is recorded beside the frequencies
+/// that depend on it, as `FirBands` records it beside its cutoffs. A mapping
+/// checks its own rate against this one and refuses a mismatch, as it
+/// refuses a pin format.
+///
+/// Positions are part of the design so a saved design opens as it was left;
+/// the elaborator never reads them, so a graph with none — every graph
+/// written in F# — elaborates to the same bytes as the same graph laid out
+/// by hand.
 type Graph =
     { name: string
       streams: int
+      sampleRate: float
       inputs: (string * NumberFormat) list
       controls: (string * NumberFormat) list
       outputs: (string * NumberFormat) list
@@ -45,10 +61,15 @@ type Graph =
 
 let pin (box: string) (pin: string) : PinRef = { box = box; pin = pin }
 
+/// The rate a design is made for until a mapping says otherwise: the studio
+/// rate a WAV from the desk is at. A board design takes its board's.
+let defaultSampleRate = 48_000.0
+
 /// A design with nothing in it yet: no boundary pins, no boxes.
-let emptyGraph (name: string) : Graph =
+let emptyGraph (name: string) (sampleRate: float) : Graph =
     { name = name
       streams = 1
+      sampleRate = sampleRate
       inputs = []
       controls = []
       outputs = []
@@ -63,22 +84,17 @@ type Side =
     | In
     | Out
 
-/// Every unit the GUI may offer, erased once. `erase` is the only way in.
-let palette: Map<string, ErasedFu> =
-    [ erase multiply16; erase add32; erase shiftAddMultiply16; erase gainModule ]
-    |> List.map (fun u -> u.name, u)
-    |> Map.ofList
-
 /// `mac` as a graph. This is the whole design, as data.
 let macGraph (streams: int) (multipliers: int) (adders: int) : Graph =
     { name = $"Mac%d{streams}s%d{multipliers}x%d{adders}"
       streams = streams
+      sampleRate = defaultSampleRate
       inputs = [ "a", uint 16; "b", uint 16; "c", uint 32 ]
       controls = []
       outputs = [ "out", uint 33 ]
       boxes =
-        [ { name = "product"; unit = "mul16"; copies = multipliers }
-          { name = "sum"; unit = "add32"; copies = adders } ]
+        [ { name = "product"; unit = "mul16"; copies = multipliers; arguments = Map.empty }
+          { name = "sum"; unit = "add32"; copies = adders; arguments = Map.empty } ]
       edges =
         [ { from = pin "input" "a"; ``to`` = pin "product" "a" }
           { from = pin "input" "b"; ``to`` = pin "product" "b" }
@@ -96,10 +112,11 @@ let gainGraph: Graph =
 
     { name = "GainPatch"
       streams = 1
+      sampleRate = defaultSampleRate
       inputs = stereo
       controls = [ "volume", uint 16; "mute", uint 1 ]
       outputs = stereo
-      boxes = [ { name = "gain"; unit = "gain"; copies = 1 } ]
+      boxes = [ { name = "gain"; unit = "gain"; copies = 1; arguments = Map.empty } ]
       edges =
         [ { from = pin "input" "left"; ``to`` = pin "gain" "left" }
           { from = pin "input" "right"; ``to`` = pin "gain" "right" }
@@ -111,6 +128,16 @@ let gainGraph: Graph =
 
 let private boxOf (g: Graph) (name: string) = g.boxes |> List.tryFind (fun b -> b.name = name)
 
+/// The unit a box is, made by its factory for the design's rate: arguments
+/// the box does not state are the factory's defaults. A box whose arguments
+/// the factory refuses cannot be elaborated, and says which one.
+let unitOf (g: Graph) (b: Box) : ErasedFu =
+    let factory = palette[b.unit]
+
+    match factory.make g.sampleRate (complete factory b.arguments) with
+    | Ok unit -> unit
+    | Error why -> failwith $"{b.name}: {why}"
+
 /// A box's signal pins, inputs and outputs, from the palette — or the design's
 /// own boundary boxes, whose pins are the design's.
 let pinsOf (g: Graph) (box: string) : (string * NumberFormat) list * (string * NumberFormat) list =
@@ -119,7 +146,9 @@ let pinsOf (g: Graph) (box: string) : (string * NumberFormat) list * (string * N
     | "output" -> g.outputs, []
     | name ->
         match boxOf g name with
-        | Some b -> palette[b.unit].operands.pins, palette[b.unit].results.pins
+        | Some b ->
+            let unit = unitOf g b
+            unit.operands.pins, unit.results.pins
         | None -> [], []
 
 /// A box's control pins: sinks on a box, sources on the `input` box.
@@ -129,7 +158,7 @@ let controlsOf (g: Graph) (box: string) : (string * NumberFormat) list =
     | "output" -> []
     | name ->
         match boxOf g name with
-        | Some b -> palette[b.unit].controls
+        | Some b -> (unitOf g b).controls
         | None -> []
 
 /// What a pin is: a field of the beat in or out of a box, or a control held

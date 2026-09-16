@@ -5,6 +5,7 @@
 module Warp11.Placement.Edit
 
 open Warp11.Placement.Fu
+open Warp11.Placement.Factories
 open Warp11.Placement.Graph
 
 type Position = float * float
@@ -32,20 +33,59 @@ let freshBoxName (g: Graph) (unit: string) : string =
     else
         Seq.initInfinite (fun i -> $"{unit}%d{i + 2}") |> Seq.find (fun n -> not (hasBox g n))
 
-/// A box of a palette unit, one copy, placed at `at`. The box's name comes
-/// back with the graph so the caller can select it.
+/// A box of a palette unit with the factory's default arguments, one copy,
+/// placed at `at`. The box's name comes back with the graph so the caller
+/// can select it.
 let addBox (unit: string) (at: Position) (g: Graph) : Result<Graph * string, string> =
-    if not (palette.ContainsKey unit) then
-        Error $"no unit called '{unit}' in the palette"
-    else
+    match palette.TryFind unit with
+    | None -> Error $"no unit called '{unit}' in the palette"
+    | Some factory ->
         let name = freshBoxName g unit
 
         Ok(
             { g with
-                boxes = g.boxes @ [ { name = name; unit = unit; copies = 1 } ]
+                boxes = g.boxes @ [ { name = name; unit = unit; copies = 1; arguments = defaults factory } ]
                 positions = g.positions |> Map.add name at },
             name
         )
+
+/// The factory's verdict on a box as it would be: made for the rate with
+/// these arguments, or refused naming the box and the parameter.
+let private checkBox (rate: float) (b: Box) : Result<unit, string> =
+    palette[b.unit].make rate (complete palette[b.unit] b.arguments)
+    |> Result.map ignore
+    |> Result.mapError (fun why -> $"{b.name}: {why}")
+
+/// One creation argument of a box, as typed. The factory checks it before
+/// the box holds it; a change is a new design.
+let setArgument (name: string) (parameter: string) (value: string) (g: Graph) : Result<Graph, string> =
+    match g.boxes |> List.tryFind (fun b -> b.name = name) with
+    | None -> Error $"no box called '{name}'"
+    | Some b ->
+        let factory = palette[b.unit]
+
+        if not (factory.parameters |> List.exists (fun p -> p.name = parameter)) then
+            let names =
+                match factory.parameters |> List.map (fun p -> p.name) with
+                | [] -> "none"
+                | ps -> String.concat ", " ps
+
+            Error $"{name}: no parameter called '{parameter}' — {b.unit} takes {names}"
+        else
+            let changed = { b with arguments = b.arguments |> Map.add parameter value }
+
+            checkBox g.sampleRate changed
+            |> Result.map (fun () -> { g with boxes = g.boxes |> List.map (fun x -> if x.name = name then changed else x) })
+
+/// The rate the design is made for. Every box is re-made for it first, so a
+/// corner above the new rate's half refuses here, naming the box.
+let setSampleRate (rate: float) (g: Graph) : Result<Graph, string> =
+    if rate <= 0.0 then
+        Error $"a sample rate is above zero, not %g{rate}"
+    else
+        g.boxes
+        |> List.fold (fun acc b -> acc |> Result.bind (fun () -> checkBox rate b)) (Ok())
+        |> Result.map (fun () -> { g with sampleRate = rate })
 
 /// A box and every wire on it.
 let removeBox (name: string) (g: Graph) : Result<Graph, string> =

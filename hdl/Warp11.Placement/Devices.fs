@@ -40,6 +40,11 @@ let private check (g: Graph) (m: SimMapping) =
     if g.streams <> 1 then
         failwith $"{g.name}: a WAV device plays one stream, and the graph declares %d{g.streams}"
 
+    // A WAV's header holds a whole number of hertz; the design's rate need not
+    // be one, so the two agree when they round to the same.
+    if round g.sampleRate <> float m.source.sampleRate then
+        failwith $"{g.name}: the design is made for %g{g.sampleRate} Hz and the recording is %d{m.source.sampleRate} Hz"
+
     for side, pins in [ "input", g.inputs; "output", g.outputs ] do
         if pins <> stereo then
             failwith $"{g.name}: a WAV device needs the {side} box to be [{describePins stereo}], and it is [{describePins pins}]"

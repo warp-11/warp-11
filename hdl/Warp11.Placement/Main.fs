@@ -67,4 +67,5 @@ let main argv =
     run "UD5 wav plays through the graph" wavPlaysThroughTheGraph
     run "UD6 edits build the gain design" editsBuildTheGainDesign
     run "UD7 a saved design opens as it was" savedDesignOpensAsItWas
+    run "UD8 arguments make the unit" argumentsMakeTheUnit
     0

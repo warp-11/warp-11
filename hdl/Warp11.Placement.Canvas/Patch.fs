@@ -81,11 +81,13 @@ let rec openWith (g: Graph) (recording: WavData) (controls: (string * uint64) li
 /// The simulator's mapping for a WAV file: a recording in, what was heard
 /// written beside it, and the speakers when there are any. What the canvas
 /// calls to run the design it holds.
-let wavOpener (wavPath: string) (audible: bool) : Graph -> (string * uint64) list -> Live =
+let wavOpenerOf (wavPath: string) (recording: WavData) (audible: bool) : Graph -> (string * uint64) list -> Live =
     let heardPath = System.IO.Path.ChangeExtension(wavPath, ".heard.wav")
-    let recording = readWavFile wavPath
     let sink = if audible then Some(AudioSink.AudioSink recording.sampleRate) else None
     fun g knobs -> openWith g recording knobs (Some heardPath) sink
+
+let wavOpener (wavPath: string) (audible: bool) : Graph -> (string * uint64) list -> Live =
+    wavOpenerOf wavPath (readWavFile wavPath) audible
 
 /// The first design: `wav in → gain → wav out`, unity gain, unmuted.
 let openGain (wavPath: string) (audible: bool) : Live =

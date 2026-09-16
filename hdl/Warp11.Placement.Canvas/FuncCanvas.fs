@@ -26,6 +26,7 @@ open Avalonia.Input
 open Avalonia.Media
 open Avalonia.VisualTree
 open Warp11.Placement.Fu
+open Warp11.Placement.Factories
 open Warp11.Placement.Graph
 open Warp11.Placement.Edit
 
@@ -204,13 +205,20 @@ let private boxView (g: Graph) (selected: Selection option) (name: string) (bx: 
         | "output" -> "output", ""
         | _ ->
             let b = g.boxes |> List.find (fun b -> b.name = name)
-            let u = palette[b.unit]
+            let u = unitOf g b
+
             let sequential =
                 match u.law with
                 | Sequential _ -> " (sequential)"
                 | Combinational _ -> ""
 
-            name, $"{b.unit} × %d{b.copies}" + sequential
+            // The arguments as typed, as Pure Data writes them in the box.
+            let arguments =
+                palette[b.unit].parameters
+                |> List.map (fun p -> b.arguments |> Map.tryFind p.name |> Option.defaultValue p.``default``)
+                |> String.concat " "
+
+            name, $"{b.unit} {arguments} × %d{b.copies}" + sequential
 
     let body =
         Border.create
@@ -401,6 +409,8 @@ let view (opening: Opening) : Control =
         // The property panel's entries.
         let nameText = ctx.useState ""
         let designName = ctx.useState opening.graph.name
+        let rateText = ctx.useState (opening.graph.sampleRate.ToString(CultureInfo.InvariantCulture))
+        let argumentText = ctx.useState Map.empty<string, string>
         let copiesText = ctx.useState ""
         let pinName = ctx.useState ""
         let pinWidth = ctx.useState "24"
@@ -514,6 +524,7 @@ let view (opening: Opening) : Control =
                 let current = history.Current.present
                 nameText.Set name
                 copiesText.Set(current.boxes |> List.tryFind (fun b -> b.name = name) |> Option.map (fun b -> string b.copies) |> Option.defaultValue "")
+                argumentText.Set(current.boxes |> List.tryFind (fun b -> b.name = name) |> Option.map (fun b -> b.arguments) |> Option.defaultValue Map.empty)
                 live |> Option.iter (fun l -> l.signalsOf name |> List.iter l.session.Watch)
             | _ -> ()
 
@@ -536,6 +547,7 @@ let view (opening: Opening) : Control =
             if not (obj.ReferenceEquals(h, history.Current)) then
                 history.Set h
                 designName.Set h.present.name
+                rateText.Set(h.present.sampleRate.ToString(CultureInfo.InvariantCulture))
                 select None
                 message.Set what
 
@@ -854,7 +866,8 @@ let view (opening: Opening) : Control =
                   StackPanel.children
                       [ button "New" (fun () ->
                             stopLive ()
-                            history.Set(Warp11.Placement.Edit.history (withLayout (emptyGraph "Untitled")))
+                            history.Set(Warp11.Placement.Edit.history (withLayout (emptyGraph "Untitled" g.sampleRate)))
+                            designName.Set "Untitled"
                             select None
                             message.Set "a new design")
                         button "Open" (fun () ->
@@ -862,6 +875,8 @@ let view (opening: Opening) : Control =
                             | Ok g ->
                                 stopLive ()
                                 history.Set(Warp11.Placement.Edit.history (withLayout g))
+                                designName.Set g.name
+                                rateText.Set(g.sampleRate.ToString(CultureInfo.InvariantCulture))
                                 select None
                                 message.Set $"opened {filePath.Current}: {g.name}, %d{g.boxes.Length} boxes, %d{g.edges.Length} wires"
                             | Error why -> message.Set $"refused: {why}")
@@ -1074,10 +1089,11 @@ let view (opening: Opening) : Control =
                 | "input" -> g.inputs, g.controls
                 | _ -> g.outputs, []
 
-            [ heading "pins" ]
-            @ (signals |> List.map (pinRow "signal"))
-            @ (controls |> List.map (pinRow "control"))
-            @ [ heading "add a pin"
+            // The form before the list, so adding a pin does not move the form
+            // under the pointer — or under the view diff, which patches by
+            // position and would hand one entry's text to another.
+            ([
+                heading "add a pin"
                 StackPanel.create
                     [ StackPanel.orientation Layout.Orientation.Horizontal
                       StackPanel.children
@@ -1110,11 +1126,50 @@ let view (opening: Opening) : Control =
                                  button "add control" (fun () -> addPin addControl)
                              else
                                  TextBlock.create [] :> Types.IView) ] ]
-                :> Types.IView ]
+                :> Types.IView
+                heading "pins" ])
+            @ (signals |> List.map (pinRow "signal"))
+            @ (controls |> List.map (pinRow "control"))
 
         let boxRows (name: string) =
             let b = g.boxes |> List.find (fun b -> b.name = name)
-            let u = palette[b.unit]
+            let u = unitOf g b
+            let factory = palette[b.unit]
+
+            // A creation argument: typed, committed on Enter, refused by the
+            // factory naming the parameter. A change is a new design.
+            let argumentRow (p: Parameter) =
+                let text = argumentText.Current |> Map.tryFind p.name |> Option.defaultValue p.``default``
+
+                let kind =
+                    match p.kind with
+                    | IntParameter -> "whole number"
+                    | FloatParameter -> "number"
+                    | FloatsParameter -> "numbers, comma-separated"
+                    | ChoiceParameter choices -> String.concat " | " choices
+
+                StackPanel.create
+                    [ StackPanel.orientation Layout.Orientation.Horizontal
+                      StackPanel.margin (Thickness(0.0, 2.0))
+                      StackPanel.children
+                          [ TextBlock.create
+                                [ TextBlock.text p.name
+                                  TextBlock.width 80.0
+                                  TextBlock.fontFamily mono
+                                  TextBlock.fontSize 12.0
+                                  TextBlock.verticalAlignment Layout.VerticalAlignment.Center ]
+                            entry 150.0 text (fun t -> argumentText.Set(argumentText.Current |> Map.add p.name t)) (fun () ->
+                                if change (setArgument name p.name text) then
+                                    message.Set $"{name}: {p.name} = {text}")
+                            TextBlock.create
+                                [ TextBlock.text $"{p.about} ({kind})"
+                                  TextBlock.fontSize 10.0
+                                  TextBlock.foreground Brushes.Gray
+                                  TextBlock.textWrapping TextWrapping.Wrap
+                                  TextBlock.width 120.0
+                                  TextBlock.margin (Thickness(6.0, 0.0, 0.0, 0.0))
+                                  TextBlock.verticalAlignment Layout.VerticalAlignment.Center ] ] ]
+                :> Types.IView
 
             let lawText =
                 match u.law with
@@ -1149,8 +1204,9 @@ let view (opening: Opening) : Control =
                               | true, n -> if change (setCopies name n) then message.Set $"{name}: %d{n} copies"
                               | _ -> message.Set $"refused: copies is a number, not '{copiesText.Current}'") ] ]
               :> Types.IView
-              row ("unit", $"{b.unit}, {lawText}")
-              heading "signal inlets" ]
+              row ("unit", $"{b.unit}, {lawText}") ]
+            @ (if factory.parameters.IsEmpty then [] else heading "creation arguments" :: (factory.parameters |> List.map argumentRow))
+            @ [ heading "signal inlets" ]
             @ (u.operands.pins |> List.map (fun (n, f) -> row (n, describeFormat f)))
             @ [ heading "signal outlets" ]
             @ (u.results.pins |> List.map (fun (n, f) -> row (n, describeFormat f)))
@@ -1177,6 +1233,19 @@ let view (opening: Opening) : Control =
                                   entry 160.0 designName.Current designName.Set (fun () ->
                                       if change (rename designName.Current) then
                                           message.Set $"the design is {designName.Current}") ] ]
+                      :> Types.IView
+                      StackPanel.create
+                          [ StackPanel.orientation Layout.Orientation.Horizontal
+                            StackPanel.margin (Thickness(0.0, 4.0))
+                            StackPanel.children
+                                [ label "sample rate"
+                                  entry 100.0 rateText.Current rateText.Set (fun () ->
+                                      match System.Double.TryParse(rateText.Current, System.Globalization.NumberStyles.Float, CultureInfo.InvariantCulture) with
+                                      | true, rate ->
+                                          if change (setSampleRate rate) then
+                                              message.Set $"the design is made for %g{rate} Hz"
+                                      | _ -> message.Set $"refused: '{rateText.Current}' is not a rate")
+                                  label "Hz" ] ]
                       :> Types.IView
                       row ("streams", string g.streams)
                       TextBlock.create

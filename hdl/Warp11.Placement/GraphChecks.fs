@@ -6,6 +6,7 @@ open Warp11
 open Warp11.Placement.Fu
 open Warp11.Placement.Units
 open Warp11.Placement.Placement
+open Warp11.Placement.Factories
 open Warp11.Placement.Graph
 open Warp11.Placement.Edit
 open Warp11.Placement.Elaborate
@@ -86,11 +87,16 @@ let badWiresRefuse () : bool =
 
 // CHECK
 let paletteIsTheUnits () : bool =
-    palette["mul16"].operands.pins = multiply16.operands.pins
-    && palette["mul16"].results.pins = multiply16.results.pins
-    && palette["add32"].results.pins = add32.results.pins
-    && palette["gain"].controls = gainModule.controls
-    && (match palette["smul16"].law, palette["gain"].law with
+    let unit (name: string) =
+        match palette[name].make defaultSampleRate (defaults palette[name]) with
+        | Ok u -> u
+        | Error why -> failwith why
+
+    (unit "mul16").operands.pins = multiply16.operands.pins
+    && (unit "mul16").results.pins = multiply16.results.pins
+    && (unit "add32").results.pins = add32.results.pins
+    && (unit "gain").controls = gainModule.controls
+    && (match (unit "smul16").law, (unit "gain").law with
         | Sequential _, Sequential _ -> true
         | _ -> false)
 
@@ -164,7 +170,7 @@ let editsBuildTheGainDesign () : bool =
         addWire (ends a, Out) (ends b, In)
 
     let built =
-        history (emptyGraph "GainPatch")
+        history (emptyGraph "GainPatch" defaultSampleRate)
         |> step (addInputPin stereo[0])
         |> step (addInputPin stereo[1])
         |> step (addControl ("volume", uint 16))
@@ -259,3 +265,129 @@ let savedDesignOpensAsItWas () : bool =
     // not a design at all
     && refuses (fun _ -> "{ \"name\": 3 }") [ "name" ]
     && refuses (fun _ -> "nonsense") [ "JSON" ]
+
+// ---------------------------------------------------------------------------
+// UD8 — A box is a factory and its creation arguments. Three `eq` boxes with
+// shapes, corners and gains typed as text, chained, elaborate to the bytes
+// of the typed form — three biquad units whose coefficients were designed
+// by hand for the same rate. The arguments reach the hardware: a low-pass
+// at 100 Hz silences a 5 kHz tone, and a flat peaking band passes it. And
+// what a factory refuses, it refuses naming the parameter: a corner above
+// half the rate, a shape that is not one, a capacity that is not a power of
+// two, an argument the unit does not have — at the box, at the file, and when
+// the design's rate moves under a box.
+
+// CHECK
+let argumentsMakeTheUnit () : bool =
+    let rate = 48_000.0
+
+    let step (change: Graph -> Result<Graph, string>) (h: History) =
+        match apply change h with
+        | h, None -> h
+        | _, Some why -> failwith why
+
+    let wire (a: string) (b: string) =
+        let ends (s: string) =
+            match s.Split '.' with
+            | [| box; p |] -> pin box p
+            | _ -> failwith s
+
+        addWire (ends a, Out) (ends b, In)
+
+    let band (name: string) (shape: string) (fc: string) (gain: string) (h: History) =
+        h
+        |> step (addBox "eq" (0.0, 0.0) >> Result.map fst)
+        |> step (renameBox "eq" name)
+        |> step (setArgument name "shape" shape)
+        |> step (setArgument name "fc" fc)
+        |> step (setArgument name "gain" gain)
+
+    let threeBand (low: string) (mid: string) (high: string) =
+        (history (emptyGraph "ThreeBandEq" rate)
+         |> step (addInputPin stereoPins.pins[0])
+         |> step (addInputPin stereoPins.pins[1])
+         |> step (addOutputPin stereoPins.pins[0])
+         |> step (addOutputPin stereoPins.pins[1])
+         |> band "low" low "200" "6"
+         |> band "mid" mid "1000" "-4"
+         |> band "high" high "5000" "3"
+         |> step (wire "input.left" "low.left")
+         |> step (wire "input.right" "low.right")
+         |> step (wire "low.left" "mid.left")
+         |> step (wire "low.right" "mid.right")
+         |> step (wire "mid.left" "high.left")
+         |> step (wire "mid.right" "high.right")
+         |> step (wire "high.left" "output.left")
+         |> step (wire "high.right" "output.right"))
+            .present
+
+    let g = threeBand "lowshelf" "peaking" "highshelf"
+
+    // The typed form: the same three sections, coefficients designed by hand.
+    let typed =
+        let section (shape: EqType) (fc: float) (gainDb: float) =
+            let coefficients = toQ230 (rbjDesign shape fc 0.707 gainDb rate) |> List.map (fun v -> lit v biquadCoeffWidth)
+            moduleUnit "eq" stereoPins stereoPins [] (fun instance _ s -> audioEqBand "AudioEqBand" instance coefficients s)
+
+        defModule
+            "ThreeBandEq"
+            (fun p -> streamInputPorts p "in1" (lower stereoPins), streamOutputPorts p "out1" (lower stereoPins))
+            (fun (inPorts, outPorts) ->
+                [ streamSource inPorts ]
+                |> fuStagesWith [] (section LowShelf 200.0 6.0) "low" stereoPins id (fun r _ -> r)
+                |> fuStagesWith [] (section Peaking 1000.0 -4.0) "mid" stereoPins id (fun r _ -> r)
+                |> fuStagesWith [] (section HighShelf 5000.0 3.0) "high" stereoPins id (fun r _ -> r)
+                |> List.iter2 streamSink [ outPorts ])
+
+    let reopened =
+        match DesignFile.parse (DesignFile.write g) with
+        | Ok g -> g
+        | Error why -> failwith why
+
+    // A 5 kHz tone through a 100 Hz low-pass is silenced; through a flat band it is not.
+    let tone = toneWav (int rate) 200 5000.0 0.25
+    let peak (w: WavData) = w.samples |> Array.map (fun s -> abs (int s)) |> Array.max
+
+    let heard (g: Graph) =
+        runInSim 10_000 g { source = tone; controls = []; outputPath = None }
+
+    let lowPassed =
+        let h = history g |> step (setArgument "low" "shape" "lowpass") |> step (setArgument "low" "fc" "100")
+        heard h.present
+
+    let refuses (change: Graph -> Result<Graph, string>) (names: string list) =
+        match change g with
+        | Ok _ -> false
+        | Error why -> names |> List.forall (fun n -> why.Contains n)
+
+    let fileRefuses (edit: string -> string) (names: string list) =
+        match DesignFile.parse (edit (DesignFile.write g)) with
+        | Ok _ -> false
+        | Error why -> names |> List.forall (fun n -> why.Contains n)
+
+    emitDesign (elaborate g).def = emitDesign typed.def
+    && reopened = g
+    && emitDesign (elaborate reopened).def = emitDesign typed.def
+    && peak (heard g) > peak tone / 2
+    && peak lowPassed < peak tone / 20
+    // a corner above half the rate
+    && refuses (setArgument "mid" "fc" "30000") [ "mid"; "fc"; "30000" ]
+    // not a number
+    && refuses (setArgument "mid" "q" "loud") [ "mid"; "q"; "loud" ]
+    // not a shape
+    && refuses (setArgument "mid" "shape" "notch") [ "mid"; "shape"; "notch"; "peaking" ]
+    // not a parameter
+    && refuses (setArgument "mid" "fq" "1") [ "mid"; "fq"; "shape, fc, q, gain" ]
+    // the rate moved under the high band
+    && refuses (setSampleRate 8_000.0) [ "high"; "fc"; "5000" ]
+    // an echo whose line is not a power of two
+    && refuses (fun g -> addBox "echo" (0.0, 0.0) g |> Result.bind (fun (g, n) -> setArgument n "capacity" "1000" g)) [ "echo"; "capacity"; "1000" ]
+    // a file with an argument the unit does not have, and one the factory refuses
+    && fileRefuses (fun t -> t.Replace("\"fc\": \"1000\"", "\"corner\": \"1000\"")) [ "mid"; "corner" ]
+    && fileRefuses (fun t -> t.Replace("\"fc\": \"1000\"", "\"fc\": \"90000\"")) [ "mid"; "fc"; "90000" ]
+    // a mapping at another rate
+    && (try
+            runInSim 100 g { source = toneWav 44_100 10 440.0 0.25; controls = []; outputPath = None } |> ignore
+            false
+        with e ->
+            e.Message.Contains "48000" && e.Message.Contains "44100")

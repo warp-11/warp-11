@@ -5,6 +5,7 @@ open Avalonia
 open Avalonia.Controls.ApplicationLifetimes
 open Avalonia.FuncUI.Hosts
 open Avalonia.Themes.Fluent
+open Warp11
 open Warp11.Placement
 open Warp11.Placement.Graph
 
@@ -51,13 +52,21 @@ let private opening (argv: string[]) : FuncCanvas.Opening =
         { none with graph = gainGraph; live = Some live; opener = Some live.reopen }
     | [| "edit"; designPath |]
     | [| "edit"; designPath; _ |] ->
+        // With a recording, a new design is made for the recording's rate.
+        let recording = if argv.Length = 3 then Some(readWavFile argv[2]) else None
+
         let g =
             match DesignFile.load designPath with
             | Ok g -> g
-            | Error why when not (System.IO.File.Exists designPath) -> ignore why; emptyGraph (System.IO.Path.GetFileNameWithoutExtension designPath)
+            | Error why when not (System.IO.File.Exists designPath) ->
+                ignore why
+
+                emptyGraph
+                    (System.IO.Path.GetFileNameWithoutExtension designPath)
+                    (recording |> Option.map (fun w -> float w.sampleRate) |> Option.defaultValue defaultSampleRate)
             | Error why -> failwith why
 
-        let opener = if argv.Length = 3 then Some(Patch.wavOpener argv[2] (AudioSink.available ())) else None
+        let opener = recording |> Option.map (fun w -> Patch.wavOpenerOf argv[2] w (AudioSink.available ()))
         { graph = g; live = None; opener = opener; file = Some designPath }
     | _ -> none
 
