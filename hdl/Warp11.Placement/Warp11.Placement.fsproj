@@ -6,7 +6,8 @@
          pedal wants that the library lacks,
          `Placement.fs` the use cases that judge them, `Factories.fs` the palette — units made from creation arguments,
          `Graph.fs` the design as data, `Edit.fs` every change an editor makes to it, `DesignFile.fs`
-         the design as a file, `Elaborate.fs` the data back into a design, `Devices.fs` what
+         the design as a file, `Elaborate.fs` the data back into a design, `Export.fs` the data as the
+         typed F# a person would have written, `Devices.fs` what
          satisfies its boundary in the simulator, and `GraphChecks.fs` the
          proof that data and typed forms meet at the bytes. -->
     <PropertyGroup>
@@ -25,6 +26,7 @@
         <Compile Include="Edit.fs"/>
         <Compile Include="DesignFile.fs"/>
         <Compile Include="Elaborate.fs"/>
+        <Compile Include="Export.fs"/>
         <Compile Include="Devices.fs"/>
         <Compile Include="GraphChecks.fs"/>
         <Compile Include="Main.fs"/>

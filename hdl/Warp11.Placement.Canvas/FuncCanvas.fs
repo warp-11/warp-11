@@ -959,6 +959,16 @@ let view (opening: Opening) : Control =
                                 with e ->
                                     message.Set $"could not save: {e.Message}")
                         entry 260.0 filePath.Current filePath.Set (fun _ -> ())
+                        button "Export F#" (fun () ->
+                            if filePath.Current = "" then
+                                message.Set "a path to export beside, first"
+                            else
+                                match Warp11.Placement.Export.export g with
+                                | Ok source ->
+                                    let path = System.IO.Path.ChangeExtension(filePath.Current, ".fs")
+                                    System.IO.File.WriteAllText(path, source)
+                                    message.Set $"exported {path}"
+                                | Error why -> message.Set $"refused: {why}")
                         button "Undo" undoLast
                         button "Redo" redoLast
                         button "Delete" deleteSelection

@@ -48,6 +48,15 @@ let main argv =
         | Error why ->
             eprintfn $"{path}: {why}"
             1
+    // A saved design as typed F# source: `export design.json`.
+    | [| "export"; path |] ->
+        match Warp11.Placement.DesignFile.load path |> Result.bind Warp11.Placement.Export.export with
+        | Ok source ->
+            printf $"{source}"
+            0
+        | Error why ->
+            eprintfn $"{path}: {why}"
+            1
     | [| "throughput" |] ->
         printfn $"{throughputReport ()}"
         0
@@ -70,4 +79,5 @@ let main argv =
     run "UD8 arguments make the unit" argumentsMakeTheUnit
     run "UD9 the pedal units do what they say" pedalUnitsDoWhatTheySay
     run "UD10 controls hold values, boxes share them" controlsHoldValues
+    run "UD11 the export is the design" exportIsTheDesign
     0

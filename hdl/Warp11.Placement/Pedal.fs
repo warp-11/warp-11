@@ -15,7 +15,7 @@ module Warp11.Placement.Pedal
 open Warp11
 open Warp11.Placement.Fu
 
-let private stereo = [ "left", sint sampleWidth; "right", sint sampleWidth ]
+let private stereo = pins2 ("left", sint sampleWidth) ("right", sint sampleWidth)
 
 /// A beat field read as a sample: a declared signed wire, whichever way the
 /// field arrived, so `pad` and `saturate` have a named signed signal.
@@ -58,39 +58,41 @@ let private saturatedDifference (instance: string) (name: string) (a: Expr) (b: 
     out
 
 /// A zero-latency stereo stage: the law gets the instance, the controls,
-/// the beat's fields and `accepted` — high when this beat moves — and hands
-/// back the two samples out. The handshake passes straight through.
+/// the beat's operands and `accepted` — high when this beat moves — and
+/// hands back the two samples out. The handshake passes straight through.
 let private stereoUnit
     (name: string)
-    (operands: (string * NumberFormat) list)
+    (operands: Pins<'a>)
     (controls: (string * NumberFormat) list)
-    (law: string -> Expr list -> Expr list -> Expr -> Expr * Expr)
-    : ErasedFu =
+    (law: string -> Expr list -> 'a -> Expr -> Expr * Expr)
+    : Fu<'a, Expr * Expr> =
     { name = name
-      operands = pinsOfList operands
-      results = pinsOfList stereo
+      operands = operands
+      results = stereo
       controls = controls
       copies = 1
       law =
         Sequential(fun instance controls s ->
             let accepted = wire $"{instance}_accepted" 1
             (s.valid &&& s.ready) ==> accepted
-            let left, right = law instance controls s.payload accepted
 
-            { s with
-                payload = [ left; right ]
-                layout = lower (pinsOfList stereo) }) }
+            // A new stream rather than `{ s with … }`: the payload changes
+            // type, and a copy keeps the record's.
+            { payload = law instance controls s.payload accepted
+              valid = s.valid
+              ready = s.ready
+              layout = lower stereo }) }
 
 /// Two stereo inputs summed, each through its own Q8.8 gain — a wet/dry
 /// mix, or two voices. Saturating.
-let mixer: ErasedFu =
+let mixer: Fu<Expr * Expr * Expr * Expr, Expr * Expr> =
     stereoUnit
         "mixer"
-        [ "a_left", sint sampleWidth; "a_right", sint sampleWidth; "b_left", sint sampleWidth; "b_right", sint sampleWidth ]
+        (pins4 ("a_left", sint sampleWidth) ("a_right", sint sampleWidth) ("b_left", sint sampleWidth) ("b_right", sint sampleWidth))
         [ "a_gain", uint 16; "b_gain", uint 16 ]
-        (fun instance controls fields _ ->
-            match controls, fields with
-            | [ aGain; bGain ], [ aL; aR; bL; bR ] ->
+        (fun instance controls (aL, aR, bL, bR) _ ->
+            match controls with
+            | [ aGain; bGain ] ->
                 let ga = gainSigned instance "a_gain" aGain
                 let gb = gainSigned instance "b_gain" bGain
 
@@ -102,20 +104,20 @@ let mixer: ErasedFu =
                         (scaled instance $"b_{name}_scaled" (sample instance $"b_{name}" b) gb)
 
                 channel "left" aL bL, channel "right" aR bR
-            | _ -> failwith "mixer: two gains and four samples")
+            | _ -> failwith "mixer: two gains")
 
 /// Drive into a cubic soft clipper: `y = 1.5 x − 0.5 x³` for the driven sample
 /// at full scale = 1, which is 1 with zero slope at ±1 — the classic shape.
 /// `drive` is Q8.8; past unity the driven sample saturates first, so more
 /// drive is more square.
-let waveshaper: ErasedFu =
+let waveshaper: Fu<Expr * Expr, Expr * Expr> =
     stereoUnit
         "waveshaper"
         stereo
         [ "drive", uint 16 ]
-        (fun instance controls fields _ ->
-            match controls, fields with
-            | [ drive ], [ l; r ] ->
+        (fun instance controls (l, r) _ ->
+            match controls with
+            | [ drive ] ->
                 let g = gainSigned instance "drive" drive
                 let fraction = sampleWidth - 1
 
@@ -148,7 +150,7 @@ let waveshaper: ErasedFu =
                     out
 
                 channel "left" l, channel "right" r
-            | _ -> failwith "waveshaper: drive and two samples")
+            | _ -> failwith "waveshaper: drive")
 
 /// Phase-accumulator width, as the tone generator's: a beat advances the
 /// phase by `rate`, so the sweep is `Fs · rate / 2^24` hertz.
@@ -158,14 +160,14 @@ let tremoloPhaseWidth = 24
 /// `depth` (Q8.8, 256 is all the way to silence) and back, once per
 /// `2^24 / rate` beats. The phase advances on accepted beats, so it tracks
 /// the sample rate rather than the clock.
-let tremolo: ErasedFu =
+let tremolo: Fu<Expr * Expr, Expr * Expr> =
     stereoUnit
         "tremolo"
         stereo
         [ "rate", uint tremoloPhaseWidth; "depth", uint 16 ]
-        (fun instance controls fields accepted ->
-            match controls, fields with
-            | [ rate; depth ], [ l; r ] ->
+        (fun instance controls (l, r) accepted ->
+            match controls with
+            | [ rate; depth ] ->
                 let phase = reg $"{instance}_phase" tremoloPhaseWidth
                 let rampWidth = tremoloPhaseWidth - 1
                 let ramp = wire $"{instance}_ramp" rampWidth
@@ -190,7 +192,7 @@ let tremolo: ErasedFu =
                 If accepted (fun () -> phase + rate ==> phase)
 
                 scaled instance "left" (sample instance "left_in" l) g, scaled instance "right" (sample instance "right_in" r) g
-            | _ -> failwith "tremolo: rate, depth and two samples")
+            | _ -> failwith "tremolo: rate and depth")
 
 /// Schroeder's all-pass section over a delay line, the building block of a
 /// reverb: flat in magnitude, so a tone comes out at the level it went in,
@@ -202,14 +204,14 @@ let tremolo: ErasedFu =
 /// `capacity` is the line's length, a power of two; `delay` is the tap and
 /// `gain` is `g`, Q8.8 — 179 is about 0.7. The two channels share one line
 /// as a packed frame, as the echo does.
-let allpass (capacity: int) : ErasedFu =
+let allpass (capacity: int) : Fu<Expr * Expr, Expr * Expr> =
     stereoUnit
         "allpass"
         stereo
         [ "delay", uint (log2Exact capacity); "gain", uint 16 ]
-        (fun instance controls fields accepted ->
-            match controls, fields with
-            | [ delay; gain ], [ l; r ] ->
+        (fun instance controls (l, r) accepted ->
+            match controls with
+            | [ delay; gain ] ->
                 let g = gainSigned instance "gain_signed" gain
                 let written = wire $"{instance}_written" sampleBits
 
@@ -227,4 +229,4 @@ let allpass (capacity: int) : ErasedFu =
                 let vR, yR = channel "right" r (sampleRight delayed)
                 cat vL vR ==> written
                 yL, yR
-            | _ -> failwith "allpass: delay, gain and two samples")
+            | _ -> failwith "allpass: delay and gain")

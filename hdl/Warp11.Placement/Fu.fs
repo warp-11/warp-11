@@ -62,6 +62,36 @@ let pins3 (an: string, af: NumberFormat) (bn: string, bf: NumberFormat) (cn: str
             | [ x; y; z ] -> x, y, z
             | _ -> failwith $"pins3 {an},{bn},{cn}: expected 3 nets" }
 
+/// Four pins, as a 4-tuple.
+let pins4 (an: string, af: NumberFormat) (bn: string, bf: NumberFormat) (cn: string, cf: NumberFormat) (dn: string, df: NumberFormat) : Pins<Expr * Expr * Expr * Expr> =
+    { pins = [ an, af; bn, bf; cn, cf; dn, df ]
+      pack = fun (a, b, c, d) -> [ a; b; c; d ]
+      unpack =
+        fun nets ->
+            match nets with
+            | [ a; b; c; d ] -> a, b, c, d
+            | _ -> failwith $"pins4 {an},{bn},{cn},{dn}: expected 4 nets" }
+
+/// Five pins, as a 5-tuple.
+let pins5 (an: string, af: NumberFormat) (bn: string, bf: NumberFormat) (cn: string, cf: NumberFormat) (dn: string, df: NumberFormat) (en: string, ef: NumberFormat) : Pins<Expr * Expr * Expr * Expr * Expr> =
+    { pins = [ an, af; bn, bf; cn, cf; dn, df; en, ef ]
+      pack = fun (a, b, c, d, e) -> [ a; b; c; d; e ]
+      unpack =
+        fun nets ->
+            match nets with
+            | [ a; b; c; d; e ] -> a, b, c, d, e
+            | _ -> failwith $"pins5 {an},{bn},{cn},{dn},{en}: expected 5 nets" }
+
+/// Six pins, as a 6-tuple — as wide as a beat goes in the typed form.
+let pins6 (an: string, af: NumberFormat) (bn: string, bf: NumberFormat) (cn: string, cf: NumberFormat) (dn: string, df: NumberFormat) (en: string, ef: NumberFormat) (fn: string, ff: NumberFormat) : Pins<Expr * Expr * Expr * Expr * Expr * Expr> =
+    { pins = [ an, af; bn, bf; cn, cf; dn, df; en, ef; fn, ff ]
+      pack = fun (a, b, c, d, e, f) -> [ a; b; c; d; e; f ]
+      unpack =
+        fun nets ->
+            match nets with
+            | [ a; b; c; d; e; f ] -> a, b, c, d, e, f
+            | _ -> failwith $"pins6 {an},{bn},{cn},{dn},{en},{fn}: expected 6 nets" }
+
 /// Pins with no typed payload: the nets themselves, in order. What a graph
 /// works in, and what a typed unit erases to.
 let pinsOfList (pins: (string * NumberFormat) list) : Pins<Expr list> =

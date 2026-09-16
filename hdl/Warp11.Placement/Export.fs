@@ -1,0 +1,208 @@
+/// A design as F# source: the typed form, the one a person would have
+/// written — a `defModule` with one `fuStagesWith` per box, tuple beats
+/// named after the pins, units by their F# names with their creation
+/// arguments as values. One way: the in-place row dissolves into an
+/// expression, so no graph can be read back from it, which is why the design
+/// file is JSON and this is an export.
+///
+/// The printer is honest only if what it prints elaborates to the bytes the
+/// graph does, and that is its one check (UD11): the source is compiled and
+/// its Verilog compared. It walks the beat exactly as `Elaborate` does.
+module Warp11.Placement.Export
+
+open Warp11.Placement.Fu
+open Warp11.Placement.Factories
+open Warp11.Placement.Graph
+open Warp11.Placement.Edit
+open Warp11.Placement.Elaborate
+
+/// F# keywords a pin or port may be called, escaped in the source.
+let private keywords =
+    set
+        [ "abstract"; "and"; "as"; "assert"; "base"; "begin"; "class"; "default"; "delegate"; "do"; "done"; "downcast"; "downto"; "elif"; "else"; "end"
+          "exception"; "extern"; "false"; "finally"; "fixed"; "for"; "fun"; "function"; "global"; "if"; "in"; "inherit"; "inline"; "interface"; "internal"
+          "lazy"; "let"; "match"; "member"; "module"; "mutable"; "namespace"; "new"; "not"; "null"; "of"; "open"; "or"; "override"; "private"; "public"
+          "rec"; "return"; "select"; "sig"; "static"; "struct"; "then"; "to"; "true"; "try"; "type"; "upcast"; "use"; "val"; "void"; "when"; "while"; "with"; "yield"
+          "const"; "params"; "process"; "pure"; "tailcall"; "trait"; "virtual"; "atomic"; "break"; "checked"; "component"; "constraint"; "constructor"; "continue"
+          "eager"; "event"; "external"; "functor"; "include"; "method"; "mixin"; "object"; "parallel"; "protected"; "sealed"; "volatile" ]
+
+let private ident (name: string) = if keywords.Contains name then $"``{name}``" else name
+
+let private showFormat (f: NumberFormat) =
+    if f.fracBits = 0 then
+        (if f.signed then $"sint %d{f.totalWidth}" else $"uint %d{f.totalWidth}")
+    else
+        let signed = if f.signed then "true" else "false"
+        $"({{ totalWidth = %d{f.totalWidth}; fracBits = %d{f.fracBits}; signed = {signed} }}: NumberFormat)"
+
+/// `pinsN (name, format) …` for a beat of N fields — the typed form goes to six.
+let private showPins (what: string) (pins: (string * NumberFormat) list) : Result<string, string> =
+    match pins.Length with
+    | 0 -> Error $"export: {what} has no fields"
+    | n when n > 6 -> Error $"export: {what} is %d{n} fields wide, and the typed form's pins go to six"
+    | n ->
+        let fields = pins |> List.map (fun (name, f) -> $"(\"{name}\", {showFormat f})") |> String.concat " "
+        Ok $"pins%d{n} {fields}"
+
+let private tuple (names: string list) =
+    match names with
+    | [ x ] -> x
+    | xs -> "(" + String.concat ", " xs + ")"
+
+let private tupleValue (names: string list) =
+    match names with
+    | [ x ] -> x
+    | xs -> String.concat ", " xs
+
+/// The design's name as a value: first letter down.
+let private valueName (name: string) =
+    ident (string (System.Char.ToLowerInvariant name[0]) + name.Substring 1)
+
+/// The source, or why it cannot be written.
+let export (g: Graph) : Result<string, string> =
+    try
+        checkEdges g
+        let order = wireOrder g
+        let ports = controlPorts g
+
+        let collect (rs: Result<'a, string> list) : Result<'a list, string> =
+            (Ok [], rs) ||> List.fold (fun acc r -> match acc, r with | Ok xs, Ok x -> Ok(x :: xs) | Error e, _ | _, Error e -> Error e) |> Result.map List.rev
+
+        // One `let` per box: the unit, its arguments as values, and its copies.
+        let units =
+            order
+            |> List.map (fun b ->
+                let factory = palette[b.unit]
+
+                factory.print g.sampleRate (complete factory b.arguments)
+                |> Result.map (fun printed ->
+                    let unit = if b.copies = 1 then printed else $"copies %d{b.copies} ({printed})"
+                    $"    let {ident b.name}Unit = {unit}"))
+            |> collect
+
+        let inPins = showPins "the input box" g.inputs
+        let outPins = showPins "the output box" g.outputs
+
+        match units, inPins, outPins with
+        | Error e, _, _
+        | _, Error e, _
+        | _, _, Error e -> Error e
+        | Ok units, Ok inPins, Ok outPins ->
+            let ins = [ for i in 1 .. g.streams -> $"in%d{i}" ]
+            let outs = [ for i in 1 .. g.streams -> $"out%d{i}" ]
+
+            let ioFactory =
+                [ for i in ins -> $"streamInputPorts p \"{i}\" (lower ({inPins}))" ]
+                @ [ for o in outs -> $"streamOutputPorts p \"{o}\" (lower ({outPins}))" ]
+                @ [ for n, f in ports -> $"p.inPort \"{n}\" %d{f.totalWidth}" ]
+
+            let ioPattern = tuple (ins @ outs @ [ for n, _ in ports -> ident n ])
+
+            // The beat, as the elaborator walks it: names and the pin each came from.
+            let sourceOf (sink: PinRef) = (g.edges |> List.find (fun e -> e.``to`` = sink)).from
+
+            let neededAfter (b: Box) (source: PinRef) =
+                let later = order |> List.skipWhile (fun x -> x.name <> b.name) |> List.tail |> List.map (fun x -> x.name) |> set
+                g.edges |> List.exists (fun e -> e.from = source && (e.``to``.box = "output" || later.Contains e.``to``.box))
+
+            let firstBeat = [ for n, f in g.inputs -> n, f, pin "input" n ]
+
+            let stages, slots =
+                (((Ok []: Result<string list, string>), firstBeat), order)
+                ||> List.fold (fun (lines, slots) b ->
+                    let unit = unitOf g b
+                    let names = slots |> List.map (fun (n, _, _) -> n)
+
+                    let indexOf (source: PinRef) =
+                        slots |> List.findIndex (fun (_, _, s) -> s = source)
+
+                    let operandIdx = [ for n, _ in unit.operands.pins -> indexOf (sourceOf (pin b.name n)) ]
+
+                    let controls =
+                        [ for n, f in unit.controls ->
+                              match g.edges |> List.tryFind (fun e -> e.``to`` = pin b.name n) with
+                              | None -> ident (implicitPortName b.name n)
+                              | Some e when e.from.box = "input" -> ident e.from.pin
+                              | Some e ->
+                                  match controlBoxOf g e.from.box with
+                                  | Some c when c.kind = NumberBox -> ident c.name
+                                  | Some c -> $"lit %d{controlValueBits c}UL %d{f.totalWidth}"
+                                  | None -> failwith $"{showPin e.from}: a control wired from a unit's box is not built" ]
+
+                    let carried = slots |> List.indexed |> List.filter (fun (_, (_, _, s)) -> neededAfter b s)
+                    let results = [ for n, f in unit.results.pins -> n, f, pin b.name n ]
+                    let nextSlots = results @ List.map snd carried
+                    let carriedIdx = carried |> List.map fst |> set
+
+                    let operandsLambda =
+                        let pattern = names |> List.mapi (fun i n -> if List.contains i operandIdx then ident n else "_")
+                        $"(fun {tuple pattern} -> {tupleValue [ for i in operandIdx -> ident names[i] ]})"
+
+                    let finishLambda =
+                        let resultNames = [ for n, _, _ in results -> ident n ]
+                        let beatPattern = names |> List.mapi (fun i n -> if carriedIdx.Contains i then ident n else "_")
+                        let beat = if carriedIdx.IsEmpty then "_" else tuple beatPattern
+                        $"(fun {tuple resultNames} {beat} -> {tupleValue (resultNames @ [ for i in carried |> List.map fst -> ident names[i] ])})"
+
+                    let controlsList = if controls.IsEmpty then "[]" else "[ " + String.concat "; " controls + " ]"
+
+                    let line =
+                        showPins $"the beat after {b.name}" [ for n, f, _ in nextSlots -> n, f ]
+                        |> Result.map (fun outPins ->
+                            $"            |> fuStagesWith {controlsList} {ident b.name}Unit \"{b.name}\" ({outPins}) {operandsLambda} {finishLambda}")
+
+                    (match lines, line with
+                     | Ok ls, Ok l -> Ok(ls @ [ l ])
+                     | Error e, _
+                     | _, Error e -> Error e),
+                    nextSlots)
+
+            stages
+            |> Result.map (fun stages ->
+                // The design's outputs picked out of the last beat, unless it is already in order.
+                let names = slots |> List.map (fun (n, _, _) -> n)
+
+                let outIdx =
+                    [ for n, _ in g.outputs ->
+                          let src = sourceOf (pin "output" n)
+                          slots |> List.findIndex (fun (_, _, s) -> s = src) ]
+
+                let projection =
+                    if outIdx = [ 0 .. slots.Length - 1 ] then
+                        []
+                    else
+                        let pattern = names |> List.mapi (fun i n -> if List.contains i outIdx then ident n else "_")
+                        [ $"            |> List.map (streamMapTo (lower ({outPins})) (fun {tuple pattern} -> {tupleValue [ for i in outIdx -> ident names[i] ]}))" ]
+
+                let sources = ins |> List.map (fun i -> $"streamSource {i}") |> String.concat "; "
+                let sinks = String.concat "; " outs
+
+                String.concat
+                    "\n"
+                    ([ $"/// {g.name}, exported from the design canvas: the typed form of the drawn"
+                       "/// design, elaborating to the same bytes."
+                       $"module Exported.{g.name}"
+                       ""
+                       "open Warp11"
+                       "open Warp11.Placement.Fu"
+                       "open Warp11.Placement.Placement"
+                       "open Warp11.Placement.Units"
+                       "open Warp11.Placement.Pedal"
+                       "open Warp11.Placement.Factories"
+                       ""
+                       $"let sampleRate = {showFloat g.sampleRate}"
+                       ""
+                       $"let {valueName g.name} =" ]
+                     @ units
+                     @ [ (if units.IsEmpty then "    defModule" else "\n    defModule")
+                         $"        \"{g.name}\""
+                         "        (fun p ->"
+                         "            " + String.concat ",\n            " ioFactory + ")"
+                         $"        (fun {ioPattern} ->"
+                         $"            [ {sources} ]" ]
+                     @ stages
+                     @ projection
+                     @ [ $"            |> List.iter2 streamSink [ {sinks} ])" ])
+                + "\n")
+    with e ->
+        Error e.Message

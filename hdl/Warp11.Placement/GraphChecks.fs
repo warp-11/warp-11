@@ -569,3 +569,154 @@ let controlsHoldValues () : bool =
     && refuses (addWire (pin "vol" controlOutlet, Out) (pin "gain2" "left", In)) [ "vol.out"; "control"; "gain2.left"; "signal" ]
     // a control box has no inlets
     && refuses (addWire (pin "input" "left", Out) (pin "vol" "in", In)) [ "vol.in"; "no inlets" ]
+
+// ---------------------------------------------------------------------------
+// UD11 — The export is the design. Five designs printed as typed F#, the
+// source compiled by `dotnet fsi` against these very assemblies, and each
+// one's Verilog compared byte for byte with the graph's own elaboration:
+// the gain design (a module unit, controls from the design's ports), `mac`
+// (combinational units, a skipped field, a rename), the three-band EQ
+// (units with creation arguments, the rate), the shared-controls design (a
+// number box, a constant, an implicit port), and a swap (a projection at the
+// output). That is the only check a printer needs, and the only one that
+// makes it honest.
+
+// CHECK
+let exportIsTheDesign () : bool =
+    let stereo = [ "left", sint sampleWidth; "right", sint sampleWidth ]
+
+    let step (change: Graph -> Result<Graph, string>) (h: History) =
+        match apply change h with
+        | h, None -> h
+        | _, Some why -> failwith why
+
+    let wire (a: PinRef) (b: PinRef) = addWire (a, Out) (b, In)
+
+    let threeBand =
+        let band (name: string) (shape: string) (fc: string) (gain: string) (h: History) =
+            h
+            |> step (addBox "eq" (0.0, 0.0) >> Result.map fst)
+            |> step (renameBox "eq" name)
+            |> step (setArgument name "shape" shape)
+            |> step (setArgument name "fc" fc)
+            |> step (setArgument name "gain" gain)
+
+        (history (emptyGraph "ThreeBandEq" 48_000.0)
+         |> step (addInputPin stereo[0])
+         |> step (addInputPin stereo[1])
+         |> step (addOutputPin stereo[0])
+         |> step (addOutputPin stereo[1])
+         |> band "low" "lowshelf" "200" "6"
+         |> band "mid" "peaking" "1000" "-4"
+         |> band "high" "highshelf" "5000" "3"
+         |> step (wire (pin "input" "left") (pin "low" "left"))
+         |> step (wire (pin "input" "right") (pin "low" "right"))
+         |> step (wire (pin "low" "left") (pin "mid" "left"))
+         |> step (wire (pin "low" "right") (pin "mid" "right"))
+         |> step (wire (pin "mid" "left") (pin "high" "left"))
+         |> step (wire (pin "mid" "right") (pin "high" "right"))
+         |> step (wire (pin "high" "left") (pin "output" "left"))
+         |> step (wire (pin "high" "right") (pin "output" "right")))
+            .present
+
+    let unwired =
+        { gainGraph with
+            name = "Shared"
+            controls = []
+            edges = gainGraph.edges |> List.filter (fun e -> e.from.box <> "input" || (e.from.pin <> "volume" && e.from.pin <> "mute")) }
+
+    let shared =
+        (history unwired
+         |> step (addBox "gain" (0.0, 0.0) >> Result.map fst)
+         |> step (removeWire { from = pin "gain" "left"; ``to`` = pin "output" "left" } >> Ok)
+         |> step (removeWire { from = pin "gain" "right"; ``to`` = pin "output" "right" } >> Ok)
+         |> step (wire (pin "gain" "left") (pin "gain2" "left"))
+         |> step (wire (pin "gain" "right") (pin "gain2" "right"))
+         |> step (wire (pin "gain2" "left") (pin "output" "left"))
+         |> step (wire (pin "gain2" "right") (pin "output" "right"))
+         |> step (addControlBox NumberBox (uint 16) (string gainUnity) (0.0, 0.0) >> Result.map fst)
+         |> step (renameBox "number" "vol")
+         |> step (addControlBox ConstantBox (uint 1) "0" (0.0, 0.0) >> Result.map fst)
+         |> step (wire (pin "vol" controlOutlet) (pin "gain" "volume"))
+         |> step (wire (pin "vol" controlOutlet) (pin "gain2" "volume"))
+         |> step (wire (pin "constant" controlOutlet) (pin "gain" "mute")))
+            .present
+
+    // The gain design with its outputs crossed: a projection at the end.
+    let swapped =
+        { gainGraph with
+            name = "Swapped"
+            edges =
+                gainGraph.edges
+                |> List.map (fun e ->
+                    if e.``to``.box = "output" then
+                        { e with from = pin "gain" (if e.``to``.pin = "left" then "right" else "left") }
+                    else
+                        e) }
+
+    let designs = [ gainGraph; macGraph 3 3 3; threeBand; shared; swapped ]
+
+    let sources =
+        designs
+        |> List.map (fun g ->
+            match Warp11.Placement.Export.export g with
+            | Ok source -> source
+            | Error why -> failwith $"{g.name}: {why}")
+
+    // One script: each design's module loaded, then its Verilog printed
+    // between fences, so one `dotnet fsi` run answers for all five.
+    let dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"warp11-export-{System.Guid.NewGuid()}")
+    System.IO.Directory.CreateDirectory dir |> ignore
+
+    let files =
+        List.zip designs sources
+        |> List.map (fun (g, source) ->
+            let path = System.IO.Path.Combine(dir, $"{g.name}.fs")
+            System.IO.File.WriteAllText(path, source)
+            path)
+
+    let fence = "=====DESIGN====="
+
+    let script =
+        [ $"#r \"{typeof<Expr>.Assembly.Location}\""
+          $"#r \"{typeof<Graph>.Assembly.Location}\""
+          $"#load " + (files |> List.map (fun f -> $"\"{f}\"") |> String.concat " ")
+          "open Warp11" ]
+        @ [ for g in designs ->
+                let value = string (System.Char.ToLowerInvariant g.name[0]) + g.name.Substring 1
+                "printf \"%s%s\" \"" + fence + "\" (emitDesign Exported." + g.name + "." + value + ".def)" ]
+        |> String.concat "\n"
+
+    let scriptPath = System.IO.Path.Combine(dir, "compare.fsx")
+    System.IO.File.WriteAllText(scriptPath, script)
+
+    // The `dotnet` host beside the runtime this process runs on — never the
+    // process's own module, which under an apphost is this program itself,
+    // and would re-run these checks without end.
+    let dotnet =
+        let beside =
+            System.IO.Path.GetFullPath(
+                System.IO.Path.Combine(System.Runtime.InteropServices.RuntimeEnvironment.GetRuntimeDirectory(), "..", "..", "..", "dotnet")
+            )
+
+        match System.Environment.GetEnvironmentVariable "DOTNET_HOST_PATH" with
+        | null
+        | "" when System.IO.File.Exists beside -> beside
+        | null
+        | "" -> failwith $"no dotnet host at {beside} and DOTNET_HOST_PATH is not set"
+        | path -> path
+
+    let info = System.Diagnostics.ProcessStartInfo(dotnet, $"fsi \"{scriptPath}\"", RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false)
+    use fsi = System.Diagnostics.Process.Start info
+    let output = fsi.StandardOutput.ReadToEnd()
+    let errors = fsi.StandardError.ReadToEnd()
+    fsi.WaitForExit()
+
+    if fsi.ExitCode <> 0 then
+        failwith $"dotnet fsi: {errors}"
+
+    let compiled = output.Split(fence, System.StringSplitOptions.RemoveEmptyEntries) |> List.ofArray
+    let expected = designs |> List.map (fun g -> emitDesign (elaborate g).def)
+
+    compiled.Length = designs.Length
+    && List.forall2 (fun (c: string) (e: string) -> c = e) compiled expected

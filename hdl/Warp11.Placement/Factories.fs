@@ -41,7 +41,13 @@ type Factory =
       parameters: Parameter list
       /// The unit, for the design's sample rate and these arguments — every
       /// parameter present — or the first thing wrong with them.
-      make: float -> Arguments -> Result<ErasedFu, string> }
+      make: float -> Arguments -> Result<ErasedFu, string>
+      /// The same unit as F# source: the typed constructor applied to the
+      /// arguments as values, with the design's rate as `sampleRate`. What
+      /// the export prints, so a design leaves the GUI naming its units the
+      /// way a hand-written one does. `make` and `print` parse the arguments
+      /// once between them, so they cannot disagree.
+      print: float -> Arguments -> Result<string, string> }
 
 /// What a fresh box of the factory holds.
 let defaults (f: Factory) : Arguments =
@@ -52,11 +58,28 @@ let defaults (f: Factory) : Arguments =
 let complete (f: Factory) (arguments: Arguments) : Arguments =
     (defaults f, arguments) ||> Map.fold (fun acc k v -> Map.add k v acc)
 
-/// A unit that takes no arguments, as a factory.
-let plain (unit: ErasedFu) : Factory =
+/// A unit that takes no arguments, as a factory: the typed value and the
+/// F# name it goes by.
+let plain (symbol: string) (unit: Fu<'a, 'r>) : Factory =
+    let erased = erase unit
+
     { name = unit.name
       parameters = []
-      make = fun _ _ -> Ok unit }
+      make = fun _ _ -> Ok erased
+      print = fun _ _ -> Ok symbol }
+
+/// A factory over a typed constructor: `parse` reads the arguments once,
+/// `build` makes the unit from what it read, `show` prints the same call.
+let private factory (name: string) (parameters: Parameter list) (parse: float -> Arguments -> Result<'p, string>) (build: float -> 'p -> Fu<'a, 'r>) (show: 'p -> string) : Factory =
+    { name = name
+      parameters = parameters
+      make = fun rate args -> parse rate args |> Result.map (build rate >> erase)
+      print = fun rate args -> parse rate args |> Result.map show }
+
+/// A float as F# source, always with a point so it reads as a float.
+let showFloat (x: float) : string =
+    let text = x.ToString("R", System.Globalization.CultureInfo.InvariantCulture)
+    if text.Contains '.' || text.Contains 'E' || text.Contains 'e' then text else text + ".0"
 
 // ---------------------------------------------------------------------------
 // Parsing an argument, refusing with the parameter's name.
@@ -114,6 +137,79 @@ let private stereo = pins2 ("left", sint sampleWidth) ("right", sint sampleWidth
 
 let private literals (width: int) (values: uint64 list) = values |> List.map (fun v -> lit v width)
 
+/// A biquad section per channel with its coefficients designed for `rate`
+/// from the shape, corner, Q and gain — no coefficient inlets, only the
+/// numbers a person thinks in. The typed unit behind the `eq` box.
+let eqSection (shape: EqType) (fc: float) (q: float) (gainDb: float) (rate: float) : Fu<Expr * Expr, Expr * Expr> =
+    let coefficients = toQ230 (rbjDesign shape fc q gainDb rate)
+    moduleUnit "eq" stereo stereo [] (fun instance _ s -> audioEqBand "AudioEqBand" instance (literals biquadCoeffWidth coefficients) s)
+
+let limiterUnit: Fu<Expr * Expr, Expr * Expr> =
+    moduleUnit "limiter" stereo stereo [ "threshold", sint sampleWidth ] (fun instance controls s ->
+        match controls with
+        | [ threshold ] -> audioLimiter "AudioLimiter" instance threshold s
+        | _ -> failwith "limiter: threshold")
+
+let echoUnit (capacity: int) : Fu<Expr * Expr, Expr * Expr> =
+    moduleUnit "echo" stereo stereo [ "delay", uint (log2Exact capacity); "feedback", uint 16 ] (fun instance controls s ->
+        match controls with
+        | [ delay; feedback ] -> audioEcho "AudioEcho" capacity instance delay feedback s
+        | _ -> failwith "echo: delay and feedback")
+
+let compressorUnit: Fu<Expr * Expr, Expr * Expr> =
+    moduleUnit
+        "compressor"
+        stereo
+        stereo
+        [ "threshold", uint sampleWidth; "ratio", uint 8; "attack", uint 16; "releaseRate", uint 16; "makeup", uint 16 ]
+        (fun instance controls s ->
+            match controls with
+            | [ threshold; ratio; attack; releaseRate; makeup ] ->
+                audioCompressor
+                    "AudioCompressor"
+                    instance
+                    { threshold = threshold
+                      ratio = ratio
+                      attack = attack
+                      releaseRate = releaseRate
+                      makeup = makeup }
+                    s
+            | _ -> failwith "compressor: five controls")
+
+let firUnit (taps: int) (lowPass: float) (highPass: float) (rate: float) : Fu<Expr * Expr, Expr * Expr> =
+    moduleUnit "fir" stereo stereo [ "preset", uint 2 ] (fun instance controls s ->
+        match controls with
+        | [ preset ] -> audioFir "AudioFir" taps { sampleRate = rate; lowPass = lowPass; highPass = highPass } instance preset s
+        | _ -> failwith "fir: preset")
+
+let multibandUnit (crossovers: float list) (rate: float) : Fu<Expr * Expr, Expr * Expr> =
+    let gains prefix = [ for i in 0 .. multibandBands - 1 -> $"{prefix}%d{i}", uint 16 ]
+
+    moduleUnit
+        "multiband"
+        stereo
+        stereo
+        ([ "threshold", uint sampleWidth; "ratio", uint 8; "attack", uint 16; "releaseRate", uint 16 ] @ gains "lg" @ gains "rg")
+        (fun instance controls s ->
+            match controls with
+            | threshold :: ratio :: attack :: releaseRate :: gains when gains.Length = 2 * multibandBands ->
+                let leftGains, rightGains = List.splitAt multibandBands gains
+
+                multibandCompressor8
+                    "MultibandCompressor"
+                    crossovers
+                    rate
+                    instance
+                    { threshold = threshold
+                      ratio = ratio
+                      attack = attack
+                      releaseRate = releaseRate
+                      leftGains = leftGains
+                      rightGains = rightGains }
+                    s
+                |> fst
+            | _ -> failwith "multiband: four controls and the gains")
+
 /// A biquad section per channel, its coefficients designed here from the
 /// shape, corner, Q and gain, for the design's rate — so the box has no
 /// coefficient inlets, only the numbers a person thinks in.
@@ -127,119 +223,73 @@ let private eqShape (text: string) : EqType =
     | "lowpass" -> LowPass
     | _ -> HighPass
 
+let private eqShapeSymbol (text: string) : string =
+    match eqShape text with
+    | Peaking -> "Peaking"
+    | LowShelf -> "LowShelf"
+    | HighShelf -> "HighShelf"
+    | LowPass -> "LowPass"
+    | HighPass -> "HighPass"
+
 let eq: Factory =
-    { name = "eq"
-      parameters =
+    factory
+        "eq"
         [ { name = "shape"; kind = ChoiceParameter eqShapes; ``default`` = "peaking"; about = "the cookbook response" }
           { name = "fc"; kind = FloatParameter; ``default`` = "1000"; about = "corner or centre, in hertz" }
           { name = "q"; kind = FloatParameter; ``default`` = "0.707"; about = "quality factor" }
           { name = "gain"; kind = FloatParameter; ``default`` = "0"; about = "decibels, for the peaking and shelving shapes" } ]
-      make =
-        fun rate args ->
+        (fun rate args ->
             match choiceArg "shape" eqShapes args, floatArg "fc" args |> Result.bind (belowNyquist "fc" rate), floatArg "q" args |> Result.bind (positive "q"), floatArg "gain" args with
-            | Ok shape, Ok fc, Ok q, Ok gain ->
-                let coefficients = toQ230 (rbjDesign (eqShape shape) fc q gain rate)
-
-                Ok(
-                    erase (
-                        moduleUnit "eq" stereo stereo [] (fun instance _ s ->
-                            audioEqBand "AudioEqBand" instance (literals biquadCoeffWidth coefficients) s)
-                    )
-                )
+            | Ok shape, Ok fc, Ok q, Ok gain -> Ok(shape, fc, q, gain)
             | Error e, _, _, _
             | _, Error e, _, _
             | _, _, Error e, _
-            | _, _, _, Error e -> Error e }
+            | _, _, _, Error e -> Error e)
+        (fun rate (shape, fc, q, gain) -> eqSection (eqShape shape) fc q gain rate)
+        (fun (shape, fc, q, gain) -> $"eqSection {eqShapeSymbol shape} {showFloat fc} {showFloat q} {showFloat gain} sampleRate")
 
-let limiter: Factory =
-    plain (
-        erase (
-            moduleUnit "limiter" stereo stereo [ "threshold", sint sampleWidth ] (fun instance controls s ->
-                match controls with
-                | [ threshold ] -> audioLimiter "AudioLimiter" instance threshold s
-                | _ -> failwith "limiter: threshold")
-        )
-    )
+let limiter: Factory = plain "limiterUnit" limiterUnit
 
 let echo: Factory =
-    { name = "echo"
-      parameters =
+    factory
+        "echo"
         [ { name = "capacity"; kind = IntParameter; ``default`` = "16384"; about = "the delay line's length in frames, a power of two" } ]
-      make =
-        fun _ args ->
+        (fun _ args ->
             intArg "capacity" args
             |> Result.bind (fun capacity ->
-                if not (isPowerOfTwo capacity) then
-                    Error $"capacity: %d{capacity} is not a power of two"
+                if isPowerOfTwo capacity && capacity >= delayBufferMinimum then
+                    Ok capacity
                 else
-                    Ok(
-                        erase (
-                            moduleUnit "echo" stereo stereo [ "delay", uint (log2Exact capacity); "feedback", uint 16 ] (fun instance controls s ->
-                                match controls with
-                                | [ delay; feedback ] -> audioEcho "AudioEcho" capacity instance delay feedback s
-                                | _ -> failwith "echo: delay and feedback")
-                        )
-                    )) }
+                    Error $"capacity: %d{capacity} is not a power of two of at least %d{delayBufferMinimum}"))
+        (fun _ capacity -> echoUnit capacity)
+        (fun capacity -> $"echoUnit %d{capacity}")
 
-let compressor: Factory =
-    plain (
-        erase (
-            moduleUnit
-                "compressor"
-                stereo
-                stereo
-                [ "threshold", uint sampleWidth; "ratio", uint 8; "attack", uint 16; "releaseRate", uint 16; "makeup", uint 16 ]
-                (fun instance controls s ->
-                    match controls with
-                    | [ threshold; ratio; attack; releaseRate; makeup ] ->
-                        audioCompressor
-                            "AudioCompressor"
-                            instance
-                            { threshold = threshold
-                              ratio = ratio
-                              attack = attack
-                              releaseRate = releaseRate
-                              makeup = makeup }
-                            s
-                    | _ -> failwith "compressor: five controls")
-        )
-    )
+let compressor: Factory = plain "compressorUnit" compressorUnit
 
 let fir: Factory =
-    { name = "fir"
-      parameters =
+    factory
+        "fir"
         [ { name = "taps"; kind = IntParameter; ``default`` = "16"; about = "filter length" }
           { name = "lowPass"; kind = FloatParameter; ``default`` = "4000"; about = "the low-pass bank's corner, in hertz" }
           { name = "highPass"; kind = FloatParameter; ``default`` = "300"; about = "the high-pass bank's corner, in hertz" } ]
-      make =
-        fun rate args ->
+        (fun rate args ->
             match intArg "taps" args, floatArg "lowPass" args |> Result.bind (belowNyquist "lowPass" rate), floatArg "highPass" args |> Result.bind (belowNyquist "highPass" rate) with
-            | Ok taps, Ok lowPass, Ok highPass ->
-                if taps < 2 then
-                    Error $"taps: at least 2, not %d{taps}"
-                else
-                    Ok(
-                        erase (
-                            moduleUnit "fir" stereo stereo [ "preset", uint 2 ] (fun instance controls s ->
-                                match controls with
-                                | [ preset ] ->
-                                    audioFir "AudioFir" taps { sampleRate = rate; lowPass = lowPass; highPass = highPass } instance preset s
-                                | _ -> failwith "fir: preset")
-                        )
-                    )
+            | Ok taps, _, _ when taps < 2 -> Error $"taps: at least 2, not %d{taps}"
+            | Ok taps, Ok lowPass, Ok highPass -> Ok(taps, lowPass, highPass)
             | Error e, _, _
             | _, Error e, _
-            | _, _, Error e -> Error e }
+            | _, _, Error e -> Error e)
+        (fun rate (taps, lowPass, highPass) -> firUnit taps lowPass highPass rate)
+        (fun (taps, lowPass, highPass) -> $"firUnit %d{taps} {showFloat lowPass} {showFloat highPass} sampleRate")
 
 let multiband: Factory =
-    { name = "multiband"
-      parameters =
+    factory
+        "multiband"
         [ { name = "crossovers"
             kind = FloatsParameter
             ``default`` = defaultCrossovers |> List.map (fun x -> x.ToString(invariant)) |> String.concat ", "
             about = $"%d{multibandBands - 1} crossover frequencies in hertz, rising" } ]
-      make =
-        fun rate args ->
+        (fun rate args ->
             floatsArg "crossovers" args
             |> Result.bind (fun crossovers ->
                 if crossovers.Length <> multibandBands - 1 then
@@ -249,67 +299,42 @@ let multiband: Factory =
                 else
                     match crossovers |> List.map (belowNyquist "crossovers" rate) |> List.tryPick (function Error e -> Some e | Ok _ -> None) with
                     | Some e -> Error e
-                    | None ->
-                        let gains prefix = [ for i in 0 .. multibandBands - 1 -> $"{prefix}%d{i}", uint 16 ]
-
-                        Ok(
-                            erase (
-                                moduleUnit
-                                    "multiband"
-                                    stereo
-                                    stereo
-                                    ([ "threshold", uint sampleWidth; "ratio", uint 8; "attack", uint 16; "releaseRate", uint 16 ] @ gains "lg" @ gains "rg")
-                                    (fun instance controls s ->
-                                        match controls with
-                                        | threshold :: ratio :: attack :: releaseRate :: gains when gains.Length = 2 * multibandBands ->
-                                            let leftGains, rightGains = List.splitAt multibandBands gains
-
-                                            multibandCompressor8
-                                                "MultibandCompressor"
-                                                crossovers
-                                                rate
-                                                instance
-                                                { threshold = threshold
-                                                  ratio = ratio
-                                                  attack = attack
-                                                  releaseRate = releaseRate
-                                                  leftGains = leftGains
-                                                  rightGains = rightGains }
-                                                s
-                                            |> fst
-                                        | _ -> failwith "multiband: four controls and the gains")
-                            )
-                        )) }
+                    | None -> Ok crossovers))
+        (fun rate crossovers -> multibandUnit crossovers rate)
+        (fun crossovers ->
+            let listed = crossovers |> List.map showFloat |> String.concat "; "
+            $"multibandUnit [ {listed} ] sampleRate")
 
 let allpassSection: Factory =
-    { name = "allpass"
-      parameters =
+    factory
+        "allpass"
         [ { name = "capacity"; kind = IntParameter; ``default`` = "4096"; about = "the delay line's length in frames, a power of two" } ]
-      make =
-        fun _ args ->
+        (fun _ args ->
             intArg "capacity" args
             |> Result.bind (fun capacity ->
-                if not (isPowerOfTwo capacity) || capacity < delayBufferMinimum then
-                    Error $"capacity: %d{capacity} is not a power of two of at least %d{delayBufferMinimum}"
+                if isPowerOfTwo capacity && capacity >= delayBufferMinimum then
+                    Ok capacity
                 else
-                    Ok(allpass capacity)) }
+                    Error $"capacity: %d{capacity} is not a power of two of at least %d{delayBufferMinimum}"))
+        (fun _ capacity -> allpass capacity)
+        (fun capacity -> $"allpass %d{capacity}")
 
 /// Every unit the GUI may offer. `erase` is the only way a unit gets in, so
 /// a palette cannot disagree with the unit the typed API elaborates.
 let palette: Map<string, Factory> =
-    [ plain (erase multiply16)
-      plain (erase add32)
-      plain (erase shiftAddMultiply16)
-      plain (erase gainModule)
+    [ plain "multiply16" multiply16
+      plain "add32" add32
+      plain "shiftAddMultiply16" shiftAddMultiply16
+      plain "gainModule" gainModule
       eq
       limiter
       echo
       compressor
       fir
       multiband
-      plain mixer
-      plain waveshaper
-      plain tremolo
+      plain "mixer" mixer
+      plain "waveshaper" waveshaper
+      plain "tremolo" tremolo
       allpassSection ]
     |> List.map (fun f -> f.name, f)
     |> Map.ofList

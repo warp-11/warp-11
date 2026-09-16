@@ -28,7 +28,7 @@ type private Slot =
 let private show = showPin
 
 /// Every wire, checked at both ends.
-let private checkEdges (g: Graph) =
+let checkEdges (g: Graph) =
     for e in g.edges do
         match lookupPin g Out e.from, lookupPin g In e.``to`` with
         | Error why, _
@@ -70,7 +70,7 @@ let private checkEdges (g: Graph) =
 
 /// Boxes in an order every wire can be followed: a box after everything that
 /// feeds it, ties broken by the graph's own order.
-let private wireOrder (g: Graph) : Box list =
+let wireOrder (g: Graph) : Box list =
     let feeds (b: Box) =
         g.edges
         |> List.filter (fun e -> e.``to``.box = b.name && e.from.box <> "input" && (controlBoxOf g e.from.box).IsNone)
