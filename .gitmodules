@@ -1,0 +1,4 @@
+[submodule "hdl/vendor/NodeEditor"]
+	path = hdl/vendor/NodeEditor
+	url = https://github.com/warp-11/NodeEditor.git
+	branch = avalonia-12
