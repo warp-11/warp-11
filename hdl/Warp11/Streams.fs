@@ -361,6 +361,13 @@ let streamStageFor (layout: Layout<'p>) : Stream<'p> -> Stream<'p> =
 /// at or above it the head is a synchronous read behind a two-slot skid.
 let streamFifoDistributedMax = 64
 
+/// The depth at or below which a FIFO's storage is registers rather than an
+/// array. Two words of LUTRAM cost the LUTs two registers and a mux cost, and
+/// on top of that name a memory primitive — one iCE40 does not have. The
+/// ring, the pointers and the head's timing are the LUTRAM form's exactly;
+/// only where the words sit differs, which a `Stream` makes nobody's business.
+let streamFifoRegisterMax = 2
+
 /// Storage-agnostic FIFO internals: the same three claims — order preserved,
 /// nothing lost or duplicated, occupancy never above `depth` — over LUTRAM or
 /// block RAM, chosen by depth and invisible from the outside.
@@ -390,6 +397,48 @@ let private ringPointers name addrWidth =
     slice (addrWidth - 1) 0 readPtr ==> readIndex
 
     writePtr, readPtr, writeIndex, readIndex
+
+/// Registers: one per word, written by the write index and read through a
+/// mux by the read index. The same ring as the LUTRAM form with the array
+/// spelled out, so the head is visible the cycle after it lands here too.
+let private registerFifo name depth addrWidth payloadWidth (packed: Expr) (offered: Expr) (accept: Expr) =
+    let words = [ for i in 0 .. depth - 1 -> reg $"{name}_word%d{i}" payloadWidth ]
+
+    let writePtr, readPtr, writeIndex, readIndex = ringPointers name addrWidth
+
+    let empty = wireBit $"{name}_empty"
+    eq writePtr readPtr ==> empty
+
+    let full = wireBit $"{name}_full"
+
+    (eq writeIndex readIndex
+     &&& bnot (eq (slice addrWidth addrWidth writePtr) (slice addrWidth addrWidth readPtr)))
+    ==> full
+
+    let outReady = wireBit $"{name}_out_ready"
+    let outValid = wireBit $"{name}_out_valid"
+    bnot empty ==> outValid
+
+    bnot full ==> accept
+
+    let push = wireBit $"{name}_push"
+    (offered &&& bnot full) ==> push
+
+    words
+    |> List.iteri (fun i word -> If (push &&& eq writeIndex (lit (uint64 i) addrWidth)) (fun () -> packed ==> word))
+
+    If push (fun () -> (writePtr + lit 1UL (addrWidth + 1)) ==> writePtr)
+
+    let pop = wireBit $"{name}_pop"
+    (outValid &&& outReady) ==> pop
+    If pop (fun () -> (readPtr + lit 1UL (addrWidth + 1)) ==> readPtr)
+
+    let head = wire $"{name}_head" payloadWidth
+    selectIndexed readIndex words ==> head
+
+    outReady,
+    { head = head
+      outValid = outValid }
 
 /// LUTRAM: the head is a combinational read, so a beat is visible the cycle it
 /// lands and the whole FIFO is two pointers and an array.
@@ -530,7 +579,8 @@ let private blockFifo name depth addrWidth payloadWidth (packed: Expr) (offered:
 /// data.
 ///
 /// **The storage is chosen from the depth and is not part of the contract.**
-/// Up to `streamFifoDistributedMax` the words live in LUTs and the head is a
+/// Up to `streamFifoRegisterMax` the words are registers behind a mux; up to
+/// `streamFifoDistributedMax` they live in LUTs and the head is a
 /// combinational read; above it they live in a block and the head is a
 /// synchronous read behind a two-slot skid. Both hold exactly `depth` beats,
 /// both sustain a beat per cycle, and both present the same `Stream` — so
@@ -572,10 +622,9 @@ let streamFifo (name: string) (depth: int) (s: Stream<'p>) : Stream<'p> =
     let packed = packFields (s.layout.pack s.payload)
 
     let build =
-        if depth <= streamFifoDistributedMax then
-            distributedFifo
-        else
-            blockFifo
+        if depth <= streamFifoRegisterMax then registerFifo
+        elif depth <= streamFifoDistributedMax then distributedFifo
+        else blockFifo
 
     let outReady, ports = build name depth addrWidth payloadWidth packed s.valid s.ready
 

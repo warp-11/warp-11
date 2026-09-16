@@ -44,3 +44,10 @@ canvas (and refuses in a browser, which has no compiler).
 
 **Export F#** writes the typed source beside the file; `dotnet run --project
 Warp11.Placement -- export <file>` prints it, and `-- emit <file>` the Verilog.
+
+**Board** writes the design's KV260 top into `board/` beside the file: the
+Verilog with the stereo boundary on the I2S pins and every control a
+register, plus the Rust seam for the register map. `-- board <file> kv260
+<dir>` does the same from the shell, and `icebreaker` targets the iCEBreaker
+over a UART — that board frames at 46 875 Hz, so a design goes there made
+for that rate (the refusal says so).

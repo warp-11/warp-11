@@ -1109,6 +1109,16 @@ let view (opening: Opening) : Control =
                                 with e ->
                                     message.Set $"could not save: {e.Message}")
                         entry 260.0 filePath.Current filePath.Set (fun _ -> ())
+                        button "Board" (fun () ->
+                            if filePath.Current = "" then
+                                message.Set "a path to write beside, first"
+                            else
+                                try
+                                    let dir = System.IO.Path.Combine(System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath filePath.Current), "board")
+                                    let written = Warp11.BoardTop.write dir (Warp11.BoardTop.kv260Top kv260 g) |> String.concat ", "
+                                    message.Set $"wrote {written}"
+                                with e ->
+                                    message.Set $"refused: {e.Message}")
                         button "Export F#" (fun () ->
                             if filePath.Current = "" then
                                 message.Set "a path to export beside, first"

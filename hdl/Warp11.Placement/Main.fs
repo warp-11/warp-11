@@ -65,6 +65,31 @@ let main argv =
             printfn $"{System.IO.Path.Combine(dir, file)}"
 
         0
+    // A saved design on a board: `board design.json kv260|icebreaker <dir>`
+    // writes the top's Verilog and the Rust seam.
+    | [| "board"; path; which; dir |] ->
+        match Warp11.DesignFile.load path with
+        | Error why ->
+            eprintfn $"{path}: {why}"
+            1
+        | Ok g ->
+            try
+                let top =
+                    match which with
+                    | "kv260" -> Warp11.BoardTop.kv260Top kv260 g
+                    | "icebreaker" -> Warp11.BoardTop.iceBreakerTop (iceBreakerAt 24_000_000) g
+                    | other -> failwith $"a board is kv260 or icebreaker, not '{other}'"
+
+                for file in Warp11.BoardTop.write dir top do
+                    printfn $"wrote {file}"
+
+                for name, entry in top.registers do
+                    printfn $"  register {name} at 0x%02x{entry.offset}"
+
+                0
+            with e ->
+                eprintfn $"{e.Message}"
+                1
     | [| "throughput" |] ->
         printfn $"{throughputReport ()}"
         0
@@ -93,4 +118,5 @@ let main argv =
     run "UD14 an image on the boundary" imageOnTheBoundary
     run "UD15 a table on the boundary" tableOnTheBoundary
     run "UD16 a written unit travels with the design" writtenUnitTravels
+    run "UD17 the design on a board" designOnABoard
     0
