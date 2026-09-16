@@ -2,7 +2,8 @@
 
     <!-- The placement trial, kept self-contained until the API settles: it
          builds over the library as it is and changes nothing in it. `Fu.fs`
-         is the surface under trial, `Units.fs` the units that cost cycles,
+         is the surface under trial, `Units.fs` the units that cost cycles, `Pedal.fs` the units a
+         pedal wants that the library lacks,
          `Placement.fs` the use cases that judge them, `Factories.fs` the palette — units made from creation arguments,
          `Graph.fs` the design as data, `Edit.fs` every change an editor makes to it, `DesignFile.fs`
          the design as a file, `Elaborate.fs` the data back into a design, `Devices.fs` what
@@ -17,6 +18,7 @@
     <ItemGroup>
         <Compile Include="Fu.fs"/>
         <Compile Include="Units.fs"/>
+        <Compile Include="Pedal.fs"/>
         <Compile Include="Placement.fs"/>
         <Compile Include="Factories.fs"/>
         <Compile Include="Graph.fs"/>

@@ -17,6 +17,7 @@ module Warp11.Placement.Elaborate
 open Warp11
 open Warp11.Placement.Fu
 open Warp11.Placement.Graph
+open Warp11.Placement.Edit
 
 /// One field of the beat, and the pin it came from.
 type private Slot =
@@ -38,18 +39,25 @@ let private checkEdges (g: Graph) =
                 failwith $"{show e.from} is {describeFormat fa}, {show e.``to``} is {describeFormat fb}"
         | Ok(ka, _), Ok(kb, _) -> failwith $"{show e.from} → {show e.``to``}: a wire runs from an output to an input of the same kind, not {ka} to {kb}"
 
-    // Every sink exactly once; every source at least once.
-    let sinks =
+    // Every signal sink exactly once; a control inlet at most once — one
+    // nobody wired holds its setting; every source at least once.
+    let signalSinks =
         [ for b in g.boxes do
               let ins, _ = pinsOf g b.name
 
-              for n, _ in ins @ controlsOf g b.name do
+              for n, _ in ins do
                   yield pin b.name n
           for n, _ in g.outputs -> pin "output" n ]
 
-    for p in sinks do
+    let controlSinks =
+        [ for b in g.boxes do
+              for n, _ in controlsOf g b.name do
+                  yield pin b.name n ]
+
+    for p in signalSinks @ controlSinks do
         match g.edges |> List.filter (fun e -> e.``to`` = p) with
-        | [] -> failwith $"{show p}: nothing is wired to it"
+        | [] when List.contains p signalSinks -> failwith $"{show p}: nothing is wired to it"
+        | []
         | [ _ ] -> ()
         | many -> failwith $"{show p}: %d{many.Length} wires land on it, and an input takes one"
 
@@ -65,7 +73,7 @@ let private checkEdges (g: Graph) =
 let private wireOrder (g: Graph) : Box list =
     let feeds (b: Box) =
         g.edges
-        |> List.filter (fun e -> e.``to``.box = b.name && e.from.box <> "input")
+        |> List.filter (fun e -> e.``to``.box = b.name && e.from.box <> "input" && (controlBoxOf g e.from.box).IsNone)
         |> List.map (fun e -> e.from.box)
         |> List.distinct
 
@@ -83,11 +91,22 @@ let private wireOrder (g: Graph) : Box list =
 
     go [] g.boxes
 
-/// The design's ports: M stream groups in, M out, and a plain input per control.
+/// The design's ports: M stream groups in, M out, a plain input per
+/// control of the design's own, then one per number box, then one per
+/// control inlet nobody wired — every control port, by name.
 type GraphPorts =
     { ins: StreamInputPorts<Expr list> list
       outs: StreamOutputPorts<Expr list> list
-      controls: Expr list }
+      controls: (string * Expr) list }
+
+/// Every control port the design has, in port order: its own, its number
+/// boxes, and the implicit ones. A mapping pokes these.
+let controlPorts (g: Graph) : (string * NumberFormat) list =
+    g.controls
+    @ [ for c in g.controlBoxes do
+            if c.kind = NumberBox then
+                yield c.name, c.format ]
+    @ [ for b, n, f in implicitControls g -> implicitPortName b.name n, f ]
 
 /// The net a pin's value rides on, when the design was elaborated with
 /// probes — what a debugger watches to paint the pin. The boundary boxes'
@@ -104,8 +123,15 @@ let probeName (g: Graph) (p: PinRef) (side: Side) : string option =
     | "output", In -> Some $"out1_{p.pin}"
     | box, In when isSignal -> Some $"{box}_in_{p.pin}"
     | box, In ->
-        // A control: the design port it was wired from.
-        g.edges |> List.tryFind (fun e -> e.``to`` = pin box p.pin) |> Option.map (fun e -> e.from.pin)
+        // A control: the port it was wired from, a number box's port, or
+        // the implicit port of an inlet nobody wired. A constant has no net.
+        match g.edges |> List.tryFind (fun e -> e.``to`` = pin box p.pin) with
+        | Some e when e.from.box = "input" -> Some e.from.pin
+        | Some e ->
+            match controlBoxOf g e.from.box with
+            | Some c when c.kind = NumberBox -> Some c.name
+            | _ -> None
+        | None -> Some(implicitPortName box p.pin)
     | box, Out when isSignal -> Some $"{box}_out_{p.pin}"
     | _ -> None
 
@@ -148,9 +174,9 @@ let elaborateWith (probes: bool) (g: Graph) : TypedModule<GraphPorts> =
         (fun p ->
             { ins = [ for i in 1 .. g.streams -> streamInputPorts p $"in%d{i}" (lower (pinsOfList g.inputs)) ]
               outs = [ for i in 1 .. g.streams -> streamOutputPorts p $"out%d{i}" (lower (pinsOfList g.outputs)) ]
-              controls = [ for n, f in g.controls -> p.inPort n f.totalWidth ] })
+              controls = [ for n, f in controlPorts g -> n, p.inPort n f.totalWidth ] })
         (fun io ->
-            let controlPorts = List.zip (List.map fst g.controls) io.controls |> Map.ofList
+            let controlPorts = Map.ofList io.controls
 
             let sourceOf (sink: PinRef) =
                 (g.edges |> List.find (fun e -> e.``to`` = sink)).from
@@ -176,14 +202,19 @@ let elaborateWith (probes: bool) (g: Graph) : TypedModule<GraphPorts> =
 
                     let operandIdx = [ for n, _ in unit.operands.pins -> indexOf (sourceOf (pin b.name n)) ]
 
+                    // A control inlet's value: the design's port it was wired
+                    // from, a number box's port, a constant's literal, or the
+                    // implicit port of an inlet nobody wired.
                     let controls =
-                        [ for n, _ in unit.controls ->
-                              let src = sourceOf (pin b.name n)
-
-                              if src.box <> "input" then
-                                  failwith $"{show src} → {show (pin b.name n)}: a control wired from a box is not built yet"
-
-                              controlPorts[src.pin] ]
+                        [ for n, f in unit.controls ->
+                              match g.edges |> List.tryFind (fun e -> e.``to`` = pin b.name n) with
+                              | None -> controlPorts[implicitPortName b.name n]
+                              | Some e when e.from.box = "input" -> controlPorts[e.from.pin]
+                              | Some e ->
+                                  match controlBoxOf g e.from.box with
+                                  | Some c when c.kind = NumberBox -> controlPorts[c.name]
+                                  | Some c -> lit (controlValueBits c) f.totalWidth
+                                  | None -> failwith $"{show e.from} → {show (pin b.name n)}: a control wired from a unit's box is not built" ]
 
                     let carried = slots |> List.indexed |> List.filter (fun (_, s) -> neededAfter b s.source)
                     let results = [ for n, f in unit.results.pins -> { name = n; format = f; source = pin b.name n } ]

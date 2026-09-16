@@ -53,24 +53,35 @@ let pinRows (g: Graph) (box: string) (side: Side) : PinRow list =
     let controls = controlsOf g box
 
     let signals, controls =
-        match side, box with
-        | In, "input" -> [], []
-        | In, _ -> inputs, controls
-        | Out, "input" -> outputs, controls
-        | Out, _ -> outputs, []
+        match side, box, controlBoxOf g box with
+        | Out, _, Some c -> [], [ controlOutlet, c.format ]
+        | In, _, Some _ -> [], []
+        | In, "input", _ -> [], []
+        | In, _, _ -> inputs, controls
+        | Out, "input", _ -> outputs, controls
+        | Out, _, _ -> outputs, []
 
     [ for n, f in signals -> { pin = n; format = f; control = false } ]
     @ [ for n, f in controls -> { pin = n; format = f; control = true } ]
 
-/// A box's height, from its taller pin column.
+let controlBoxWidth = 120.0
+
+/// A box's width: a control box is narrow.
+let boxWidthOf (g: Graph) (box: string) =
+    if (controlBoxOf g box).IsSome then controlBoxWidth else boxWidth
+
+/// A box's height, from its taller pin column; a control box is one row.
 let boxHeight (g: Graph) (box: string) =
-    headerHeight + float (max (pinRows g box In).Length (pinRows g box Out).Length) * rowHeight + 10.0
+    if (controlBoxOf g box).IsSome then
+        headerHeight + rowHeight
+    else
+        headerHeight + float (max (pinRows g box In).Length (pinRows g box Out).Length) * rowHeight + 10.0
 
 /// Where a pin sits, relative to its box's top-left: inputs down the left
 /// edge, outputs down the right.
 let private pinOffset (g: Graph) (p: PinRef) (side: Side) : (float * float) option =
     let row = pinRows g p.box side |> List.tryFindIndex (fun r -> r.pin = p.pin)
-    let x = match side with In -> 0.0 | Out -> boxWidth
+    let x = match side with In -> 0.0 | Out -> boxWidthOf g p.box
     row |> Option.map (fun r -> x, headerHeight + float r * rowHeight + rowHeight / 2.0)
 
 /// A pin's centre in world coordinates.
@@ -79,8 +90,10 @@ let pinCentre (g: Graph) (p: PinRef) (side: Side) : (float * float) option =
     | Some(bx, by), Some(dx, dy) -> Some(bx + dx, by + dy)
     | _ -> None
 
-/// Boxes in the order a chain reads: input, the design's boxes, output.
-let boxOrder (g: Graph) = "input" :: (g.boxes |> List.map (fun b -> b.name)) @ [ "output" ]
+/// Boxes in the order a chain reads: input, the design's boxes, output, and
+/// the control boxes beside them.
+let boxOrder (g: Graph) =
+    "input" :: (g.boxes |> List.map (fun b -> b.name)) @ [ "output" ] @ (g.controlBoxes |> List.map (fun c -> c.name))
 
 /// A position for every box that has none: one column per box, left to
 /// right. A graph written in F# arrives with none; a saved one with all.
@@ -160,7 +173,7 @@ let hitTest (g: Graph) (wx: float, wy: float) : Hit =
         |> List.rev
         |> List.tryFind (fun box ->
             match Map.tryFind box g.positions with
-            | Some(bx, by) -> wx >= bx && wx <= bx + boxWidth && wy >= by && wy <= by + boxHeight g box
+            | Some(bx, by) -> wx >= bx && wx <= bx + boxWidthOf g box && wy >= by && wy <= by + boxHeight g box
             | None -> false)
         |> Option.map HitBox
         |> Option.defaultValue HitNothing
@@ -199,10 +212,20 @@ let private boxView (g: Graph) (selected: Selection option) (name: string) (bx: 
     let isBoundary = name = "input" || name = "output"
     let isSelected = selected = Some(SelectedBox name)
 
+    let width = boxWidthOf g name
+
     let title, subtitle =
-        match name with
-        | "input" -> "input", $"%d{g.streams} stream(s), %d{g.controls.Length} control(s)"
-        | "output" -> "output", ""
+        match name, controlBoxOf g name with
+        | "input", _ -> "input", $"%d{g.streams} stream(s), %d{g.controls.Length} control(s)"
+        | "output", _ -> "output", ""
+        | _, Some c ->
+            let kind =
+                match c.kind, c.format.totalWidth with
+                | NumberBox, 1 -> "toggle"
+                | NumberBox, _ -> "number"
+                | ConstantBox, _ -> "constant"
+
+            name, $"{kind} {c.value}"
         | _ ->
             let b = g.boxes |> List.find (fun b -> b.name = name)
             let u = unitOf g b
@@ -224,7 +247,7 @@ let private boxView (g: Graph) (selected: Selection option) (name: string) (bx: 
         Border.create
             [ Canvas.left bx
               Canvas.top by
-              Border.width boxWidth
+              Border.width width
               Border.height (boxHeight g name)
               Border.background (if isBoundary then boundaryFill :> IBrush else boxFill :> IBrush)
               Border.borderBrush (if isSelected then selectedStroke :> IBrush else boxStroke :> IBrush)
@@ -247,7 +270,7 @@ let private boxView (g: Graph) (selected: Selection option) (name: string) (bx: 
         [ for side in [ In; Out ] do
               for row, r in List.indexed (pinRows g name side) do
                   let isInput = side = In
-                  let px = bx + (if isInput then 0.0 else boxWidth)
+                  let px = bx + (if isInput then 0.0 else width)
                   let py = by + headerHeight + float row * rowHeight + rowHeight / 2.0
 
                   // A signal pin is a circle; a control pin a square, as a
@@ -277,12 +300,20 @@ let private boxView (g: Graph) (selected: Selection option) (name: string) (bx: 
                                 Ellipse.isHitTestVisible false ]
                           :> Types.IView
 
-                  // The pin's name, inside the box beside it.
+                  // The pin's name, inside the box beside it — and for a
+                  // control inlet nobody wired, the value it holds.
+                  let text =
+                      match g.boxes |> List.tryFind (fun b -> b.name = name) with
+                      | Some b when r.control && isInput && not (g.edges |> List.exists (fun e -> e.``to`` = pin name r.pin)) ->
+                          let held = b.settings |> Map.tryFind r.pin |> Option.defaultValue "0"
+                          $"{r.pin} = {held}"
+                      | _ -> r.pin
+
                   yield
                       TextBlock.create
-                          [ Canvas.left (if isInput then px + pinRadius + 4.0 else px - pinRadius - 4.0 - 7.0 * float r.pin.Length)
+                          [ Canvas.left (if isInput then px + pinRadius + 4.0 else px - pinRadius - 4.0 - 7.0 * float text.Length)
                             Canvas.top (py - 7.0)
-                            TextBlock.text r.pin
+                            TextBlock.text text
                             TextBlock.fontSize 11.0
                             TextBlock.fontStyle (if r.control then FontStyle.Italic else FontStyle.Normal)
                             TextBlock.foreground Brushes.DimGray
@@ -376,8 +407,10 @@ let private label (text: string) =
     TextBlock.create [ TextBlock.text text; TextBlock.verticalAlignment Layout.VerticalAlignment.Center; TextBlock.margin (Thickness(4.0, 0.0)) ]
     :> Types.IView
 
-/// A one-line entry: its text is state, Enter commits it.
-let private entry (width: float) (text: string) (onChanged: string -> unit) (onEnter: unit -> unit) =
+/// A one-line entry: its text is state, Enter commits it. The handler gets
+/// the box's text as it is at that keystroke rather than the state's, since
+/// a re-render is scheduled and a fast Enter can land before it.
+let private entry (width: float) (text: string) (onChanged: string -> unit) (onEnter: string -> unit) =
     TextBox.create
         [ TextBox.width width
           TextBox.text text
@@ -386,7 +419,10 @@ let private entry (width: float) (text: string) (onChanged: string -> unit) (onE
               (fun e ->
                   if e.Key = Key.Enter then
                       e.Handled <- true
-                      onEnter ()),
+
+                      match e.Source with
+                      | :? TextBox as t -> onEnter (if isNull t.Text then "" else t.Text)
+                      | _ -> ()),
               SubPatchOptions.Always
           ) ]
     :> Types.IView
@@ -510,6 +546,24 @@ let view (opening: Opening) : Control =
                     message.Set "the design changed — Open in sim runs it again"
                 else
                     message.Set ""
+
+                true
+            | _, Some why ->
+                message.Set $"refused: {why}"
+                false
+
+        // A value — a setting, a number box — is not a new design: the port
+        // exists either way, so the session keeps running and is poked.
+        let changeValue (what: Graph -> Result<Graph, string>) (poke: (string * uint64) option) : bool =
+            match apply what history.Current with
+            | h, None ->
+                history.Set h
+
+                match live, poke with
+                | Some l, Some(name, v) ->
+                    l.session.Poke(name, System.Numerics.BigInteger v)
+                    message.Set $"{name} = %d{v}"
+                | _ -> message.Set ""
 
                 true
             | _, Some why ->
@@ -828,6 +882,21 @@ let view (opening: Opening) : Control =
                                     Button.margin (Thickness(2.0, 1.0))
                                     Button.onClick ((fun _ -> placeBox name (somewhereVisible ())), SubPatchOptions.Always) ]
                               :> Types.IView ]
+                      @ [ TextBlock.create [ TextBlock.text "controls"; TextBlock.fontWeight FontWeight.Bold; TextBlock.margin (Thickness(4.0, 8.0, 4.0, 2.0)) ] :> Types.IView ]
+                      @ [ for label, kind, format, value in [ "number", NumberBox, uint 16, "0"; "toggle", NumberBox, uint 1, "0"; "constant", ConstantBox, uint 16, "0" ] ->
+                              Button.create
+                                  [ Button.content label
+                                    Button.horizontalAlignment Layout.HorizontalAlignment.Stretch
+                                    Button.margin (Thickness(2.0, 1.0))
+                                    Button.onClick (
+                                        (fun _ ->
+                                            let mutable placed = None
+
+                                            if change (addControlBox kind format value (somewhereVisible ()) >> Result.map (fun (g, n) -> placed <- Some n; g)) then
+                                                placed |> Option.iter (fun n -> select (Some(SelectedBox n)); message.Set $"added {n}")),
+                                        SubPatchOptions.Always
+                                    ) ]
+                              :> Types.IView ]
                   ) ]
             :> Types.IView
 
@@ -889,7 +958,7 @@ let view (opening: Opening) : Control =
                                     message.Set $"saved {filePath.Current}"
                                 with e ->
                                     message.Set $"could not save: {e.Message}")
-                        entry 260.0 filePath.Current filePath.Set ignore
+                        entry 260.0 filePath.Current filePath.Set (fun _ -> ())
                         button "Undo" undoLast
                         button "Redo" redoLast
                         button "Delete" deleteSelection
@@ -1098,16 +1167,16 @@ let view (opening: Opening) : Control =
                     [ StackPanel.orientation Layout.Orientation.Horizontal
                       StackPanel.children
                           [ label "name"
-                            entry 110.0 pinName.Current pinName.Set ignore
+                            entry 110.0 pinName.Current pinName.Set (fun _ -> ())
                             label "width"
-                            entry 44.0 pinWidth.Current pinWidth.Set ignore ] ]
+                            entry 44.0 pinWidth.Current pinWidth.Set (fun _ -> ()) ] ]
                 :> Types.IView
                 StackPanel.create
                     [ StackPanel.orientation Layout.Orientation.Horizontal
                       StackPanel.margin (Thickness(0.0, 4.0))
                       StackPanel.children
                           [ label "fraction"
-                            entry 44.0 pinFraction.Current pinFraction.Set ignore
+                            entry 44.0 pinFraction.Current pinFraction.Set (fun _ -> ())
                             CheckBox.create
                                 [ CheckBox.content "signed"
                                   CheckBox.isChecked pinSigned.Current
@@ -1158,9 +1227,9 @@ let view (opening: Opening) : Control =
                                   TextBlock.fontFamily mono
                                   TextBlock.fontSize 12.0
                                   TextBlock.verticalAlignment Layout.VerticalAlignment.Center ]
-                            entry 150.0 text (fun t -> argumentText.Set(argumentText.Current |> Map.add p.name t)) (fun () ->
-                                if change (setArgument name p.name text) then
-                                    message.Set $"{name}: {p.name} = {text}")
+                            entry 150.0 text (fun t -> argumentText.Set(argumentText.Current |> Map.add p.name t)) (fun typed ->
+                                if change (setArgument name p.name typed) then
+                                    message.Set $"{name}: {p.name} = {typed}")
                             TextBlock.create
                                 [ TextBlock.text $"{p.about} ({kind})"
                                   TextBlock.fontSize 10.0
@@ -1176,33 +1245,58 @@ let view (opening: Opening) : Control =
                 | Sequential _ -> "sequential"
                 | Combinational _ -> "combinational"
 
+            // A wired inlet says where from; an unwired one holds a value,
+            // typed here — poked live when the design is running.
             let controlRow (n: string, f: NumberFormat) =
-                let from =
-                    g.edges
-                    |> List.tryFind (fun e -> e.``to`` = pin name n)
-                    |> Option.map (fun e -> $"from {showPin e.from}")
-                    |> Option.defaultValue "unwired"
+                match g.edges |> List.tryFind (fun e -> e.``to`` = pin name n) with
+                | Some e -> row (n, $"{describeFormat f}  from {showPin e.from}")
+                | None ->
+                    let key = $"setting:{n}"
+                    let text = argumentText.Current |> Map.tryFind key |> Option.defaultValue (b.settings |> Map.tryFind n |> Option.defaultValue "0")
 
-                row (n, $"{describeFormat f}  {from}")
+                    StackPanel.create
+                        [ StackPanel.orientation Layout.Orientation.Horizontal
+                          StackPanel.margin (Thickness(0.0, 2.0))
+                          StackPanel.children
+                              [ TextBlock.create
+                                    [ TextBlock.text n
+                                      TextBlock.width 80.0
+                                      TextBlock.fontFamily mono
+                                      TextBlock.fontSize 12.0
+                                      TextBlock.verticalAlignment Layout.VerticalAlignment.Center ]
+                                entry 100.0 text (fun t -> argumentText.Set(argumentText.Current |> Map.add key t)) (fun typed ->
+                                    let bits =
+                                        match System.UInt64.TryParse typed with
+                                        | true, v -> Some(implicitPortName name n, v)
+                                        | _ -> None
+
+                                    changeValue (setSetting name n typed) bits |> ignore)
+                                TextBlock.create
+                                    [ TextBlock.text $"{describeFormat f}, unwired"
+                                      TextBlock.fontSize 10.0
+                                      TextBlock.foreground Brushes.Gray
+                                      TextBlock.margin (Thickness(6.0, 0.0, 0.0, 0.0))
+                                      TextBlock.verticalAlignment Layout.VerticalAlignment.Center ] ] ]
+                    :> Types.IView
 
             [ StackPanel.create
                   [ StackPanel.orientation Layout.Orientation.Horizontal
                     StackPanel.children
                         [ label "name"
-                          entry 120.0 nameText.Current nameText.Set (fun () ->
-                              if change (renameBox name nameText.Current) then
-                                  select (Some(SelectedBox nameText.Current))
-                                  message.Set $"renamed {name} to {nameText.Current}") ] ]
+                          entry 120.0 nameText.Current nameText.Set (fun typed ->
+                              if change (renameBox name typed) then
+                                  select (Some(SelectedBox typed))
+                                  message.Set $"renamed {name} to {typed}") ] ]
               :> Types.IView
               StackPanel.create
                   [ StackPanel.orientation Layout.Orientation.Horizontal
                     StackPanel.margin (Thickness(0.0, 4.0))
                     StackPanel.children
                         [ label "copies"
-                          entry 50.0 copiesText.Current copiesText.Set (fun () ->
-                              match System.Int32.TryParse copiesText.Current with
+                          entry 50.0 copiesText.Current copiesText.Set (fun typed ->
+                              match System.Int32.TryParse typed with
                               | true, n -> if change (setCopies name n) then message.Set $"{name}: %d{n} copies"
-                              | _ -> message.Set $"refused: copies is a number, not '{copiesText.Current}'") ] ]
+                              | _ -> message.Set $"refused: copies is a number, not '{typed}'") ] ]
               :> Types.IView
               row ("unit", $"{b.unit}, {lawText}") ]
             @ (if factory.parameters.IsEmpty then [] else heading "creation arguments" :: (factory.parameters |> List.map argumentRow))
@@ -1213,10 +1307,62 @@ let view (opening: Opening) : Control =
             @ [ heading "control inlets" ]
             @ (u.controls |> List.map controlRow)
 
+        let controlBoxRows (c: ControlBox) =
+            let kindText =
+                match c.kind, c.format.totalWidth with
+                | NumberBox, 1 -> "toggle: a one-bit number box, a port of the design"
+                | NumberBox, _ -> "number box: a port of the design, poked live"
+                | ConstantBox, _ -> "constant: a literal in the design"
+
+            let text = argumentText.Current |> Map.tryFind "value" |> Option.defaultValue c.value
+
+            let commit (typed: string) =
+                match c.kind, System.UInt64.TryParse typed with
+                | NumberBox, (true, v) -> changeValue (setControlValue c.name typed) (Some(c.name, v)) |> ignore
+                | NumberBox, _ -> changeValue (setControlValue c.name typed) None |> ignore
+                | ConstantBox, _ -> if change (setControlValue c.name typed) then message.Set $"{c.name} = {typed}"
+
+            [ StackPanel.create
+                  [ StackPanel.orientation Layout.Orientation.Horizontal
+                    StackPanel.children
+                        [ label "name"
+                          entry 120.0 nameText.Current nameText.Set (fun typed ->
+                              if change (renameBox c.name typed) then
+                                  select (Some(SelectedBox typed))
+                                  message.Set $"renamed {c.name} to {typed}") ] ]
+              :> Types.IView
+              row ("kind", kindText)
+              row ("format", describeFormat c.format)
+              StackPanel.create
+                  [ StackPanel.orientation Layout.Orientation.Horizontal
+                    StackPanel.margin (Thickness(0.0, 4.0))
+                    StackPanel.children
+                        (if c.kind = NumberBox && c.format.totalWidth = 1 then
+                             [ label "on"
+                               CheckBox.create
+                                   [ CheckBox.isChecked (c.value = "1")
+                                     CheckBox.onIsCheckedChanged (
+                                         (fun e ->
+                                             match e.Source with
+                                             | :? Avalonia.Controls.Primitives.ToggleButton as t ->
+                                                 let v = if t.IsChecked.GetValueOrDefault() then 1UL else 0UL
+
+                                                 if string v <> c.value then
+                                                     changeValue (setControlValue c.name (string v)) (Some(c.name, v)) |> ignore
+                                             | _ -> ()),
+                                         SubPatchOptions.Always
+                                     ) ] ]
+                         else
+                             [ label "value"
+                               entry 100.0 text (fun t -> argumentText.Set(argumentText.Current |> Map.add "value" t)) commit ]) ]
+              :> Types.IView
+              row ("outlet", $"{controlOutlet}: {describeFormat c.format}") ]
+
         let propertyPanel =
             let title, rows =
                 match selection.Current with
                 | Some(SelectedBox("input" | "output" as box)) -> box, boundaryRows box @ liveRows box
+                | Some(SelectedBox box) when (controlBoxOf g box).IsSome -> box, controlBoxRows (controlBoxOf g box).Value
                 | Some(SelectedBox box) -> box, boxRows box @ liveRows box
                 | Some(SelectedWire e) ->
                     "wire",
@@ -1230,21 +1376,21 @@ let view (opening: Opening) : Control =
                           [ StackPanel.orientation Layout.Orientation.Horizontal
                             StackPanel.children
                                 [ label "name"
-                                  entry 160.0 designName.Current designName.Set (fun () ->
-                                      if change (rename designName.Current) then
-                                          message.Set $"the design is {designName.Current}") ] ]
+                                  entry 160.0 designName.Current designName.Set (fun typed ->
+                                      if change (rename typed) then
+                                          message.Set $"the design is {typed}") ] ]
                       :> Types.IView
                       StackPanel.create
                           [ StackPanel.orientation Layout.Orientation.Horizontal
                             StackPanel.margin (Thickness(0.0, 4.0))
                             StackPanel.children
                                 [ label "sample rate"
-                                  entry 100.0 rateText.Current rateText.Set (fun () ->
-                                      match System.Double.TryParse(rateText.Current, System.Globalization.NumberStyles.Float, CultureInfo.InvariantCulture) with
+                                  entry 100.0 rateText.Current rateText.Set (fun typed ->
+                                      match System.Double.TryParse(typed, System.Globalization.NumberStyles.Float, CultureInfo.InvariantCulture) with
                                       | true, rate ->
                                           if change (setSampleRate rate) then
                                               message.Set $"the design is made for %g{rate} Hz"
-                                      | _ -> message.Set $"refused: '{rateText.Current}' is not a rate")
+                                      | _ -> message.Set $"refused: '{typed}' is not a rate")
                                   label "Hz" ] ]
                       :> Types.IView
                       row ("streams", string g.streams)

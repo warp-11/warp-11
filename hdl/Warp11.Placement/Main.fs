@@ -68,4 +68,6 @@ let main argv =
     run "UD6 edits build the gain design" editsBuildTheGainDesign
     run "UD7 a saved design opens as it was" savedDesignOpensAsItWas
     run "UD8 arguments make the unit" argumentsMakeTheUnit
+    run "UD9 the pedal units do what they say" pedalUnitsDoWhatTheySay
+    run "UD10 controls hold values, boxes share them" controlsHoldValues
     0

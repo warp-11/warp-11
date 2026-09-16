@@ -13,6 +13,7 @@ module Warp11.Placement.Devices
 open Warp11
 open Warp11.Placement.Fu
 open Warp11.Placement.Graph
+open Warp11.Placement.Edit
 open Warp11.Placement.Elaborate
 
 /// The simulator's answer to a stereo boundary: a recording in, control
@@ -49,13 +50,26 @@ let private check (g: Graph) (m: SimMapping) =
         if pins <> stereo then
             failwith $"{g.name}: a WAV device needs the {side} box to be [{describePins stereo}], and it is [{describePins pins}]"
 
-    for name, _ in m.controls do
-        if not (g.controls |> List.exists (fun (n, _) -> n = name)) then
-            failwith $"{g.name}: no control called '{name}' — it has [{describePins g.controls}]"
+    let ports = controlPorts g
 
+    for name, _ in m.controls do
+        if not (ports |> List.exists (fun (n, _) -> n = name)) then
+            failwith $"{g.name}: no control called '{name}' — it has [{describePins ports}]"
+
+    // The design's own controls come from outside, so the mapping must say;
+    // a number box and an unwired inlet hold their own values.
     for name, _ in g.controls do
         if not (m.controls |> List.exists (fun (n, _) -> n = name)) then
             failwith $"{g.name}: the mapping gives no value for control '{name}'"
+
+/// What the design's own control ports start at: each number box's value
+/// and each unwired inlet's setting. The design's own controls are the
+/// mapping's to give.
+let startingValues (g: Graph) : (string * uint64) list =
+    [ for c in g.controlBoxes do
+          if c.kind = NumberBox then
+              yield c.name, controlValueBits c
+      for b, n, f in implicitControls g -> implicitPortName b.name n, settingBits b (n, f) ]
 
 /// Play the mapping's recording through the graph's design in the simulator
 /// and return what the output box heard. `idleLimit` bounds the wait for a
@@ -65,7 +79,7 @@ let runInSim (idleLimit: int) (g: Graph) (m: SimMapping) : WavData =
     let design = elaborate g
     let sim = Sim design.def
 
-    for name, value in m.controls do
+    for name, value in startingValues g @ m.controls do
         sim.Poke(name, value)
 
     let heard =

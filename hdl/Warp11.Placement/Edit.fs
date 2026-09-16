@@ -23,7 +23,8 @@ let private checkName (what: string) (name: string) : Result<unit, string> =
     else
         Ok()
 
-let private hasBox (g: Graph) (name: string) = g.boxes |> List.exists (fun b -> b.name = name)
+let private hasBox (g: Graph) (name: string) =
+    g.boxes |> List.exists (fun b -> b.name = name) || (controlBoxOf g name).IsSome
 
 /// The name a new box of `unit` gets: the unit's own name when it is free,
 /// else the unit's name and the first free number from 2.
@@ -44,7 +45,7 @@ let addBox (unit: string) (at: Position) (g: Graph) : Result<Graph * string, str
 
         Ok(
             { g with
-                boxes = g.boxes @ [ { name = name; unit = unit; copies = 1; arguments = defaults factory } ]
+                boxes = g.boxes @ [ { name = name; unit = unit; copies = 1; arguments = defaults factory; settings = Map.empty } ]
                 positions = g.positions |> Map.add name at },
             name
         )
@@ -87,7 +88,7 @@ let setSampleRate (rate: float) (g: Graph) : Result<Graph, string> =
         |> List.fold (fun acc b -> acc |> Result.bind (fun () -> checkBox rate b)) (Ok())
         |> Result.map (fun () -> { g with sampleRate = rate })
 
-/// A box and every wire on it.
+/// A box — a unit's or a control's — and every wire on it.
 let removeBox (name: string) (g: Graph) : Result<Graph, string> =
     if not (hasBox g name) then
         Error $"no box called '{name}'"
@@ -95,6 +96,7 @@ let removeBox (name: string) (g: Graph) : Result<Graph, string> =
         Ok
             { g with
                 boxes = g.boxes |> List.filter (fun b -> b.name <> name)
+                controlBoxes = g.controlBoxes |> List.filter (fun c -> c.name <> name)
                 edges = g.edges |> List.filter (fun e -> e.from.box <> name && e.``to``.box <> name)
                 positions = g.positions |> Map.remove name }
 
@@ -113,6 +115,7 @@ let renameBox (name: string) (newName: string) (g: Graph) : Result<Graph, string
 
             { g with
                 boxes = g.boxes |> List.map (fun b -> if b.name = name then { b with name = newName } else b)
+                controlBoxes = g.controlBoxes |> List.map (fun c -> if c.name = name then { c with name = newName } else c)
                 edges = g.edges |> List.map (fun e -> { from = follow e.from; ``to`` = follow e.``to`` })
                 positions =
                     match g.positions |> Map.tryFind name with
@@ -132,12 +135,12 @@ let setCopies (name: string) (n: int) (g: Graph) : Result<Graph, string> =
     else
         Ok { g with boxes = g.boxes |> List.map (fun b -> if b.name = name then { b with copies = n } else b) }
 
-/// A second box of the same unit with the same copies, unwired — every
-/// input takes exactly one wire, so the copy starts with none.
+/// A second box of the same unit with the same copies, arguments and
+/// settings, unwired — every input takes exactly one wire, so the copy
+/// starts with none. A control box copies with its value.
 let duplicateBox (name: string) (at: Position) (g: Graph) : Result<Graph * string, string> =
-    match g.boxes |> List.tryFind (fun b -> b.name = name) with
-    | None -> Error $"no box called '{name}'"
-    | Some b ->
+    match g.boxes |> List.tryFind (fun b -> b.name = name), controlBoxOf g name with
+    | Some b, _ ->
         let copyName = freshBoxName g b.unit
 
         Ok(
@@ -146,6 +149,75 @@ let duplicateBox (name: string) (at: Position) (g: Graph) : Result<Graph * strin
                 positions = g.positions |> Map.add copyName at },
             copyName
         )
+    | None, Some c ->
+        let stem = (match c.kind with NumberBox -> "number" | ConstantBox -> "constant")
+        let copyName = freshBoxName g stem
+
+        Ok(
+            { g with
+                controlBoxes = g.controlBoxes @ [ { c with name = copyName } ]
+                positions = g.positions |> Map.add copyName at },
+            copyName
+        )
+    | None, None -> Error $"no box called '{name}'"
+
+/// A value as a control's bits: a whole number that fits the format.
+let private controlBits (what: string) (f: NumberFormat) (text: string) : Result<uint64, string> =
+    match System.UInt64.TryParse text with
+    | true, v when f.totalWidth >= 64 || v < (1UL <<< f.totalWidth) -> Ok v
+    | true, v -> Error $"{what}: %d{v} does not fit %d{f.totalWidth} bits"
+    | _ -> Error $"{what}: '{text}' is not a whole number"
+
+/// The value a box's unwired control inlet holds. Checked against the
+/// inlet's format; a wired inlet takes its value from the wire, not here.
+let setSetting (name: string) (inlet: string) (value: string) (g: Graph) : Result<Graph, string> =
+    match g.boxes |> List.tryFind (fun b -> b.name = name) with
+    | None -> Error $"no box called '{name}'"
+    | Some b ->
+        match controlsOf g name |> List.tryFind (fun (n, _) -> n = inlet) with
+        | None -> Error $"{name}: no control inlet called '{inlet}'"
+        | Some(_, f) ->
+            controlBits (showPin (pin name inlet)) f value
+            |> Result.map (fun _ ->
+                { g with boxes = g.boxes |> List.map (fun x -> if x.name = name then { b with settings = b.settings |> Map.add inlet value } else x) })
+
+/// The setting's value as bits, or the format's zero when nothing was typed.
+let settingBits (b: Box) (inlet: string, f: NumberFormat) : uint64 =
+    match b.settings |> Map.tryFind inlet |> Option.map (controlBits inlet f) with
+    | Some(Ok v) -> v
+    | _ -> 0UL
+
+/// A control box: a number box, a toggle (a one-bit number box) or a
+/// constant, of a format, starting at a value.
+let addControlBox (kind: ControlKind) (format: NumberFormat) (value: string) (at: Position) (g: Graph) : Result<Graph * string, string> =
+    let stem =
+        match kind, format.totalWidth with
+        | NumberBox, 1 -> "toggle"
+        | NumberBox, _ -> "number"
+        | ConstantBox, _ -> "constant"
+
+    let name = freshBoxName g stem
+
+    controlBits name format value
+    |> Result.map (fun _ ->
+        { g with
+            controlBoxes = g.controlBoxes @ [ { name = name; kind = kind; format = format; value = value } ]
+            positions = g.positions |> Map.add name at },
+        name)
+
+/// A control box's value. For a number box this is where the port starts;
+/// for a constant it is the design.
+let setControlValue (name: string) (value: string) (g: Graph) : Result<Graph, string> =
+    match controlBoxOf g name with
+    | None -> Error $"no control box called '{name}'"
+    | Some c ->
+        controlBits name c.format value
+        |> Result.map (fun _ -> { g with controlBoxes = g.controlBoxes |> List.map (fun x -> if x.name = name then { c with value = value } else x) })
+
+let controlValueBits (c: ControlBox) : uint64 =
+    match controlBits c.name c.format c.value with
+    | Ok v -> v
+    | Error _ -> 0UL
 
 /// A wire between two pins, either end first: the edge always runs from
 /// the output to the input. Refused, naming the pin, when the ends are the

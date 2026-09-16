@@ -6,6 +6,7 @@ open Warp11
 open Warp11.Placement.Fu
 open Warp11.Placement.Units
 open Warp11.Placement.Placement
+open Warp11.Placement.Pedal
 open Warp11.Placement.Factories
 open Warp11.Placement.Graph
 open Warp11.Placement.Edit
@@ -391,3 +392,180 @@ let argumentsMakeTheUnit () : bool =
             false
         with e ->
             e.Message.Contains "48000" && e.Message.Contains "44100")
+
+// ---------------------------------------------------------------------------
+// UD9 — The pedal units, each on its defining property, through a graph and
+// the simulator's mapping. A mixer fed the same tone twice at unity doubles
+// it; a waveshaper at unity drive lifts a quarter-scale tone by the cubic's
+// 1.5 − 0.5x², and at sixteen times drive squares it to full scale; a tremolo
+// at full depth swings a tone between its level and silence; an all-pass is
+// flat, so a tone leaves at the level it entered, where a comb would not.
+
+// CHECK
+let pedalUnitsDoWhatTheySay () : bool =
+    let rate = int defaultSampleRate
+    let stereo = [ "left", sint sampleWidth; "right", sint sampleWidth ]
+
+    let chain (name: string) (unit: string) (controls: (string * NumberFormat) list) (extraEdges: Edge list) (boxEdges: Edge list) : Graph =
+        { emptyGraph name defaultSampleRate with
+            inputs = stereo
+            controls = controls
+            outputs = stereo
+            boxes = [ { name = "u"; unit = unit; copies = 1; arguments = Map.empty; settings = Map.empty } ]
+            edges =
+                boxEdges
+                @ [ for n, _ in controls -> { from = pin "input" n; ``to`` = pin "u" n } ]
+                @ [ { from = pin "u" "left"; ``to`` = pin "output" "left" }; { from = pin "u" "right"; ``to`` = pin "output" "right" } ]
+                @ extraEdges }
+
+    let straight = [ { from = pin "input" "left"; ``to`` = pin "u" "left" }; { from = pin "input" "right"; ``to`` = pin "u" "right" } ]
+
+    let tone = toneWav rate 4000 1000.0 0.25
+    let peak (samples: int16[]) = samples |> Array.map (fun s -> abs (int s)) |> Array.max
+    let inPeak = peak tone.samples
+
+    let heard (g: Graph) (values: (string * uint64) list) =
+        (runInSim 100_000 g { source = tone; controls = values; outputPath = None }).samples
+
+    // The same tone into both inputs, both gains unity: twice the level.
+    let mixed =
+        heard
+            (chain
+                "MixTwice"
+                "mixer"
+                [ "a_gain", uint 16; "b_gain", uint 16 ]
+                []
+                [ { from = pin "input" "left"; ``to`` = pin "u" "a_left" }
+                  { from = pin "input" "right"; ``to`` = pin "u" "a_right" }
+                  { from = pin "input" "left"; ``to`` = pin "u" "b_left" }
+                  { from = pin "input" "right"; ``to`` = pin "u" "b_right" } ])
+            [ "a_gain", gainUnity; "b_gain", gainUnity ]
+
+    let shaper = chain "Shape" "waveshaper" [ "drive", uint 16 ] [] straight
+    let shapedClean = heard shaper [ "drive", gainUnity ]
+    let shapedHard = heard shaper [ "drive", 16UL * gainUnity ]
+    // 1.5x − 0.5x³ at x = 0.25 is 0.3672, i.e. 1.469 times the input.
+    let cubic = 1.5 * 0.25 - 0.5 * 0.25 ** 3.0
+
+    // Full depth, one sweep over the 4000-frame tone: the loudest tenth is the
+    // tone and the quietest is near silence.
+    let trem =
+        heard
+            (chain "Trem" "tremolo" [ "rate", uint tremoloPhaseWidth; "depth", uint 16 ] [] straight)
+            [ "rate", uint64 ((1 <<< tremoloPhaseWidth) / 4000); "depth", gainUnity ]
+
+    let tenth (samples: int16[]) (i: int) =
+        let n = samples.Length / 10
+        peak samples[i * n .. (i + 1) * n - 1]
+
+    let tremTenths = [ for i in 0..9 -> tenth trem i ]
+
+    // An all-pass at 0.7 over a 100-frame tap: once settled, the tone is at
+    // its own level, within a few percent.
+    let passed =
+        heard
+            (chain "AllPass" "allpass" [ "delay", uint 12; "gain", uint 16 ] [] straight)
+            [ "delay", 100UL; "gain", 179UL ]
+
+    let settled = tenth passed 9
+
+    peak mixed = 2 * inPeak
+    && abs (float (peak shapedClean) - cubic * 4.0 * float inPeak) < 0.02 * float inPeak
+    && peak shapedHard > 32_000
+    && List.max tremTenths > inPeak * 9 / 10
+    && List.min tremTenths < inPeak / 5
+    && abs (settled - inPeak) < inPeak / 20
+
+// ---------------------------------------------------------------------------
+// UD10 — A control inlet nobody wired holds its setting and gets a port of
+// its own, `{box}_{pin}`; a number box is one port driving as many inlets
+// as are wired to it; a constant is a literal and no port at all. The gain
+// design with nothing wired to its controls elaborates, plays at the
+// setting's level, and its ports are named after the box and the pin. Two
+// gains on one number box are one `vol` port; a constant `mute` leaves no
+// port in the Verilog. The file carries settings and control boxes, and a
+// value that does not fit is refused naming the pin.
+
+// CHECK
+let controlsHoldValues () : bool =
+    let stereo = [ "left", sint sampleWidth; "right", sint sampleWidth ]
+
+    let step (change: Graph -> Result<Graph, string>) (h: History) =
+        match apply change h with
+        | h, None -> h
+        | _, Some why -> failwith why
+
+    let wire (a: PinRef) (b: PinRef) = addWire (a, Out) (b, In)
+
+    // The gain design with its controls unwired: two implicit ports.
+    let unwired =
+        { gainGraph with
+            name = "GainUnwired"
+            controls = []
+            edges = gainGraph.edges |> List.filter (fun e -> e.from.box <> "input" || (e.from.pin <> "volume" && e.from.pin <> "mute")) }
+
+    let doubled =
+        (history unwired |> step (setSetting "gain" "volume" (string (2UL * gainUnity)))).present
+
+    let tone = toneWav (int defaultSampleRate) 200 440.0 0.25
+    let heard = runInSim 10_000 doubled { source = tone; controls = []; outputPath = None }
+    let verilog = emitDesign (elaborate doubled).def
+
+    // Two gains on one number box, muted by a constant.
+    let shared =
+        (history { unwired with name = "Shared" }
+         |> step (addBox "gain" (0.0, 0.0) >> Result.map fst)
+         |> step (removeWire { from = pin "gain" "left"; ``to`` = pin "output" "left" } >> Ok)
+         |> step (removeWire { from = pin "gain" "right"; ``to`` = pin "output" "right" } >> Ok)
+         |> step (wire (pin "gain" "left") (pin "gain2" "left"))
+         |> step (wire (pin "gain" "right") (pin "gain2" "right"))
+         |> step (wire (pin "gain2" "left") (pin "output" "left"))
+         |> step (wire (pin "gain2" "right") (pin "output" "right"))
+         |> step (addControlBox NumberBox (uint 16) (string gainUnity) (0.0, 0.0) >> Result.map fst)
+         |> step (renameBox "number" "vol")
+         |> step (addControlBox ConstantBox (uint 1) "0" (0.0, 0.0) >> Result.map fst)
+         |> step (wire (pin "vol" controlOutlet) (pin "gain" "volume"))
+         |> step (wire (pin "vol" controlOutlet) (pin "gain2" "volume"))
+         |> step (wire (pin "constant" controlOutlet) (pin "gain" "mute"))
+         |> step (wire (pin "constant" controlOutlet) (pin "gain2" "mute")))
+            .present
+
+    // The top module's own header: the units' modules have `volume` and
+    // `mute` ports of their own, which is not what is being asked.
+    let header (verilog: string) (name: string) =
+        verilog.Split '\n' |> Array.find (fun l -> l.StartsWith $"module {name} ")
+
+    let sharedVerilog = header (emitDesign (elaborate shared).def) "Shared"
+    // The number box at half: two gains at half is a quarter.
+    let quartered = runInSim 10_000 shared { source = tone; controls = [ "vol", gainUnity / 2UL ]; outputPath = None }
+
+    let reopened =
+        match DesignFile.parse (DesignFile.write shared) with
+        | Ok g -> g
+        | Error why -> failwith why
+
+    let refuses (change: Graph -> Result<Graph, string>) (names: string list) =
+        match change shared with
+        | Ok _ -> false
+        | Error why -> names |> List.forall (fun n -> why.Contains n)
+
+    // Two halvings, then the WAV's 16-bit rounding: within one of a quarter.
+    let quarter (s: int16) = float s / 4.0
+
+    heard.samples = (tone.samples |> Array.map (fun s -> s * 2s))
+    && (header verilog "GainUnwired").Contains "input [15:0] gain_volume, input gain_mute"
+    && (controlPorts doubled |> List.map fst) = [ "gain_volume"; "gain_mute" ]
+    && (controlPorts shared |> List.map fst) = [ "vol" ]
+    && sharedVerilog.Contains "input [15:0] vol"
+    && not (sharedVerilog.Contains "gain_volume")
+    && not (sharedVerilog.Contains "mute")
+    && Array.forall2 (fun (q: int16) (s: int16) -> abs (float q - quarter s) <= 1.0) quartered.samples tone.samples
+    && reopened = shared
+    // a setting that does not fit the inlet
+    && refuses (setSetting "gain" "volume" "70000") [ "gain.volume"; "70000"; "16" ]
+    // a setting on a pin that is not a control inlet
+    && refuses (setSetting "gain" "left" "1") [ "gain"; "left" ]
+    // a control box into a signal inlet
+    && refuses (addWire (pin "vol" controlOutlet, Out) (pin "gain2" "left", In)) [ "vol.out"; "control"; "gain2.left"; "signal" ]
+    // a control box has no inlets
+    && refuses (addWire (pin "input" "left", Out) (pin "vol" "in", In)) [ "vol.in"; "no inlets" ]

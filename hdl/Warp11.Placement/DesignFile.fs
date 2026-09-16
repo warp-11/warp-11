@@ -57,6 +57,21 @@ let write (g: Graph) : string =
                        arguments[k] <- JsonValue.Create v
 
                    o["arguments"] <- arguments
+                   let settings = JsonObject()
+
+                   for KeyValue(k, v) in b.settings do
+                       settings[k] <- JsonValue.Create v
+
+                   o["settings"] <- settings
+                   o :> JsonNode |]
+        )
+
+    root["controlBoxes"] <-
+        JsonArray(
+            [| for c in g.controlBoxes ->
+                   let o = formatNode (c.name, c.format) :?> JsonObject
+                   o["kind"] <- JsonValue.Create(match c.kind with NumberBox -> "number" | ConstantBox -> "constant")
+                   o["value"] <- JsonValue.Create c.value
                    o :> JsonNode |]
         )
 
@@ -178,15 +193,36 @@ let private readBox (rate: float) (n: JsonNode) : Result<Box, string> =
                 | Ok node -> readArguments name factory node
                 | Error _ -> Ok(defaults factory)
 
-            arguments
-            |> Result.bind (fun arguments ->
+            let settings =
+                match field n "settings" with
+                | Ok(:? JsonObject as o) ->
+                    o |> List.ofSeq |> each (fun (KeyValue(k, v)) -> asString $"box '{name}': setting '{k}'" v |> Result.map (fun t -> k, t)) |> Result.map Map.ofList
+                | Ok _ -> Error $"box '{name}': 'settings' should be an object"
+                | Error _ -> Ok Map.empty
+
+            match arguments, settings with
+            | Ok arguments, Ok settings ->
                 // The factory's verdict, so a file never opens a box it cannot make.
                 factory.make rate arguments
                 |> Result.mapError (fun why -> $"box '{name}': {why}")
-                |> Result.map (fun _ -> { name = name; unit = unit; copies = copies; arguments = arguments }))
+                |> Result.map (fun _ -> { name = name; unit = unit; copies = copies; arguments = arguments; settings = settings })
+            | Error e, _
+            | _, Error e -> Error e
     | Error e, _, _
     | _, Error e, _
     | _, _, Error e -> Error e
+
+let private readControlBox (n: JsonNode) : Result<ControlBox, string> =
+    readFormat "a control box" n
+    |> Result.bind (fun (name, format) ->
+        let get k f = field n k |> Result.bind (f $"control box '{name}': '{k}'")
+
+        match get "kind" asString, get "value" asString with
+        | Ok "number", Ok value -> Ok { name = name; kind = NumberBox; format = format; value = value }
+        | Ok "constant", Ok value -> Ok { name = name; kind = ConstantBox; format = format; value = value }
+        | Ok other, _ -> Error $"control box '{name}': kind is number or constant, not '{other}'"
+        | Error e, _
+        | _, Error e -> Error e)
 
 let private readWire (n: JsonNode) : Result<Edge, string> =
     let get name = field n name |> Result.bind (asString $"a wire's '{name}'") |> Result.bind (readPin $"a wire's '{name}'")
@@ -252,10 +288,13 @@ let parse (text: string) : Result<Graph, string> =
                 formats "controls",
                 formats "outputs",
                 get "boxes" (asArray "'boxes'") |> Result.bind (each (readBox rate)),
+                (match field root "controlBoxes" with
+                 | Ok node -> asArray "'controlBoxes'" node |> Result.bind (each readControlBox)
+                 | Error _ -> Ok []),
                 get "wires" (asArray "'wires'") |> Result.bind (each readWire),
                 get "positions" readPositions
             with
-            | Ok name, Ok streams, Ok inputs, Ok controls, Ok outputs, Ok boxes, Ok wires, Ok positions ->
+            | Ok name, Ok streams, Ok inputs, Ok controls, Ok outputs, Ok boxes, Ok controlBoxes, Ok wires, Ok positions ->
                 checkWires
                     { name = name
                       streams = streams
@@ -264,16 +303,18 @@ let parse (text: string) : Result<Graph, string> =
                       controls = controls
                       outputs = outputs
                       boxes = boxes
+                      controlBoxes = controlBoxes
                       edges = wires
                       positions = positions }
-            | Error e, _, _, _, _, _, _, _
-            | _, Error e, _, _, _, _, _, _
-            | _, _, Error e, _, _, _, _, _
-            | _, _, _, Error e, _, _, _, _
-            | _, _, _, _, Error e, _, _, _
-            | _, _, _, _, _, Error e, _, _
-            | _, _, _, _, _, _, Error e, _
-            | _, _, _, _, _, _, _, Error e -> Error e))
+            | Error e, _, _, _, _, _, _, _, _
+            | _, Error e, _, _, _, _, _, _, _
+            | _, _, Error e, _, _, _, _, _, _
+            | _, _, _, Error e, _, _, _, _, _
+            | _, _, _, _, Error e, _, _, _, _
+            | _, _, _, _, _, Error e, _, _, _
+            | _, _, _, _, _, _, Error e, _, _
+            | _, _, _, _, _, _, _, Error e, _
+            | _, _, _, _, _, _, _, _, Error e -> Error e))
 
 let save (path: string) (g: Graph) : unit = System.IO.File.WriteAllText(path, write g)
 

@@ -18,13 +18,36 @@ open Warp11.Placement.Units
 open Warp11.Placement.Placement
 open Warp11.Placement.Factories
 
-/// One box: a factory by name, the creation arguments typed into it, and
-/// how many copies.
+/// One box: a factory by name, the creation arguments typed into it, how
+/// many copies, and the **settings** — the value each control inlet nobody
+/// wired holds, as typed. An unwired control inlet is not an error: the
+/// elaborator gives it a port of its own, `{box}_{pin}`, and the setting is
+/// what that port is poked with until something else drives it.
 type Box =
     { name: string
       unit: string
       copies: int
-      arguments: Arguments }
+      arguments: Arguments
+      settings: Map<string, string> }
+
+/// A control box: Pure Data's number box, toggle and message box. A source
+/// of one control value, with no beat through it. A **number** box is a port
+/// of the design named after the box — the simulator pokes it live, a board
+/// mapping makes it a register; a **constant** is baked in as a literal. A
+/// toggle is a number box one bit wide, drawn as a switch.
+type ControlKind =
+    | NumberBox
+    | ConstantBox
+
+type ControlBox =
+    { name: string
+      kind: ControlKind
+      format: NumberFormat
+      /// The value as typed: what the port starts at, or what the literal is.
+      value: string }
+
+/// The one outlet every control box has.
+let controlOutlet = "out"
 
 /// A pin on a box — or on the design's own boundary, where the box is
 /// `"input"` (its signal inputs and controls, as sources) or `"output"`.
@@ -56,6 +79,7 @@ type Graph =
       controls: (string * NumberFormat) list
       outputs: (string * NumberFormat) list
       boxes: Box list
+      controlBoxes: ControlBox list
       edges: Edge list
       positions: Map<string, float * float> }
 
@@ -74,6 +98,7 @@ let emptyGraph (name: string) (sampleRate: float) : Graph =
       controls = []
       outputs = []
       boxes = []
+      controlBoxes = []
       edges = []
       positions = Map.empty }
 
@@ -93,8 +118,9 @@ let macGraph (streams: int) (multipliers: int) (adders: int) : Graph =
       controls = []
       outputs = [ "out", uint 33 ]
       boxes =
-        [ { name = "product"; unit = "mul16"; copies = multipliers; arguments = Map.empty }
-          { name = "sum"; unit = "add32"; copies = adders; arguments = Map.empty } ]
+        [ { name = "product"; unit = "mul16"; copies = multipliers; arguments = Map.empty; settings = Map.empty }
+          { name = "sum"; unit = "add32"; copies = adders; arguments = Map.empty; settings = Map.empty } ]
+      controlBoxes = []
       edges =
         [ { from = pin "input" "a"; ``to`` = pin "product" "a" }
           { from = pin "input" "b"; ``to`` = pin "product" "b" }
@@ -116,7 +142,8 @@ let gainGraph: Graph =
       inputs = stereo
       controls = [ "volume", uint 16; "mute", uint 1 ]
       outputs = stereo
-      boxes = [ { name = "gain"; unit = "gain"; copies = 1; arguments = Map.empty } ]
+      boxes = [ { name = "gain"; unit = "gain"; copies = 1; arguments = Map.empty; settings = Map.empty } ]
+      controlBoxes = []
       edges =
         [ { from = pin "input" "left"; ``to`` = pin "gain" "left" }
           { from = pin "input" "right"; ``to`` = pin "gain" "right" }
@@ -175,8 +202,22 @@ let describeFormat (f: NumberFormat) =
 
 let showPin (p: PinRef) = $"{p.box}.{p.pin}"
 
+let controlBoxOf (g: Graph) (name: string) = g.controlBoxes |> List.tryFind (fun c -> c.name = name)
+
 let boxExists (g: Graph) (name: string) =
-    name = "input" || name = "output" || g.boxes |> List.exists (fun b -> b.name = name)
+    name = "input"
+    || name = "output"
+    || g.boxes |> List.exists (fun b -> b.name = name)
+    || (controlBoxOf g name).IsSome
+
+/// A box's control inlets nobody wired, and the port each gets.
+let implicitControls (g: Graph) : (Box * string * NumberFormat) list =
+    [ for b in g.boxes do
+          for n, f in controlsOf g b.name do
+              if not (g.edges |> List.exists (fun e -> e.``to`` = pin b.name n)) then
+                  yield b, n, f ]
+
+let implicitPortName (box: string) (pin: string) = $"{box}_{pin}"
 
 /// What a pin is, or why it is not. A wire's `from` end is looked up among a
 /// box's outputs and its `to` end among its inputs — a box may call an input
@@ -189,13 +230,16 @@ let lookupPin (g: Graph) (side: Side) (p: PinRef) : Result<PinKind * NumberForma
         let controls = controlsOf g p.box
         let find pins = pins |> List.tryFind (fun (n, _) -> n = p.pin) |> Option.map snd
 
-        match side with
-        | Out ->
+        match side, controlBoxOf g p.box with
+        | Out, Some c when p.pin = controlOutlet -> Ok(ControlOut, c.format)
+        | Out, Some _ -> Error $"{showPin p}: a control box's one outlet is '{controlOutlet}'"
+        | In, Some _ -> Error $"{showPin p}: a control box has no inlets"
+        | Out, None ->
             match find signalOuts, (if p.box = "input" then find controls else None) with
             | Some f, _ -> Ok(SignalOut, f)
             | _, Some f -> Ok(ControlOut, f)
             | _ -> Error $"{showPin p}: no such output pin"
-        | In ->
+        | In, None ->
             match find signalIns, (if p.box = "input" then None else find controls) with
             | Some f, _ -> Ok(SignalIn, f)
             | _, Some f -> Ok(ControlIn, f)

@@ -37,9 +37,13 @@ let rec openWith (g: Graph) (recording: WavData) (controls: (string * uint64) li
     let session =
         new DebugSession(design.def, ownThread = not (System.OperatingSystem.IsBrowser()), devices = [ attach ]) :> IDebugSession
 
-    // Only the controls this graph has: an edited design may have lost one.
-    for name, value in controls do
-        if g.controls |> List.exists (fun (n, _) -> n = name) then
+    // Number boxes and unwired inlets start at their own values; then the
+    // knobs — only the controls this graph has, since an edited design may
+    // have lost one.
+    let ports = controlPorts g
+
+    for name, value in Warp11.Placement.Devices.startingValues g @ controls do
+        if ports |> List.exists (fun (n, _) -> n = name) then
             session.Poke(name, System.Numerics.BigInteger value)
 
     for name in probeNames g do
@@ -54,7 +58,7 @@ let rec openWith (g: Graph) (recording: WavData) (controls: (string * uint64) li
     session.Watch "in1_valid"
     session.Watch "out1_valid"
 
-    for name, _ in g.controls do
+    for name, _ in controlPorts g do
         session.Watch name
 
     let inventory = session.Inventory

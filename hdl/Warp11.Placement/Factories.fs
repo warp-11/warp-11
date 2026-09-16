@@ -16,6 +16,7 @@ open Warp11
 open Warp11.Placement.Fu
 open Warp11.Placement.Units
 open Warp11.Placement.Placement
+open Warp11.Placement.Pedal
 
 type ParameterKind =
     | IntParameter
@@ -280,6 +281,19 @@ let multiband: Factory =
                             )
                         )) }
 
+let allpassSection: Factory =
+    { name = "allpass"
+      parameters =
+        [ { name = "capacity"; kind = IntParameter; ``default`` = "4096"; about = "the delay line's length in frames, a power of two" } ]
+      make =
+        fun _ args ->
+            intArg "capacity" args
+            |> Result.bind (fun capacity ->
+                if not (isPowerOfTwo capacity) || capacity < delayBufferMinimum then
+                    Error $"capacity: %d{capacity} is not a power of two of at least %d{delayBufferMinimum}"
+                else
+                    Ok(allpass capacity)) }
+
 /// Every unit the GUI may offer. `erase` is the only way a unit gets in, so
 /// a palette cannot disagree with the unit the typed API elaborates.
 let palette: Map<string, Factory> =
@@ -292,6 +306,10 @@ let palette: Map<string, Factory> =
       echo
       compressor
       fir
-      multiband ]
+      multiband
+      plain mixer
+      plain waveshaper
+      plain tremolo
+      allpassSection ]
     |> List.map (fun f -> f.name, f)
     |> Map.ofList
