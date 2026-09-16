@@ -35,7 +35,16 @@ let private stereoDesign (name: string) (rate: float) : History =
 /// M1's design: a stereo stream through `gain`, volume and mute the
 /// design's own controls.
 let gain (rate: float) : Graph =
-    { gainGraph with sampleRate = rate } |> inARow [ "input"; "gain"; "output" ]
+    { gainGraph with
+        sampleRate = rate
+        // Its default mapping: the KV260 through the host's memory, the
+        // file beside it.
+        mapping = Some "gain.kv260.json" }
+    |> inARow [ "input"; "gain"; "output" ]
+
+/// The gain example's mapping: the KV260 preset, the boundary in the
+/// host's memory — a WAV in, the design, a WAV out, no codec needed.
+let gainMapping: Warp11.Mapping.Mapping = { board = kv260; path = HostMemory }
 
 /// M2's design: three `eq` sections with creation arguments — a low shelf,
 /// a peaking cut, a high shelf — designed for the rate.
@@ -151,6 +160,8 @@ let write (dir: string) =
 
     for file, g in all recordingRate do
         Warp11.DesignFile.save (System.IO.Path.Combine(dir, file)) g
+
+    Warp11.Mapping.save (System.IO.Path.Combine(dir, "gain.kv260.json")) gainMapping
 
     writePgm (System.IO.Path.Combine(dir, "gradient.pgm")) gradient
     writeCsv (System.IO.Path.Combine(dir, "numbers.csv")) numbers

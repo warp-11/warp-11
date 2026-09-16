@@ -53,7 +53,13 @@ let main argv =
             1
     // A saved design as typed F# source: `export design.json`.
     | [| "export"; path |] ->
-        match Warp11.DesignFile.load path |> Result.bind Warp11.Export.export with
+        // With the design's default mapping when it names one: the board
+        // and a build function ride along.
+        let exportWithDefault (g: Warp11.Graph.Graph) =
+            let mapping = g.mapping |> Option.bind (fun _ -> Warp11.Mapping.defaultFor path g.mapping |> Result.toOption)
+            Warp11.Export.exportWith mapping g
+
+        match Warp11.DesignFile.load path |> Result.bind exportWithDefault with
         | Ok source ->
             printf $"{source}"
             0
@@ -70,24 +76,71 @@ let main argv =
         0
     // The batch bridge: `batchserve design.json <preset>` serves the design's
     // host-memory top in the Sim to a Rust driver on stdin.
-    | [| "batchserve"; path; which |] ->
-        match Warp11.DesignFile.load path, preset which with
-        | Error why, _ ->
+    | [| "batchserve"; path |]
+    | [| "batchserve"; path; _ |] ->
+        let which = if argv.Length = 3 then Some argv[2] else None
+
+        let mapping (g: Warp11.Graph.Graph) =
+            match which with
+            | None -> Warp11.Mapping.defaultFor path g.mapping
+            | Some w when w.EndsWith ".json" -> Warp11.Mapping.load w
+            | Some w -> Warp11.Mapping.ofBoard w HostMemory
+
+        match Warp11.DesignFile.load path with
+        | Error why ->
             eprintfn $"{path}: {why}"
             1
-        | _, Error why ->
-            eprintfn $"{why}"
+        | Ok g ->
+            match mapping g with
+            | Error why ->
+                eprintfn $"{why}"
+                1
+            | Ok m ->
+                Warp11.BoardTop.batchServe (Warp11.BoardTop.boardTopOf m.board HostMemory g)
+                0
+    // A saved design's build directory: `build design.json [mapping.json] <dir>`
+    // — the design's default mapping when none is named — writes everything
+    // the board's toolchain needs and says how to run it.
+    | [| "build"; path; dir |]
+    | [| "build"; path; _; dir |] ->
+        let mappingFile = if argv.Length = 4 then Some argv[2] else None
+
+        match Warp11.DesignFile.load path with
+        | Error why ->
+            eprintfn $"{path}: {why}"
             1
-        | Ok g, Ok board ->
-            Warp11.BoardTop.batchServe (Warp11.BoardTop.boardTop board Warp11.BoardTop.HostMemory g)
-            0
-    // A saved design's build directory: `build design.json <preset> pins|memory <dir>`
-    // writes everything the board's toolchain needs and says how to run it.
+        | Ok g ->
+            let mapping =
+                match mappingFile with
+                | Some file -> Warp11.Mapping.load file
+                | None -> Warp11.Mapping.defaultFor path g.mapping
+
+            match mapping with
+            | Error why ->
+                eprintfn $"{why}"
+                1
+            | Ok m ->
+                try
+                    let top = Warp11.BoardTop.boardTopOf m.board m.path g
+                    let out = Warp11.Build.write dir top
+
+                    for file in out.files do
+                        printfn $"wrote {file}"
+
+                    for name, entry in top.registers do
+                        printfn $"  register {name} at 0x%02x{entry.offset}"
+
+                    printfn $"build with: {out.run}"
+                    0
+                with e ->
+                    eprintfn $"{e.Message}"
+                    1
+    // ...or for a preset and a path named on the line.
     | [| "build"; path; which; way; dir |] ->
         let dataPath =
             match way with
-            | "pins" -> Ok Warp11.BoardTop.Pins
-            | "memory" -> Ok Warp11.BoardTop.HostMemory
+            | "pins" -> Ok Pins
+            | "memory" -> Ok HostMemory
             | other -> Error $"a data path is pins or memory, not '{other}'"
 
         match Warp11.DesignFile.load path, preset which, dataPath with
@@ -100,7 +153,7 @@ let main argv =
             1
         | Ok g, Ok board, Ok dataPath ->
             try
-                let top = Warp11.BoardTop.boardTop board dataPath g
+                let top = Warp11.BoardTop.boardTopOf board dataPath g
                 let out = Warp11.Build.write dir top
 
                 for file in out.files do
@@ -126,7 +179,7 @@ let main argv =
             1
         | Ok g, Ok board ->
             try
-                let top = Warp11.BoardTop.boardTop board Warp11.BoardTop.Pins g
+                let top = Warp11.BoardTop.boardTopOf board Pins g
 
                 for file in Warp11.BoardTop.write dir top do
                     printfn $"wrote {file}"
@@ -170,4 +223,5 @@ let main argv =
     run "UD18 the design on the host's memory" designOnHostMemory
     run "UD19 the build directory, Vivado" buildDirectoryVivado
     run "UD20 the build directory, the open flow" buildDirectoryOpenFlow
+    run "UD21 the mapping is a file" mappingIsAFile
     0

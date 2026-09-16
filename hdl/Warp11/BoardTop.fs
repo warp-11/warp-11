@@ -25,21 +25,58 @@ let boardRate (board: Board) (targetHz: float) : float =
 /// The stereo boundary a board's converter needs.
 let private stereo = [ "left", signedInt sampleWidth; "right", signedInt sampleWidth ]
 
+/// A design's instance as a board top sees it: the stream through it, rows
+/// of the boundary's fields in and out, and its control ports by name.
+type Rig =
+    { through: Stream<Expr list> -> Stream<Expr list>
+      ports: (string * Expr) list }
+
+/// What a board top needs to know of a design, whether it was drawn or
+/// written: its boundary, its controls with where they start, and how to
+/// instantiate it. A drawn design is `ofGraph`; the export prints one for
+/// the typed form, so the build follows from the code either way.
+type Design =
+    { name: string
+      sampleRate: float
+      streams: int
+      inputs: (string * NumberFormat) list
+      outputs: (string * NumberFormat) list
+      controls: (string * NumberFormat) list
+      starting: (string * uint64) list
+      /// The instance under a name.
+      rig: string -> Rig }
+
+/// A drawn design, as a board top takes it.
+let ofGraph (g: Graph) : Design =
+    { name = g.name
+      sampleRate = g.sampleRate
+      streams = g.streams
+      inputs = g.inputs
+      outputs = g.outputs
+      controls = controlPorts g
+      starting = startingValues g
+      rig =
+        fun instance ->
+            let io = (elaborate g).NewNamed instance
+
+            { through = streamThroughInstance io.ins.Head io.outs.Head
+              ports = io.controls } }
+
 /// What a board asks of a design before it will carry it: one stream, the
 /// stereo boundary, and a rate the board's clock divides into — said with
 /// the rate it would land on, so a design can be made for it.
-let check (board: Board) (g: Graph) =
-    if g.streams <> 1 then
-        failwith $"{g.name}: a board carries one stream, and the design declares %d{g.streams}"
+let check (board: Board) (d: Design) =
+    if d.streams <> 1 then
+        failwith $"{d.name}: a board carries one stream, and the design declares %d{d.streams}"
 
-    for side, pins in [ "input", g.inputs; "output", g.outputs ] do
+    for side, pins in [ "input", d.inputs; "output", d.outputs ] do
         if pins <> stereo then
-            failwith $"{g.name}: the {board.name}'s converter needs the {side} box to be [{describePins stereo}], and it is [{describePins pins}]"
+            failwith $"{d.name}: the {board.name}'s converter needs the {side} box to be [{describePins stereo}], and it is [{describePins pins}]"
 
-    let landed = boardRate board g.sampleRate
+    let landed = boardRate board d.sampleRate
 
-    if round landed <> round g.sampleRate then
-        failwith $"{g.name}: the design is made for %g{g.sampleRate} Hz, and the {board.name}'s clock frames at %.3f{landed} Hz for it — make the design for that rate"
+    if round landed <> round d.sampleRate then
+        failwith $"{d.name}: the design is made for %g{d.sampleRate} Hz, and the {board.name}'s clock frames at %.3f{landed} Hz for it — make the design for that rate"
 
 /// Register words the aperture holds: 256 bytes, as every audio app's.
 let apertureAddrWidth = 8
@@ -47,35 +84,28 @@ let apertureAddrWidth = 8
 /// The registers a design's control ports become: one read-write register
 /// each, starting where the port starts (a number box's value, a setting;
 /// the design's own controls at zero).
-let registersOf (g: Graph) : (string * RegEntry) list * RegMap =
-    let starting = startingValues g |> Map.ofList
+let registersOf (d: Design) : (string * RegEntry) list * RegMap =
+    let starting = d.starting |> Map.ofList
 
     buildRegMapPinned apertureAddrWidth (fun r ->
-        [ for name, f in controlPorts g ->
+        [ for name, f in d.controls ->
               name, r.RwReg(name, f.totalWidth, (starting |> Map.tryFind name |> Option.defaultValue 0UL)) ])
 
 /// The design between the converter and the registers: the stream from the
 /// link through the design's instance and back, every control port driven
 /// from its register.
-let private through (g: Graph) (control: string -> Expr -> Expr) (i2s: I2sLink) =
+let private through (d: Design) (control: string -> Expr -> Expr) (i2s: I2sLink) =
     // `design` is a Verilog reserved word; the instance is the drawn one.
-    let io = (elaborate g).NewNamed "drawn"
+    let rig = d.rig "drawn"
 
-    for name, port in io.controls do
+    for name, port in rig.ports do
         control name port ==> port
 
     i2s.input
-    |> Stream.mapTo (layoutOfList g.inputs) (fun (l, r) -> [ l; r ])
-    |> streamThroughInstance io.ins.Head io.outs.Head
+    |> Stream.mapTo (layoutOfList d.inputs) (fun (l, r) -> [ l; r ])
+    |> rig.through
     |> Stream.mapTo sampleLayout (fun fields -> fields[0], fields[1])
     |> i2s.send
-
-/// Which way a design's boundary reaches the world on this board: the
-/// converter on the board's pins, or the host's memory — rows in a DMA buffer
-/// the fabric reads, runs the design over, and writes back.
-type DataPath =
-    | Pins
-    | HostMemory
 
 /// The registers the host-memory path adds ahead of the design's controls:
 /// the batch contract every such top speaks, so one driver runs any of them.
@@ -134,8 +164,8 @@ let rowShape (beatWidth: int) (pins: (string * NumberFormat) list) : RowShape =
       bytesPerRow = lanesPerRow * laneWidth / 8 }
 
 /// The batch registers, then one read-write register per control port.
-let private batchRegistersOf (g: Graph) : BatchRegs * (string * RegEntry) list * RegMap =
-    let starting = startingValues g |> Map.ofList
+let private batchRegistersOf (d: Design) : BatchRegs * (string * RegEntry) list * RegMap =
+    let starting = d.starting |> Map.ofList
 
     let (batch, controls), map =
         buildRegMapPinned apertureAddrWidth (fun r ->
@@ -152,7 +182,7 @@ let private batchRegistersOf (g: Graph) : BatchRegs * (string * RegEntry) list *
                   frameCount = r.RwReg("frameCount", 32, 0UL) }
 
             let controls =
-                [ for name, f in controlPorts g ->
+                [ for name, f in d.controls ->
                       name, r.RwReg(name, f.totalWidth, (starting |> Map.tryFind name |> Option.defaultValue 0UL)) ]
 
             batch, controls)
@@ -274,23 +304,23 @@ let targetOf (part: Part) =
 /// The top's name says the host path — `GainPatchAxi`, `GainPatchUart`,
 /// `GainPatchTop` — because that is what changes its port list; the board
 /// is the file's business, not the module's.
-let private pinsTop (board: Board) (g: Graph) : BoardTop =
-    check board g
-    let entries, map = registersOf g
-    let rate = int (round g.sampleRate)
+let private pinsTop (board: Board) (d: Design) : BoardTop =
+    check board d
+    let entries, map = registersOf d
+    let rate = int (round d.sampleRate)
 
     let fromRegisters (regs: SlaveRegs) =
         let byName = Map.ofList entries
         fun (name: string) (_: Expr) -> regs.value byName[name]
 
     let baked =
-        let starting = startingValues g |> Map.ofList
+        let starting = d.starting |> Map.ofList
         fun (name: string) (port: Expr) -> lit (starting |> Map.tryFind name |> Option.defaultValue 0UL) (width port)
 
     let name, top, registers =
         match board.host with
         | AxiLiteAt _ ->
-            let name = $"{g.name}Axi"
+            let name = $"{d.name}Axi"
 
             let top =
                 defModuleClocked
@@ -300,11 +330,11 @@ let private pinsTop (board: Board) (g: Graph) : BoardTop =
                     (fun (slavePorts, pins) ->
                         let regs = regMapSlave slavePorts map
                         let i2s = i2sLink "audio" pins board.fabricHz rate stockBitsPerSlot
-                        through g (fromRegisters regs) i2s)
+                        through d (fromRegisters regs) i2s)
 
             name, top.def, entries
         | UartAt baud ->
-            let name = $"{g.name}Uart"
+            let name = $"{d.name}Uart"
 
             let top =
                 defModule
@@ -313,11 +343,11 @@ let private pinsTop (board: Board) (g: Graph) : BoardTop =
                     (fun (uart, pins) ->
                         let regs = serialRegMapSlave "host" board.fabricHz baud uart map
                         let i2s = i2sLink "audio" pins board.fabricHz rate stockBitsPerSlot
-                        through g (fromRegisters regs) i2s)
+                        through d (fromRegisters regs) i2s)
 
             name, top.def, entries
         | NoHost ->
-            let name = $"{g.name}Top"
+            let name = $"{d.name}Top"
 
             let top =
                 defModule
@@ -325,7 +355,7 @@ let private pinsTop (board: Board) (g: Graph) : BoardTop =
                     (fun p -> i2sPins p SeparateCodecs)
                     (fun pins ->
                         let i2s = i2sLink "audio" pins board.fabricHz rate stockBitsPerSlot
-                        through g baked i2s)
+                        through d baked i2s)
 
             name, top.def, []
 
@@ -344,25 +374,25 @@ let private pinsTop (board: Board) (g: Graph) : BoardTop =
 /// 256-byte aligned — the host driver pads and checks, because a design
 /// that silently processed a truncated block would be worse than one that
 /// refused.
-let private hostMemoryTop (board: Board) (g: Graph) : BoardTop =
+let private hostMemoryTop (board: Board) (d: Design) : BoardTop =
     let memory =
         match board.hostMemory with
         | Some m -> m
-        | None -> failwith $"{g.name}: the {board.name} has no host memory — the design's rows have nowhere to go but the pins"
+        | None -> failwith $"{d.name}: the {board.name} has no host memory — the design's rows have nowhere to go but the pins"
 
     match board.host with
     | AxiLiteAt _ -> ()
-    | _ -> failwith $"{g.name}: the host-memory path needs an AXI-Lite host to be told where the rows are, and the {board.name} has none"
+    | _ -> failwith $"{d.name}: the host-memory path needs an AXI-Lite host to be told where the rows are, and the {board.name} has none"
 
-    if g.streams <> 1 then
-        failwith $"{g.name}: the host-memory path carries one stream, and the design declares %d{g.streams}"
+    if d.streams <> 1 then
+        failwith $"{d.name}: the host-memory path carries one stream, and the design declares %d{d.streams}"
 
-    let batch, entries, map = batchRegistersOf g
-    let inShape = rowShape memory.width g.inputs
-    let outShape = rowShape memory.width g.outputs
+    let batch, entries, map = batchRegistersOf d
+    let inShape = rowShape memory.width d.inputs
+    let outShape = rowShape memory.width d.outputs
     let beatBytes = memory.width / 8
     let burstBytes = beatsPerBurst * beatBytes
-    let name = $"{g.name}Batch"
+    let name = $"{d.name}Batch"
 
     let top =
         defModuleClocked
@@ -375,9 +405,9 @@ let private hostMemoryTop (board: Board) (g: Graph) : BoardTop =
             (fun (slavePorts, readBusPorts, writeBusPorts) ->
                 let regs = regMapSlave slavePorts map
                 let byName = Map.ofList entries
-                let io = (elaborate g).NewNamed "drawn"
+                let rig = d.rig "drawn"
 
-                for n, port in io.controls do
+                for n, port in rig.ports do
                     regs.value byName[n] ==> port
 
                 let frameCount = regs.value batch.frameCount
@@ -418,9 +448,9 @@ let private hostMemoryTop (board: Board) (g: Graph) : BoardTop =
                 // --- the design ---------------------------------------------
                 let outBeats =
                     beats
-                    |> beatsToRows inShape g.inputs
-                    |> streamThroughInstance io.ins.Head io.outs.Head
-                    |> rowsToBeats outShape g.outputs memory.width
+                    |> beatsToRows inShape d.inputs
+                    |> rig.through
+                    |> rowsToBeats outShape d.outputs memory.width
 
                 // --- the write side -----------------------------------------
                 let wrAddr = wire "wr_addr" 32
@@ -489,12 +519,15 @@ let private hostMemoryTop (board: Board) (g: Graph) : BoardTop =
 
 /// The design on a board, the way the path says: the converter on the pins,
 /// or the host's memory.
-let boardTop (board: Board) (path: DataPath) (g: Graph) : BoardTop =
+let boardTop (board: Board) (path: DataPath) (d: Design) : BoardTop =
     checkBoard board
 
     match path with
-    | Pins -> pinsTop board g
-    | HostMemory -> hostMemoryTop board g
+    | Pins -> pinsTop board d
+    | HostMemory -> hostMemoryTop board d
+
+/// `boardTop` for a drawn design.
+let boardTopOf (board: Board) (path: DataPath) (g: Graph) : BoardTop = boardTop board path (ofGraph g)
 
 /// The register map as the Rust seam prints it, headed for the top it serves.
 let seamLines (t: BoardTop) : string list =

@@ -96,3 +96,4 @@ hardware/vivado/*.jou
 # what Save heard and Board write beside an example
 hdl/Warp11.Placement.Canvas/examples/*.heard.*
 hdl/Warp11.Placement.Canvas/examples/board/
+hdl/Warp11.Placement.Canvas/examples/build/

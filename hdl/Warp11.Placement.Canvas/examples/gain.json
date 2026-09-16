@@ -94,5 +94,7 @@
       120
     ]
   },
-  "designs": {}
+  "designs": {},
+  "units": {},
+  "mapping": "gain.kv260.json"
 }

@@ -89,7 +89,11 @@ type Graph =
       /// The units written in the GUI that this design uses, by name: the F#
       /// that defines each, so the file is complete and a head with a
       /// compiler opens it again.
-      units: Map<string, string> }
+      units: Map<string, string>
+      /// The design's default mapping: the file beside this one that says
+      /// which board it goes to and how (`gain.kv260.json`). None maps to
+      /// the simulator only.
+      mapping: string option }
 
 let pin (box: string) (pin: string) : PinRef = { box = box; pin = pin }
 
@@ -110,7 +114,8 @@ let emptyGraph (name: string) (sampleRate: float) : Graph =
       edges = []
       positions = Map.empty
       designs = Map.empty
-      units = Map.empty }
+      units = Map.empty
+      mapping = None }
 
 /// Which side of a box a pin is on. A box may call an input and an output by
 /// the same name (`gain` has `left` on both sides), so wherever a pin is
@@ -141,7 +146,8 @@ let macGraph (streams: int) (multipliers: int) (adders: int) : Graph =
           { from = pin "sum" "sum"; ``to`` = pin "output" "out" } ]
       positions = Map.empty
       designs = Map.empty
-      units = Map.empty }
+      units = Map.empty
+      mapping = None }
 
 /// The first patch: a stereo stream through `gain`, volume and mute from the
 /// design's controls.
@@ -165,7 +171,8 @@ let gainGraph: Graph =
           { from = pin "gain" "right"; ``to`` = pin "output" "right" } ]
       positions = Map.empty
       designs = Map.empty
-      units = Map.empty }
+      units = Map.empty
+      mapping = None }
 
 let private boxOf (g: Graph) (name: string) = g.boxes |> List.tryFind (fun b -> b.name = name)
 

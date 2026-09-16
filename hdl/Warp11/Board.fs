@@ -77,11 +77,19 @@ type Clock =
 /// The bulk data path to the host, where the part has one: the PS slave port
 /// an AXI master writes DDR through, its width, and the arena a `u-dma-buf`
 /// node reserves for a design's buffers.
-type HostMemory =
+type HostMemoryFacts =
     { /// `S_AXI_HPC0_FPD`, `S_AXI_HP0_FPD`, …
       port: string
       width: int
       arenaBytes: int }
+
+/// Which way a design's boundary reaches the world on a board: the
+/// converter on the board's pins, or the host's memory — rows in a DMA
+/// buffer the fabric reads, runs the design over, and writes back. A
+/// design's choice, per mapping; refused where the board has no such path.
+type DataPath =
+    | Pins
+    | HostMemory
 
 /// How a host reaches the design's registers.
 ///
@@ -141,7 +149,7 @@ type Board =
       /// The fabric clock, in hertz. Every derived rate divides this.
       fabricHz: int
       /// The bulk path to the host, where the part has one.
-      hostMemory: HostMemory option
+      hostMemory: HostMemoryFacts option
       host: HostDriver
       loading: Loading
       connectors: Connector list }

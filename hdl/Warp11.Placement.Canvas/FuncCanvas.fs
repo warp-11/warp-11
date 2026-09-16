@@ -497,6 +497,39 @@ let view (opening: Opening) : Control =
         let slice = ctx.useState<Warp11.Debug.Trace> { firstCycle = 0; signals = [] }
         let breakText = ctx.useState ""
         let streamsText = ctx.useState (string opening.graph.streams)
+
+        // The target: the design's default mapping, loaded from beside its
+        // file; edited here row by row; saved beside it again.
+        let loadMapping (file: string) (g: Graph) : Warp11.Mapping.Mapping option =
+            match file, g.mapping with
+            | "", _
+            | _, None -> None
+            | f, Some m ->
+                Warp11.Mapping.load (System.IO.Path.Combine(System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath f), m))
+                |> Result.toOption
+
+        let mapping = ctx.useState (loadMapping (opening.file |> Option.defaultValue "") opening.graph)
+        let fabricText = ctx.useState ""
+        let baseText = ctx.useState ""
+        let arenaText = ctx.useState ""
+
+        let useMapping (m: Warp11.Mapping.Mapping option) =
+            mapping.Set m
+
+            match m with
+            | Some m ->
+                fabricText.Set(string m.board.fabricHz)
+
+                baseText.Set(
+                    match m.board.host with
+                    | AxiLiteAt b -> $"0x%X{b}"
+                    | _ -> ""
+                )
+
+                arenaText.Set(m.board.hostMemory |> Option.map (fun hm -> string (hm.arenaBytes >>> 20)) |> Option.defaultValue "")
+            | None -> ()
+
+        ctx.useEffect ((fun () -> useMapping mapping.Current), [ EffectTrigger.AfterInit ])
         // Playing: the timer steps the session as many frames as real time
         // has passed — Pure Data's "DSP on" — so a knob turned mid-file is
         // heard mid-file. `Run` is the free-running alternative.
@@ -1096,6 +1129,7 @@ let view (opening: Opening) : Control =
                                 history.Set(Warp11.Edit.history (withLayout g))
                                 designName.Set g.name
                                 rateText.Set(g.sampleRate.ToString(CultureInfo.InvariantCulture))
+                                useMapping (loadMapping filePath.Current g)
                                 select None
                                 message.Set $"opened {filePath.Current}: {g.name}, %d{g.boxes.Length} boxes, %d{g.edges.Length} wires"
                             | Error why -> message.Set $"refused: {why}")
@@ -1104,19 +1138,34 @@ let view (opening: Opening) : Control =
                                 message.Set "a path to save to, first"
                             else
                                 try
-                                    Warp11.DesignFile.save filePath.Current g
-                                    message.Set $"saved {filePath.Current}"
+                                    let saved =
+                                        match mapping.Current with
+                                        | Some m ->
+                                            let file = Warp11.Mapping.fileFor (System.IO.Path.GetFullPath filePath.Current) m.board.name
+                                            Warp11.Mapping.save file m
+                                            { g with mapping = Some(System.IO.Path.GetFileName file) }
+                                        | None -> { g with mapping = None }
+
+                                    Warp11.DesignFile.save filePath.Current saved
+                                    change (setMapping saved.mapping) |> ignore
+
+                                    message.Set(
+                                        match saved.mapping with
+                                        | Some m -> $"saved {filePath.Current} and its mapping {m}"
+                                        | None -> $"saved {filePath.Current}"
+                                    )
                                 with e ->
                                     message.Set $"could not save: {e.Message}")
                         entry 260.0 filePath.Current filePath.Set (fun _ -> ())
-                        button "Board" (fun () ->
-                            if filePath.Current = "" then
-                                message.Set "a path to write beside, first"
-                            else
+                        button "Build" (fun () ->
+                            match filePath.Current, mapping.Current with
+                            | "", _ -> message.Set "a path to build beside, first"
+                            | _, None -> message.Set "no target: pick a preset in the design panel"
+                            | file, Some m ->
                                 try
-                                    let dir = System.IO.Path.Combine(System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath filePath.Current), "board")
-                                    let written = Warp11.BoardTop.write dir (Warp11.BoardTop.boardTop kv260 Warp11.BoardTop.Pins g) |> String.concat ", "
-                                    message.Set $"wrote {written}"
+                                    let dir = System.IO.Path.Combine(System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath file), "build")
+                                    let out = Warp11.Build.write dir (Warp11.BoardTop.boardTopOf m.board m.path g)
+                                    message.Set $"wrote %d{out.files.Length} files to {dir} — build with {out.run}"
                                 with e ->
                                     message.Set $"refused: {e.Message}")
                         button "Export F#" (fun () ->
@@ -1305,6 +1354,122 @@ let view (opening: Opening) : Control =
         let heading (text: string) =
             TextBlock.create [ TextBlock.text text; TextBlock.fontWeight FontWeight.Bold; TextBlock.margin (Thickness(0.0, 8.0, 0.0, 2.0)) ]
             :> Types.IView
+
+        // The target section: a preset fills every row; any row edited makes
+        // it custom; what the part cannot honour is refused in the status
+        // line by name.
+        let targetRows () : Types.IView list =
+            let presetNames = (presets |> List.map fst) @ [ "custom"; "simulator only" ]
+
+            let current =
+                match mapping.Current with
+                | None -> "simulator only"
+                | Some m -> Warp11.Mapping.presetOf m.board |> Option.defaultValue "custom"
+
+            let combo (items: string list) (selected: string) (onPick: string -> unit) =
+                ComboBox.create
+                    [ ComboBox.width 170.0
+                      ComboBox.dataItems items
+                      ComboBox.selectedItem (box selected)
+                      ComboBox.onSelectedItemChanged (fun item ->
+                          match item with
+                          | :? string as s when s <> selected -> onPick s
+                          | _ -> ()) ]
+                :> Types.IView
+
+            let line (children: Types.IView list) =
+                StackPanel.create
+                    [ StackPanel.orientation Layout.Orientation.Horizontal
+                      StackPanel.margin (Thickness(0.0, 2.0))
+                      StackPanel.children children ]
+                :> Types.IView
+
+            let update (f: Warp11.Mapping.Mapping -> Warp11.Mapping.Mapping) =
+                match mapping.Current with
+                | Some m ->
+                    let next = f m
+
+                    try
+                        checkBoard next.board
+                        useMapping (Some { next with board = { next.board with name = (Warp11.Mapping.presetOf next.board |> Option.defaultValue "custom") } })
+                    with e ->
+                        message.Set $"refused: {e.Message}"
+                | None -> ()
+
+            let pick (name: string) =
+                match name with
+                | "simulator only" -> useMapping None
+                | "custom" -> ()
+                | name ->
+                    match preset name with
+                    | Ok b ->
+                        let path =
+                            match mapping.Current with
+                            | Some m when b.hostMemory.IsSome -> m.path
+                            | _ -> Pins
+
+                        useMapping (Some { board = b; path = path })
+                    | Error why -> message.Set why
+
+            [ heading "target"; line [ label "preset"; combo presetNames current pick ] ]
+            @ (match mapping.Current with
+               | None -> [ row ("mapping", "none — the design runs in the simulator only") ]
+               | Some m ->
+                   let b = m.board
+
+                   let clockSource =
+                       match b.clock with
+                       | PsClock i -> $"PS clock %d{i}"
+                       | Crystal hz -> $"%d{hz} Hz crystal → PLL →"
+                       | Oscillator hz -> $"%d{hz} Hz oscillator"
+
+                   let landed = Warp11.BoardTop.boardRate b g.sampleRate
+
+                   [ row ("part", b.part.device + (b.part.boardPart |> Option.map (fun bp -> $" ({bp})") |> Option.defaultValue ""))
+                     row ("build tool", (match b.tool with Vivado -> "Vivado" | OpenFlow -> "yosys → nextpnr → icepack"))
+                     line
+                         [ label "clock"
+                           label clockSource
+                           entry 110.0 fabricText.Current fabricText.Set (fun typed ->
+                               match System.Int32.TryParse typed with
+                               | true, hz when hz > 0 -> update (fun m -> { m with board = { m.board with fabricHz = hz } })
+                               | _ -> message.Set $"refused: '{typed}' is not a rate")
+                           label "Hz" ]
+                     row ("the design's rate lands at", $"%.3f{landed} Hz")
+                     line
+                         [ label "data path"
+                           combo [ "pins"; "memory" ] (match m.path with Pins -> "pins" | HostMemory -> "memory") (fun p ->
+                               update (fun m -> { m with path = (if p = "memory" then HostMemory else Pins) })) ]
+                     (match b.hostMemory with
+                      | Some hm ->
+                          line
+                              [ label "host memory"
+                                label $"{hm.port}, %d{hm.width} bits, arena"
+                                entry 50.0 arenaText.Current arenaText.Set (fun typed ->
+                                    match System.Int32.TryParse typed with
+                                    | true, mib when mib > 0 ->
+                                        update (fun m -> { m with board = { m.board with hostMemory = Some { hm with arenaBytes = mib <<< 20 } } })
+                                    | _ -> message.Set $"refused: '{typed}' is not a size")
+                                label "MiB" ]
+                      | None -> row ("host memory", "none"))
+                     (match b.host with
+                      | AxiLiteAt _ ->
+                          line
+                              [ label "host driver"
+                                label "AXI-Lite at"
+                                entry 120.0 baseText.Current baseText.Set (fun typed ->
+                                    try
+                                        let v = System.Convert.ToUInt64(typed.Replace("0x", "").Replace("0X", ""), 16)
+                                        update (fun m -> { m with board = { m.board with host = AxiLiteAt v } })
+                                    with _ ->
+                                        message.Set $"refused: '{typed}' is not a hex address") ]
+                      | UartAt baud -> row ("host driver", $"UART at %d{baud} baud")
+                      | NoHost -> row ("host driver", "none"))
+                     row ("loading", (match b.loading with OsApp d -> $"OS app under {d}" | Sram -> "SRAM (iceprog -S)" | Flash -> "SPI flash (iceprog)"))
+                     heading "connectors" ]
+                   @ (b.connectors
+                      |> List.map (fun c -> row (string c.role, c.pins |> List.map (fun (port, pin) -> $"{port} {pin.pin}") |> String.concat "  ")))
+                   @ [ row ("mapping file", (if filePath.Current = "" then $"<design>.{b.name}.json" else System.IO.Path.GetFileName(Warp11.Mapping.fileFor (System.IO.Path.GetFullPath filePath.Current) b.name))) ])
 
         let liveRows (box: string) =
             match live with
@@ -1752,6 +1917,7 @@ let view (opening: Opening) : Control =
                             TextBlock.foreground Brushes.Gray
                             TextBlock.textWrapping TextWrapping.Wrap ]
                       :> Types.IView ]
+                    @ targetRows ()
 
             ScrollViewer.create
                 [ DockPanel.dock Dock.Right

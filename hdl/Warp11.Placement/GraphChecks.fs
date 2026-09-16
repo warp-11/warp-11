@@ -688,10 +688,18 @@ let exportIsTheDesign () : bool =
 
     let designs = [ gainGraph; macGraph 3 3 3; threeBand; shared; swapped; twiceThreeBand (); writtenSwap () ]
 
+    // The gain design carries a mapping, so the export's board, path and
+    // build function are compiled too.
+    let mappingFor (g: Graph) : Warp11.Mapping.Mapping option =
+        if g.name = Warp11.Graph.gainGraph.name then
+            Some { board = kv260; path = HostMemory }
+        else
+            None
+
     let sources =
         designs
         |> List.map (fun g ->
-            match Warp11.Export.export g with
+            match Warp11.Export.exportWith (mappingFor g) g with
             | Ok source -> source
             | Error why -> failwith $"{g.name}: {why}")
 
@@ -1040,7 +1048,7 @@ let writtenUnitTravels () : bool =
 // CHECK
 let designOnABoard () : bool =
     let onKv260 = { gainGraph with name = "GainBoard"; sampleRate = stockSampleRate }
-    let top = Warp11.BoardTop.boardTop kv260 Warp11.BoardTop.Pins onKv260
+    let top = Warp11.BoardTop.boardTopOf kv260 Pins onKv260
     let sim = Sim top.top
     let axi = SimAxi.client sim
     let volume = top.registers |> List.find (fun (n, _) -> n = "volume") |> snd
@@ -1059,19 +1067,19 @@ let designOnABoard () : bool =
 
     let iceBoard = iceBreakerAt 24_000_000
     let onIce = { onKv260 with name = "GainIce"; sampleRate = Warp11.BoardTop.boardRate iceBoard 48_000.0 }
-    let ice = Warp11.BoardTop.boardTop iceBoard Warp11.BoardTop.Pins onIce
-    let bare = Warp11.BoardTop.boardTop { iceBoard with host = NoHost } Warp11.BoardTop.Pins onIce
+    let ice = Warp11.BoardTop.boardTopOf iceBoard Pins onIce
+    let bare = Warp11.BoardTop.boardTopOf { iceBoard with host = NoHost } Pins onIce
 
     let refused =
         try
-            Warp11.BoardTop.boardTop kv260 Warp11.BoardTop.Pins { onKv260 with sampleRate = 48_000.0 } |> ignore
+            Warp11.BoardTop.boardTopOf kv260 Pins { onKv260 with sampleRate = 48_000.0 } |> ignore
             false
         with e ->
             e.Message.Contains "48000" && e.Message.Contains "48828.125"
 
     let impossible =
         try
-            Warp11.BoardTop.boardTop { iceBoard with host = AxiLiteAt 0UL } Warp11.BoardTop.Pins onIce |> ignore
+            Warp11.BoardTop.boardTopOf { iceBoard with host = AxiLiteAt 0UL } Pins onIce |> ignore
             false
         with e ->
             e.Message.Contains "no processing system"
@@ -1098,7 +1106,7 @@ let designOnABoard () : bool =
 // CHECK
 let designOnHostMemory () : bool =
     let g = { gainGraph with name = "GainMemory"; sampleRate = stockSampleRate }
-    let top = Warp11.BoardTop.boardTop kv260 Warp11.BoardTop.HostMemory g
+    let top = Warp11.BoardTop.boardTopOf kv260 HostMemory g
     let batch = top.batch.Value
     let sim = Sim top.top
     let ddr = SimAxiDdr(sim, 0x20000)
@@ -1144,7 +1152,7 @@ let designOnHostMemory () : bool =
 
     let refused =
         try
-            Warp11.BoardTop.boardTop (iceBreakerAt 24_000_000) Warp11.BoardTop.HostMemory g |> ignore
+            Warp11.BoardTop.boardTopOf (iceBreakerAt 24_000_000) HostMemory g |> ignore
             false
         with e ->
             e.Message.Contains "no host memory"
@@ -1177,8 +1185,8 @@ let buildDirectoryVivado () : bool =
         System.IO.File.ReadAllText(System.IO.Path.Combine(dir, sub, file))
 
     try
-        let pins = Warp11.Build.write (System.IO.Path.Combine(dir, "pins")) (Warp11.BoardTop.boardTop kv260 Warp11.BoardTop.Pins g)
-        let memory = Warp11.Build.write (System.IO.Path.Combine(dir, "memory")) (Warp11.BoardTop.boardTop kv260 Warp11.BoardTop.HostMemory g)
+        let pins = Warp11.Build.write (System.IO.Path.Combine(dir, "pins")) (Warp11.BoardTop.boardTopOf kv260 Pins g)
+        let memory = Warp11.Build.write (System.IO.Path.Combine(dir, "memory")) (Warp11.BoardTop.boardTopOf kv260 HostMemory g)
 
         let bd = read "pins" "gain_build_axi_bd.tcl"
         let xdc = read "pins" "gain_build_axi_pins.xdc"
@@ -1230,7 +1238,7 @@ let buildDirectoryVivado () : bool =
 
         let refused =
             try
-                Warp11.Build.write (System.IO.Path.Combine(dir, "short")) (Warp11.BoardTop.boardTop shortBoard Warp11.BoardTop.Pins g)
+                Warp11.Build.write (System.IO.Path.Combine(dir, "short")) (Warp11.BoardTop.boardTopOf shortBoard Pins g)
                 |> ignore
 
                 false
@@ -1260,7 +1268,7 @@ let buildDirectoryOpenFlow () : bool =
         System.IO.File.ReadAllText(System.IO.Path.Combine(dir, file))
 
     try
-        let out = Warp11.Build.write dir (Warp11.BoardTop.boardTop board Warp11.BoardTop.Pins g)
+        let out = Warp11.Build.write dir (Warp11.BoardTop.boardTopOf board Pins g)
         let wrapper = read "gain_ice_uart_top.v"
         let pins = read "gain_ice_uart_top.pcf"
         let sh = read "build.sh"
@@ -1284,3 +1292,53 @@ let buildDirectoryOpenFlow () : bool =
     finally
         if System.IO.Directory.Exists dir then
             System.IO.Directory.Delete(dir, true)
+
+// UD21 — The mapping is a file. A board with every axis and the data path
+// round-trip through the mapping file, preset and custom alike; a board
+// alone round-trips as a board file; the design names its default mapping
+// and its file carries the name; the export with a mapping prints the
+// board, the path and a build function; a mapping naming an impossible
+// combination is refused on load.
+
+// CHECK
+let mappingIsAFile () : bool =
+    let custom = { kv260 with fabricHz = 99_999_001; name = "custom" }
+
+    let roundTrips (m: Warp11.Mapping.Mapping) =
+        Warp11.Mapping.parse (Warp11.Mapping.write m) = Ok m
+
+    let boardRoundTrips (b: Board) =
+        Warp11.Mapping.parseBoard (Warp11.Mapping.writeBoard b) = Ok b
+
+    let ice = iceBreakerAt 24_000_000
+    let g = { gainGraph with mapping = Some "gain.kv260.json" }
+    let carried = Warp11.DesignFile.parse (Warp11.DesignFile.write g)
+
+    let exported =
+        match Warp11.Export.exportWith (Some { board = kv260; path = HostMemory }) g with
+        | Ok text -> text
+        | Error why -> failwith why
+
+    let refused =
+        match Warp11.Mapping.parse (Warp11.Mapping.write { board = { ice with host = AxiLiteAt 0UL }; path = Pins }) with
+        | Error why -> why.Contains "no processing system"
+        | Ok _ -> false
+
+    roundTrips { board = kv260; path = HostMemory }
+    && roundTrips { board = kv260; path = Pins }
+    && roundTrips { board = ice; path = Pins }
+    && roundTrips { board = custom; path = HostMemory }
+    && boardRoundTrips kv260
+    && boardRoundTrips ice
+    && Warp11.Mapping.presetOf kv260 = Some "kv260"
+    && Warp11.Mapping.presetOf custom = None
+    && (match carried with
+        | Ok g' -> g'.mapping = Some "gain.kv260.json"
+        | Error _ -> false)
+    && exported.Contains "/// The target: the `kv260` preset"
+    && exported.Contains "let board ="
+    && exported.Contains "let path = HostMemory"
+    && exported.Contains "let build (dir: string) = Warp11.Build.write dir (Warp11.BoardTop.boardTop board path design)"
+    && exported.Contains "let design: Warp11.BoardTop.Design ="
+    && Warp11.Mapping.fileFor "/tmp/x/gain.json" "kv260" = "/tmp/x/gain.kv260.json"
+    && refused

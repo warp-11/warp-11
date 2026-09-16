@@ -400,6 +400,9 @@ let setStreams (n: int) (g: Graph) : Result<Graph, string> =
 let rename (name: string) (g: Graph) : Result<Graph, string> =
     checkName "design" name |> Result.map (fun () -> { g with name = name })
 
+/// The design's default mapping: the file beside it, or none.
+let setMapping (file: string option) (g: Graph) : Result<Graph, string> = Ok { g with mapping = file }
+
 // ---------------------------------------------------------------------------
 // Undo.
 

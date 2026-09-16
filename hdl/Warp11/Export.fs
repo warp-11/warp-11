@@ -240,7 +240,67 @@ let rec private definitionsOf (g: Graph) : string list =
 /// The source, or why it cannot be written: one module, the design's rate,
 /// the units written for it, the designs it uses as values above it, and
 /// the design itself.
-let export (g: Graph) : Result<string, string> =
+let exportWith (mapping: Warp11.Mapping.Mapping option) (g: Graph) : Result<string, string> =
+    let target =
+        match mapping with
+        | None -> []
+        | Some m ->
+            let path =
+                match m.path with
+                | Pins -> "Pins"
+                | HostMemory -> "HostMemory"
+
+            let provenance =
+                match Warp11.Mapping.presetOf m.board with
+                | Some name -> $"/// The target: the `{name}` preset, every axis spelled out."
+                | None -> "/// The target, every axis spelled out."
+
+            let ins, outs, controls = ioNames g
+            let ports = controlPorts g
+            let q (text: string) = "\"" + text + "\""
+            let fmtList (pins: (string * NumberFormat) list) = pins |> List.map (fun (n, f) -> q n + ", " + showFormat f) |> String.concat "; "
+            let listOf (items: string) = if items = "" then "[]" else "[ " + items + " ]"
+            let starting = startingValues g |> List.map (fun (n, v) -> q n + ", " + string v + "UL") |> String.concat "; "
+            let fieldsIn = [ for i in 0 .. g.inputs.Length - 1 -> "fields[" + string i + "]" ]
+            let outNames = [ for n, _ in g.outputs -> ident n ]
+            let portList = [ for (n, _), v in List.zip ports controls -> q n + ", " + v ] |> String.concat "; "
+            let inPins = match showPins "the input box" g.inputs with Ok p -> p | Error e -> failwith e
+            let ioPattern = tuple (ins @ outs @ controls)
+            let outList = "[ " + String.concat "; " outNames + " ]"
+
+            [ ""
+              provenance
+              "let board ="
+              Warp11.Mapping.showBoard m.board
+              ""
+              "let path = " + path
+              ""
+              "/// The design as a board top takes it: its boundary, its controls and"
+              "/// where they start, and the instance under a name."
+              "let design: Warp11.BoardTop.Design ="
+              "    { name = " + q g.name
+              "      sampleRate = sampleRate"
+              "      streams = " + string g.streams
+              "      inputs = " + listOf (fmtList g.inputs)
+              "      outputs = " + listOf (fmtList g.outputs)
+              "      controls = " + listOf (fmtList ports)
+              "      starting = " + listOf starting
+              "      rig ="
+              "        fun instance ->"
+              "            let " + ioPattern + " = " + valueName g.name + ".NewNamed instance"
+              ""
+              "            { through ="
+              "                fun s ->"
+              "                    s"
+              "                    |> streamMapTo (" + inPins + ") (fun fields -> " + tupleValue fieldsIn + ")"
+              "                    |> streamThroughInstance " + ins.Head + " " + outs.Head
+              "                    |> streamMapTo (layoutOfList " + listOf (fmtList g.outputs) + ") (fun " + tuple outNames + " -> " + outList + ")"
+              "              ports = " + listOf portList + " } }"
+              ""
+              "/// The build directory for this design on the board: `build \"out\"` writes"
+              "/// what the board's toolchain builds from, and says how to run it."
+              "let build (dir: string) = Warp11.Build.write dir (Warp11.BoardTop.boardTop board path design)" ]
+
     designsInOrder g
     |> List.distinctBy (fun d -> d.name)
     |> List.map printDesign
@@ -263,5 +323,9 @@ let export (g: Graph) : Result<string, string> =
                ""
                $"let sampleRate = {showFloat g.sampleRate}"
                "" ]
-             @ [ String.concat "\n\n" blocks ])
+             @ [ String.concat "\n\n" blocks ]
+             @ target)
         + "\n")
+
+/// `exportWith` no mapping: the design alone.
+let export (g: Graph) : Result<string, string> = exportWith None g

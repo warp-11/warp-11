@@ -45,9 +45,15 @@ canvas (and refuses in a browser, which has no compiler).
 **Export F#** writes the typed source beside the file; `dotnet run --project
 Warp11.Placement -- export <file>` prints it, and `-- emit <file>` the Verilog.
 
-**Board** writes the design's KV260 top into `board/` beside the file: the
-Verilog with the stereo boundary on the I2S pins and every control a
-register, plus the Rust seam for the register map. `-- board <file> kv260
-<dir>` does the same from the shell, and `icebreaker` targets the iCEBreaker
-over a UART — that board frames at 46 875 Hz, so a design goes there made
-for that rate (the refusal says so).
+**Target** (in the design panel, nothing selected) is where the design
+goes: a preset (`kv260`, `icebreaker`) fills every row — part, build tool,
+clock and fabric rate, data path (the boundary on the I2S pins, or in the
+host's memory: a recording in, the design, a recording out, no codec
+needed), host driver, loading, connectors — and any row edited makes it
+custom. Save writes it beside the design as `gain.kv260.json`, and the
+design names it; `gain.json` ships with that one. **Build** writes
+`build/` beside the design with everything the board's toolchain builds
+from and says how to run it; `dotnet run --project Warp11.Placement --
+build <file> <dir>` does the same from the shell. The iCEBreaker frames at
+46 875 Hz, so a design goes there made for that rate (the refusal says so).
+`notes/BUILD.md` is the plan.

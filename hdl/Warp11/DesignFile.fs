@@ -102,6 +102,10 @@ let rec private node (g: Graph) : JsonObject =
         units[name] <- JsonValue.Create source
 
     root["units"] <- units
+
+    match g.mapping with
+    | Some m -> root["mapping"] <- JsonValue.Create m
+    | None -> ()
     root
 
 /// The graph as JSON text.
@@ -345,7 +349,14 @@ let rec private readGraph (root: JsonNode) : Result<Graph, string> =
                       edges = wires
                       positions = positions
                       designs = designs
-                      units = units }
+                      units = units
+                      mapping =
+                        match field root "mapping" with
+                        | Ok node ->
+                            match asString "'mapping'" node with
+                            | Ok m -> Some m
+                            | Error _ -> None
+                        | Error _ -> None }
             | Error e, _, _, _, _, _, _, _, _
             | _, Error e, _, _, _, _, _, _, _
             | _, _, Error e, _, _, _, _, _, _
