@@ -6,7 +6,6 @@ open Avalonia.Controls.ApplicationLifetimes
 open Avalonia.FuncUI.Hosts
 open Avalonia.Themes.Fluent
 open Warp11.Placement.Graph
-open Warp11.Placement.Canvas.NodeEditorSpike
 
 type SpikeWindow(g: Graph, live: FuncCanvas.Live option) as this =
     inherit HostWindow()
@@ -22,7 +21,6 @@ type App(g: Graph, live: FuncCanvas.Live option) =
 
     override this.Initialize() =
         this.Styles.Add(FluentTheme())
-        this.Styles.Add(nodeEditorTheme "Warp11.Placement.Canvas")
         this.RequestedThemeVariant <- Avalonia.Styling.ThemeVariant.Light
 
     override this.OnFrameworkInitializationCompleted() =

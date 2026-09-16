@@ -8,7 +8,6 @@ open Avalonia.Controls
 open Avalonia.Controls.ApplicationLifetimes
 open Avalonia.Themes.Fluent
 open Warp11.Placement.Graph
-open Warp11.Placement.Canvas.NodeEditorSpike
 
 type App() =
     inherit Application()

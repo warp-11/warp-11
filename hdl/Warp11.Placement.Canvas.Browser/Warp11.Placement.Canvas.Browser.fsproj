@@ -20,19 +20,9 @@
         <!-- Source-linked from the desktop spike: that project carries
              Avalonia.Desktop, whose native backends the wasm build cannot
              scan, so the view is compiled here rather than referenced. -->
-        <Compile Include="../Warp11.Placement.Canvas/NodeEditorSpike.fs"/>
         <Compile Include="../Warp11.Placement.Canvas/AudioSink.fs"/>
         <Compile Include="../Warp11.Placement.Canvas/FuncCanvas.fs"/>
         <Compile Include="Program.fs"/>
-    </ItemGroup>
-
-    <!-- The wasm publish trims; a control library's compiled XAML is reached
-         only by name at run time, so the trimmer must be told to keep it. -->
-    <ItemGroup>
-        <TrimmerRootAssembly Include="NodeEditorAvalonia"/>
-        <TrimmerRootAssembly Include="NodeEditorAvalonia.Model"/>
-        <TrimmerRootAssembly Include="NodeEditorAvalonia.Mvvm"/>
-        <TrimmerRootAssembly Include="PanAndZoom"/>
     </ItemGroup>
 
     <ItemGroup>
@@ -48,10 +38,6 @@
 
     <ItemGroup>
         <ProjectReference Include="../Warp11.Placement/Warp11.Placement.fsproj"/>
-        <!-- Vendored — see hdl/vendor/README.md. -->
-        <ProjectReference Include="../vendor/NodeEditor/src/NodeEditorAvalonia.Model/NodeEditorAvalonia.Model.csproj"/>
-        <ProjectReference Include="../vendor/NodeEditor/src/NodeEditorAvalonia.Mvvm/NodeEditorAvalonia.Mvvm.csproj"/>
-        <ProjectReference Include="../vendor/NodeEditor/src/NodeEditorAvalonia/NodeEditorAvalonia.csproj"/>
     </ItemGroup>
 
 </Project>
