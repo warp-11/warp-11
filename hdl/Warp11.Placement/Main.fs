@@ -224,4 +224,5 @@ let main argv =
     run "UD19 the build directory, Vivado" buildDirectoryVivado
     run "UD20 the build directory, the open flow" buildDirectoryOpenFlow
     run "UD21 the mapping is a file" mappingIsAFile
+    run "UD22 the Mandelbrot frame, drawn" mandelbrotDrawn
     0

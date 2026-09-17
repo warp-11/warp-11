@@ -879,3 +879,34 @@ let coords (width: int) (fracBits: int) : Fu<Expr, Expr * Expr * Expr> =
               valid = s.valid
               ready = ready
               layout = layout3 ("cx0", 32) ("cy", 32) ("dx", 32) }) }
+
+/// The design's pins, as the boundary sees them.
+let beatPin = "beat", unsignedInt 32
+let pixelsPin = "pixels", pixelsFormat
+
+let viewControls (fracBits: int) =
+    let view = viewFormat fracBits
+    [ "cxOrigin", view; "cyOrigin", view; "dx", view; "dy", view ]
+
+/// The frame as the canvas draws it, in typed form: beats in, `coords`, the
+/// lane spent `lanes` times, pixels out — the four boxes, so the drawn design
+/// and this meet at the bytes.
+let mandelChunksDef (name: string) (width: int) (maxIter: int) (fracBits: int) (threads: int) (lanes: int) =
+    let coords = coords width fracBits
+    let lane = copies lanes (mandel16 maxIter fracBits threads)
+    let view = viewFormat fracBits
+
+    defModule
+        name
+        (fun p ->
+            streamInputPorts p "in1" (pins1 beatPin),
+            streamOutputPorts p "out1" (pins1 pixelsPin),
+            p.inPort "cxOrigin" 32,
+            p.inPort "cyOrigin" 32,
+            p.inPort "dx" 32,
+            p.inPort "dy" 32)
+        (fun (in1, out1, cxOrigin, cyOrigin, dx, dy) ->
+            [ streamSource in1 ]
+            |> fuStagesWith [ cxOrigin; cyOrigin; dx; dy ] coords "coords" (pins3 ("cx0", view) ("cy", view) ("dx", view)) id (fun r _ -> r)
+            |> fuStagesWith [] lane "mandel16" (pins1 pixelsPin) id (fun r _ -> r)
+            |> List.iter2 streamSink [ out1 ])

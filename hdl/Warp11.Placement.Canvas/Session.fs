@@ -153,10 +153,39 @@ let rec openWith (g: Graph) (source: Graph -> Source) (controls: (string * uint6
       framesPerSecond = src.framesPerSecond
       reopen = fun g knobs -> openWith g source knobs savePath }
 
+/// A frame the design draws: a count into the design, the chunks out as
+/// pixels, saved as a PGM `width` wide. Nothing on the input but the beat
+/// index, so a view is the design's own controls.
+let frameSource (g: Graph) (width: int) (height: int) : Source =
+    let m: Warp11.Devices.FrameMapping = { width = width; height = height; controls = []; outputPath = None }
+    let beats = Warp11.Devices.frameBeats m g.outputs
+
+    beatSource g (Warp11.Devices.countBeats beats) beats (fun path heard ->
+        let out = ofChunks width (Warp11.Devices.pixelsPerBeatOf g.outputs) (heard |> List.truncate beats |> List.map List.head)
+        writePgm path out
+        $"wrote {path}: %d{out.height} rows")
+
+/// `frame:<width>x<height>`, the source that is a count rather than a file.
+let private frameSpec (text: string) : (int * int) option =
+    match text.Split ':' with
+    | [| "frame"; size |] ->
+        match size.Split 'x' with
+        | [| w; h |] ->
+            match System.Int32.TryParse w, System.Int32.TryParse h with
+            | (true, w), (true, h) when w > 0 && h > 0 -> Some(w, h)
+            | _ -> None
+        | _ -> None
+    | _ -> None
+
 /// The source a file is, by its extension: a recording, an image or a
-/// table. What `-- edit design.json <file>` opens with.
+/// table — or `frame:<width>x<height>`, a frame for the design to draw.
+/// What `-- edit design.json <file>` opens with.
 let sourceOf (path: string) (audible: bool) : (Graph -> Source) * string =
     let heardPath (ext: string) = System.IO.Path.ChangeExtension(path, $".heard{ext}")
+
+    match frameSpec path with
+    | Some(width, height) -> (fun g -> frameSource g width height), $"frame-%d{width}x%d{height}.pgm"
+    | None ->
 
     match System.IO.Path.GetExtension(path).ToLowerInvariant() with
     | ".wav" ->
@@ -168,13 +197,13 @@ let sourceOf (path: string) (audible: bool) : (Graph -> Source) * string =
     | ".csv" ->
         let table = readCsv path
         (fun g -> csvSource g table), heardPath ".csv"
-    | other -> failwith $"{path}: a source is a .wav, a .pgm or a .csv, not '{other}'"
+    | other -> failwith $"{path}: a source is a .wav, a .pgm, a .csv or frame:<width>x<height>, not '{other}'"
 
 /// The rate a new design opened with a file is made for: a recording's,
 /// or the default for anything without one.
 let rateOf (path: string) : float =
-    match System.IO.Path.GetExtension(path).ToLowerInvariant() with
-    | ".wav" -> float (readWavFile path).sampleRate
+    match frameSpec path, System.IO.Path.GetExtension(path).ToLowerInvariant() with
+    | None, ".wav" -> float (readWavFile path).sampleRate
     | _ -> defaultSampleRate
 
 /// The first design: `wav in → gain → wav out`, unity gain, unmuted.

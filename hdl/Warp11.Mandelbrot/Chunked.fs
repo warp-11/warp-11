@@ -12,35 +12,6 @@ open Warp11
 open Warp11.Fu
 open Warp11.Mandel
 
-/// The design's pins, as the boundary sees them.
-let beatPin = "beat", unsignedInt 32
-let pixelsPin = "pixels", pixelsFormat
-
-let viewControls (fracBits: int) =
-    let view = viewFormat fracBits
-    [ "cxOrigin", view; "cyOrigin", view; "dx", view; "dy", view ]
-
-/// The design: beats in, chunk views, the farmed lane, pixels out.
-let mandelChunksDef (name: string) (width: int) (maxIter: int) (fracBits: int) (threads: int) (lanes: int) =
-    let coords = coords width fracBits
-    let lane = copies lanes (mandel16 maxIter fracBits threads)
-    let view = viewFormat fracBits
-
-    defModule
-        name
-        (fun p ->
-            streamInputPorts p "in1" (pins1 beatPin),
-            streamOutputPorts p "out1" (pins1 pixelsPin),
-            p.inPort "cxOrigin" 32,
-            p.inPort "cyOrigin" 32,
-            p.inPort "dx" 32,
-            p.inPort "dy" 32)
-        (fun (in1, out1, cxOrigin, cyOrigin, dx, dy) ->
-            [ streamSource in1 ]
-            |> fuStagesWith [ cxOrigin; cyOrigin; dx; dy ] coords "coords" (pins3 ("cx0", view) ("cy", view) ("dx", view)) id (fun r _ -> r)
-            |> fuStagesWith [] lane "mandel" (pins1 pixelsPin) id (fun r _ -> r)
-            |> List.iter2 streamSink [ out1 ])
-
 /// The design as a board top takes it.
 let mandelChunks (name: string) (width: int) (maxIter: int) (fracBits: int) (threads: int) (lanes: int) : BoardTop.Design =
     let def = mandelChunksDef name width maxIter fracBits threads lanes
