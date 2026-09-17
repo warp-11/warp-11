@@ -30,6 +30,18 @@ let ofRows (width: int) (rows: BigInteger list) : Grey =
       height = rows.Length
       pixels = rows |> List.map (rowOfBits width) |> Array.concat }
 
+/// A grey image from beats each carrying `pixelsPerBeat` pixels in raster
+/// order, a row every `ceil(width / pixelsPerBeat)` beats and cropped to
+/// `width` — how a frame drawn a chunk at a time comes back.
+let ofChunks (width: int) (pixelsPerBeat: int) (beats: BigInteger list) : Grey =
+    let chunksPerRow = (width + pixelsPerBeat - 1) / pixelsPerBeat
+    let height = beats.Length / chunksPerRow
+    let padded = beats |> List.map (rowOfBits pixelsPerBeat) |> Array.concat
+
+    { width = width
+      height = height
+      pixels = [| for r in 0 .. height - 1 do yield! padded[r * chunksPerRow * pixelsPerBeat .. r * chunksPerRow * pixelsPerBeat + width - 1] |] }
+
 let writePgm (path: string) (g: Grey) =
     use file = System.IO.File.Create path
     let header = System.Text.Encoding.ASCII.GetBytes $"P5\n%d{g.width} %d{g.height}\n255\n"

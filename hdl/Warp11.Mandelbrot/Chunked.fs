@@ -108,3 +108,37 @@ let renderTwin (width: int) (height: int) (maxIter: int) (fracBits: int) (view: 
                let cx = (cxOrigin + uint64 c * dx) &&& 0xFFFFFFFFUL
                let cy = (cyOrigin + uint64 r * dy) &&& 0xFFFFFFFFUL
                byte (laneTwin fracBits maxIter cx cy) |]
+
+/// The same frame through the counted board top in the Sim: the batch
+/// registers written as the host would — the count, the view, where the
+/// frame goes — start pulsed, busy polled, the frame read out of the
+/// behavioural DDR. What the driver does on the KV260, against the top the
+/// generator builds, before any bitstream exists.
+let renderThroughBoardTop (width: int) (height: int) (maxIter: int) (fracBits: int) (threads: int) (lanes: int) (view: uint64 * uint64 * uint64 * uint64) =
+    let design = mandelChunks "MandelChunks" width maxIter fracBits threads lanes
+    let top = BoardTop.boardTop kv260 Counted design
+    let batch = top.batch.Value
+    let sim = Sim top.top
+    // Write-only: the counted top reads nothing, so it has no read channel.
+    let ddr = SimAxiWriteSlave(sim, 0x20000, dataBytes = 16, awEvery = 3, bDelay = 6)
+    let axi = SimAxi.clientWith sim ddr.Cycle
+    let chunks = paddedWidth width / pixelsPerBeat
+    let beats = height * chunks
+    let dst = 0x8000
+    let cxOrigin, cyOrigin, dx, dy = view
+    let register (name: string) = top.registers |> List.find (fun (n, _) -> n = name) |> snd
+
+    for name, value in [ "cxOrigin", cxOrigin; "cyOrigin", cyOrigin; "dx", dx; "dy", dy ] do
+        axi.write32 (register name).offset value
+
+    axi.write32 batch.dstAddr.offset (uint64 dst)
+    axi.write32 batch.frameCount.offset (uint64 beats)
+    axi.write32 batch.start.offset 1UL
+    let mutable spins = 0
+
+    while axi.read32 batch.busy.offset <> 0UL && spins < 400_000 do
+        ddr.Cycle()
+        spins <- spins + 1
+
+    let pixels = ddr.Memory[dst .. dst + beats * pixelsPerBeat - 1]
+    pixels, spins, top

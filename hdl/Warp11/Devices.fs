@@ -215,6 +215,74 @@ let runImageInSim (idleLimit: int) (g: Graph) (m: ImageMapping) : Grey =
     out
 
 // ---------------------------------------------------------------------------
+// A frame the design draws: a count in, chunks of pixels out.
+
+/// What satisfies a generator's boundary in the simulator: nothing but a
+/// count of beats, the index on the input box's one field, and the output
+/// box's one field read as pixels — a byte each, as many a beat as the
+/// field holds — assembled into a frame `width` pixels wide. The board's
+/// `Counted` path, in the simulator.
+type FrameMapping =
+    { width: int
+      height: int
+      controls: (string * uint64) list
+      outputPath: string option }
+
+/// Pixels a beat of `pins` carries: the one output field, a byte a pixel.
+let pixelsPerBeatOf (pins: (string * NumberFormat) list) : int =
+    match pins with
+    | [ _, f ] when f.totalWidth % 8 = 0 -> f.totalWidth / 8
+    | _ -> failwith $"a frame needs the output box to be one field of whole bytes, and it is [{describePins pins}]"
+
+/// Beats a frame of `m` takes from a design with `outputs`: rows of chunks.
+let frameBeats (m: FrameMapping) (outputs: (string * NumberFormat) list) : int =
+    let perBeat = pixelsPerBeatOf outputs
+    m.height * ((m.width + perBeat - 1) / perBeat)
+
+let private checkFrame (g: Graph) (m: FrameMapping) =
+    if g.streams < 1 then
+        failwith $"{g.name}: a design has at least one stream"
+
+    match g.inputs with
+    | [ _ ] -> ()
+    | pins -> failwith $"{g.name}: a counted input is one field, the beat index, and the input box is [{describePins pins}]"
+
+    pixelsPerBeatOf g.outputs |> ignore
+    let ports = controlPorts g
+
+    for name, _ in m.controls do
+        if not (ports |> List.exists (fun (n, _) -> n = name)) then
+            failwith $"{g.name}: no control called '{name}' — it has [{describePins ports}]"
+
+    for name, _ in g.controls do
+        if not (m.controls |> List.exists (fun (n, _) -> n = name)) then
+            failwith $"{g.name}: the mapping gives no value for control '{name}'"
+
+/// The count as beats: the index on the one field.
+let countBeats (n: int) : BigInteger list list = [ for k in 0 .. n - 1 -> [ BigInteger k ] ]
+
+/// Draw the frame: the count into the design, the chunks out, the image.
+let runFrameInSim (idleLimit: int) (g: Graph) (m: FrameMapping) : Grey =
+    checkFrame g m
+    let sim = Sim (elaborate g).def
+
+    for name, value in startingValues g @ m.controls do
+        sim.Poke(name, value)
+
+    let beats = frameBeats m g.outputs
+
+    let devices =
+        [ for i in 1 .. g.streams ->
+              let input, output = streamPinsOf g i
+              BeatStreamDevice(sim, input, output, countBeats beats, beats) ]
+
+    drive sim devices idleLimit
+    let heard = devices.Head.Heard |> List.truncate beats |> List.map List.head
+    let out = ofChunks m.width (pixelsPerBeatOf g.outputs) heard
+    m.outputPath |> Option.iter (fun path -> writePgm path out)
+    out
+
+// ---------------------------------------------------------------------------
 // A table on the boundary: a row a beat, columns by pin name.
 
 type CsvMapping =

@@ -249,6 +249,7 @@ let exportWith (mapping: Warp11.Mapping.Mapping option) (g: Graph) : Result<stri
                 match m.path with
                 | Pins -> "Pins"
                 | HostMemory -> "HostMemory"
+                | Counted -> "Counted"
 
             let provenance =
                 match Warp11.Mapping.presetOf m.board with

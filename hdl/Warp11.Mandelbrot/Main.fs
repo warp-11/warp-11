@@ -289,6 +289,14 @@ let private mainDemo () =
         let ok = pixels = chunkTwin
         printfn $"chunked design (%d{lanes} lanes) vs twin: %b{ok} (%d{cycles} cycles)"
 
+    // The same design on the KV260's counted path, in the Sim against the
+    // behavioural DDR: the host writes a count and a view, the frame lands.
+    // 32×8: sixteen beats, the burst the write side's rows must fill.
+    let boardTwin = Chunked.renderTwin 32 8 48 28 chunkView
+    let boardPixels, boardCycles, boardTop = Chunked.renderThroughBoardTop 32 8 48 28 8 2 chunkView
+    let boardOk = boardPixels = boardTwin
+    printfn $"counted board top vs twin ({boardTop.name}, 2 lanes): %b{boardOk} (%d{boardCycles} cycles)"
+
     0
 
 /// What `debug` will open, by label — the pod designs on this side of the

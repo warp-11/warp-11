@@ -300,12 +300,14 @@ let private pathText (p: DataPath) =
     match p with
     | Pins -> "pins"
     | HostMemory -> "memory"
+    | Counted -> "count"
 
 let private readPath (text: string) : Result<DataPath, string> =
     match text with
     | "pins" -> Ok Pins
     | "memory" -> Ok HostMemory
-    | other -> Error $"'path': a data path is pins or memory, not '{other}'"
+    | "count" -> Ok Counted
+    | other -> Error $"'path': a data path is pins, memory or count, not '{other}'"
 
 let write (m: Mapping) : string =
     let o = JsonObject()

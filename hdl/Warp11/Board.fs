@@ -90,6 +90,10 @@ type HostMemoryFacts =
 type DataPath =
     | Pins
     | HostMemory
+    /// Beats counted into the design — its input box's one field is the beat
+    /// index, `0 …` as many as the host asks for — and rows out to the host's
+    /// memory. A generator's path: a frame the design draws, nothing read.
+    | Counted
 
 /// How a host reaches the design's registers.
 ///

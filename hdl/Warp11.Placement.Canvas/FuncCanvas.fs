@@ -1633,8 +1633,8 @@ let view (opening: Opening) : Control =
                      row ("the design's rate lands at", $"%.3f{landed} Hz")
                      line
                          [ label "data path"
-                           combo [ "pins"; "memory" ] (match m.path with Pins -> "pins" | HostMemory -> "memory") (fun p ->
-                               update (fun m -> { m with path = (if p = "memory" then HostMemory else Pins) })) ]
+                           combo [ "pins"; "memory"; "count" ] (match m.path with Pins -> "pins" | HostMemory -> "memory" | Counted -> "count") (fun p ->
+                               update (fun m -> { m with path = (match p with "memory" -> HostMemory | "count" -> Counted | _ -> Pins) })) ]
                      (match b.hostMemory with
                       | Some hm ->
                           line

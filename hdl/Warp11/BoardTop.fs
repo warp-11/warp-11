@@ -134,8 +134,18 @@ type BatchRegs =
 let batchId = 0x7A11BA7CUL
 
 /// A lane is a host word: a field of a row sign-extended into 32 bits, so
-/// the host reads a plain `i32` and gets the number the fabric computed.
+/// the host reads a plain `i32` and gets the number the fabric computed. A
+/// field wider than a word takes the next lanes too, low word first.
 let laneWidth = 32
+
+/// The lanes a field takes.
+let lanesOf (f: NumberFormat) = (f.totalWidth + laneWidth - 1) / laneWidth
+
+/// Where each field starts, in lanes, and how many it takes.
+let private laneSpans (pins: (string * NumberFormat) list) : (int * int) list =
+    (0, pins)
+    ||> List.mapFold (fun start (_, f) -> (start, lanesOf f), start + lanesOf f)
+    |> fst
 
 /// Beats per burst. At 128 bits a burst is 256 bytes, so a 256-byte-aligned
 /// base can never cross AXI's 4 KB boundary — the rule `axiMasterReaderBurst`
@@ -155,12 +165,7 @@ type RowShape =
 /// cannot.
 let rowShape (beatWidth: int) (pins: (string * NumberFormat) list) : RowShape =
     let lanesPerBeat = beatWidth / laneWidth
-
-    for name, f in pins do
-        if f.totalWidth > laneWidth then
-            failwith $"a lane is %d{laneWidth} bits and '{name}' is %d{f.totalWidth} — the host-memory path is not built for wider fields"
-
-    let lanes = pins.Length
+    let lanes = pins |> List.sumBy (fun (_, f) -> lanesOf f)
 
     if lanes < 1 || lanes > lanesPerBeat then
         failwith $"a row of %d{lanes} fields does not fit a %d{beatWidth}-bit beat — the host-memory path is not built for that"
@@ -213,11 +218,12 @@ let private beatsToRows (shape: RowShape) (pins: (string * NumberFormat) list) (
     let fire = beats.valid &&& outReady
 
     let laneAt (lane: int) (w: int) = slice (lane * laneWidth + w - 1) (lane * laneWidth) beat
+    let spans = laneSpans pins
 
     let fields =
         if shape.rowsPerBeat = 1 then
             fire ==> beats.ready
-            [ for i, (_, f) in List.indexed pins -> laneAt i f.totalWidth ]
+            [ for (start, _), (_, f) in List.zip spans pins -> laneAt start f.totalWidth ]
         else
             let phaseWidth = ceilLog2 shape.rowsPerBeat
             let phase = reg "unpack_phase" phaseWidth
@@ -226,8 +232,8 @@ let private beatsToRows (shape: RowShape) (pins: (string * NumberFormat) list) (
 
             If fire (fun () -> mux last (lit 0UL phaseWidth) (phase + lit 1UL phaseWidth) ==> phase)
 
-            [ for i, (_, f) in List.indexed pins ->
-                  selectIndexed phase [ for row in 0 .. shape.rowsPerBeat - 1 -> laneAt (row * shape.lanesPerRow + i) f.totalWidth ] ]
+            [ for (start, _), (_, f) in List.zip spans pins ->
+                  selectIndexed phase [ for row in 0 .. shape.rowsPerBeat - 1 -> laneAt (row * shape.lanesPerRow + start) f.totalWidth ] ]
 
     { payload = fields
       valid = beats.valid
@@ -238,13 +244,15 @@ let private beatsToRows (shape: RowShape) (pins: (string * NumberFormat) list) (
 /// — unavoidable, because the producer has already been told its row was
 /// taken.
 let private rowsToBeats (shape: RowShape) (pins: (string * NumberFormat) list) (beatWidth: int) (rows: Stream<Expr list>) : Stream<Expr> =
+    // A field fills its lanes, sign-extended to the last.
     let lane (f: NumberFormat) (e: Expr) =
-        if f.signed then asUInt (pad laneWidth (asSInt e)) else pad laneWidth e
+        let w = lanesOf f * laneWidth
+        if f.signed then asUInt (pad w (asSInt e)) else pad w e
 
     let lanes = List.map2 (fun (_, f) e -> lane f e) pins rows.payload
 
     let rowBits =
-        let padding = shape.lanesPerRow - lanes.Length
+        let padding = shape.lanesPerRow - (pins |> List.sumBy (fun (_, f) -> lanesOf f))
         let padded = lanes @ List.replicate padding (lit 0UL laneWidth)
         // Lane 0 at the low end.
         padded |> List.rev |> List.reduce cat
@@ -384,7 +392,12 @@ let private pinsTop (board: Board) (d: Design) : BoardTop =
 /// 256-byte aligned — the host driver pads and checks, because a design
 /// that silently processed a truncated block would be worse than one that
 /// refused.
-let private hostMemoryTop (board: Board) (d: Design) : BoardTop =
+///
+/// `counted` is the same top with nothing read: the input rows are the beat
+/// index, `0 … frameCount - 1`, on the input box's one field, so the host
+/// writes the count and the view and reads the frame back. The registers
+/// are the same, `srcAddr` unused, so one driver speaks to both.
+let private hostMemoryTop (board: Board) (counted: bool) (d: Design) : BoardTop =
     let memory =
         match board.hostMemory with
         | Some m -> m
@@ -396,6 +409,9 @@ let private hostMemoryTop (board: Board) (d: Design) : BoardTop =
 
     if d.streams <> 1 then
         failwith $"{d.name}: the host-memory path carries one stream, and the design declares %d{d.streams}"
+
+    if counted && d.inputs.Length <> 1 then
+        failwith $"{d.name}: the counted path puts the beat index on the input box's one field, and the design declares [{describePins d.inputs}]"
 
     let batch, entries, map = batchRegistersOf d
     let inShape = rowShape memory.width d.inputs
@@ -410,7 +426,7 @@ let private hostMemoryTop (board: Board) (d: Design) : BoardTop =
             name
             (fun p ->
                 axiLiteSlavePorts p map.apertureAddrWidth,
-                axiReadBusPorts p "m_axi" 32 memory.width,
+                (if counted then None else Some(axiReadBusPorts p "m_axi" 32 memory.width)),
                 axiWriteBusPorts p "m_axi" 32 memory.width)
             (fun (slavePorts, readBusPorts, writeBusPorts) ->
                 let regs = regMapSlave slavePorts map
@@ -436,29 +452,49 @@ let private hostMemoryTop (board: Board) (d: Design) : BoardTop =
                 let arIssued = reg "ar_issued" 32
                 let beatsWritten = reg "beats_written" 32
 
-                // --- the read side: one descriptor per burst ---------------
-                let reqReady = wireBit "req_ready"
-                let arMore = wireBit "ar_more"
-                (running &&& lt arIssued bursts) ==> arMore
-
-                let reqAddr = wire "req_addr" 32
                 let burstAddrShift = ceilLog2 burstBytes
-                (regs.value batch.srcAddr + asUInt (shl burstAddrShift (slice (31 - burstAddrShift) 0 arIssued))) ==> reqAddr
 
-                let requests: Stream<Expr * Expr> =
-                    { payload = (reqAddr, lit (uint64 (beatsPerBurst - 1)) 8)
-                      valid = arMore
-                      ready = reqReady
-                      layout = layout2 ("addr", 32) ("len", 8) }
+                let rows: Stream<Expr list> =
+                    match readBusPorts with
+                    | Some readBusPorts ->
+                        // --- the read side: one descriptor per burst -------
+                        let reqReady = wireBit "req_ready"
+                        let arMore = wireBit "ar_more"
+                        (running &&& lt arIssued bursts) ==> arMore
 
-                If (arMore &&& reqReady) (fun () -> arIssued + lit 1UL 32 ==> arIssued)
+                        let reqAddr = wire "req_addr" 32
+                        (regs.value batch.srcAddr + asUInt (shl burstAddrShift (slice (31 - burstAddrShift) 0 arIssued))) ==> reqAddr
 
-                let beats = axiMasterReaderBurstOn (axiReadBusOf readBusPorts) 4 beatsPerBurst requests
+                        let requests: Stream<Expr * Expr> =
+                            { payload = (reqAddr, lit (uint64 (beatsPerBurst - 1)) 8)
+                              valid = arMore
+                              ready = reqReady
+                              layout = layout2 ("addr", 32) ("len", 8) }
+
+                        If (arMore &&& reqReady) (fun () -> arIssued + lit 1UL 32 ==> arIssued)
+
+                        axiMasterReaderBurstOn (axiReadBusOf readBusPorts) 4 beatsPerBurst requests
+                        |> beatsToRows inShape d.inputs
+                    | None ->
+                        // --- the count: `frameCount` beats, the index each -
+                        // `arIssued` counts them, as it counts bursts read.
+                        let more = wireBit "count_more"
+                        (running &&& lt arIssued frameCount) ==> more
+                        let countReady = wireBit "count_ready"
+                        registerStreamReady countReady
+                        If (more &&& countReady) (fun () -> arIssued + lit 1UL 32 ==> arIssued)
+
+                        let _, f = d.inputs.Head
+                        let index = if f.totalWidth >= 32 then pad f.totalWidth arIssued else slice (f.totalWidth - 1) 0 arIssued
+
+                        { payload = [ index ]
+                          valid = more
+                          ready = countReady
+                          layout = layoutOfList d.inputs }
 
                 // --- the design ---------------------------------------------
                 let outBeats =
-                    beats
-                    |> beatsToRows inShape d.inputs
+                    rows
                     |> rig.through
                     |> rowsToBeats outShape d.outputs memory.width
 
@@ -504,7 +540,7 @@ let private hostMemoryTop (board: Board) (d: Design) : BoardTop =
                 assertThat (aligned batch.srcAddr) $"srcAddr must be %d{burstBytes}-byte aligned"
                 assertThat (aligned batch.dstAddr) $"dstAddr must be %d{burstBytes}-byte aligned"
 
-                let rowsPerBurst = max inShape.rowsPerBurst outShape.rowsPerBurst
+                let rowsPerBurst = if counted then outShape.rowsPerBurst else max inShape.rowsPerBurst outShape.rowsPerBurst
                 let rowShift = ceilLog2 rowsPerBurst
 
                 assertThat
@@ -534,7 +570,8 @@ let boardTop (board: Board) (path: DataPath) (d: Design) : BoardTop =
 
     match path with
     | Pins -> pinsTop board d
-    | HostMemory -> hostMemoryTop board d
+    | HostMemory -> hostMemoryTop board false d
+    | Counted -> hostMemoryTop board true d
 
 /// `boardTop` for a drawn design.
 let boardTopOf (board: Board) (path: DataPath) (g: Graph) : BoardTop = boardTop board path (ofGraph g)
