@@ -228,53 +228,16 @@ let private pool (unit: Fu<'a, 'r>) (law: 'a -> 'r) (name: string) (clients: Cli
 let private prefixed (prefix: string) (l: Layout<'x>) : Layout<'x> =
     { l with fields = [ for n, w in l.fields -> $"{prefix}_{n}", w ] }
 
-/// `n` copies of a stage over one stream, IN ORDER: beats go to lanes round
-/// robin, and leave round robin in the same rotation, so beat `i` comes out
-/// of lane `i mod n` and before beat `i + 1` whatever the lanes are doing. A
-/// slow lane stalls the merge rather than being overtaken — which is the
-/// property `farmWith` gives up for throughput and a sample stream cannot
-/// give up. At one lane it is the stage itself.
+/// `n` copies of a stage over one stream, IN ORDER: a beat goes to whichever
+/// lane is free and leaves in the order it came, so beat `i` is out before
+/// beat `i + 1` whatever the lanes cost — a sample stream cannot give that
+/// up, and a frame's raster is the same rule. `streamFarmOrdered` is the
+/// mechanism: a queue of lane indices the merge follows, and above
+/// `fanFlatMax` lanes the clustered fan the flat one would not clock at. At
+/// one lane it is the stage itself. The queue holds two beats a lane, the
+/// beat a lane holds and the one it stages.
 let private orderedFarm (name: string) (n: int) (worker: int -> Stream<'p> -> Stream<'q>) (s: Stream<'p>) : Stream<'q> =
-    if n = 1 then
-        worker 0 s
-    else
-        let laneBits = ceilLog2 n
-        let lane (i: int) = lit (uint64 i) laneBits
-
-        // Dispatch: the next lane in rotation gets the beat.
-        let feeding = counter $"{name}_feed" n (s.valid &&& s.ready)
-        let laneReadies = [ for i in 0 .. n - 1 -> wireBit $"{name}_lane%d{i}_ready" ]
-        selectIndexed feeding.count laneReadies ==> s.ready
-
-        let lanes =
-            [ for i in 0 .. n - 1 ->
-                  { s with
-                      valid = s.valid &&& eq feeding.count (lane i)
-                      ready = laneReadies[i] } ]
-
-        let outs = List.mapi worker lanes
-        let layout = outs.Head.layout
-
-        // Merge: take from the lanes in the same rotation.
-        let ready = wireBit $"{name}_ready"
-        registerStreamReady ready
-        let valid = wireBit $"{name}_valid"
-        let taking = counter $"{name}_take" n (valid &&& ready)
-        selectIndexed taking.count [ for o in outs -> o.valid ] ==> valid
-
-        for i, o in List.indexed outs do
-            (ready &&& eq taking.count (lane i)) ==> o.ready
-
-        let fields =
-            [ for j, (fieldName, format) in List.indexed layout.fields ->
-                  let f = wire $"{name}_{fieldName}" format.totalWidth
-                  selectIndexed taking.count [ for o in outs -> (layout.pack o.payload)[j] ] ==> f
-                  f ]
-
-        { payload = layout.unpack fields
-          valid = valid
-          ready = ready
-          layout = layout }
+    streamFarmOrdered name n (2 * n) worker s
 
 /// A stage over a sequential unit, `k` copies for this stream. The unit sees
 /// only its operands; the rest of the beat waits beside it in a context FIFO

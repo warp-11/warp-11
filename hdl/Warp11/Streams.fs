@@ -852,6 +852,125 @@ let streamMergeClustered (streams: Stream<'p> list) : Stream<'p> =
         |> List.map (fun group -> stage (streamMergeTree group))
         |> streamMergeTree
 
+/// Dispatch to whichever lane is free, and merge back **in issue order**:
+/// the pair `streamBalanceOrdered` / `streamMergeOrdered`, which share a
+/// queue of lane indices. The dispatch pushes the lane it chose as it fires;
+/// the merge takes from the lane at the head and pops. So beat `i` leaves
+/// before beat `i + 1` whatever the lanes' costs, and a lane that is slow
+/// holds up only the beats issued after its own — what a farm of equal
+/// round-robin turns cannot do — while the beats still need no addresses.
+///
+/// The queue is `depth` deep, and the dispatch waits when it is full, so
+/// the depth bounds the beats in flight across the farm: `2n` fits lanes
+/// that hold a beat and stage the next. A queue of lane indices is a few
+/// bits a beat, which is what a lane-carried tag would have cost anyway —
+/// here it is the farm's own and never crosses a boundary.
+type OrderedLanes<'p> =
+    { lanes: Stream<'p> list
+      /// The lane each beat went to, in issue order — the merge's to pop.
+      order: Stream<Expr> }
+
+let streamBalanceOrdered (name: string) (n: int) (depth: int) (s: Stream<'p>) : OrderedLanes<'p> =
+    if n = 1 then
+        { lanes = [ s ]; order = { payload = lit 0UL 1; valid = lit 0UL 1; ready = wireBit (current().FreshName "no_order_ready"); layout = layout1 ("lane", 1) } }
+    else
+
+    let b = current ()
+    let laneBits = max 1 (ceilLog2 n)
+    let readies = [ for i in 0 .. n - 1 -> wireBit $"{name}_lane%d{i}_ready" ]
+    let chosen = oneHotLowest readies
+    let anyReady = List.reduce (|||) readies
+
+    // The queue's producer side: the chosen lane's index, pushed as the beat
+    // fires. `fire` is what the queue's ready allows, so a full queue holds
+    // the beat at the source.
+    let pushReady = wireBit $"{name}_order_push_ready"
+    let fire = s.valid &&& anyReady &&& pushReady
+    fire ==> s.ready
+
+    let index =
+        chosen
+        |> List.indexed
+        |> List.fold (fun acc (i, one) -> mux one (lit (uint64 i) laneBits) acc) (lit 0UL laneBits)
+
+    let pushed: Stream<Expr> =
+        { payload = index
+          valid = s.valid &&& anyReady
+          ready = pushReady
+          layout = layout1 ("lane", laneBits) }
+
+    // The queue is a power of two deep — the next one up, never fewer than
+    // asked, since the depth is what bounds the beats in flight.
+    let order = streamFifo $"{name}_order" (1 <<< ceilLog2 (max 2 depth)) pushed
+
+    { lanes =
+        [ for i in 0 .. n - 1 ->
+              b.RegisterStreamReady readies[i]
+
+              { s with
+                  valid = s.valid &&& chosen[i] &&& pushReady
+                  ready = readies[i] } ]
+      order = order }
+
+/// The merge half: the lane at the head of the queue is the one taken from,
+/// and the head is popped as its beat leaves.
+let streamMergeOrdered (name: string) (o: OrderedLanes<'p>) : Stream<'p> =
+    match o.lanes with
+    | [ s ] -> s
+    | lanes ->
+
+    let b = current ()
+    let head = o.order.payload
+    let outReady = wireBit $"{name}_merge_ready"
+    b.RegisterStreamReady outReady
+    let outValid = wireBit $"{name}_merge_valid"
+    (o.order.valid &&& selectIndexed head [ for l in lanes -> l.valid ]) ==> outValid
+    (outValid &&& outReady) ==> o.order.ready
+
+    lanes
+    |> List.iteri (fun i l -> (o.order.valid &&& eq head (lit (uint64 i) (width head)) &&& outReady) ==> l.ready)
+
+    let first = List.head lanes
+
+    { payload =
+        first.layout.unpack
+            [ for f in 0 .. first.layout.fields.Length - 1 -> selectIndexed head [ for l in lanes -> (l.layout.pack l.payload)[f] ] ]
+      valid = outValid
+      ready = outReady
+      layout = first.layout }
+
+/// The ordered pair over the clustered topology: above [fanFlatMax], the
+/// beats go to a cluster in order, through a register, to a lane in order —
+/// each level keeps its own queue, and the register keeps order, so the
+/// whole does. `worker` runs once per lane with its index.
+let streamFarmOrdered (name: string) (n: int) (depth: int) (worker: int -> Stream<'p> -> Stream<'q>) (s: Stream<'p>) : Stream<'q> =
+    if n = 1 then
+        worker 0 s
+    elif n <= fanFlatMax then
+        let o = streamBalanceOrdered name n depth s
+        streamMergeOrdered name { lanes = List.mapi worker o.lanes; order = o.order }
+    else
+        let perNode = int (ceil (sqrt (float n)))
+        let clusters = (n + perNode - 1) / perNode
+
+        let sizes =
+            [ for g in 0 .. clusters - 1 -> n / clusters + (if g < n % clusters then 1 else 0) ]
+
+        let stageIn = streamStageFor s.layout
+        let top = streamBalanceOrdered name clusters depth s
+        // Where each cluster's lanes start, so a worker gets its index in the farm.
+        let starts = (0, sizes) ||> List.scan (+) |> List.truncate clusters
+
+        let merged =
+            List.zip3 starts sizes top.lanes
+            |> List.mapi (fun g (start, size, clusterStream) ->
+                let sub = streamBalanceOrdered $"{name}_c%d{g}" size (2 * size) (stageIn clusterStream)
+                let outs = sub.lanes |> List.mapi (fun i lane -> worker (start + i) lane)
+                let stageOut = streamStageFor outs.Head.layout
+                stageOut (streamMergeOrdered $"{name}_c%d{g}" { lanes = outs; order = sub.order }))
+
+        streamMergeOrdered name { lanes = merged; order = top.order }
+
 /// A link's two stall counters, as wireable Exprs.
 type StallCounters = { blocked: Expr; starved: Expr }
 

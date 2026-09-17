@@ -289,6 +289,13 @@ let private mainDemo () =
         let ok = pixels = chunkTwin
         printfn $"chunked design (%d{lanes} lanes) vs twin: %b{ok} (%d{cycles} cycles)"
 
+    // Above `fanFlatMax` the farm clusters: twenty lanes over a 64×8 frame,
+    // the order kept through two levels of queue and a register each way.
+    let wideTwin = Chunked.renderTwin 64 8 48 28 chunkView
+    let widePixels, wideCycles = Chunked.renderInSim 64 8 48 28 8 20 chunkView 40000
+    let wideOk = widePixels = wideTwin
+    printfn $"chunked design (20 lanes, clustered) vs twin: %b{wideOk} (%d{wideCycles} cycles)"
+
     // The same design on the KV260's counted path, in the Sim against the
     // behavioural DDR: the host writes a count and a view, the frame lands.
     // 32×8: sixteen beats, the burst the write side's rows must fill.
