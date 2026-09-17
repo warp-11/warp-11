@@ -99,6 +99,7 @@ let pages =
       page "Guides" "Runtime and host drivers" "guides/runtime" "runtime/README.md"
       page "Guides" "Streams" "guides/streams" "docs/streams.md"
       page "Guides" "Hardware workflow" "guides/dev-workflow" "docs/dev-workflow.md"
+      page "Guides" "The design canvas" "guides/design-canvas" "docs/design-canvas.md"
       page "Guides" "Comparison to other HDLs" "guides/comparison" "docs/HDL_COMPARISON.md" ]
 
 /// Sidebar order, which is not the order the page list is written in.
