@@ -75,8 +75,14 @@ let moduleUnit
 /// The same unit, `n` copies.
 let copies (n: int) (unit: Fu<'a, 'r>) : Fu<'a, 'r> = { unit with copies = n }
 
-/// The same unit, answering `k` beats for one.
-let answering (k: int) (unit: Fu<'a, 'r>) : Fu<'a, 'r> = { unit with answers = k }
+/// The same unit, answering `k` beats for one. A combinational unit is a
+/// function of its operands and answers exactly once; only a sequential one
+/// can spread an answer over beats.
+let answering (k: int) (unit: Fu<'a, 'r>) : Fu<'a, 'r> =
+    match unit.law with
+    | Combinational _ when k <> 1 -> failwith $"'{unit.name}': a combinational unit answers once for one beat, not %d{k} times"
+    | _ when k < 1 -> failwith $"'{unit.name}': a unit answers at least once, not %d{k} times"
+    | _ -> { unit with answers = k }
 
 /// A unit over bare nets — what a graph holds. Made only by `erase`, from a
 /// typed unit through its pins, so a palette cannot disagree with the unit
