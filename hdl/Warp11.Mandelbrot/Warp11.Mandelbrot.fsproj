@@ -12,6 +12,7 @@
         <Compile Include="Harness.fs"/>
         <Compile Include="FramePod.fs"/>
         <Compile Include="FrameAxi.fs"/>
+        <Compile Include="Chunked.fs"/>
         <Compile Include="FrameHost.fs"/>
         <Compile Include="Seam.fs"/>
         <Compile Include="Host.fs"/>

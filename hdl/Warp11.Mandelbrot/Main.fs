@@ -278,6 +278,17 @@ let private mainDemo () =
     let frame1Ok = done1 && frame1Fb = frameFb
     printfn $"frame pod (1 lane) matches:   %b{frame1Ok} (%d{frame1Cycles} cycles)"
 
+    // The chunked design — the canvas's four boxes in typed form: 32×4 at
+    // maxIter 48, over one lane and then three, every pixel bit-exact
+    // against the twin and in raster order, which is the farm keeping order.
+    let chunkView = (cx0Q, cyQ 0, dxQ, (toQ -0.25))
+    let chunkTwin = Chunked.renderTwin 32 4 48 28 chunkView
+
+    for lanes in [ 1; 3 ] do
+        let pixels, cycles = Chunked.renderInSim 32 4 48 28 8 lanes chunkView 20000
+        let ok = pixels = chunkTwin
+        printfn $"chunked design (%d{lanes} lanes) vs twin: %b{ok} (%d{cycles} cycles)"
+
     0
 
 /// What `debug` will open, by label — the pod designs on this side of the

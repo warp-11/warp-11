@@ -339,6 +339,39 @@ let blur: Factory =
         (fun _ (columns, rows) -> blurUnit columns rows)
         (fun (columns, rows) -> $"blurUnit %d{columns} %d{rows}")
 
+let private atLeast (name: string) (low: int) (v: int) : Result<int, string> =
+    if v >= low then Ok v else Error $"{name} is at least %d{low}, not %d{v}"
+
+let mandel16: Factory =
+    factory
+        "mandel16"
+        [ { name = "maxIter"; kind = IntParameter; ``default`` = "256"; about = "iterations before a point is called inside" }
+          { name = "fracBits"; kind = IntParameter; ``default`` = "28"; about = "fraction bits of the 32-bit view numbers" }
+          { name = "threads"; kind = IntParameter; ``default`` = "8"; about = "pixels in flight through the cone; more than its 4 stages" } ]
+        (fun _ args ->
+            match intArg "maxIter" args |> Result.bind (atLeast "maxIter" 2), intArg "fracBits" args, intArg "threads" args |> Result.bind (atLeast "threads" (Warp11.Mandel.mandelStepLatency + 1)) with
+            | Ok maxIter, Ok fracBits, Ok threads when fracBits >= 1 && fracBits <= 30 -> Ok(maxIter, fracBits, threads)
+            | Ok _, Ok fracBits, Ok _ -> Error $"fracBits is between 1 and 30, not %d{fracBits}"
+            | Error e, _, _
+            | _, Error e, _
+            | _, _, Error e -> Error e)
+        (fun _ (maxIter, fracBits, threads) -> Warp11.Mandel.mandel16 maxIter fracBits threads)
+        (fun (maxIter, fracBits, threads) -> $"mandel16 %d{maxIter} %d{fracBits} %d{threads}")
+
+let coords: Factory =
+    factory
+        "coords"
+        [ { name = "width"; kind = IntParameter; ``default`` = "1400"; about = "pixels in a row of the frame" }
+          { name = "fracBits"; kind = IntParameter; ``default`` = "28"; about = "fraction bits of the 32-bit view numbers" } ]
+        (fun _ args ->
+            match intArg "width" args |> Result.bind (atLeast "width" 1), intArg "fracBits" args with
+            | Ok width, Ok fracBits when fracBits >= 1 && fracBits <= 30 -> Ok(width, fracBits)
+            | Ok _, Ok fracBits -> Error $"fracBits is between 1 and 30, not %d{fracBits}"
+            | Error e, _
+            | _, Error e -> Error e)
+        (fun _ (width, fracBits) -> Warp11.Mandel.coords width fracBits)
+        (fun (width, fracBits) -> $"coords %d{width} %d{fracBits}")
+
 /// A unit written in the GUI, compiled by the head that has a compiler: the
 /// erased unit, the name it goes by, and the source that defines it.
 let written (symbol: string) (unit: ErasedFu) (definition: string) : Factory =
@@ -365,7 +398,9 @@ let builtIn: Map<string, Factory> =
       plain "waveshaper" waveshaper
       plain "tremolo" tremolo
       allpassSection
-      blur ]
+      blur
+      mandel16
+      coords ]
     |> List.map (fun f -> f.name, f)
     |> Map.ofList
 

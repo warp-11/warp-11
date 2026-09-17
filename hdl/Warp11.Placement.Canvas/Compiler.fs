@@ -43,6 +43,7 @@ let private session =
                    "open Warp11.Fu"
                    "open Warp11.Units"
                    "open Warp11.Pedal"
+                   "open Warp11.Mandel"
                    "open Warp11.Factories" ]
 
          match fsi.EvalInteractionNonThrowing preamble with

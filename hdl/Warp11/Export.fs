@@ -318,6 +318,7 @@ let exportWith (mapping: Warp11.Mapping.Mapping option) (g: Graph) : Result<stri
                "open Warp11.Fu"
                "open Warp11.Units"
                "open Warp11.Pedal"
+               "open Warp11.Mandel"
                "open Warp11.Factories"
                "open Warp11.Elaborate"
                ""
