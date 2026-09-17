@@ -29,13 +29,16 @@ toolbar to hear the tone at twice its level.
 | region | what |
 |---|---|
 | **palette** (left) | every unit the library offers, plus the boundary boxes and the control boxes. Click one to add it, or double-click the canvas and type its name |
-| **canvas** (middle) | boxes and wires. Drag a box to move it; drag from a pin to a pin to wire them; click to select; pan on empty space; wheel to zoom |
+| **canvas** (middle) | boxes and wires. Drag a box to move it; drag from a pin to a pin to wire them; click to select; pan on empty space; wheel to scroll, Shift+wheel sideways, Ctrl+wheel to zoom. Scrollbars appear when a box is out of view and span the design |
 | **panel** (right) | the selection's properties: a box's name, copies and arguments; a boundary box's pins; the design itself when nothing is selected — name, sample rate, streams, and the **target** section |
-| **toolbar** (top) | New / Open / Save with a path; **Build** and **Export F#**; Undo / Redo / Delete; **Open in sim**, then Play / Run / Step / Reset / Stop; a number box per control; the breakpoint entry |
+| **menus** (top) | **File**: New, Open…, Save, Save As… — the platform's own pickers. **Edit**: Undo, Redo, Delete. **Build**: Build…, Export to F#… |
+| **toolbar** | **Open in sim**, then Play / Run / Step / Reset / Stop; a number box per control; the breakpoint entry; where the view is, and the file it is over |
 | **status line** | what just happened, or why something was refused |
 
 Keys: Delete or Backspace removes the selection, Ctrl+Z / Ctrl+Y undo and
-redo, Ctrl+D duplicates a box. Every change is one history entry, and a
+redo, Ctrl+D duplicates a box, Ctrl+N / Ctrl+O / Ctrl+S / Ctrl+Shift+S are
+the File menu. The three areas are resizable: drag the divider on either
+side of the canvas. Every change is one history entry, and a
 change the elaborator would refuse is refused before it lands, naming the
 pin.
 
@@ -120,7 +123,7 @@ whose pins have changed refuses an old file at the exact wire.
 `hdl/Warp11.Placement.Canvas/examples/` has one per feature, written by
 `Warp11.Placement -- examples`, with a README saying what to look at in each.
 
-**Export F#** writes the typed form beside the file: the units by their F#
+**Build → Export to F#…** asks where to write the typed form: the units by their F#
 names, the beat as a tuple named after the pins, the stages in wire order —
 the source a person would have written, which elaborates to the same bytes.
 It is one-way: the typed form cannot be read back as a graph.
@@ -168,14 +171,14 @@ by name. The rows:
 | loading | an OS app the FPGA manager loads (`xmutil`), or SRAM / SPI flash (`iceprog`) |
 | connectors | per device role, which package pin each port lands on. The I2S pinout follows the connector: the Pmod I2S2's separate converters, or a shared bus |
 
-**Save** writes the mapping file beside the design and the design's default.
+**File → Save** writes the mapping file beside the design and the design's default.
 A board edited here can be saved as a `*.board.json` file and picked by
 other designs.
 
 ### Build
 
-**Build** writes `build/` beside the design with everything the board's
-toolchain builds from, and the status line says how to run it. From the
+**Build → Build…** asks for a folder and writes everything the board's
+toolchain builds from into it; the status line says how to run it. From the
 shell:
 
 ```sh

@@ -42,7 +42,7 @@ a unit over typed pins; Compile adds it to the palette for the session and
 keeps its source with the design, so the file opens again on a desktop
 canvas (and refuses in a browser, which has no compiler).
 
-**Export F#** writes the typed source beside the file; `dotnet run --project
+**Build → Export to F#…** writes the typed source where you say; `dotnet run --project
 Warp11.Placement -- export <file>` prints it, and `-- emit <file>` the Verilog.
 
 **Target** (in the design panel, nothing selected) is where the design
@@ -51,9 +51,9 @@ clock and fabric rate, data path (the boundary on the I2S pins, or in the
 host's memory: a recording in, the design, a recording out, no codec
 needed), host driver, loading, connectors — and any row edited makes it
 custom. Save writes it beside the design as `gain.kv260.json`, and the
-design names it; `gain.json` ships with that one. **Build** writes
-`build/` beside the design with everything the board's toolchain builds
-from and says how to run it; `dotnet run --project Warp11.Placement --
+design names it; `gain.json` ships with that one. **Build → Build…** asks
+for a folder and writes everything the board's toolchain builds from into
+it, and says how to run it; `dotnet run --project Warp11.Placement --
 build <file> <dir>` does the same from the shell. The iCEBreaker frames at
 46 875 Hz, so a design goes there made for that rate (the refusal says so).
 `notes/BUILD.md` is the plan.

@@ -19,11 +19,13 @@ open System.Globalization
 open Warp11
 open Avalonia
 open Avalonia.Controls
+open Avalonia.Controls.Primitives
 open Avalonia.Controls.Shapes
 open Avalonia.FuncUI
 open Avalonia.FuncUI.DSL
 open Avalonia.Input
 open Avalonia.Media
+open Avalonia.Platform.Storage
 open Avalonia.VisualTree
 open Warp11.Fu
 open Warp11.Factories
@@ -441,6 +443,45 @@ let private entry (width: float) (text: string) (onChanged: string -> unit) (onE
           ) ]
     :> Types.IView
 
+/// A menu item: its label, the key it shows beside it, what it does. The
+/// gesture is shown, not bound — the canvas binds its own keys when it has
+/// focus, and the root binds the file ones, so a Delete typed into an
+/// empty entry never reaches the design.
+let private menuItem (header: string) (gesture: string option) (act: unit -> unit) =
+    MenuItem.create (
+        [ MenuItem.header header; MenuItem.onClick ((fun _ -> act ()), SubPatchOptions.Always) ]
+        @ (gesture |> Option.map (fun k -> MenuItem.inputGesture (KeyGesture.Parse k)) |> Option.toList)
+    )
+    :> Types.IView
+
+let private menuSeparator () = MenuItem.create [ MenuItem.header "-" ] :> Types.IView
+
+/// The three areas across: palette | splitter | canvas | splitter | properties.
+/// Made once and held, because the splitters write the widths into these
+/// very definitions — a fresh set each render would put every drag back.
+let private paneColumns () =
+    let columns = ColumnDefinitions()
+    columns.Add(ColumnDefinition(Width = GridLength 150.0, MinWidth = 100.0))
+    columns.Add(ColumnDefinition(Width = GridLength.Auto))
+    columns.Add(ColumnDefinition(Width = GridLength(1.0, GridUnitType.Star), MinWidth = 200.0))
+    columns.Add(ColumnDefinition(Width = GridLength.Auto))
+    columns.Add(ColumnDefinition(Width = GridLength 390.0, MinWidth = 200.0))
+    columns
+
+let private splitter (column: int) =
+    GridSplitter.create
+        [ Grid.column column
+          GridSplitter.width 5.0
+          GridSplitter.resizeDirection GridResizeDirection.Columns
+          GridSplitter.background Brushes.Gainsboro ]
+    :> Types.IView
+
+/// How far one wheel notch scrolls the canvas, in screen pixels.
+let private wheelStep = 48.0
+
+let private designFileType = FilePickerFileType("Warp 11 design", Patterns = ResizeArray [ "*.json" ])
+let private fsharpFileType = FilePickerFileType("F# source", Patterns = ResizeArray [ "*.fs" ])
+
 /// The canvas over a design. The graph the user edits is the component's
 /// own state from the opening on; with a design running behind it, values
 /// are painted on the wires, a box's signals are listed when it is
@@ -459,6 +500,9 @@ let view (opening: Opening) : Control =
         /// Double-click on the canvas: where, and what has been typed so far.
         let typing = ctx.useState<((float * float) * string) option> None
         let filePath = ctx.useState (opening.file |> Option.defaultValue "")
+        /// The outer canvas's size on screen: the scrollbars' viewport.
+        let canvasSize = ctx.useState (Size(800.0, 600.0))
+        let columns = ctx.useState (paneColumns (), renderOnChange = false)
         let importText = ctx.useState ""
         /// A unit being written: its source, compiled on request.
         let unitSource = ctx.useState Compiler.template
@@ -829,10 +873,23 @@ let view (opening: Opening) : Control =
             match toWorld e with
             | None -> ()
             | Some(_, (sx, sy), (wx, wy)) ->
-                // Zoom about the cursor: the world point under it stays put.
-                let z = zoom.Current * (if e.Delta.Y > 0.0 then 1.1 else 1.0 / 1.1) |> max 0.2 |> min 5.0
-                zoom.Set z
-                pan.Set((sx - wx * z, sy - wy * z))
+                if e.KeyModifiers.HasFlag KeyModifiers.Control then
+                    // Zoom about the cursor: the world point under it stays put.
+                    let z = zoom.Current * (if e.Delta.Y > 0.0 then 1.1 else 1.0 / 1.1) |> max 0.2 |> min 5.0
+                    zoom.Set z
+                    pan.Set((sx - wx * z, sy - wy * z))
+                else
+                    // A notch scrolls, the scrollbars' way; Shift turns it sideways.
+                    // Some platforms already turn Shift+wheel into a horizontal
+                    // delta, so whichever axis the notch came on is the one taken.
+                    let px, py = pan.Current
+                    let notch = if e.Delta.X <> 0.0 then e.Delta.X else e.Delta.Y
+
+                    if e.KeyModifiers.HasFlag KeyModifiers.Shift then
+                        pan.Set((px + notch * wheelStep, py))
+                    else
+                        pan.Set((px + e.Delta.X * wheelStep, py + e.Delta.Y * wheelStep))
+
                 e.Handled <- true
 
         let onKey (e: KeyEventArgs) =
@@ -1026,10 +1083,12 @@ let view (opening: Opening) : Control =
 
         // ---- the palette: every unit, a click adds a box of it.
         let paletteView =
+            ScrollViewer.create
+                [ Grid.column 0
+                  ScrollViewer.horizontalScrollBarVisibility Primitives.ScrollBarVisibility.Disabled
+                  ScrollViewer.content (
             StackPanel.create
-                [ DockPanel.dock Dock.Left
-                  StackPanel.width 130.0
-                  StackPanel.margin (Thickness 6.0)
+                [ StackPanel.margin (Thickness 6.0)
                   StackPanel.children (
                       [ TextBlock.create [ TextBlock.text "palette"; TextBlock.fontWeight FontWeight.Bold; TextBlock.margin (Thickness(4.0, 2.0)) ] :> Types.IView ]
                       @ [ for name in palette.Keys |> Seq.sort ->
@@ -1081,10 +1140,11 @@ let view (opening: Opening) : Control =
                                     ) ]
                               :> Types.IView ]
                   ) ]
+                  ) ]
             :> Types.IView
 
-        // ---- the toolbar: the file and the history on the first row; the
-        // run controls, with a number box per control, on the second.
+        // ---- the run: `Open in sim` on the view row, and with a design running,
+        // the run controls with a number box per control on the row below.
         let openInSim () =
             match opening.opener with
             | None -> ()
@@ -1110,78 +1170,209 @@ let view (opening: Opening) : Control =
                 with e ->
                     message.Set $"refused: {e.Message}"
 
-        let fileRow =
+        // ---- the file, through the menus. Every dialog is the platform's own
+        // picker, reached from the window this canvas is in; what comes back
+        // is a local path, since this head reads and writes files by path —
+        // a browser has none, and says so rather than failing later.
+        let topLevel () = TopLevel.GetTopLevel ctx.control |> Option.ofObj
+        let localPath (item: IStorageItem) = item.TryGetLocalPath() |> Option.ofObj
+
+        /// Where a picker opens: beside the design's file, when it has one.
+        let startIn (provider: IStorageProvider) =
+            task {
+                match filePath.Current with
+                | "" -> return None
+                | f ->
+                    let! folder = provider.TryGetFolderFromPathAsync(System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath f))
+                    return Option.ofObj folder
+            }
+
+        let picked (item: IStorageItem option) (onPath: string -> unit) =
+            match item with
+            | None -> ()
+            | Some item ->
+                match localPath item with
+                | Some path -> onPath path
+                | None -> message.Set "refused: no local path for that file — this head reads and writes files by path"
+
+        let pickOpen (onPath: string -> unit) =
+            topLevel ()
+            |> Option.iter (fun top ->
+                task {
+                    try
+                        let! start = startIn top.StorageProvider
+                        let options = FilePickerOpenOptions(Title = "Open a design", AllowMultiple = false, FileTypeFilter = ResizeArray [ designFileType ])
+                        start |> Option.iter (fun s -> options.SuggestedStartLocation <- s)
+                        let! files = top.StorageProvider.OpenFilePickerAsync options
+                        picked (files |> Seq.tryHead |> Option.map (fun f -> f :> IStorageItem)) onPath
+                    with e ->
+                        message.Set $"refused: {e.Message}"
+                }
+                |> ignore)
+
+        let pickSave (title: string) (suggested: string) (fileType: FilePickerFileType) (onPath: string -> unit) =
+            topLevel ()
+            |> Option.iter (fun top ->
+                task {
+                    try
+                        let! start = startIn top.StorageProvider
+
+                        let options =
+                            FilePickerSaveOptions(
+                                Title = title,
+                                SuggestedFileName = suggested,
+                                DefaultExtension = System.IO.Path.GetExtension(suggested).TrimStart '.',
+                                FileTypeChoices = ResizeArray [ fileType ]
+                            )
+
+                        start |> Option.iter (fun s -> options.SuggestedStartLocation <- s)
+                        let! file = top.StorageProvider.SaveFilePickerAsync options
+                        picked (file |> Option.ofObj |> Option.map (fun f -> f :> IStorageItem)) onPath
+                    with e ->
+                        message.Set $"refused: {e.Message}"
+                }
+                |> ignore)
+
+        let pickFolder (title: string) (onPath: string -> unit) =
+            topLevel ()
+            |> Option.iter (fun top ->
+                task {
+                    try
+                        let! start = startIn top.StorageProvider
+                        let options = FolderPickerOpenOptions(Title = title, AllowMultiple = false)
+                        start |> Option.iter (fun s -> options.SuggestedStartLocation <- s)
+                        let! folders = top.StorageProvider.OpenFolderPickerAsync options
+                        picked (folders |> Seq.tryHead |> Option.map (fun f -> f :> IStorageItem)) onPath
+                    with e ->
+                        message.Set $"refused: {e.Message}"
+                }
+                |> ignore)
+
+        let newDesign () =
+            stopLive ()
+            history.Set(Warp11.Edit.history (withLayout (emptyGraph "Untitled" g.sampleRate)))
+            path.Set []
+            designName.Set "Untitled"
+            filePath.Set ""
+            useMapping None
+            select None
+            message.Set "a new design"
+
+        let openFrom (file: string) =
+            match Warp11.DesignFile.load file with
+            | Ok g ->
+                stopLive ()
+                history.Set(Warp11.Edit.history (withLayout g))
+                path.Set []
+                designName.Set g.name
+                rateText.Set(g.sampleRate.ToString(CultureInfo.InvariantCulture))
+                filePath.Set file
+                useMapping (loadMapping file g)
+                select None
+                message.Set $"opened {file}: {g.name}, %d{g.boxes.Length} boxes, %d{g.edges.Length} wires"
+            | Error why -> message.Set $"refused: {why}"
+
+        // The file is the whole design, however far the view has drilled into
+        // it; the mapping is the design's, and is saved beside the file.
+        let saveTo (file: string) =
+            try
+                let saved =
+                    match mapping.Current with
+                    | Some m ->
+                        let mappingFile = Warp11.Mapping.fileFor (System.IO.Path.GetFullPath file) m.board.name
+                        Warp11.Mapping.save mappingFile m
+                        { root with mapping = Some(System.IO.Path.GetFileName mappingFile) }
+                    | None -> { root with mapping = None }
+
+                Warp11.DesignFile.save file saved
+                filePath.Set file
+
+                match apply (setMapping saved.mapping) history.Current with
+                | h, None -> history.Set h
+                | _, Some why -> message.Set $"refused: {why}"
+
+                message.Set(
+                    match saved.mapping with
+                    | Some m -> $"saved {file} and its mapping {m}"
+                    | None -> $"saved {file}"
+                )
+            with e ->
+                message.Set $"could not save: {e.Message}"
+
+        let saveAs () = pickSave "Save the design as" $"{root.name}.json" designFileType saveTo
+        let save () = if filePath.Current = "" then saveAs () else saveTo filePath.Current
+
+        let build () =
+            match mapping.Current with
+            | None -> message.Set "no target: pick a preset in the design panel"
+            | Some m ->
+                pickFolder "Build into" (fun dir ->
+                    try
+                        let out = Warp11.Build.write dir (Warp11.BoardTop.boardTopOf m.board m.path root)
+                        message.Set $"wrote %d{out.files.Length} files to {dir} — build with {out.run}"
+                    with e ->
+                        message.Set $"refused: {e.Message}")
+
+        let exportFs () =
+            // Exported first: a design that cannot be exported gets its reason,
+            // not a dialog.
+            match Warp11.Export.export root with
+            | Error why -> message.Set $"refused: {why}"
+            | Ok source ->
+                pickSave "Export as F#" $"{root.name}.fs" fsharpFileType (fun file ->
+                    try
+                        System.IO.File.WriteAllText(file, source)
+                        message.Set $"exported {file}"
+                    with e ->
+                        message.Set $"could not export: {e.Message}")
+
+        let menuBar =
+            Menu.create
+                [ DockPanel.dock Dock.Top
+                  Menu.viewItems
+                      [ MenuItem.create
+                            [ MenuItem.header "_File"
+                              MenuItem.viewItems
+                                  [ menuItem "_New" (Some "Ctrl+N") newDesign
+                                    menuItem "_Open…" (Some "Ctrl+O") (fun () -> pickOpen openFrom)
+                                    menuSeparator ()
+                                    menuItem "_Save" (Some "Ctrl+S") save
+                                    menuItem "Save _As…" (Some "Ctrl+Shift+S") saveAs ] ]
+                        MenuItem.create
+                            [ MenuItem.header "_Edit"
+                              MenuItem.viewItems
+                                  [ menuItem "_Undo" (Some "Ctrl+Z") undoLast
+                                    menuItem "_Redo" (Some "Ctrl+Shift+Z") redoLast
+                                    menuSeparator ()
+                                    menuItem "_Delete" (Some "Delete") deleteSelection ] ]
+                        MenuItem.create
+                            [ MenuItem.header "_Build"
+                              MenuItem.viewItems
+                                  [ menuItem "_Build…" None build
+                                    menuItem "_Export to F#…" None exportFs ] ] ] ]
+            :> Types.IView
+
+        /// The file keys, bound at the root so they work wherever focus is: no
+        /// entry uses them, so they bubble up unhandled from anywhere.
+        let onFileKey (e: KeyEventArgs) =
+            let ctrl = e.KeyModifiers.HasFlag KeyModifiers.Control
+            let shift = e.KeyModifiers.HasFlag KeyModifiers.Shift
+
+            match e.Key with
+            | Key.N when ctrl -> newDesign (); e.Handled <- true
+            | Key.O when ctrl -> pickOpen openFrom; e.Handled <- true
+            | Key.S when ctrl && shift -> saveAs (); e.Handled <- true
+            | Key.S when ctrl -> save (); e.Handled <- true
+            | _ -> ()
+
+        // ---- the view row: the run, where the view is, and what it is over.
+        let viewRow =
             StackPanel.create
                 [ DockPanel.dock Dock.Top
                   StackPanel.orientation Layout.Orientation.Horizontal
                   StackPanel.margin (Thickness(10.0, 6.0, 10.0, 0.0))
                   StackPanel.children
-                      [ button "New" (fun () ->
-                            stopLive ()
-                            history.Set(Warp11.Edit.history (withLayout (emptyGraph "Untitled" g.sampleRate)))
-                            designName.Set "Untitled"
-                            select None
-                            message.Set "a new design")
-                        button "Open" (fun () ->
-                            match Warp11.DesignFile.load filePath.Current with
-                            | Ok g ->
-                                stopLive ()
-                                history.Set(Warp11.Edit.history (withLayout g))
-                                designName.Set g.name
-                                rateText.Set(g.sampleRate.ToString(CultureInfo.InvariantCulture))
-                                useMapping (loadMapping filePath.Current g)
-                                select None
-                                message.Set $"opened {filePath.Current}: {g.name}, %d{g.boxes.Length} boxes, %d{g.edges.Length} wires"
-                            | Error why -> message.Set $"refused: {why}")
-                        button "Save" (fun () ->
-                            if filePath.Current = "" then
-                                message.Set "a path to save to, first"
-                            else
-                                try
-                                    let saved =
-                                        match mapping.Current with
-                                        | Some m ->
-                                            let file = Warp11.Mapping.fileFor (System.IO.Path.GetFullPath filePath.Current) m.board.name
-                                            Warp11.Mapping.save file m
-                                            { g with mapping = Some(System.IO.Path.GetFileName file) }
-                                        | None -> { g with mapping = None }
-
-                                    Warp11.DesignFile.save filePath.Current saved
-                                    change (setMapping saved.mapping) |> ignore
-
-                                    message.Set(
-                                        match saved.mapping with
-                                        | Some m -> $"saved {filePath.Current} and its mapping {m}"
-                                        | None -> $"saved {filePath.Current}"
-                                    )
-                                with e ->
-                                    message.Set $"could not save: {e.Message}")
-                        entry 260.0 filePath.Current filePath.Set (fun _ -> ())
-                        button "Build" (fun () ->
-                            match filePath.Current, mapping.Current with
-                            | "", _ -> message.Set "a path to build beside, first"
-                            | _, None -> message.Set "no target: pick a preset in the design panel"
-                            | file, Some m ->
-                                try
-                                    let dir = System.IO.Path.Combine(System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath file), "build")
-                                    let out = Warp11.Build.write dir (Warp11.BoardTop.boardTopOf m.board m.path g)
-                                    message.Set $"wrote %d{out.files.Length} files to {dir} — build with {out.run}"
-                                with e ->
-                                    message.Set $"refused: {e.Message}")
-                        button "Export F#" (fun () ->
-                            if filePath.Current = "" then
-                                message.Set "a path to export beside, first"
-                            else
-                                match Warp11.Export.export g with
-                                | Ok source ->
-                                    let path = System.IO.Path.ChangeExtension(filePath.Current, ".fs")
-                                    System.IO.File.WriteAllText(path, source)
-                                    message.Set $"exported {path}"
-                                | Error why -> message.Set $"refused: {why}")
-                        button "Undo" undoLast
-                        button "Redo" redoLast
-                        button "Delete" deleteSelection
-                        (match live, opening.opener with
+                      [ (match live, opening.opener with
                          | None, Some _ -> button "Open in sim" openInSim
                          | _ -> TextBlock.create [] :> Types.IView)
                         // Where the view is: the design, then each box drilled into,
@@ -1208,8 +1399,10 @@ let view (opening: Opening) : Control =
                             [ TextBlock.margin (Thickness(10.0, 0.0))
                               TextBlock.verticalAlignment Layout.VerticalAlignment.Center
                               TextBlock.fontFamily mono
-                              TextBlock.text
-                                  $"{g.boxes.Length} boxes, {g.edges.Length} wires — %d{history.Current.past.Length} to undo — zoom {inv z}" ] ] ]
+                              TextBlock.text (
+                                  (if filePath.Current = "" then "unsaved" else System.IO.Path.GetFileName filePath.Current)
+                                  + $" — {g.boxes.Length} boxes, {g.edges.Length} wires — %d{history.Current.past.Length} to undo — zoom {inv z}"
+                              ) ] ] ]
             :> Types.IView
 
         // Play: with a speaker, start it and free-run — the speaker paces the
@@ -1920,8 +2113,7 @@ let view (opening: Opening) : Control =
                     @ targetRows ()
 
             ScrollViewer.create
-                [ DockPanel.dock Dock.Right
-                  ScrollViewer.width 390.0
+                [ Grid.column 4
                   ScrollViewer.content (
                       View.withKey
                           key
@@ -1934,35 +2126,85 @@ let view (opening: Opening) : Control =
                   ) ]
             :> Types.IView
 
+        // ---- the canvas, with scrollbars that span the boxes and what is on
+        // screen, in world units — Pure Data's: they say where the design is,
+        // and vanish when all of it is in view. Zero-based, since Avalonia's
+        // Auto visibility asks whether the maximum is above zero. Pan is the
+        // one truth; a bar moved to where the pan already is changes nothing,
+        // so the two cannot chase each other.
+        let viewLeft, viewTop = -px / z, -py / z
+        let viewWidth, viewHeight = canvasSize.Current.Width / z, canvasSize.Current.Height / z
+
+        let left, top, right, bottom =
+            let margin = 40.0
+
+            boxOrder g
+            |> List.fold
+                (fun (l, t, r, b) name ->
+                    let x, y = g.positions[name]
+                    min l (x - margin), min t (y - margin), max r (x + boxWidthOf g name + margin), max b (y + boxHeight g name + margin))
+                (viewLeft, viewTop, viewLeft + viewWidth, viewTop + viewHeight)
+
+        let scrollBar (orientation: Layout.Orientation) (extent: float) (viewport: float) (at: float) (moveTo: float -> unit) =
+            let overflow = extent - viewport
+
+            ScrollBar.create
+                [ ScrollBar.orientation orientation
+                  (if orientation = Layout.Orientation.Vertical then
+                       ScrollBar.horizontalAlignment Layout.HorizontalAlignment.Right
+                   else
+                       ScrollBar.verticalAlignment Layout.VerticalAlignment.Bottom)
+                  ScrollBar.visibility Primitives.ScrollBarVisibility.Auto
+                  ScrollBar.allowAutoHide false
+                  ScrollBar.minimum 0.0
+                  ScrollBar.maximum (if overflow < 0.5 then 0.0 else overflow)
+                  ScrollBar.viewportSize viewport
+                  ScrollBar.value at
+                  ScrollBar.onScroll ((fun e -> if abs (e.NewValue - at) > 1e-6 then moveTo e.NewValue), SubPatchOptions.Always) ]
+            :> Types.IView
+
+        let canvasView =
+            Panel.create
+                [ Grid.column 2
+                  Panel.children
+                      [ Canvas.create
+                            [ Canvas.background (SolidColorBrush(Color.FromRgb(255uy, 255uy, 255uy)))
+                              Canvas.clipToBounds true
+                              Canvas.focusable true
+                              Canvas.onSizeChanged ((fun e -> canvasSize.Set e.NewSize), SubPatchOptions.Always)
+                              Canvas.onPointerPressed (onPressed, SubPatchOptions.Always)
+                              Canvas.onPointerMoved (onMoved, SubPatchOptions.Always)
+                              Canvas.onPointerReleased (onReleased, SubPatchOptions.Always)
+                              Canvas.onPointerWheelChanged (onWheel, SubPatchOptions.Always)
+                              Canvas.onKeyDown (onKey, SubPatchOptions.Always)
+                              Canvas.children (
+                                  [ Canvas.create
+                                        [ Canvas.renderTransformOrigin (RelativePoint(0.0, 0.0, RelativeUnit.Absolute))
+                                          Canvas.renderTransform transform
+                                          // Wires over boxes, as a design is read.
+                                          Canvas.children (boxes @ wires @ pending) ]
+                                    :> Types.IView ]
+                                  @ typingView
+                              ) ]
+                        scrollBar Layout.Orientation.Vertical (bottom - top) viewHeight (viewTop - top) (fun v -> pan.Set((px, -(top + v) * z)))
+                        scrollBar Layout.Orientation.Horizontal (right - left) viewWidth (viewLeft - left) (fun v -> pan.Set((-(left + v) * z, py))) ] ]
+            :> Types.IView
+
         DockPanel.create
-            [ DockPanel.children (
-                  [ TextBlock.create
+            [ DockPanel.onKeyDown (onFileKey, SubPatchOptions.Always)
+              DockPanel.children (
+                  [ menuBar
+                    TextBlock.create
                         [ DockPanel.dock Dock.Top
                           TextBlock.margin (Thickness(10.0, 6.0, 10.0, 0.0))
                           TextBlock.fontFamily mono
                           TextBlock.foreground (if message.Current.StartsWith "refused" then Brushes.DarkRed else Brushes.Black)
                           TextBlock.text (if message.Current = "" then " " else message.Current) ]
                     :> Types.IView
-                    fileRow ]
+                    viewRow ]
                   @ runRow
-                  @ [ paletteView; propertyPanel ]
-                  @ [ Canvas.create
-                          [ Canvas.background (SolidColorBrush(Color.FromRgb(255uy, 255uy, 255uy)))
-                            Canvas.clipToBounds true
-                            Canvas.focusable true
-                            Canvas.onPointerPressed (onPressed, SubPatchOptions.Always)
-                            Canvas.onPointerMoved (onMoved, SubPatchOptions.Always)
-                            Canvas.onPointerReleased (onReleased, SubPatchOptions.Always)
-                            Canvas.onPointerWheelChanged (onWheel, SubPatchOptions.Always)
-                            Canvas.onKeyDown (onKey, SubPatchOptions.Always)
-                            Canvas.children (
-                                [ Canvas.create
-                                      [ Canvas.renderTransformOrigin (RelativePoint(0.0, 0.0, RelativeUnit.Absolute))
-                                        Canvas.renderTransform transform
-                                        // Wires over boxes, as a design is read.
-                                        Canvas.children (boxes @ wires @ pending) ]
-                                  :> Types.IView ]
-                                @ typingView
-                            ) ]
+                  @ [ Grid.create
+                          [ Grid.columnDefinitions columns.Current
+                            Grid.children [ paletteView; splitter 1; canvasView; splitter 3; propertyPanel ] ]
                       :> Types.IView ]
               ) ])
