@@ -286,6 +286,7 @@ let exportWith (mapping: Warp11.Mapping.Mapping option) (g: Graph) : Result<stri
               "      outputs = " + listOf (fmtList g.outputs)
               "      controls = " + listOf (fmtList ports)
               "      starting = " + listOf starting
+              "      answers = " + string (answersOf g)
               "      rig ="
               "        fun instance ->"
               "            let " + ioPattern + " = " + valueName g.name + ".NewNamed instance"

@@ -23,6 +23,7 @@ let mandelChunks (name: string) (width: int) (pixels: int) (maxIter: int) (fracB
       outputs = [ pixelsPin ]
       controls = viewControls fracBits
       starting = []
+      answers = pixels / pixelsPerBeat
       rig =
         fun instance ->
             let in1, out1, cxOrigin, cyOrigin, dx, dy = def.NewNamed instance

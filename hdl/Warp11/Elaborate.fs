@@ -337,8 +337,14 @@ and graphUnit (probes: bool) (sub: Graph) : ErasedFu =
 /// box is.
 and unitOfWith (probes: bool) (g: Graph) (b: Box) : ErasedFu =
     match designOf g b with
-    | Some sub -> graphUnit probes sub
+    | Some sub -> { graphUnit probes sub with answers = answersOf sub }
     | None -> paletteUnitOf g b
+
+/// Beats the design emits for one it takes: the product over its boxes,
+/// each answering its own count — a chain, so a box that answers four
+/// followed by one that answers two is eight for one.
+and answersOf (g: Graph) : int =
+    g.boxes |> List.fold (fun acc b -> acc * (unitOfWith false g b).answers) 1
 
 let unitOf (g: Graph) (b: Box) : ErasedFu = unitOfWith false g b
 

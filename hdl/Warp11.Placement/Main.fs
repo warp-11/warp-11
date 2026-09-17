@@ -16,6 +16,40 @@ let private run (name: string) (check: unit -> bool) =
 
     printfn $"%-44s{name} {verdict}"
 
+/// `frame design.json <w>x<h> out.pgm [name=value ...]`.
+let private frame (path: string) (size: string) (out: string) (sets: string[]) : int =
+    let parsed =
+        match size.Split 'x' with
+        | [| w; h |] ->
+            match System.Int32.TryParse w, System.Int32.TryParse h with
+            | (true, w), (true, h) when w > 0 && h > 0 -> Some(w, h)
+            | _ -> None
+        | _ -> None
+
+    let controls =
+        [ for set in sets ->
+              match set.Split '=' with
+              | [| name; value |] ->
+                  let value =
+                      if value.StartsWith "0x" then System.Convert.ToUInt64(value.Substring 2, 16) else System.UInt64.Parse value
+
+                  name, value
+              | _ -> failwith $"'{set}': a control is name=value" ]
+
+    match parsed, Warp11.DesignFile.load path with
+    | None, _ ->
+        eprintfn $"'{size}': a frame is <width>x<height>"
+        1
+    | _, Error why ->
+        eprintfn $"{path}: {why}"
+        1
+    | Some(width, height), Ok g ->
+        let m: Warp11.Devices.FrameMapping = { width = width; height = height; controls = controls; outputPath = Some out }
+        let sw = System.Diagnostics.Stopwatch.StartNew()
+        let drawn = Warp11.Devices.runFrameInSim 100_000 g m
+        printfn $"wrote {out}: %d{drawn.width}×%d{drawn.height} in %.1f{sw.Elapsed.TotalSeconds} s"
+        0
+
 [<EntryPoint>]
 let main argv =
     match argv with
@@ -66,6 +100,16 @@ let main argv =
         | Error why ->
             eprintfn $"{path}: {why}"
             1
+    // A frame the design draws, from the shell: `frame design.json <w>x<h>
+    // out.pgm [name=value ...]` — the count in, the pixels out as a PGM, the
+    // design's own controls set by name.
+    | [| "frame"; path; size; out |] ->
+        frame path size out [||]
+    | [| "frame"; path; size; out; _ |]
+    | [| "frame"; path; size; out; _; _ |]
+    | [| "frame"; path; size; out; _; _; _ |]
+    | [| "frame"; path; size; out; _; _; _; _ |] ->
+        frame path size out argv[4..]
     // The example designs as files: `examples <dir>`.
     | [| "examples"; dir |] ->
         Warp11.Placement.Examples.write dir
@@ -76,15 +120,19 @@ let main argv =
         0
     // The batch bridge: `batchserve design.json <preset>` serves the design's
     // host-memory top in the Sim to a Rust driver on stdin.
+    // A preset alone is the host-memory path; `<preset> count` the counted one;
+    // the design's own mapping says which when nothing is named.
     | [| "batchserve"; path |]
-    | [| "batchserve"; path; _ |] ->
-        let which = if argv.Length = 3 then Some argv[2] else None
+    | [| "batchserve"; path; _ |]
+    | [| "batchserve"; path; _; "count" |] ->
+        let which = if argv.Length >= 3 then Some argv[2] else None
+        let dataPath = if argv.Length = 4 then Counted else HostMemory
 
         let mapping (g: Warp11.Graph.Graph) =
             match which with
             | None -> Warp11.Mapping.defaultFor path g.mapping
             | Some w when w.EndsWith ".json" -> Warp11.Mapping.load w
-            | Some w -> Warp11.Mapping.ofBoard w HostMemory
+            | Some w -> Warp11.Mapping.ofBoard w dataPath
 
         match Warp11.DesignFile.load path with
         | Error why ->
@@ -96,8 +144,13 @@ let main argv =
                 eprintfn $"{why}"
                 1
             | Ok m ->
-                Warp11.BoardTop.batchServe (Warp11.BoardTop.boardTopOf m.board HostMemory g)
-                0
+                match m.path with
+                | Pins ->
+                    eprintfn $"{path}: the batch bridge serves a design on the host's memory, and the mapping puts it on the pins"
+                    1
+                | path ->
+                    Warp11.BoardTop.batchServe (Warp11.BoardTop.boardTopOf m.board path g)
+                    0
     // A saved design's build directory: `build design.json [mapping.json] <dir>`
     // — the design's default mapping when none is named — writes everything
     // the board's toolchain needs and says how to run it.

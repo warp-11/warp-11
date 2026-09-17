@@ -1,6 +1,7 @@
 pub mod fs_sim_window;
 pub mod udmabuf;
 pub mod wav;
+pub mod pgm;
 pub mod mandel_frame_twin;
 pub mod mandel_twin;
 pub mod mmap;

@@ -43,6 +43,8 @@ type Design =
       outputs: (string * NumberFormat) list
       controls: (string * NumberFormat) list
       starting: (string * uint64) list
+      /// Beats out for one in — one, unless a unit in it answers several.
+      answers: int
       /// The instance under a name.
       rig: string -> Rig }
 
@@ -55,6 +57,7 @@ let ofGraph (g: Graph) : Design =
       outputs = g.outputs
       controls = controlPorts g
       starting = startingValues g
+      answers = answersOf g
       rig =
         fun instance ->
             let io = (elaborate g).NewNamed instance
@@ -397,6 +400,9 @@ let private pinsTop (board: Board) (d: Design) : BoardTop =
 /// index, `0 … frameCount - 1`, on the input box's one field, so the host
 /// writes the count and the view and reads the frame back. The registers
 /// are the same, `srcAddr` unused, so one driver speaks to both.
+///
+/// `frameCount` is rows *in*; a design that answers several beats for one
+/// writes that many times as many rows, and the host reads them back.
 let private hostMemoryTop (board: Board) (counted: bool) (d: Design) : BoardTop =
     let memory =
         match board.hostMemory with
@@ -412,6 +418,12 @@ let private hostMemoryTop (board: Board) (counted: bool) (d: Design) : BoardTop 
 
     if counted && d.inputs.Length <> 1 then
         failwith $"{d.name}: the counted path puts the beat index on the input box's one field, and the design declares [{describePins d.inputs}]"
+
+    // Rows out are rows in times the answers: a shift, so a power of two.
+    let answersShift = ceilLog2 d.answers
+
+    if 1 <<< answersShift <> d.answers then
+        failwith $"{d.name}: the host-memory path counts rows out as a shift of rows in, so a design answers a power of two beats for one, not %d{d.answers}"
 
     let batch, entries, map = batchRegistersOf d
     let inShape = rowShape memory.width d.inputs
@@ -444,9 +456,15 @@ let private hostMemoryTop (board: Board) (counted: bool) (d: Design) : BoardTop 
                 let burstShift = ceilLog2 inShape.rowsPerBurst
                 pad 32 (slice 31 burstShift frameCount) ==> bursts
 
+                // `frameCount` is rows in; the rows out are `answers` as many.
+                let rowsOut = wire "rows_out" 32
+
+                (if answersShift = 0 then frameCount else shl answersShift (slice (31 - answersShift) 0 frameCount))
+                ==> rowsOut
+
                 let beatsTotal = wire "beats_total" 32
                 let outShift = ceilLog2 outShape.rowsPerBeat
-                pad 32 (slice 31 outShift frameCount) ==> beatsTotal
+                pad 32 (slice 31 outShift rowsOut) ==> beatsTotal
 
                 let running = regBit "running"
                 let arIssued = reg "ar_issued" 32
@@ -613,8 +631,20 @@ let batchServe (t: BoardTop) =
         | _ -> failwith $"{t.name}: the batch bridge serves a host-memory top"
 
     let sim = Sim t.top
-    let ddr = SimAxiDdr(sim, memory.arenaBytes, dataBytes = memory.width / 8)
-    let axi = SimAxi.clientWith sim ddr.Cycle
+
+    // The counted top reads nothing and has no read channel, so its DDR is
+    // the write-only slave; the memory path's answers both.
+    let reads = t.top.decls |> List.exists (function Input(n, _) -> n = "m_axi_arready" | _ -> false)
+
+    let cycle, ddrMemory =
+        if reads then
+            let ddr = SimAxiDdr(sim, memory.arenaBytes, dataBytes = memory.width / 8)
+            ddr.Cycle, ddr.Memory
+        else
+            let ddr = SimAxiWriteSlave(sim, memory.arenaBytes, dataBytes = memory.width / 8)
+            ddr.Cycle, ddr.Memory
+
+    let axi = SimAxi.clientWith sim cycle
     let out = System.Console.Out
     out.WriteLine "BATCHSERVE"
     out.Flush()
@@ -629,18 +659,18 @@ let batchServe (t: BoardTop) =
              out.WriteLine "OK"
          | [| "C"; n |] ->
              for _ in 1 .. int (System.Convert.ToUInt64(n, 16)) do
-                 ddr.Cycle()
+                 cycle ()
 
              out.WriteLine "OK"
          | [| "D"; off; len |] ->
              let start = int (System.Convert.ToUInt64(off, 16))
              let count = int (System.Convert.ToUInt64(len, 16))
-             out.WriteLine(ddr.Memory[start .. start + count - 1] |> Array.map (sprintf "%02x") |> String.concat "")
+             out.WriteLine(ddrMemory[start .. start + count - 1] |> Array.map (sprintf "%02x") |> String.concat "")
          | [| "L"; off; hex |] ->
              let start = int (System.Convert.ToUInt64(off, 16))
 
              for i in 0 .. hex.Length / 2 - 1 do
-                 ddr.Memory[start + i] <- System.Convert.ToByte(hex.Substring(i * 2, 2), 16)
+                 ddrMemory[start + i] <- System.Convert.ToByte(hex.Substring(i * 2, 2), 16)
 
              out.WriteLine "OK"
          | [| "M" |] ->

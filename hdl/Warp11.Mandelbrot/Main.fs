@@ -351,6 +351,15 @@ let main argv =
     | [| "lanescale"; w; h; mi; l |] ->
         FrameHost.laneScale [ (int w, int h, int mi, int l) ]
         0
+    // The same through the counted board top and the write-only DDR model.
+    | [| "boardscale"; w; h; px; mi; l |] ->
+        let w, h, pixels, maxIter, lanes = int w, int h, int px, int mi, int l
+        let toQ (v: float) = uint64 (int64 (v * 268435456.0)) &&& 0xFFFFFFFFUL
+        let view = (toQ -2.25, toQ -1.125, toQ (3.0 / float w), toQ (2.25 / float h))
+        let frame, cycles, top = Chunked.renderThroughBoardTop w h pixels maxIter 28 8 lanes view
+        let ok = frame = Chunked.renderTwin w h pixels maxIter 28 view
+        printfn $"[BoardScale] {top.name} %d{w}x%d{h}/px%d{pixels}/m%d{maxIter}/l%d{lanes}: %d{cycles} cycles | bit-exact %b{ok}"
+        0
     // The chunked design at the same view as `lanescale`, for the two to be
     // set beside each other: cycles a frame, and the Sim's speed over it.
     | [| "chunkscale"; w; h; px; mi; l |] ->
