@@ -160,8 +160,10 @@ let mandelbrot (width: int) (pixels: int) (maxIter: int) (fracBits: int) (thread
         .present
     |> inARow [ "input"; "coords"; "mandelChunk"; "output" ]
 
-/// The Mandelbrot example's mapping: the KV260 preset on the counted path.
-let mandelbrotMapping: Warp11.Mapping.Mapping = { board = kv260; path = Counted }
+/// The Mandelbrot example's mapping: the KV260 on the counted path, at the
+/// clock the frame design proved — 166.67 MHz fills the part's DSPs at 104
+/// lanes with timing to spare.
+let mandelbrotMapping: Warp11.Mapping.Mapping = { board = kv260At 166_666_672; path = Counted }
 
 /// A 64×64 test image: a diagonal gradient with a bright square, so a blur
 /// has edges to soften.

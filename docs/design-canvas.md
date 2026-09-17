@@ -58,7 +58,15 @@ A **box** is a unit from the palette — `gain`, `eq`, `compressor`, `mixer`,
   gain; a `blur`'s columns and rows. They configure the unit at elaboration,
   so changing one is a new design and the running session stops.
 - **copies**: how many instances of a sequential unit run side by side. A
-  design with two streams needs two copies of each sequential box.
+  design with two streams needs two copies of each sequential box; more
+  copies than streams is a **farm** — a beat goes to whichever copy is
+  free and the beats leave in the order they came, clustered above sixteen
+  so the fan clocks. The Mandelbrot example spends `mandelChunk` 104 times
+  that way.
+- **answers**: a unit may emit several beats for one it takes — `mandelChunk`
+  drains a 128-pixel chunk as eight beats of sixteen. The placement carries
+  the beat's context alongside each of them and keeps the order across all
+  of them; nothing about it shows on the canvas but the count of beats out.
 
 The **input** and **output** boxes are the boundary: the fields of a beat in
 and out, with their formats (width, fraction bits, signedness), which the
@@ -92,7 +100,9 @@ such a file, naming the unit.
 
 **Open in sim** elaborates the current design and runs it on the mapping the
 file was opened with: a `.wav` for a stereo boundary, a `.pgm` image for a
-row boundary, a `.csv` table for a table boundary. Then:
+row boundary, a `.csv` table for a table boundary — or `frame:<w>x<h>`, a
+count in place of a file, for a design that draws: the input box's one
+field is the beat index and what comes out is assembled into a PGM. Then:
 
 - **Play** runs the design at real time through the speaker; the speaker
   paces the simulator by back-pressure. **Run** is unpaced. **Step** is one
@@ -165,7 +175,7 @@ by name. The rows:
 | part | the toolchain's part arguments, what memory the fabric has, whether there is a processing system |
 | build tool | Vivado for Xilinx parts, yosys → nextpnr → icepack for iCE40 |
 | clock | where the fabric clock comes from — a PS clock the overlay pins, a crystal through a PLL — and its rate, which every derived rate divides |
-| data path | **pins**: the boundary on the I2S pins, a converter on the header. **memory**: the boundary in the host's DDR — rows in a DMA buffer the fabric reads, runs the design over and writes back, no converter needed |
+| data path | **pins**: the boundary on the I2S pins, a converter on the header. **memory**: the boundary in the host's DDR — rows in a DMA buffer the fabric reads, runs the design over and writes back, no converter needed. **count**: nothing read — the input box's one field is the beat index, the host writes how many and reads the rows back; a generator's path, the Mandelbrot example's |
 | host memory | which PS slave port the fabric's master lands on, its width, the arena the overlay reserves |
 | host driver | how a host reaches the registers: AXI-Lite at a base (a uio device on the OS), a UART at a baud, or none (a fixed-function design with its controls baked at their starting values) |
 | loading | an OS app the FPGA manager loads (`xmutil`), or SRAM / SPI flash (`iceprog`) |
@@ -243,6 +253,19 @@ any bitstream exists — which is how the DDR path was checked to the byte:
 ```sh
 warp11_batch in.wav out.wav --sim my.json --preset kv260 --set volume=512
 ```
+
+A design on the **count** path draws a frame instead: `frame:<w>x<h>` in
+place of the WAV, the design's chunk width so the host knows how many beats
+come back for each it asks for, the view as registers, a PGM out —
+
+```sh
+warp11_batch frame:1400x800 out.pgm --sim mandelbrot.json --chunk 128 \
+    --set cxOrigin=0xE0000000 --set cyOrigin=0x10000000 --set dx=575219 --set dy=0xFFF5C28F
+warp11_batch frame:1400x800 out.pgm --board mandelbrot_batch --layout mandelbrot_batch_layout.rs --chunk 128 --set ...
+```
+
+and `Warp11.Placement -- frame mandelbrot.json 1400x800 out.pgm cxOrigin=…`
+draws the same through the simulator's own device, no driver in the loop.
 
 Cross-build for the KV260 with `cargo build --release --target
 aarch64-unknown-linux-musl -p warp11-host`.

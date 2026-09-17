@@ -12,7 +12,7 @@
       "source": "PsClock",
       "index": 71
     },
-    "fabricHz": 100000000,
+    "fabricHz": 166666672,
     "hostMemory": {
       "port": "S_AXI_HPC0_FPD",
       "width": 128,
