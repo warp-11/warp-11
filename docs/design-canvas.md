@@ -28,10 +28,10 @@ toolbar to hear the tone at twice its level.
 
 | region | what |
 |---|---|
-| **palette** (left) | every unit the library offers, plus the boundary boxes and the control boxes. Click one to add it, or double-click the canvas and type its name |
-| **canvas** (middle) | boxes and wires. Drag a box to move it; drag from a pin to a pin to wire them; click to select; pan on empty space; wheel to scroll, Shift+wheel sideways, Ctrl+wheel to zoom. Scrollbars appear when a box is out of view and span the design |
+| **palette** (left) | every unit the library offers, the designs imported into this one, and the control boxes. Click one to add it, or double-click the canvas and type its name |
+| **canvas** (middle) | boxes and wires. Drag a box to move it; drag from a pin to a pin to wire them; click to select; pan on empty space; wheel to zoom, Shift+wheel to scroll down the design, Ctrl+wheel across it. Scrollbars appear when a box is out of view and span the design |
 | **panel** (right) | the selection's properties: a box's name, copies and arguments; a boundary box's pins; the design itself when nothing is selected — name, sample rate, streams, and the **target** section |
-| **menus** (top) | **File**: New, Open…, Save, Save As… — the platform's own pickers. **Edit**: Undo, Redo, Delete. **Build**: Build…, Export to F#… |
+| **menus** (top) | **File**: New, Open…, Import Design…, Save, Save As… — the platform's own pickers. **Edit**: Undo, Redo, Delete. **Build**: Build…, Export to F#… |
 | **toolbar** | **Open in sim**, then Play / Run / Step / Reset / Stop; a number box per control; the breakpoint entry; where the view is, and the file it is over |
 | **status line** | what just happened, or why something was refused |
 
@@ -72,9 +72,9 @@ with a control outlet each. A number box pokes the running design live.
 
 ### Designs inside designs
 
-A saved design can be placed in another as a box: the *designs* entry in the
-palette takes a file's path, and the box's pins are that design's boundary,
-its control ports its control inlets. **Double-click** such a box to drill
+A saved design can be placed in another as a box: **File → Import Design…**
+adds it to the palette's *designs* section, and the box's pins are that
+design's boundary, its control ports its control inlets. **Double-click** such a box to drill
 into it with the values live; the breadcrumb steps back out. The file
 carries the sub-designs, so it is complete on its own.
 

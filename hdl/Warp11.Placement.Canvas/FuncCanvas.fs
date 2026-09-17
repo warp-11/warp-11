@@ -503,7 +503,6 @@ let view (opening: Opening) : Control =
         /// The outer canvas's size on screen: the scrollbars' viewport.
         let canvasSize = ctx.useState (Size(800.0, 600.0))
         let columns = ctx.useState (paneColumns (), renderOnChange = false)
-        let importText = ctx.useState ""
         /// A unit being written: its source, compiled on request.
         let unitSource = ctx.useState UnitSource.template
         let unitPanelOpen = ctx.useState false
@@ -873,22 +872,22 @@ let view (opening: Opening) : Control =
             match toWorld e with
             | None -> ()
             | Some(_, (sx, sy), (wx, wy)) ->
-                if e.KeyModifiers.HasFlag KeyModifiers.Control then
+                // The wheel zooms, as in a node editor; held, it scrolls —
+                // Shift down the design, Ctrl across it (Blender's). Some
+                // platforms already turn Shift+wheel into a horizontal delta,
+                // so whichever axis the notch came on is the one taken.
+                let px, py = pan.Current
+                let notch = if e.Delta.X <> 0.0 then e.Delta.X else e.Delta.Y
+
+                if e.KeyModifiers.HasFlag KeyModifiers.Shift then
+                    pan.Set((px, py + notch * wheelStep))
+                elif e.KeyModifiers.HasFlag KeyModifiers.Control then
+                    pan.Set((px + notch * wheelStep, py))
+                else
                     // Zoom about the cursor: the world point under it stays put.
-                    let z = zoom.Current * (if e.Delta.Y > 0.0 then 1.1 else 1.0 / 1.1) |> max 0.2 |> min 5.0
+                    let z = zoom.Current * (if notch > 0.0 then 1.1 else 1.0 / 1.1) |> max 0.2 |> min 5.0
                     zoom.Set z
                     pan.Set((sx - wx * z, sy - wy * z))
-                else
-                    // A notch scrolls, the scrollbars' way; Shift turns it sideways.
-                    // Some platforms already turn Shift+wheel into a horizontal
-                    // delta, so whichever axis the notch came on is the one taken.
-                    let px, py = pan.Current
-                    let notch = if e.Delta.X <> 0.0 then e.Delta.X else e.Delta.Y
-
-                    if e.KeyModifiers.HasFlag KeyModifiers.Shift then
-                        pan.Set((px + notch * wheelStep, py))
-                    else
-                        pan.Set((px + e.Delta.X * wheelStep, py + e.Delta.Y * wheelStep))
 
                 e.Handled <- true
 
@@ -1106,12 +1105,8 @@ let view (opening: Opening) : Control =
                                     Button.margin (Thickness(2.0, 1.0))
                                     Button.onClick ((fun _ -> placeBox name (somewhereVisible ())), SubPatchOptions.Always) ]
                               :> Types.IView ]
-                      @ [ entry 118.0 importText.Current importText.Set (fun typed ->
-                              match Warp11.DesignFile.load typed with
-                              | Ok sub -> if change (importDesign sub) then message.Set $"imported {sub.name}: place it from the palette"
-                              | Error why -> message.Set $"refused: {why}")
-                          TextBlock.create
-                              [ TextBlock.text "a design file's path, Enter imports it"
+                      @ [ TextBlock.create
+                              [ TextBlock.text (if g.designs.IsEmpty then "File › Import Design… adds one" else "File › Import Design… adds another")
                                 TextBlock.fontSize 10.0
                                 TextBlock.foreground Brushes.Gray
                                 TextBlock.textWrapping TextWrapping.Wrap
@@ -1195,13 +1190,13 @@ let view (opening: Opening) : Control =
                 | Some path -> onPath path
                 | None -> message.Set "refused: no local path for that file — this head reads and writes files by path"
 
-        let pickOpen (onPath: string -> unit) =
+        let pickOpen (title: string) (onPath: string -> unit) =
             topLevel ()
             |> Option.iter (fun top ->
                 task {
                     try
                         let! start = startIn top.StorageProvider
-                        let options = FilePickerOpenOptions(Title = "Open a design", AllowMultiple = false, FileTypeFilter = ResizeArray [ designFileType ])
+                        let options = FilePickerOpenOptions(Title = title, AllowMultiple = false, FileTypeFilter = ResizeArray [ designFileType ])
                         start |> Option.iter (fun s -> options.SuggestedStartLocation <- s)
                         let! files = top.StorageProvider.OpenFilePickerAsync options
                         picked (files |> Seq.tryHead |> Option.map (fun f -> f :> IStorageItem)) onPath
@@ -1300,6 +1295,12 @@ let view (opening: Opening) : Control =
                 message.Set $"could not save: {e.Message}"
 
         let saveAs () = pickSave "Save the design as" $"{root.name}.json" designFileType saveTo
+
+        /// A design file as a unit of this one: it joins the palette's designs.
+        let importFrom (file: string) =
+            match Warp11.DesignFile.load file with
+            | Ok sub -> if change (importDesign sub) then message.Set $"imported {sub.name}: place it from the palette"
+            | Error why -> message.Set $"refused: {why}"
         let save () = if filePath.Current = "" then saveAs () else saveTo filePath.Current
 
         let build () =
@@ -1334,7 +1335,8 @@ let view (opening: Opening) : Control =
                             [ MenuItem.header "_File"
                               MenuItem.viewItems
                                   [ menuItem "_New" (Some "Ctrl+N") newDesign
-                                    menuItem "_Open…" (Some "Ctrl+O") (fun () -> pickOpen openFrom)
+                                    menuItem "_Open…" (Some "Ctrl+O") (fun () -> pickOpen "Open a design" openFrom)
+                                    menuItem "_Import Design…" None (fun () -> pickOpen "Import a design as a unit" importFrom)
                                     menuSeparator ()
                                     menuItem "_Save" (Some "Ctrl+S") save
                                     menuItem "Save _As…" (Some "Ctrl+Shift+S") saveAs ] ]
@@ -1360,7 +1362,7 @@ let view (opening: Opening) : Control =
 
             match e.Key with
             | Key.N when ctrl -> newDesign (); e.Handled <- true
-            | Key.O when ctrl -> pickOpen openFrom; e.Handled <- true
+            | Key.O when ctrl -> pickOpen "Open a design" openFrom; e.Handled <- true
             | Key.S when ctrl && shift -> saveAs (); e.Handled <- true
             | Key.S when ctrl -> save (); e.Handled <- true
             | _ -> ()
