@@ -12,9 +12,10 @@
 //! answers those itself.
 
 use std::fs::OpenOptions;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use warp11_host::fs_sim_window::FsSimWindow;
 use warp11_host::mmap::MmapWindow;
+use warp11_host::seam::{self, parse_number, read_layout};
 use warp11_host::udmabuf::{find_uio, Udmabuf};
 use warp11_host::wav::{from_sample, read_wav, to_sample, write_wav};
 use warp11_runtime::batch::{BatchDevice, BatchError};
@@ -79,57 +80,9 @@ fn parse_args() -> Args {
     parsed
 }
 
-fn parse_number(s: &str) -> Option<u32> {
-    if let Some(hex) = s.strip_prefix("0x") {
-        u32::from_str_radix(hex, 16).ok()
-    } else {
-        s.parse().ok()
-    }
-}
-
-/// `volume`, `VOLUME_OFFSET`, `srcAddr`, `SRC_ADDR` all compare as `volume`
-/// and `srcaddr`: the seam spells a name one way and a person another.
-fn key(name: &str) -> String {
-    name.chars()
-        .filter(|c| *c != '_')
-        .map(|c| c.to_ascii_lowercase())
-        .collect()
-}
-
-/// The registers a seam file names, from its `*_OFFSET` constants, and the
-/// layout hash it was built against.
-fn read_layout(path: &Path) -> Result<(Vec<(String, usize)>, Option<u32>), String> {
-    let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let mut registers = Vec::new();
-    let mut hash = None;
-    for line in text.lines() {
-        let line = line.trim();
-        let Some(rest) = line.strip_prefix("pub const ") else { continue };
-        let Some((name, value)) = rest.split_once(':') else { continue };
-        let Some((_, value)) = value.split_once('=') else { continue };
-        let value = value.trim().trim_end_matches(';').trim();
-        if let Some(reg) = name.strip_suffix("_OFFSET") {
-            let offset = parse_number(value).ok_or_else(|| format!("bad offset in {line}"))? as usize;
-            registers.push((reg.to_string(), offset));
-        } else if name == "LAYOUT_HASH_VALUE" {
-            hash = Some(parse_number(value).ok_or_else(|| format!("bad hash in {line}"))?);
-        }
-    }
-    Ok((registers, hash))
-}
-
 fn resolve(sets: &[(String, u32)], registers: &[(String, usize)]) -> Result<Vec<(usize, u32)>, String> {
     sets.iter()
-        .map(|(name, value)| {
-            registers
-                .iter()
-                .find(|(r, _)| key(r) == key(name))
-                .map(|(_, offset)| (*offset, *value))
-                .ok_or_else(|| {
-                    let known: Vec<&str> = registers.iter().map(|(r, _)| r.as_str()).collect();
-                    format!("no register '{name}' — the design has [{}]", known.join(", "))
-                })
-        })
+        .map(|(name, value)| seam::resolve(name, registers).map(|offset| (offset, *value)))
         .collect()
 }
 
