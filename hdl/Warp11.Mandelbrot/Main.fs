@@ -4,11 +4,9 @@ module Warp11.Mandelbrot.Main
 
 open System.Numerics
 open Warp11
+open Warp11.Mandel
+open Warp11.Mandelbrot.Harness
 open Warp11.Mandelbrot.Pod
-open Warp11.Mandelbrot.Step
-open Warp11.Mandelbrot.Lane
-open Warp11.Mandelbrot.Coalescer
-open Warp11.Mandelbrot.LanePod
 open Warp11.Mandelbrot.FramePod
 open Warp11.Mandelbrot.FrameAxi
 

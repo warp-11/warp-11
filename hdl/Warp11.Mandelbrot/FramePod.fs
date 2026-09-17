@@ -13,8 +13,7 @@
 module Warp11.Mandelbrot.FramePod
 
 open Warp11
-open Warp11.Mandelbrot.Coalescer
-open Warp11.Mandelbrot.LanePod
+open Warp11.Mandel
 
 /// The drained-beat layout a frame pod of this size emits — shared with the
 /// wrapper reading the stream.

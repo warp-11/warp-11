@@ -1,9 +1,9 @@
 module Warp11.Mandelbrot.Seam
 
 open Warp11
+open Warp11.Mandel
 open Warp11.Mandelbrot.Board
 open Warp11.Mandelbrot.Pod
-open Warp11.Mandelbrot.LanePod
 open Warp11.Mandelbrot.FrameAxi
 
 /// The generated Rust side of the seam: offsets, sizes and frame constants as

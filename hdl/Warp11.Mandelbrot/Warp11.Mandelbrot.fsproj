@@ -9,10 +9,7 @@
     <ItemGroup>
         <Compile Include="Board.fs" />
         <Compile Include="Pod.fs"/>
-        <Compile Include="Step.fs"/>
-        <Compile Include="Lane.fs"/>
-        <Compile Include="Coalescer.fs"/>
-        <Compile Include="LanePod.fs"/>
+        <Compile Include="Harness.fs"/>
         <Compile Include="FramePod.fs"/>
         <Compile Include="FrameAxi.fs"/>
         <Compile Include="FrameHost.fs"/>
