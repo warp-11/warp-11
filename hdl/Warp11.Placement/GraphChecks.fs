@@ -1273,7 +1273,37 @@ let buildDirectoryOpenFlow () : bool =
         let pins = read "gain_ice_uart_top.pcf"
         let sh = read "build.sh"
 
+        // The same design on a shared-bus header: the pinout follows the
+        // connector, and the pin map names its four lines.
+        let shared =
+            { board with
+                connectors =
+                    (board.connectors |> List.filter (fun c -> c.role <> I2sSeparateCodecs))
+                    @ [ { role = I2sSharedBus
+                          pins =
+                            [ "bclk", { pin = "43"; standard = None }
+                              "ws", { pin = "38"; standard = None }
+                              "sd_in", { pin = "34"; standard = None }
+                              "sd_out", { pin = "31"; standard = None } ] } ] }
+
+        let sharedDir = System.IO.Path.Combine(dir, "shared")
+        Warp11.Build.write sharedDir (Warp11.BoardTop.boardTopOf shared Pins g) |> ignore
+        let sharedPins = System.IO.File.ReadAllText(System.IO.Path.Combine(sharedDir, "gain_ice_uart_top.pcf"))
+
+        let both =
+            try
+                Warp11.BoardTop.boardTopOf { shared with connectors = shared.connectors @ (board.connectors |> List.filter (fun c -> c.role = I2sSeparateCodecs)) } Pins g
+                |> ignore
+
+                false
+            with e ->
+                e.Message.Contains "not both"
+
         (pll.divr, pll.divf, pll.divq, pll.filterRange) = (0, 63, 5, 1)
+        && sharedPins.Contains "set_io bclk 43"
+        && sharedPins.Contains "set_io sd_in 34"
+        && not (sharedPins.Contains "mclk")
+        && both
         && pll.achievedHz = 24_000_000.0
         && wrapper.Contains "module gain_ice_uart_top ("
         && wrapper.Contains ".DIVF(7'b0111111)"
@@ -1330,6 +1360,7 @@ let mappingIsAFile () : bool =
     && roundTrips { board = custom; path = HostMemory }
     && boardRoundTrips kv260
     && boardRoundTrips ice
+    && boardRoundTrips { ice with connectors = [ { role = I2sSharedBus; pins = [ "bclk", { pin = "43"; standard = None } ] } ] }
     && Warp11.Mapping.presetOf kv260 = Some "kv260"
     && Warp11.Mapping.presetOf custom = None
     && (match carried with

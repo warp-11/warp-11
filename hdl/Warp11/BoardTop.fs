@@ -62,6 +62,16 @@ let ofGraph (g: Graph) : Design =
             { through = streamThroughInstance io.ins.Head io.outs.Head
               ports = io.controls } }
 
+/// The I2S pinout the board's connector says: the Pmod I2S2's separate
+/// converters, or a shared bus. Both at once is refused — one header, one
+/// thing plugged into it. A board with neither still elaborates the
+/// Pmod shape, and the pin gate refuses it by name when it is built.
+let pinoutOf (board: Board) : I2sPinout =
+    match connectorFor I2sSharedBus board, connectorFor I2sSeparateCodecs board with
+    | Some _, Some _ -> failwith $"{board.name}: both I2S connectors are given — a board has a shared bus or separate codecs on its header, not both"
+    | Some _, None -> SharedBus
+    | None, _ -> SeparateCodecs
+
 /// What a board asks of a design before it will carry it: one stream, the
 /// stereo boundary, and a rate the board's clock divides into — said with
 /// the rate it would land on, so a design can be made for it.
@@ -326,7 +336,7 @@ let private pinsTop (board: Board) (d: Design) : BoardTop =
                 defModuleClocked
                     axiClock
                     name
-                    (fun p -> axiLiteSlavePorts p map.apertureAddrWidth, i2sPins p SeparateCodecs)
+                    (fun p -> axiLiteSlavePorts p map.apertureAddrWidth, i2sPins p (pinoutOf board))
                     (fun (slavePorts, pins) ->
                         let regs = regMapSlave slavePorts map
                         let i2s = i2sLink "audio" pins board.fabricHz rate stockBitsPerSlot
@@ -339,7 +349,7 @@ let private pinsTop (board: Board) (d: Design) : BoardTop =
             let top =
                 defModule
                     name
-                    (fun p -> uartPins p "host", i2sPins p SeparateCodecs)
+                    (fun p -> uartPins p "host", i2sPins p (pinoutOf board))
                     (fun (uart, pins) ->
                         let regs = serialRegMapSlave "host" board.fabricHz baud uart map
                         let i2s = i2sLink "audio" pins board.fabricHz rate stockBitsPerSlot
@@ -352,7 +362,7 @@ let private pinsTop (board: Board) (d: Design) : BoardTop =
             let top =
                 defModule
                     name
-                    (fun p -> i2sPins p SeparateCodecs)
+                    (fun p -> i2sPins p (pinoutOf board))
                     (fun pins ->
                         let i2s = i2sLink "audio" pins board.fabricHz rate stockBitsPerSlot
                         through d baked i2s)

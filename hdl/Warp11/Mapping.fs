@@ -96,6 +96,7 @@ let private boardNode (b: Board) : JsonObject =
                        str (
                            match c.role with
                            | I2sSeparateCodecs -> "I2sSeparateCodecs"
+                           | I2sSharedBus -> "I2sSharedBus"
                            | HostUart -> "HostUart"
                            | ClockIn -> "ClockIn"
                            | Leds -> "Leds"
@@ -232,6 +233,7 @@ let private readBoard (o: JsonNode) : Result<Board, string> =
                                                                                                      >>= fun role ->
                                                                                                          (match role with
                                                                                                           | "I2sSeparateCodecs" -> Ok I2sSeparateCodecs
+                                                                                                          | "I2sSharedBus" -> Ok I2sSharedBus
                                                                                                           | "HostUart" -> Ok HostUart
                                                                                                           | "ClockIn" -> Ok ClockIn
                                                                                                           | "Leds" -> Ok Leds
@@ -398,6 +400,7 @@ let showBoard (b: Board) : string =
     let role (r: DeviceRole) =
         match r with
         | I2sSeparateCodecs -> "I2sSeparateCodecs"
+        | I2sSharedBus -> "I2sSharedBus"
         | HostUart -> "HostUart"
         | ClockIn -> "ClockIn"
         | Leds -> "Leds"

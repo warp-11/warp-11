@@ -143,17 +143,17 @@ let main argv =
             | "memory" -> Ok HostMemory
             | other -> Error $"a data path is pins or memory, not '{other}'"
 
-        match Warp11.DesignFile.load path, preset which, dataPath with
-        | Error why, _, _ ->
+        // `which` is a preset's name or a board file's path.
+        match Warp11.DesignFile.load path, dataPath |> Result.bind (Warp11.Mapping.ofBoard which) with
+        | Error why, _ ->
             eprintfn $"{path}: {why}"
             1
-        | _, Error why, _
-        | _, _, Error why ->
+        | _, Error why ->
             eprintfn $"{why}"
             1
-        | Ok g, Ok board, Ok dataPath ->
+        | Ok g, Ok m ->
             try
-                let top = Warp11.BoardTop.boardTopOf board dataPath g
+                let top = Warp11.BoardTop.boardTopOf m.board m.path g
                 let out = Warp11.Build.write dir top
 
                 for file in out.files do

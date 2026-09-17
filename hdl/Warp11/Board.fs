@@ -120,6 +120,10 @@ type Loading =
 type DeviceRole =
     /// `i2sPins p SeparateCodecs`: the Pmod I2S2's two rows.
     | I2sSeparateCodecs
+    /// `i2sPins p SharedBus`: one bus every chip shares, no master clock —
+    /// `bclk`, `ws`, `sd_in`, `sd_out`. A board has one I2S connector or
+    /// the other, and the top takes the pinout the connector says.
+    | I2sSharedBus
     /// `uartPins p "host"`.
     | HostUart
     /// The board's own clock input, for a wrapper that takes a crystal.
