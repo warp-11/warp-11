@@ -21,14 +21,18 @@ type Law<'a, 'r> =
     | Sequential of (string -> Expr list -> Stream<'a> -> Stream<'r>)
 
 /// A functional unit: a law over typed pins, its controls, and how many
-/// copies of it a design may spend.
+/// copies of it a design may spend. `answers` is how many beats it emits
+/// for one it takes — one, but for a unit that drains a chunk as beats or
+/// unpacks a row; the placement carries the beat's context and keeps order
+/// across all of them.
 type Fu<'a, 'r> =
     { name: string
       operands: Layout<'a>
       results: Layout<'r>
       controls: (string * NumberFormat) list
       law: Law<'a, 'r>
-      copies: int }
+      copies: int
+      answers: int }
 
 /// A combinational unit with no controls, one copy.
 let fu (name: string) (operands: Layout<'a>) (results: Layout<'r>) (law: 'a -> 'r) : Fu<'a, 'r> =
@@ -37,7 +41,8 @@ let fu (name: string) (operands: Layout<'a>) (results: Layout<'r>) (law: 'a -> '
       results = results
       controls = []
       law = Combinational(fun _ a -> law a)
-      copies = 1 }
+      copies = 1
+      answers = 1 }
 
 /// A sequential unit with no controls, one copy.
 let fuSequential (name: string) (operands: Layout<'a>) (results: Layout<'r>) (law: string -> Stream<'a> -> Stream<'r>) : Fu<'a, 'r> =
@@ -46,7 +51,8 @@ let fuSequential (name: string) (operands: Layout<'a>) (results: Layout<'r>) (la
       results = results
       controls = []
       law = Sequential(fun instance _ s -> law instance s)
-      copies = 1 }
+      copies = 1
+      answers = 1 }
 
 /// A module as a unit: a stream through it, controls beside it, an instance
 /// per copy. `audioGain "AudioGain" instance volume mute` is the shape — an
@@ -63,10 +69,14 @@ let moduleUnit
       results = results
       controls = controls
       law = Sequential law
-      copies = 1 }
+      copies = 1
+      answers = 1 }
 
 /// The same unit, `n` copies.
 let copies (n: int) (unit: Fu<'a, 'r>) : Fu<'a, 'r> = { unit with copies = n }
+
+/// The same unit, answering `k` beats for one.
+let answering (k: int) (unit: Fu<'a, 'r>) : Fu<'a, 'r> = { unit with answers = k }
 
 /// A unit over bare nets — what a graph holds. Made only by `erase`, from a
 /// typed unit through its pins, so a palette cannot disagree with the unit
@@ -81,6 +91,7 @@ let erase (unit: Fu<'a, 'r>) : ErasedFu =
       results = results
       controls = unit.controls
       copies = unit.copies
+      answers = unit.answers
       law =
         match unit.law with
         | Combinational law -> Combinational(fun controls nets -> unit.results.pack (law controls (unit.operands.unpack nets)))
@@ -236,8 +247,8 @@ let private prefixed (prefix: string) (l: Layout<'x>) : Layout<'x> =
 /// `fanFlatMax` lanes the clustered fan the flat one would not clock at. At
 /// one lane it is the stage itself. The queue holds two beats a lane, the
 /// beat a lane holds and the one it stages.
-let private orderedFarm (name: string) (n: int) (worker: int -> Stream<'p> -> Stream<'q>) (s: Stream<'p>) : Stream<'q> =
-    streamFarmOrdered name n (2 * n) worker s
+let private orderedFarm (name: string) (n: int) (k: int) (worker: int -> Stream<'p> -> Stream<'q>) (s: Stream<'p>) : Stream<'q> =
+    streamFarmOrdered name n (2 * n) k worker s
 
 /// A stage over a sequential unit, `k` copies for this stream. The unit sees
 /// only its operands; the rest of the beat waits beside it in a context FIFO
@@ -260,9 +271,9 @@ let private sequentialStage
 
     let copy (i: int) =
         let instance = if k = 1 then $"{name}_{unit.name}" else $"{name}_{unit.name}%d{i}"
-        withContext instance 2 opLayout resLayout ctxLayout (law instance)
+        withContextExpanding unit.answers instance 2 opLayout resLayout ctxLayout (law instance)
 
-    orderedFarm name k copy src |> streamMapTo (outPins) (fun (r, p) -> finish r p)
+    orderedFarm name k unit.answers copy src |> streamMapTo (outPins) (fun (r, p) -> finish r p)
 
 /// The M streams that need a unit, handed over together, so the row of the
 /// matrix is decided here:

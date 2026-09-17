@@ -690,7 +690,13 @@ let streamZip (joined: Layout<'z>) (combine: 'a -> 'b -> 'z) (a: Stream<'a>) (b:
 /// A stage that answers in the cycle it accepted — a combinational module
 /// spliced through a stream — works too: its context pairs with it directly
 /// rather than through the FIFO. See the bypass in the body.
-let withContext
+///
+/// `withContextExpanding k` is the same over a stage that answers `k` beats
+/// for every one — a chunk drained as beats, a row unpacked — each of the
+/// `k` paired with the beat's context, which leaves the FIFO with the last.
+/// Such a stage registers by nature, so the bypass is off for it.
+let withContextExpanding
+    (k: int)
     (name: string)
     (depth: int)
     (operands: Layout<'a>)
@@ -699,6 +705,9 @@ let withContext
     (stage: Stream<'a> -> Stream<'b>)
     (s: Stream<'a * 'c>)
     : Stream<'b * 'c> =
+    if k < 1 then
+        failwith $"withContext '{name}': a stage answers at least one beat for one, not %d{k}"
+
     let b = current ()
     let fresh (what: string) = b.FreshName $"{name}_{what}"
 
@@ -713,6 +722,8 @@ let withContext
     let contextInReady = wireBit (fresh "context_in_ready")
     b.RegisterStreamReady contextInReady
     let direct = wireBit (fresh "context_direct")
+    let outReady = wireBit (fresh "zip_ready")
+    b.RegisterStreamReady outReady
 
     let stageOut =
         stage
@@ -742,7 +753,18 @@ let withContext
     // No ready here depends on a valid. It could not: a farm's dispatch makes
     // a lane's valid depend on its ready, and the two together would loop.
     let empty = bnot held.valid
-    (empty &&& stageOut.valid) ==> direct
+    (if k = 1 then empty &&& stageOut.valid else lit 0UL 1) ==> direct
+
+    // Which of the `k` answers this one is: the context leaves with the last.
+    let last =
+        if k = 1 then
+            lit 1UL 1
+        else
+            let phaseWidth = ceilLog2 k
+            let phase = reg (fresh "answer") phaseWidth
+            let atLast = eq phase (lit (uint64 (k - 1)) phaseWidth)
+            If (stageOut.valid &&& held.valid &&& outReady) (fun () -> mux atLast (lit 0UL phaseWidth) (phase + lit 1UL phaseWidth) ==> phase)
+            atLast
 
     // A context field is bits while it waits: the FIFO hands it back
     // width-only whatever reading it arrived with, so the bypass reads the
@@ -755,17 +777,28 @@ let withContext
 
     // The pairing: the stage's result goes when downstream can take it, and
     // the FIFO's head goes with it whenever it is the head that was read.
-    let outReady = wireBit (fresh "zip_ready")
-    b.RegisterStreamReady outReady
-
-    outReady ==> stageOut.ready
-    (outReady &&& stageOut.valid &&& bnot empty) ==> held.ready
+    // An expanding stage's answers wait for their context: the FIFO fills on
+    // the edge after the accept, and the first answer may be ready before it.
+    let paired = if k = 1 then stageOut.valid else stageOut.valid &&& held.valid
+    (if k = 1 then outReady else outReady &&& held.valid) ==> stageOut.ready
+    (outReady &&& stageOut.valid &&& bnot empty &&& last) ==> held.ready
     (stageReady &&& contextInReady) ==> s.ready
 
     { payload = stageOut.payload, contextPayload
-      valid = stageOut.valid
+      valid = paired
       ready = outReady
       layout = layoutJoin results context }
+
+let withContext
+    (name: string)
+    (depth: int)
+    (operands: Layout<'a>)
+    (results: Layout<'b>)
+    (context: Layout<'c>)
+    (stage: Stream<'a> -> Stream<'b>)
+    (s: Stream<'a * 'c>)
+    : Stream<'b * 'c> =
+    withContextExpanding 1 name depth operands results context stage s
 
 /// Dispatch fan-out: each beat goes to exactly ONE consumer — the lowest-index
 /// ready one. The source's ready is the OR of consumer readies, so a beat
@@ -913,8 +946,9 @@ let streamBalanceOrdered (name: string) (n: int) (depth: int) (s: Stream<'p>) : 
       order = order }
 
 /// The merge half: the lane at the head of the queue is the one taken from,
-/// and the head is popped as its beat leaves.
-let streamMergeOrdered (name: string) (o: OrderedLanes<'p>) : Stream<'p> =
+/// and the head is popped as its beat leaves — its `k`th beat, for lanes
+/// that answer `k` beats for one.
+let streamMergeOrdered (name: string) (k: int) (o: OrderedLanes<'p>) : Stream<'p> =
     match o.lanes with
     | [ s ] -> s
     | lanes ->
@@ -925,7 +959,18 @@ let streamMergeOrdered (name: string) (o: OrderedLanes<'p>) : Stream<'p> =
     b.RegisterStreamReady outReady
     let outValid = wireBit $"{name}_merge_valid"
     (o.order.valid &&& selectIndexed head [ for l in lanes -> l.valid ]) ==> outValid
-    (outValid &&& outReady) ==> o.order.ready
+
+    let last =
+        if k = 1 then
+            lit 1UL 1
+        else
+            let phaseWidth = ceilLog2 k
+            let phase = reg $"{name}_merge_answer" phaseWidth
+            let atLast = eq phase (lit (uint64 (k - 1)) phaseWidth)
+            If (outValid &&& outReady) (fun () -> mux atLast (lit 0UL phaseWidth) (phase + lit 1UL phaseWidth) ==> phase)
+            atLast
+
+    (outValid &&& outReady &&& last) ==> o.order.ready
 
     lanes
     |> List.iteri (fun i l -> (o.order.valid &&& eq head (lit (uint64 i) (width head)) &&& outReady) ==> l.ready)
@@ -942,13 +987,26 @@ let streamMergeOrdered (name: string) (o: OrderedLanes<'p>) : Stream<'p> =
 /// The ordered pair over the clustered topology: above [fanFlatMax], the
 /// beats go to a cluster in order, through a register, to a lane in order —
 /// each level keeps its own queue, and the register keeps order, so the
-/// whole does. `worker` runs once per lane with its index.
-let streamFarmOrdered (name: string) (n: int) (depth: int) (worker: int -> Stream<'p> -> Stream<'q>) (s: Stream<'p>) : Stream<'q> =
+/// whole does. `worker` runs once per lane with its index, and answers `k`
+/// beats for one.
+let streamFarmOrdered (name: string) (n: int) (depth: int) (k: int) (worker: int -> Stream<'p> -> Stream<'q>) (s: Stream<'p>) : Stream<'q> =
+    // A lane that answers `k` beats for one answers them at its own pace,
+    // and the merge is elsewhere while it does: its answers wait in a queue
+    // of `2k`, a beat's worth and the next, so the lane is never held by
+    // whose turn it is. At one answer the merge takes it as it comes.
+    let queued (i: int) (lane: Stream<'p>) =
+        let out = worker i lane
+
+        if k = 1 then
+            out
+        else
+            streamFifo $"{name}_lane%d{i}_answers" (1 <<< ceilLog2 (2 * k)) out
+
     if n = 1 then
         worker 0 s
     elif n <= fanFlatMax then
         let o = streamBalanceOrdered name n depth s
-        streamMergeOrdered name { lanes = List.mapi worker o.lanes; order = o.order }
+        streamMergeOrdered name k { lanes = List.mapi queued o.lanes; order = o.order }
     else
         let perNode = int (ceil (sqrt (float n)))
         let clusters = (n + perNode - 1) / perNode
@@ -965,11 +1023,11 @@ let streamFarmOrdered (name: string) (n: int) (depth: int) (worker: int -> Strea
             List.zip3 starts sizes top.lanes
             |> List.mapi (fun g (start, size, clusterStream) ->
                 let sub = streamBalanceOrdered $"{name}_c%d{g}" size (2 * size) (stageIn clusterStream)
-                let outs = sub.lanes |> List.mapi (fun i lane -> worker (start + i) lane)
+                let outs = sub.lanes |> List.mapi (fun i lane -> queued (start + i) lane)
                 let stageOut = streamStageFor outs.Head.layout
-                stageOut (streamMergeOrdered $"{name}_c%d{g}" { lanes = outs; order = sub.order }))
+                stageOut (streamMergeOrdered $"{name}_c%d{g}" k { lanes = outs; order = sub.order }))
 
-        streamMergeOrdered name { lanes = merged; order = top.order }
+        streamMergeOrdered name k { lanes = merged; order = top.order }
 
 /// A link's two stall counters, as wireable Exprs.
 type StallCounters = { blocked: Expr; starved: Expr }

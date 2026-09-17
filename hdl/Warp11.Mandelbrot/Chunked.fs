@@ -13,8 +13,8 @@ open Warp11.Fu
 open Warp11.Mandel
 
 /// The design as a board top takes it.
-let mandelChunks (name: string) (width: int) (maxIter: int) (fracBits: int) (threads: int) (lanes: int) : BoardTop.Design =
-    let def = mandelChunksDef name width maxIter fracBits threads lanes
+let mandelChunks (name: string) (width: int) (pixels: int) (maxIter: int) (fracBits: int) (threads: int) (lanes: int) : BoardTop.Design =
+    let def = mandelChunksDef name width pixels maxIter fracBits threads lanes
 
     { name = name
       sampleRate = 0.0
@@ -38,9 +38,9 @@ let mandelChunks (name: string) (width: int) (maxIter: int) (fracBits: int) (thr
 /// A frame through the design in the Sim: beats `0 .. height × chunks - 1`
 /// offered as fast as they are taken, the pixels collected in the order
 /// they leave — the raster, if the farm keeps order — as one byte a pixel.
-let renderInSim (width: int) (height: int) (maxIter: int) (fracBits: int) (threads: int) (lanes: int) (view: uint64 * uint64 * uint64 * uint64) (cycleLimit: int) =
-    let sim = Sim (mandelChunksDef "MandelChunksSim" width maxIter fracBits threads lanes).def
-    let chunks = paddedWidth width / pixelsPerBeat
+let renderInSim (width: int) (height: int) (pixels: int) (maxIter: int) (fracBits: int) (threads: int) (lanes: int) (view: uint64 * uint64 * uint64 * uint64) (cycleLimit: int) =
+    let sim = Sim (mandelChunksDef "MandelChunksSim" width pixels maxIter fracBits threads lanes).def
+    let chunks = chunkedWidth pixels width / pixels
     let beats = height * chunks
     let cxOrigin, cyOrigin, dx, dy = view
     sim.Poke("cxOrigin", cxOrigin)
@@ -48,11 +48,11 @@ let renderInSim (width: int) (height: int) (maxIter: int) (fracBits: int) (threa
     sim.Poke("dx", dx)
     sim.Poke("dy", dy)
     sim.Poke("out1_ready", 1UL)
-    let pixels = ResizeArray<byte>()
+    let pixelsOut = ResizeArray<byte>()
     let mutable offered = 0
     let mutable cycles = 0
 
-    while pixels.Count < beats * pixelsPerBeat && cycles < cycleLimit do
+    while pixelsOut.Count < beats * pixels && cycles < cycleLimit do
         sim.Poke("in1_valid", (if offered < beats then 1UL else 0UL))
         sim.Poke("in1_beat", uint64 offered)
         let accepted = offered < beats && sim.Peek "in1_ready" = 1UL
@@ -61,17 +61,17 @@ let renderInSim (width: int) (height: int) (maxIter: int) (fracBits: int) (threa
             let beat = sim.PeekWide "out1_pixels"
 
             for j in 0 .. pixelsPerBeat - 1 do
-                pixels.Add(byte ((beat >>> (j * 8)) &&& BigInteger 255))
+                pixelsOut.Add(byte ((beat >>> (j * 8)) &&& BigInteger 255))
 
         sim.Tick()
         cycles <- cycles + 1
         if accepted then offered <- offered + 1
 
-    pixels.ToArray(), cycles
+    pixelsOut.ToArray(), cycles
 
 /// The same frame from the whole-pixel twin, pixel by pixel.
-let renderTwin (width: int) (height: int) (maxIter: int) (fracBits: int) (view: uint64 * uint64 * uint64 * uint64) =
-    let widthPadded = paddedWidth width
+let renderTwin (width: int) (height: int) (pixels: int) (maxIter: int) (fracBits: int) (view: uint64 * uint64 * uint64 * uint64) =
+    let widthPadded = chunkedWidth pixels width
     let cxOrigin, cyOrigin, dx, dy = view
 
     [| for r in 0 .. height - 1 do
@@ -85,15 +85,15 @@ let renderTwin (width: int) (height: int) (maxIter: int) (fracBits: int) (view: 
 /// frame goes — start pulsed, busy polled, the frame read out of the
 /// behavioural DDR. What the driver does on the KV260, against the top the
 /// generator builds, before any bitstream exists.
-let renderThroughBoardTop (width: int) (height: int) (maxIter: int) (fracBits: int) (threads: int) (lanes: int) (view: uint64 * uint64 * uint64 * uint64) =
-    let design = mandelChunks "MandelChunks" width maxIter fracBits threads lanes
+let renderThroughBoardTop (width: int) (height: int) (pixels: int) (maxIter: int) (fracBits: int) (threads: int) (lanes: int) (view: uint64 * uint64 * uint64 * uint64) =
+    let design = mandelChunks "MandelChunks" width pixels maxIter fracBits threads lanes
     let top = BoardTop.boardTop kv260 Counted design
     let batch = top.batch.Value
     let sim = Sim top.top
     // Write-only: the counted top reads nothing, so it has no read channel.
     let ddr = SimAxiWriteSlave(sim, 0x20000, dataBytes = 16, awEvery = 3, bDelay = 6)
     let axi = SimAxi.clientWith sim ddr.Cycle
-    let chunks = paddedWidth width / pixelsPerBeat
+    let chunks = chunkedWidth pixels width / pixels
     let beats = height * chunks
     let dst = 0x8000
     let cxOrigin, cyOrigin, dx, dy = view
@@ -111,5 +111,5 @@ let renderThroughBoardTop (width: int) (height: int) (maxIter: int) (fracBits: i
         ddr.Cycle()
         spins <- spins + 1
 
-    let pixels = ddr.Memory[dst .. dst + beats * pixelsPerBeat - 1]
-    pixels, spins, top
+    let frame = ddr.Memory[dst .. dst + beats * pixels - 1]
+    frame, spins, top

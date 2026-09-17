@@ -2,7 +2,7 @@
 /// pipelined `z² + c` cone, the barrel lane that keeps it full, the row
 /// coalescer, the raster coord-gen and the pod that chains them — one
 /// row-run in, aligned 128-bit beats out — plus the pod at one beat wide
-/// as a unit, `mandel16`. Each section keeps the header it was written
+/// as a unit, `mandelChunk`. Each section keeps the header it was written
 /// under in `Warp11.Mandelbrot`, where the frame tops and harnesses stay.
 module Warp11.Mandel
 
@@ -790,52 +790,74 @@ let mandelLanePod (width: int) (height: int) (maxIter: int) (fracBits: int) (nTh
 /// the silicon config. Said once, so every pin that carries one agrees.
 let viewFormat (fracBits: int) = signedFixed 32 fracBits
 
-/// One beat of the frame, sixteen pixels wide: a byte an escape count,
-/// pixel `c` at bits `8c+7 … 8c`, the coalescer's beat as the DDR takes it.
+/// A beat of the frame: sixteen escape counts, a byte each, pixel `c` at
+/// bits `8c+7 … 8c` — the coalescer's beat, as the DDR takes it.
 let pixelsFormat = unsignedInt beatBits
 
-/// The pod at one beat wide as a unit: a chunk's view in — its first pixel's
-/// `cx0`, its row's `cy`, the step `dx` — and its sixteen escape counts out
-/// as one beat. `mandelLanePod 16 1` unchanged: the coord-gen sweeps the
-/// sixteen columns, the barrel iterates them, the coalescer's double buffer
-/// gathers the beat while the next chunk starts. One beat in, one beat out,
-/// so `copies` farms it in order.
+/// The width a frame is drawn at for chunks of `pixels`: whole chunks, and
+/// whole coalescer beats within them.
+let chunkedWidth (pixels: int) (width: int) =
+    let chunk = paddedWidth pixels
+    (width + chunk - 1) / chunk * chunk
+
+/// The pod at one chunk wide as a unit: a chunk's view in — its first
+/// pixel's `cx0`, its row's `cy`, the step `dx` — and its escape counts out
+/// as the pod drains them, a beat of sixteen at a time: `pixels / 16` beats
+/// for one, which the unit says and the placement carries the context and
+/// keeps the order across. `mandelLanePod pixels 1` unchanged: the coord-gen
+/// sweeps the chunk, the barrel iterates it, the coalescer's double buffer
+/// gathers it while the next chunk starts.
+///
+/// A wider chunk keeps the barrel fuller — the pod drains its tail once a
+/// chunk, so a chunk of sixteen drains it every sixteen pixels where a row
+/// of the frame design drained it every row. A hundred and twenty-eight is
+/// within a few percent of the row design's cycles; the beats stay sixteen
+/// pixels wide through the farm whatever the chunk.
 ///
 /// `dx` rides in the beat rather than as a control on purpose: a control on a
 /// box spent 104 times is a net across the die, the path the frame design
 /// took out of its dispatch tree by carrying `dx` in the run.
-let mandel16 (maxIter: int) (fracBits: int) (threads: int) : Fu<Expr * Expr * Expr, Expr> =
+let mandelChunk (pixels: int) (maxIter: int) (fracBits: int) (threads: int) : Fu<Expr * Expr * Expr, Expr> =
+    if pixels % pixelsPerBeat <> 0 then
+        failwith $"mandelChunk: a chunk is whole beats of %d{pixelsPerBeat} pixels, not %d{pixels}"
+
     let view = viewFormat fracBits
-    let run = lanePodRunTransporter pixelsPerBeat 1
+    let run = lanePodRunTransporter pixels 1
 
     moduleUnit
-        "mandel16"
+        "mandelChunk"
         (pins3 ("cx0", view) ("cy", view) ("dx", view))
         (pins1 ("pixels", pixelsFormat))
         []
         (fun instance _ s ->
             let runs =
                 s
-                |> streamMapTo (layout1 ("data", run.width)) (fun (cx0, cy, dx) -> run.dematerialize (lit 0UL (lanePodAddrWidth pixelsPerBeat 1), asUInt cy, asUInt cx0, asUInt dx))
+                |> streamMapTo (layout1 ("data", run.width)) (fun (cx0, cy, dx) -> run.dematerialize (lit 0UL (lanePodAddrWidth pixels 1), asUInt cy, asUInt cx0, asUInt dx))
 
-            mandelLanePod pixelsPerBeat 1 maxIter fracBits threads instance runs
+            mandelLanePod pixels 1 maxIter fracBits threads instance runs
             |> streamMapTo (layout1 ("pixels", beatBits)) snd)
+    |> answering (pixels / pixelsPerBeat)
 
 /// The raster as chunk views: beat `k` of the frame becomes the view of its
-/// chunk — `cx0` steps by sixteen `dx` a beat and returns to `cxOrigin` at
+/// chunk — `cx0` steps by `pixels` `dx` a beat and returns to `cxOrigin` at
 /// each row's start, `cy` steps by `dy` a row — both from the origin at beat
 /// zero. Adders and a counter; the frame's width says how many chunks a row
 /// is, and the host says how many beats a frame is by how many it asks for.
-let coords (width: int) (fracBits: int) : Fu<Expr, Expr * Expr * Expr> =
-    let chunks = paddedWidth width / pixelsPerBeat
+let coords (width: int) (pixels: int) (fracBits: int) : Fu<Expr, Expr * Expr * Expr> =
+    let chunks = chunkedWidth pixels width / pixels
     let chunkWidth = max 1 (ceilLog2 chunks)
     let view = viewFormat fracBits
+    let stepShift = ceilLog2 pixels
+
+    if 1 <<< stepShift <> pixels then
+        failwith $"coords: a chunk is a power of two pixels wide, not %d{pixels}"
 
     { name = "coords"
       operands = pins1 ("beat", unsignedInt 32)
       results = pins3 ("cx0", view) ("cy", view) ("dx", view)
       controls = [ "cxOrigin", view; "cyOrigin", view; "dx", view; "dy", view ]
       copies = 1
+      answers = 1
       law =
         Sequential(fun instance controls s ->
             let cxOrigin, cyOrigin, dx, dy =
@@ -859,8 +881,8 @@ let coords (width: int) (fracBits: int) : Fu<Expr, Expr * Expr * Expr> =
             let cx0 = mux first cxOrigin cxNext
             let cy = mux first cyOrigin cyNext
             let lastOfRow = eq thisChunk (lit (uint64 (chunks - 1)) chunkWidth)
-            // Sixteen `dx`: the step across one chunk, at the view's width.
-            let dx16 = cat (slice 27 0 dx) (lit 0UL 4)
+            // The step across one chunk, at the view's width.
+            let dxChunk = cat (slice (31 - stepShift) 0 dx) (lit 0UL stepShift)
 
             If fire (fun () ->
                 ifElse
@@ -872,7 +894,7 @@ let coords (width: int) (fracBits: int) : Fu<Expr, Expr * Expr * Expr> =
                       (otherwise,
                        fun () ->
                            thisChunk + lit 1UL chunkWidth ==> chunk
-                           cx0 + dx16 ==> cxNext
+                           cx0 + dxChunk ==> cxNext
                            cy ==> cyNext) ])
 
             { payload = (cx0, cy, dx)
@@ -891,9 +913,9 @@ let viewControls (fracBits: int) =
 /// The frame as the canvas draws it, in typed form: beats in, `coords`, the
 /// lane spent `lanes` times, pixels out — the four boxes, so the drawn design
 /// and this meet at the bytes.
-let mandelChunksDef (name: string) (width: int) (maxIter: int) (fracBits: int) (threads: int) (lanes: int) =
-    let coords = coords width fracBits
-    let lane = copies lanes (mandel16 maxIter fracBits threads)
+let mandelChunksDef (name: string) (width: int) (pixels: int) (maxIter: int) (fracBits: int) (threads: int) (lanes: int) =
+    let coords = coords width pixels fracBits
+    let lane = copies lanes (mandelChunk pixels maxIter fracBits threads)
     let view = viewFormat fracBits
 
     defModule
@@ -908,5 +930,5 @@ let mandelChunksDef (name: string) (width: int) (maxIter: int) (fracBits: int) (
         (fun (in1, out1, cxOrigin, cyOrigin, dx, dy) ->
             [ streamSource in1 ]
             |> fuStagesWith [ cxOrigin; cyOrigin; dx; dy ] coords "coords" (pins3 ("cx0", view) ("cy", view) ("dx", view)) id (fun r _ -> r)
-            |> fuStagesWith [] lane "mandel16" (pins1 pixelsPin) id (fun r _ -> r)
+            |> fuStagesWith [] lane "mandelChunk" (pins1 pixelsPin) id (fun r _ -> r)
             |> List.iter2 streamSink [ out1 ])

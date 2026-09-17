@@ -71,6 +71,7 @@ let private stereoUnit
       results = stereo
       controls = controls
       copies = 1
+      answers = 1
       law =
         Sequential(fun instance controls s ->
             let accepted = wire $"{instance}_accepted" 1

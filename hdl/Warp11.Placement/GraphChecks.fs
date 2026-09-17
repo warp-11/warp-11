@@ -1375,7 +1375,7 @@ let mappingIsAFile () : bool =
     && refused
 
 // UD22 — The Mandelbrot frame, drawn. The four boxes — a count in, `coords`,
-// `mandel16` spent three times, pixels out — elaborate to the bytes of the
+// `mandelChunk` spent three times, pixels out — elaborate to the bytes of the
 // typed `mandelChunksDef` assembled with the same placement; the frame the
 // drawn design renders in the Sim from a count is the whole-pixel twin's,
 // pixel for pixel; the export names the units and the counted path; and
@@ -1383,8 +1383,8 @@ let mappingIsAFile () : bool =
 
 // CHECK
 let mandelbrotDrawn () : bool =
-    let g = Examples.mandelbrot 32 48 28 8 3
-    let typed = Warp11.Mandel.mandelChunksDef "Mandelbrot" 32 48 28 8 3
+    let g = Examples.mandelbrot 32 32 48 28 8 3
+    let typed = Warp11.Mandel.mandelChunksDef "Mandelbrot" 32 32 48 28 8 3
     let sameBytes = emitDesign (elaborate g).def = emitDesign typed.def
 
     let toQ (v: float) = uint64 (int64 (v * 268435456.0)) &&& 0xFFFFFFFFUL
@@ -1411,8 +1411,8 @@ let mandelbrotDrawn () : bool =
     && frame.width = 32
     && frame.height = 4
     && frame.pixels = twin
-    && exported.Contains "mandel16 48 28 8"
-    && exported.Contains "coords 32 28"
+    && exported.Contains "mandelChunk 32 48 28 8"
+    && exported.Contains "coords 32 32 28"
     && exported.Contains "copies 3"
     && exported.Contains "let path = Counted"
     && top.name = "MandelbrotBatch"

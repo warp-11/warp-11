@@ -51,17 +51,19 @@
       "copies": 1,
       "arguments": {
         "fracBits": "28",
+        "pixels": "128",
         "width": "1400"
       },
       "settings": {}
     },
     {
-      "name": "mandel16",
-      "unit": "mandel16",
+      "name": "mandelChunk",
+      "unit": "mandelChunk",
       "copies": 4,
       "arguments": {
         "fracBits": "28",
         "maxIter": "256",
+        "pixels": "128",
         "threads": "8"
       },
       "settings": {}
@@ -91,18 +93,18 @@
     },
     {
       "from": "coords.cx0",
-      "to": "mandel16.cx0"
+      "to": "mandelChunk.cx0"
     },
     {
       "from": "coords.cy",
-      "to": "mandel16.cy"
+      "to": "mandelChunk.cy"
     },
     {
       "from": "coords.dx",
-      "to": "mandel16.dx"
+      "to": "mandelChunk.dx"
     },
     {
-      "from": "mandel16.pixels",
+      "from": "mandelChunk.pixels",
       "to": "output.pixels"
     }
   ],
@@ -115,7 +117,7 @@
       60,
       120
     ],
-    "mandel16": [
+    "mandelChunk": [
       580,
       120
     ],

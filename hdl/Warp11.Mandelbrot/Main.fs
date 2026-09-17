@@ -282,25 +282,25 @@ let private mainDemo () =
     // maxIter 48, over one lane and then three, every pixel bit-exact
     // against the twin and in raster order, which is the farm keeping order.
     let chunkView = (cx0Q, cyQ 0, dxQ, (toQ -0.25))
-    let chunkTwin = Chunked.renderTwin 32 4 48 28 chunkView
+    let chunkTwin = Chunked.renderTwin 32 4 16 48 28 chunkView
 
     for lanes in [ 1; 3 ] do
-        let pixels, cycles = Chunked.renderInSim 32 4 48 28 8 lanes chunkView 20000
+        let pixels, cycles = Chunked.renderInSim 32 4 16 48 28 8 lanes chunkView 20000
         let ok = pixels = chunkTwin
         printfn $"chunked design (%d{lanes} lanes) vs twin: %b{ok} (%d{cycles} cycles)"
 
     // Above `fanFlatMax` the farm clusters: twenty lanes over a 64×8 frame,
     // the order kept through two levels of queue and a register each way.
-    let wideTwin = Chunked.renderTwin 64 8 48 28 chunkView
-    let widePixels, wideCycles = Chunked.renderInSim 64 8 48 28 8 20 chunkView 40000
+    let wideTwin = Chunked.renderTwin 64 8 16 48 28 chunkView
+    let widePixels, wideCycles = Chunked.renderInSim 64 8 16 48 28 8 20 chunkView 40000
     let wideOk = widePixels = wideTwin
     printfn $"chunked design (20 lanes, clustered) vs twin: %b{wideOk} (%d{wideCycles} cycles)"
 
     // The same design on the KV260's counted path, in the Sim against the
     // behavioural DDR: the host writes a count and a view, the frame lands.
     // 32×8: sixteen beats, the burst the write side's rows must fill.
-    let boardTwin = Chunked.renderTwin 32 8 48 28 chunkView
-    let boardPixels, boardCycles, boardTop = Chunked.renderThroughBoardTop 32 8 48 28 8 2 chunkView
+    let boardTwin = Chunked.renderTwin 32 8 16 48 28 chunkView
+    let boardPixels, boardCycles, boardTop = Chunked.renderThroughBoardTop 32 8 16 48 28 8 2 chunkView
     let boardOk = boardPixels = boardTwin
     printfn $"counted board top vs twin ({boardTop.name}, 2 lanes): %b{boardOk} (%d{boardCycles} cycles)"
 
@@ -350,6 +350,18 @@ let main argv =
         0
     | [| "lanescale"; w; h; mi; l |] ->
         FrameHost.laneScale [ (int w, int h, int mi, int l) ]
+        0
+    // The chunked design at the same view as `lanescale`, for the two to be
+    // set beside each other: cycles a frame, and the Sim's speed over it.
+    | [| "chunkscale"; w; h; px; mi; l |] ->
+        let w, h, pixels, maxIter, lanes = int w, int h, int px, int mi, int l
+        let toQ (v: float) = uint64 (int64 (v * 268435456.0)) &&& 0xFFFFFFFFUL
+        let view = (toQ -2.25, toQ -1.125, toQ (3.0 / float w), toQ (2.25 / float h))
+        let sw = System.Diagnostics.Stopwatch.StartNew()
+        let frame, cycles = Chunked.renderInSim w h pixels maxIter 28 8 lanes view 4_000_000
+        sw.Stop()
+        let ok = frame = Chunked.renderTwin w h pixels maxIter 28 view
+        printfn $"[ChunkScale] %d{w}x%d{h}/px%d{pixels}/m%d{maxIter}/l%d{lanes}: %d{cycles} cycles | bit-exact %b{ok} | %d{sw.ElapsedMilliseconds} ms (%.0f{float cycles / float sw.ElapsedMilliseconds * 1000.0} cyc/s)"
         0
     | [| "cyclesweep" |] ->
         FrameHost.cycleSweep ()
