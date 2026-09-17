@@ -18,7 +18,6 @@ type App() =
         try
             System.Console.WriteLine "spike: Initialize"
             this.Styles.Add(FluentTheme())
-            this.Styles.Add(nodeEditorTheme "Warp11.Placement.Canvas.Browser")
             this.RequestedThemeVariant <- Styling.ThemeVariant.Light
             System.Console.WriteLine "spike: styles added"
         with e ->

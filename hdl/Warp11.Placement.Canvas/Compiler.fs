@@ -2,7 +2,8 @@
 /// service evaluates the source in this process, against the library this
 /// canvas runs on, and hands back the unit as a value. Desktop only — the
 /// browser head keeps the palette it was built with, and a design carrying a
-/// written unit refuses to open there.
+/// written unit refuses to open there. What both heads need of a unit's
+/// source is in `UnitSource`.
 module Warp11.Placement.Canvas.Compiler
 
 open System.IO
@@ -10,6 +11,7 @@ open FSharp.Compiler.Interactive.Shell
 open Warp11
 open Warp11.Fu
 open Warp11.Factories
+open Warp11.Placement.Canvas.UnitSource
 
 /// The evaluation session, made on first use: the library referenced from
 /// where it is loaded, its modules opened, so a source reads as a line of a
@@ -49,11 +51,6 @@ let private session =
              let said = diagnostics |> Array.map (fun d -> d.Message) |> String.concat "; "
              failwith $"the compiler could not open the library: {e.Message} {said}")
 
-/// The name the source defines: its first top-level `let`.
-let definedName (source: string) : string option =
-    let m = System.Text.RegularExpressions.Regex.Match(source, @"^\s*let\s+(?:inline\s+)?([A-Za-z_][A-Za-z0-9_]*)", System.Text.RegularExpressions.RegexOptions.Multiline)
-    if m.Success then Some m.Groups[1].Value else None
-
 /// The source compiled and its unit erased: a factory for the session, or
 /// the first thing the compiler said. The value the source defines must be
 /// a `Fu<'a, 'r>` — a unit over typed pins — and call itself by that name,
@@ -87,11 +84,3 @@ let compileUnit (name: string) (source: string) : Result<Factory, string> =
                 Error $"'{name}' is not a unit over typed pins: {e.Message} {said}"
     with e ->
         Error e.Message
-
-/// What a fresh unit box starts as: the channels swapped, one line each way.
-let template =
-    String.concat
-        "\n"
-        [ "let swap ="
-          "    fu \"swap\" (pins2 (\"left\", signedInt 24) (\"right\", signedInt 24)) (pins2 (\"left\", signedInt 24) (\"right\", signedInt 24))"
-          "        (fun (l, r) -> r, l)" ]

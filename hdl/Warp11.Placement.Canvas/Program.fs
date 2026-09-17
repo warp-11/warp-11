@@ -80,7 +80,7 @@ let main argv =
     | [| "unit"; path |] ->
         let source = System.IO.File.ReadAllText path
 
-        match Compiler.definedName source with
+        match UnitSource.definedName source with
         | None ->
             eprintfn $"{path}: no `let` to name the unit by"
             1

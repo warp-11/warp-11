@@ -505,7 +505,7 @@ let view (opening: Opening) : Control =
         let columns = ctx.useState (paneColumns (), renderOnChange = false)
         let importText = ctx.useState ""
         /// A unit being written: its source, compiled on request.
-        let unitSource = ctx.useState Compiler.template
+        let unitSource = ctx.useState UnitSource.template
         let unitPanelOpen = ctx.useState false
         // The property panel's entries.
         let nameText = ctx.useState ""
@@ -2010,14 +2010,15 @@ let view (opening: Opening) : Control =
             // work inside, and on the UI thread that wait meets the
             // dispatcher and neither moves. The verdict comes back posted.
             let compile () =
-                match Compiler.definedName unitSource.Current with
-                | None -> message.Set "refused: the source needs a `let` to name the unit by"
-                | Some name ->
+                match UnitSource.definedName unitSource.Current, Warp11.Factories.compileUnit with
+                | None, _ -> message.Set "refused: the source needs a `let` to name the unit by"
+                | Some _, None -> message.Set "refused: this head has no compiler — write the unit on the desktop"
+                | Some name, Some compileUnit ->
                     let source = unitSource.Current
                     let rate = g.sampleRate
                     message.Set $"compiling {name}…"
 
-                    System.Threading.Tasks.Task.Run(fun () -> Compiler.compileUnit name source)
+                    System.Threading.Tasks.Task.Run(fun () -> compileUnit name source)
                     |> fun task ->
                         task.ContinueWith(fun (t: System.Threading.Tasks.Task<Result<Factory, string>>) ->
                             Avalonia.Threading.Dispatcher.UIThread.Post(fun () ->
