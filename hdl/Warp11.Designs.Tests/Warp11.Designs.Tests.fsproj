@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <OutputType>Exe</OutputType>
+        <TargetFramework>net10.0</TargetFramework>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <Compile Include="DslTests.fs"/>
+        <Compile Include="MemoryTests.fs"/>
+        <Compile Include="RegMapTests.fs"/>
+        <Compile Include="StreamTests.fs"/>
+        <Compile Include="ImageTests.fs"/>
+        <Compile Include="SemanticTests.fs"/>
+        <Compile Include="RegistryTests.fs"/>
+        <Compile Include="StructuralTests.fs"/>
+        <Compile Include="EmitterTests.fs"/>
+        <Compile Include="Program.fs"/>
+    </ItemGroup>
+
+    <ItemGroup>
+        <PackageReference Include="Expecto" Version="11.1.0"/>
+    </ItemGroup>
+
+    <ItemGroup>
+        <ProjectReference Include="../Warp11/Warp11.fsproj"/>
+        <ProjectReference Include="../Warp11.Designs/Warp11.Designs.fsproj"/>
+    </ItemGroup>
+
+</Project>

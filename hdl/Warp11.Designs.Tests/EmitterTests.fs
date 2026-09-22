@@ -1,0 +1,241 @@
+module Warp11.Designs.Tests.EmitterTests
+
+open System.Text.RegularExpressions
+open Expecto
+open Warp11
+open Warp11.Designs
+
+let private laneMasked (design: ModuleDef) =
+    design.stmts
+    |> List.exists (function
+        | MemWrite (_, _, _, _, Some _) -> true
+        | _ -> false)
+
+let private exportableDesigns () =
+    Registry.designs
+    |> List.map (fun entry -> entry.build ())
+    |> List.filter (fun design ->
+        not (laneMasked design)
+        && allModules design
+           |> List.forall (fun child ->
+               child.decls
+               |> List.forall (function
+                   | Memory (_, _, _, Some _, _) -> false
+                   | _ -> true)))
+
+let private withoutRamStyle verilog =
+    Regex.Replace(verilog, """\(\* ram_style = "[a-z]*" \*\) """, "")
+
+let private firrtlHeader =
+    """FIRRTL version 4.0.0
+circuit T :
+  public module T :
+    input clock : Clock
+    input reset : UInt<1>
+    input a : UInt<8>
+    input b : UInt<8>
+    output o : UInt<8>
+"""
+
+let private expectUnsupported body expected =
+    Expect.throwsC
+        (fun () -> FirrtlImport.importFirrtl (firrtlHeader + body) |> ignore)
+        (fun ex ->
+            Expect.isTrue
+                (ex :? FirrtlImport.Unsupported)
+                $"The FIRRTL reader should reject {expected} as unsupported"
+            Expect.stringContains ex.Message expected $"The rejection should identify {expected}")
+
+let private bare name =
+    { name = name
+      decls = []
+      stmts = []
+      instances = []
+      clock = defaultClock
+      streamReadies = []
+      probes = []
+      stateMachines = [] }
+
+let private collisionParent instanceName =
+    let grandchild =
+        { bare "CollideGrandChild" with
+            decls = [ Input ("i", UInt 8); Output ("o", UInt 8); Wire ("sig", UInt 8) ]
+            stmts =
+                [ Assign ("sig", Add (Ref ("i", UInt 8), Lit (1UL, UInt 8)))
+                  Assign ("o", Ref ("sig", UInt 8)) ] }
+
+    { bare "CollideParent" with
+        decls =
+            [ Input ("i", UInt 8)
+              Output ("o", UInt 8)
+              Wire ("gc_sig", UInt 8)
+              Wire ($"{instanceName}_i", UInt 8)
+              Wire ($"{instanceName}_o", UInt 8) ]
+        stmts =
+            [ Assign ("gc_sig", Add (Ref ("i", UInt 8), Lit (100UL, UInt 8)))
+              Assign ($"{instanceName}_i", Ref ("i", UInt 8))
+              Assign ("o", Add (Ref ($"{instanceName}_o", UInt 8), Ref ("gc_sig", UInt 8))) ]
+        instances = [ { instName = instanceName; child = grandchild } ] }
+
+let private structuralLines (verilog: string) =
+    verilog.Split '\n'
+    |> Array.filter (fun line -> not (line.StartsWith "module " || line.Contains "assign escape"))
+    |> Array.toList
+
+let private fixedLayerTest =
+    testCase "Fixed arithmetic layer emits the raw design structure" <| fun _ ->
+        Expect.equal
+            (emitDesign escapeStepFixed.def |> structuralLines)
+            (emitDesign escapeStep.def |> structuralLines)
+            "The Fixed layer should compile away except for its signed escape comparison"
+
+let private multiplierMemoizationTest =
+    testCase "mulOf memoizes multipliers by width" <| fun _ ->
+        Expect.isTrue (System.Object.ReferenceEquals(mulOf 8, mulOf 8)) "Repeated requests should return the same multiplier module"
+
+let private flattenCollisionTest =
+    testCase "flatten rejects colliding hierarchical names" <| fun _ ->
+        Expect.throwsC
+            (fun () -> flatten (collisionParent "gc") |> ignore)
+            (fun ex ->
+                Expect.stringContains ex.Message "gc_sig" "The collision should identify the flattened name"
+                Expect.stringContains ex.Message "collides" "The collision should be explicit")
+
+        let sim = Sim (collisionParent "child")
+        sim.Poke("i", 5UL)
+        sim.Tick()
+        Expect.equal (sim.Peek "o") 111UL "Renaming the instance should preserve both independent signals"
+
+let private supportedFirrtlTest =
+    testCase "FIRRTL reader accepts its supported formerly-high constructs" <| fun _ ->
+        let unresetRegister =
+            """FIRRTL version 4.0.0
+circuit T :
+  public module T :
+    input clock : Clock
+    input reset : UInt<1>
+    input a : UInt<8>
+    output o : UInt<8>
+    reg r : UInt<8>, clock
+    connect r, a
+    connect o, r
+"""
+
+        let registerDesign = FirrtlImport.importFirrtl unresetRegister
+        Expect.contains registerDesign.decls (Reg ("r", UInt 8, None)) "An unreset register should retain no reset value"
+
+        let dynamicShift =
+            """FIRRTL version 4.0.0
+circuit T :
+  public module T :
+    input a : UInt<8>
+    input n : UInt<3>
+    output o : UInt<15>
+    connect o, dshl(a, n)
+"""
+
+        let reduction =
+            """FIRRTL version 4.0.0
+circuit T :
+  public module T :
+    input a : UInt<8>
+    output o : UInt<1>
+    connect o, orr(a)
+"""
+
+        let variableDivision =
+            """FIRRTL version 4.0.0
+circuit T :
+  public module T :
+    input a : UInt<8>
+    input b : UInt<8>
+    output o : UInt<8>
+    connect o, div(a, b)
+"""
+
+        [ dynamicShift; reduction; variableDivision ]
+        |> List.iter (fun text -> FirrtlImport.importFirrtl text |> emitDesign |> ignore)
+
+let tests =
+    testList
+        "FIRRTL and emitter"
+        [ testCase "FIRRTL export is closed over catalog designs" <| fun _ ->
+              let designs = exportableDesigns ()
+              Expect.isNonEmpty designs "The closure check should cover exportable catalog designs"
+
+              for design in designs do
+                  let text = Firrtl.emitFirrtl design
+                  let lines = text.Split '\n' |> Array.map (fun line -> line.Trim())
+                  let modules = allModules design |> List.distinctBy (fun child -> child.name)
+
+                  let moduleLines =
+                      lines
+                      |> Array.filter (fun line -> line.StartsWith "module " || line.StartsWith "public module ")
+
+                  Expect.equal moduleLines.Length modules.Length $"{design.name} should emit every module exactly once"
+                  Expect.stringContains text $"circuit {design.name} :" $"{design.name} should name its top-level circuit"
+
+                  for child in modules do
+                      for declaration in child.decls do
+                          match declaration with
+                          | Input (name, signalType) ->
+                              Expect.stringContains text $"input {name} : {Firrtl.typeText signalType}" $"{child.name}.{name} should retain its input type"
+                          | Output (name, signalType) ->
+                              Expect.stringContains text $"output {name} : {Firrtl.typeText signalType}" $"{child.name}.{name} should retain its output type"
+                          | _ -> ()
+
+                  let declared =
+                      set
+                          [ for child in modules do
+                                for declaration in child.decls do
+                                    match declOf declaration with
+                                    | Some (name, _) -> yield name
+                                    | None -> ()
+
+                                for declaration in child.decls do
+                                    match declaration with
+                                    | Memory (name, _, _, _, _) -> yield name
+                                    | _ -> () ]
+
+                  for line in lines |> Array.filter (fun line -> line.StartsWith "connect ") do
+                      let target = line.Substring("connect ".Length).Split(',').[0].Trim()
+                      Expect.isTrue (target.Contains "." || declared.Contains target) $"{design.name} connect target {target} should be declared"
+              ()
+
+          testCase "FIRRTL export refuses initialized memories" <| fun _ ->
+              let preloaded =
+                  (defModule "FirrtlRomRefusal" (fun ports -> ports.inPort "addr" 2, ports.outPort "out" 8) (fun (address, output) ->
+                      let lookup = distributedRom "lookup" 8 [| 1UL; 2UL; 3UL; 4UL |]
+                      memRead lookup address ==> output)).def
+
+              Expect.throwsC
+                  (fun () -> Firrtl.emitFirrtl preloaded |> ignore)
+                  (fun ex ->
+                      Expect.isTrue (ex :? Firrtl.Unrepresentable) "Initialized memory should be unrepresentable in FIRRTL"
+                      Expect.stringContains ex.Message "initial contents" "The refusal should identify the lost contents")
+
+          testCase "FIRRTL catalog exports round-trip to identical Verilog" <| fun _ ->
+              let designs = exportableDesigns ()
+              Expect.isNonEmpty designs "The round-trip should cover exportable catalog designs"
+
+              for design in designs do
+                  let original = emitDesign design |> withoutRamStyle
+                  let imported = Firrtl.emitFirrtl design |> FirrtlImport.importFirrtl |> emitDesign |> withoutRamStyle
+                  Expect.equal imported original $"{design.name} should survive a FIRRTL round-trip"
+              ()
+
+          testCase "FIRRTL reader explicitly refuses unsupported constructs" <| fun _ ->
+              [ "    when a :\n      connect o, a\n", "when"
+                "    connect o, asClock(a)\n", "asClock"
+                "    printf(clock, UInt<1>(1), \"hi\")\n    connect o, a\n", "printf"
+                "    stop(clock, UInt<1>(1), 0)\n    connect o, a\n", "stop"
+                "    attach(a, b)\n    connect o, a\n", "attach"
+                "    wire w : { x : UInt<8> }\n    connect o, a\n", "bundle"
+                "    frobnicate o, a\n", "unrecognised statement" ]
+              |> List.iter (fun (body, expected) -> expectUnsupported body expected)
+              ()
+
+          supportedFirrtlTest
+          flattenCollisionTest
+          fixedLayerTest
+          multiplierMemoizationTest ]

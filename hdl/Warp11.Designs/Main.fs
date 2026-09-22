@@ -1915,70 +1915,6 @@ let private utilityPrimitives () =
     && countersWrapWhereTheySay
     && bitShapesAreTheirDefinitions
 
-/// Flattening must not merge two signals into one name.
-///
-/// `flatten` prefixes a child's internals with the instance name, so a
-/// grandchild's `sig` inside instance `gc` becomes `gc_sig`. If the parent
-/// already declares `gc_sig`, two different signals land on one name and the
-/// Sim answers for whichever it evaluated — silently, and with the Verilog
-/// still correct, because the emitter preserves hierarchy and never flattens.
-///
-/// This is checked by building the collision rather than by asserting the
-/// absence of one: a check that only ran clean designs would pass just as well
-/// with the guard removed. Both halves are here — the collision is refused,
-/// and the same shape with the instance renamed is accepted and computes the
-/// right answer.
-let private flattenRefusesNameCollisions () =
-    let bare name =
-        { name = name
-          decls = []
-          stmts = []
-          instances = []
-          clock = defaultClock
-          streamReadies = []
-          probes = []
-          stateMachines = [] }
-
-    // Grandchild: one internal wire, `sig`.
-    let grandchild =
-        { bare "CollideGrandChild" with
-            decls = [ Input("i", UInt 8); Output("o", UInt 8); Wire("sig", UInt 8) ]
-            stmts =
-                [ Assign("sig", Add(Ref("i", UInt 8), Lit(1UL, UInt 8)))
-                  Assign("o", Ref("sig", UInt 8)) ] }
-
-    /// The parent, with its instance named by the caller. At "gc" its own
-    /// `gc_sig` collides with the grandchild's flattened `sig`; at "child"
-    /// nothing does, and the arithmetic is identical either way.
-    let parent instanceName =
-        { bare "CollideParent" with
-            decls =
-                [ Input("i", UInt 8)
-                  Output("o", UInt 8)
-                  Wire("gc_sig", UInt 8)
-                  Wire($"{instanceName}_i", UInt 8)
-                  Wire($"{instanceName}_o", UInt 8) ]
-            stmts =
-                [ Assign("gc_sig", Add(Ref("i", UInt 8), Lit(100UL, UInt 8)))
-                  Assign($"{instanceName}_i", Ref("i", UInt 8))
-                  Assign("o", Add(Ref($"{instanceName}_o", UInt 8), Ref("gc_sig", UInt 8))) ]
-            instances = [ { instName = instanceName; child = grandchild } ] }
-
-    let refused =
-        try
-            flatten (parent "gc") |> ignore
-            false
-        with e -> e.Message.Contains "gc_sig" && e.Message.Contains "collides"
-
-    // Renamed, the same design is legal — and 5 must give (5+1) + (5+100).
-    let accepted =
-        let sim = Sim(parent "child")
-        sim.Poke("i", 5UL)
-        sim.Tick()
-        sim.Peek "o" = 111UL
-
-    refused && accepted
-
 /// The elaboration gate, in three pairs.
 ///
 /// Each of these emits as perfectly legal Verilog and is almost always a bug, so
@@ -2879,276 +2815,6 @@ let private registryLoads () =
     List.forall loads Registry.designs
     && List.forall slices Registry.designs
     && List.length (List.distinct labels) = List.length labels
-
-/// The FIRRTL export, checked on the property that matters before `firtool`
-/// exists to check it for us: the text is *closed*. Every name it mentions is
-/// one it declares, every module the design reaches appears exactly once, and
-/// every port lines up with the decl it came from.
-///
-/// That is weaker than "firtool accepts it" and stronger than "it did not
-/// throw" — a dropped declaration, a misnamed instance field or a module lost to
-/// the dedupe all fail here, and those are the bugs an emitter actually has.
-let private firrtlIsClosed () =
-    let closed (d: ModuleDef) =
-        let text = Firrtl.emitFirrtl d
-        let lines = text.Split '\n' |> Array.map (fun l -> l.Trim())
-
-        let modules = allModules d |> List.distinctBy (fun c -> c.name)
-
-        // One module line per distinct module, and the circuit named for the top.
-        // The top is `public module` — FIRRTL 4.0 removed private main modules —
-        // so both spellings count.
-        let moduleLines =
-            lines |> Array.filter (fun l -> l.StartsWith "module " || l.StartsWith "public module ")
-
-        let namesMatch =
-            Array.length moduleLines = List.length modules
-            && text.Contains $"circuit {d.name} :"
-
-        // Every port of every module, present and typed as declared.
-        let portsMatch =
-            modules
-            |> List.forall (fun md ->
-                md.decls
-                |> List.forall (function
-                    | Input (n, t) -> text.Contains $"input {n} : {Firrtl.typeText t}"
-                    | Output (n, t) -> text.Contains $"output {n} : {Firrtl.typeText t}"
-                    | _ -> true))
-
-        // Every connect target is a name this circuit declares, or a field of an
-        // instance or memory port (which the dot makes obvious).
-        let declared =
-            set
-                [ for md in modules do
-                    for decl in md.decls do
-                        match declOf decl with
-                        | Some (n, _) -> yield n
-                        | None -> ()
-
-                    for decl in md.decls do
-                        match decl with
-                        | Memory(n, _, _, _, _) -> yield n
-                        | _ -> () ]
-
-        let targetsDeclared =
-            lines
-            |> Array.filter (fun l -> l.StartsWith "connect ")
-            |> Array.forall (fun l ->
-                let target = l.Substring("connect ".Length).Split(',').[0].Trim()
-                target.Contains "." || declared.Contains target)
-
-        namesMatch && portsMatch && targetsDeclared
-
-    // A ROM's contents cannot be said in `.fir`, so the export refuses by name
-    // rather than emitting a memory that reads as zeros. That refusal is part of
-    // the contract and is checked like anything else.
-    let refusesRomInit =
-        let preloaded =
-            (defModule "FirrtlRomRefusal" (fun p -> (p.inPort "addr" 2, p.outPort "out" 8)) (fun (addr, out) ->
-                let lookup = distributedRom "lookup" 8 [| 1UL; 2UL; 3UL; 4UL |]
-                memRead lookup addr ==> out))
-                .def
-
-        try
-            Firrtl.emitFirrtl preloaded |> ignore
-            false
-        with Firrtl.Unrepresentable message ->
-            message.Contains "initial contents"
-
-    // A lane-masked memory exports as a FIRRTL vector, which `firtool` compiles
-    // and the differential's third leg checks — but the *reader* refuses one, so
-    // it cannot round-trip. Named here rather than quietly filtered, the way a
-    // ROM's contents are.
-    let laneMasked (d: ModuleDef) =
-        d.stmts |> List.exists (function MemWrite (_, _, _, _, Some _) -> true | _ -> false)
-
-    let exportable =
-        Registry.designs
-        |> List.map (fun e -> e.build ())
-        |> List.filter (fun d ->
-            not (laneMasked d)
-            && allModules d
-               |> List.forall (fun m ->
-                   m.decls
-                   |> List.forall (function
-                       | Memory(_, _, _, Some _, _) -> false
-                       | _ -> true)))
-
-    List.forall closed exportable && refusesRomInit && not (List.isEmpty exportable)
-
-/// The import's property: a design that goes out as `.fir` and comes back
-/// through the reader emits the *identical* Verilog.
-///
-/// That is a strong check and a narrow one, and both halves are worth saying.
-/// Strong, because it is byte-identical against the emitter this repo already
-/// trusts, over every construct the catalogs use — a dropped statement, a
-/// mis-scoped name, a memory write landing in the wrong place all fail it, and
-/// each of those was a real bug while this was written. Narrow, because it only
-/// proves the reader and the writer agree: a construct misunderstood in the same
-/// way twice would round-trip happily. Reading FIRRTL nobody here wrote is what
-/// closes that gap, and is the next piece rather than this one.
-let private firrtlRoundTrips () =
-    // A lane-masked memory exports as a FIRRTL vector — `firtool` compiles it and
-    // the differential's third leg checks it — but the reader refuses one, so it
-    // cannot come back. Excluded by name, the way a ROM's contents are.
-    let laneMasked (d: ModuleDef) =
-        d.stmts |> List.exists (function MemWrite (_, _, _, _, Some _) -> true | _ -> false)
-
-    let exportable =
-        Registry.designs
-        |> List.map (fun e -> e.build ())
-        |> List.filter (fun d ->
-            not (laneMasked d)
-            && allModules d
-               |> List.forall (fun m ->
-                   m.decls
-                   |> List.forall (function
-                       | Memory(_, _, _, Some _, _) -> false
-                       | _ -> true)))
-
-    // `ram_style` is the one thing a round trip loses, and it is worth being
-    // exact about what that means. FIRRTL has no notion of storage style — it
-    // describes a circuit, not how a synthesiser should build one — so an
-    // imported memory comes back `Unspecified`. Nothing about *behaviour*
-    // changes, which is why the comparison strips the attribute rather than the
-    // export refusing (as it does for a ROM's contents, where behaviour would
-    // change). What is lost is a directive to Vivado, and `hdl/README.md` says
-    // so beside the rest of the subset.
-    let withoutRamStyle (verilog: string) =
-        System.Text.RegularExpressions.Regex.Replace(verilog, """\(\* ram_style = "[a-z]*" \*\) """, "")
-
-    let roundTrips (d: ModuleDef) =
-        try
-            let back = withoutRamStyle (emitDesign (FirrtlImport.importFirrtl (Firrtl.emitFirrtl d)))
-            back = withoutRamStyle (emitDesign d)
-        with _ ->
-            false
-
-    // What the reader does *not* accept, checked rather than described. Every
-    // one of these is a line `hdl/README.md` claims is refused; a silent
-    // acceptance would mean a construct read as something it is not, and an
-    // unrecognised statement dropped is circuit behaviour dropped.
-    let refuses (body: string) (expected: string) =
-        let header =
-            """FIRRTL version 4.0.0
-circuit T :
-  public module T :
-    input clock : Clock
-    input reset : UInt<1>
-    input a : UInt<8>
-    input b : UInt<8>
-    output o : UInt<8>
-"""
-
-        let text = header + body
-
-        try
-            FirrtlImport.importFirrtl text |> ignore
-            false
-        with FirrtlImport.Unsupported message ->
-            message.Contains expected
-
-    let refusesWhatItSaysItDoes =
-        [ "    when a :\n      connect o, a\n", "when"
-          "    connect o, asClock(a)\n", "asClock"
-          "    printf(clock, UInt<1>(1), \"hi\")\n    connect o, a\n", "printf"
-          "    stop(clock, UInt<1>(1), 0)\n    connect o, a\n", "stop"
-          "    attach(a, b)\n    connect o, a\n", "attach"
-          "    wire w : { x : UInt<8> }\n    connect o, a\n", "bundle"
-          // The catch-all. Dropping a statement nobody recognised is the one
-          // failure that changes a design without saying so.
-          "    frobnicate o, a\n", "unrecognised statement" ]
-        |> List.forall (fun (body, expected) -> refuses body expected)
-
-    // The counterparts: constructs that used to be refused and now read as what
-    // they mean. A refusal check that outlives the refusal passes forever while
-    // testing nothing, so each retirement moves to this side of the ledger.
-    let readsUnresetRegisters =
-        let text =
-            """FIRRTL version 4.0.0
-circuit T :
-  public module T :
-    input clock : Clock
-    input reset : UInt<1>
-    input a : UInt<8>
-    output o : UInt<8>
-    reg r : UInt<8>, clock
-    connect r, a
-    connect o, r
-"""
-
-        try
-            let d = FirrtlImport.importFirrtl text
-
-            d.decls
-            |> List.exists (function
-                | Reg (_, _, None) -> true
-                | _ -> false)
-        with _ ->
-            false
-
-    let readsDynamicShifts =
-        let text =
-            """FIRRTL version 4.0.0
-circuit T :
-  public module T :
-    input a : UInt<8>
-    input n : UInt<3>
-    output o : UInt<15>
-    connect o, dshl(a, n)
-"""
-
-        try
-            let d = FirrtlImport.importFirrtl text
-            // 8 + 2^3 - 1 = 15: FIRRTL's width, kept rather than guessed at.
-            emitDesign d |> ignore
-            true
-        with _ ->
-            false
-
-    let readsReductions =
-        let text =
-            """FIRRTL version 4.0.0
-circuit T :
-  public module T :
-    input a : UInt<8>
-    output o : UInt<1>
-    connect o, orr(a)
-"""
-
-        try
-            emitDesign (FirrtlImport.importFirrtl text) |> ignore
-            true
-        with _ ->
-            false
-
-    // Division by a *signal* is the case the authoring surface will not express
-    // and the reader must, since a foreign design is entitled to say it.
-    let readsVariableDivision =
-        let text =
-            """FIRRTL version 4.0.0
-circuit T :
-  public module T :
-    input a : UInt<8>
-    input b : UInt<8>
-    output o : UInt<8>
-    connect o, div(a, b)
-"""
-
-        try
-            emitDesign (FirrtlImport.importFirrtl text) |> ignore
-            true
-        with _ ->
-            false
-
-    let refusesHighFirrtl =
-        refusesWhatItSaysItDoes
-        && readsUnresetRegisters
-        && readsDynamicShifts
-        && readsReductions
-        && readsVariableDivision
-
-    List.forall roundTrips exportable && refusesHighFirrtl && not (List.isEmpty exportable)
 
 /// `regNoReset`'s defining property, which is about *reset* and nothing else:
 /// the two registers take the same value from the same input on the same edge,
@@ -4775,7 +4441,6 @@ let private mainDemo () =
         printfn "%s" (emitDesign d)
         printfn ""
 
-    printfn $"mulOf 8 memoized:             %b{System.Object.ReferenceEquals(mulOf 8, mulOf 8)}"
     printfn $"audio chain unity passthrough:%b{audioUnityPassthrough ()}"
     printfn $"audio FIR preset DC response: %b{audioFirDcResponse ()}"
     printfn $"compressor regulates output:  %b{compressorRegulatesOutput ()}"
@@ -4799,16 +4464,6 @@ let private mainDemo () =
     printfn $"stream driver is lazy:        %b{simStreamDrivesLazily ()}"
     printfn $"i2sThrough is a pipeline:     %b{i2sThroughIsAPipeline ()}"
     printfn $"I2S MSB follows the edge:     %b{i2sMsbFollowsTheEdge ()}"
-
-    // The Fixed layer compiles away: every line except the module header and the
-    // escape compare (Number.lessThan is signed; the hand-written design chose the unsigned
-    // trick) must be byte-identical between the raw and typed designs.
-    let minusEscape (v: string) =
-        [ for line in v.Split('\n') do
-              if not (line.StartsWith "module " || line.Contains "assign escape") then
-                  yield line ]
-
-    printfn $"Fixed layer compiles away:    %b{minusEscape (emitDesign escapeStep.def) = minusEscape (emitDesign escapeStepFixed.def)}"
 
     // saturate/saturateS/shl/shr against their software meanings, on the
     // boundary patterns (clamp points, sign flips) plus a spread of ordinary
@@ -5546,8 +5201,6 @@ let private mainDemo () =
     printfn $"inventory groups by instance: %b{inventoryGroups ()}"
     printfn $"registry entries all load:    %b{registryLoads ()}"
     printfn $"breakpoint expressions:       %b{breakpointExpressions ()}"
-    printfn $"FIRRTL export is closed:      %b{firrtlIsClosed ()}"
-    printfn $"FIRRTL round-trips:           %b{firrtlRoundTrips ()}"
     printfn $"reg holds through reset:      %b{holdsThroughReset ()}"
     printfn $"dynamic shifts shift:         %b{dynamicShiftsShift ()}"
     printfn $"bit reductions reduce:        %b{reductionsReduce ()}"
@@ -5593,8 +5246,6 @@ let private mainDemo () =
     printfn $"max pool combinational:       %b{maxPoolCombinationalAgrees ()}"
     printfn $"state machines, four claims:  %b{stateMachines ()}"
     printfn $"utility primitives:           %b{utilityPrimitives ()}"
-    printfn $"flatten refuses collisions:   %b{flattenRefusesNameCollisions ()}"
-
     // The design-space sweep: the same pipeline at each worker count, driven
     // flat out, judged by throughput and the probes. This is the whole
     // methodology at toy scale — the optimum is read off the table, not
