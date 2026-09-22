@@ -33,8 +33,12 @@ pub mod regmap {
     pub const DST_ADDR: usize = 0x14;
     /// Rows to process; a multiple of the rows a burst holds.
     pub const FRAME_COUNT: usize = 0x18;
+    /// Cycles the last batch took: cleared at start, counting while busy,
+    /// frozen at done. The fabric's own measure of the work, as against
+    /// timing a poll loop over a bus.
+    pub const CYCLES: usize = 0x1C;
     /// Where the design's own controls begin.
-    pub const FIRST_CONTROL: usize = 0x1C;
+    pub const FIRST_CONTROL: usize = 0x20;
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -97,6 +101,12 @@ impl<W: RegisterWindow> BatchDevice<W> {
 
     pub fn busy(&mut self) -> Result<bool, W::Error> {
         Ok(self.window.read32(regmap::BUSY)? & 1 != 0)
+    }
+
+    /// Cycles the last batch took, as the fabric counted them. Meaningful
+    /// once it is done; while it runs, it is how far it has got.
+    pub fn cycles(&mut self) -> Result<u32, W::Error> {
+        self.window.read32(regmap::CYCLES)
     }
 
     /// Poll `busy` until it clears, with `between` called between polls — a

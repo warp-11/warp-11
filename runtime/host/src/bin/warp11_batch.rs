@@ -252,6 +252,7 @@ fn run_sim(args: &Args, frames: &[(i16, i16)]) -> Result<Output, String> {
     device
         .wait_done(2_000_000, |w| w.free_cycles(2048))
         .map_err(describe)?;
+    eprintln!("{} rows in {} fabric cycles", count, device.cycles().map_err(|e| format!("{e:?}"))?);
     let out = device.window_mut().read_ddr(dst, out_len).map_err(|e| format!("{e:?}"))?;
     Ok(unstaged(args, frames, &out))
 }
@@ -306,11 +307,12 @@ fn run_board(args: &Args, frames: &[(i16, i16)]) -> Result<Output, String> {
         .map_err(|e| format!("{e:?}"))?;
     device.wait_done(50_000_000, |_| Ok(())).map_err(describe)?;
     let elapsed = started.elapsed();
+    let cycles = device.cycles().map_err(|e| format!("{e:?}"))?;
     device.acknowledge().map_err(|e| format!("{e:?}"))?;
 
     arena.sync_for_cpu(half, out_len).map_err(|e| format!("sync_for_cpu: {e}"))?;
     let out = unstaged(args, frames, &arena_map.bytes()[half..half + out_len]);
-    eprintln!("{} rows in {:.3} ms", count, elapsed.as_secs_f64() * 1e3);
+    eprintln!("{} rows in {:.3} ms wall, {} fabric cycles", count, elapsed.as_secs_f64() * 1e3, cycles);
     Ok(out)
 }
 

@@ -109,7 +109,13 @@ type BatchRegs =
       srcAddr: RegEntry
       dstAddr: RegEntry
       /// Rows, not bytes — the host stages a row a frame.
-      frameCount: RegEntry }
+      frameCount: RegEntry
+      /// Cycles the last batch took: cleared at `start`, counting while
+      /// `busy`, frozen at done — so a host reads the fabric's own measure
+      /// of the work rather than timing a poll loop over a bus. The drain
+      /// past the last beat is a handful of cycles and belongs to whoever
+      /// measures egress, as the frame design's own counter had it.
+      cycles: RegEntry }
 
 /// The identity every batch top answers with, so a driver can refuse a
 /// bitstream that is not one; the layout hash beside it says which design.
@@ -176,7 +182,8 @@ let private batchRegistersOf (d: Design) : BatchRegs * (string * RegEntry) list 
                   doneIrq = r.Word(fun w -> w.W1c "doneIrq")
                   srcAddr = r.RwReg("srcAddr", 32, 0UL)
                   dstAddr = r.RwReg("dstAddr", 32, 0UL)
-                  frameCount = r.RwReg("frameCount", 32, 0UL) }
+                  frameCount = r.RwReg("frameCount", 32, 0UL)
+                  cycles = r.RoField("cycles", 32) }
 
             let controls =
                 [ for name, f in d.controls ->
@@ -448,6 +455,7 @@ let private hostMemoryTop (board: Board) (counted: bool) (d: Design) : BoardTop 
                 let running = regBit "running"
                 let arIssued = reg "ar_issued" 32
                 let beatsWritten = reg "beats_written" 32
+                let cycleCount = reg "cycle_count" 32
 
                 let burstAddrShift = ceilLog2 burstBytes
 
@@ -523,10 +531,15 @@ let private hostMemoryTop (board: Board) (counted: bool) (d: Design) : BoardTop 
                        fun () ->
                            lit 1UL 1 ==> running
                            lit 0UL 32 ==> arIssued
-                           lit 0UL 32 ==> beatsWritten)
-                      (otherwise, fun () -> If finished (fun () -> lit 0UL 1 ==> running)) ]
+                           lit 0UL 32 ==> beatsWritten
+                           lit 0UL 32 ==> cycleCount)
+                      (otherwise,
+                       fun () ->
+                           If finished (fun () -> lit 0UL 1 ==> running)
+                           If running (fun () -> cycleCount + lit 1UL 32 ==> cycleCount)) ]
 
                 regs.drive batch.busy running
+                regs.drive batch.cycles cycleCount
                 regs.setBit batch.doneIrq finished
 
                 // The caller's half of the contract, said out loud: checked
@@ -554,7 +567,8 @@ let private hostMemoryTop (board: Board) (counted: bool) (d: Design) : BoardTop 
           "doneIrq", batch.doneIrq
           "srcAddr", batch.srcAddr
           "dstAddr", batch.dstAddr
-          "frameCount", batch.frameCount ]
+          "frameCount", batch.frameCount
+          "cycles", batch.cycles ]
         @ entries
       batch = Some batch
       map = map

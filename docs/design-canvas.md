@@ -264,8 +264,11 @@ warp11_batch frame:1400x800 out.pgm --sim mandelbrot.json --chunk 128 \
 warp11_batch frame:1400x800 out.pgm --board mandelbrot_batch --layout mandelbrot_batch_layout.rs --chunk 128 --set ...
 ```
 
-and `Warp11.Placement -- frame mandelbrot.json 1400x800 out.pgm cxOrigin=…`
+and `Warp11.Mandelbrot -- frame mandelbrot.json 1400x800 out.pgm cxOrigin=…`
 draws the same through the simulator's own device, no driver in the loop.
+Either way the driver reports the fabric's **own** cycle count for the batch,
+read from the `cycles` register the contract carries — the work's measure,
+as against timing a poll loop over a bus.
 
 Cross-build for the KV260 with `cargo build --release --target
 aarch64-unknown-linux-musl -p warp11-host`.

@@ -1136,6 +1136,26 @@ let designOnHostMemory () : bool =
         ddr.Cycle()
         spins <- spins + 1
 
+    // The cycle counter's defining property: it counts the work, stops, and
+    // starts over. Frozen once done — two reads agree with cycles passing
+    // between them — and an identical second batch counts *the same*, which
+    // is what tells cleared-at-start from accumulating. Not compared against
+    // the host's poll count: a poll is a bus transaction that runs the
+    // fabric several cycles, so the fabric's own count is the larger.
+    let counted = axi.read32 batch.cycles.offset
+    for _ in 1..50 do ddr.Cycle()
+    let frozen = axi.read32 batch.cycles.offset = counted
+
+    // A second batch clears it and counts again rather than accumulating.
+    axi.write32 batch.start.offset 1UL
+    let mutable again = 0
+
+    while axi.read32 batch.busy.offset <> 0UL && again < 400_000 do
+        ddr.Cycle()
+        again <- again + 1
+
+    let recounted = axi.read32 batch.cycles.offset
+
     let mask = (1UL <<< sampleWidth) - 1UL
 
     let heard =
@@ -1160,11 +1180,17 @@ let designOnHostMemory () : bool =
 
     idOk
     && spins < 400_000
+    && again < 400_000
+    && counted > 0UL
+    && frozen
+    && recounted = counted
     && heard = expected.samples
     && top.name = "GainMemoryBatch"
-    && (top.registers |> List.map fst |> List.take 7) = [ "id"; "start"; "busy"; "doneIrq"; "srcAddr"; "dstAddr"; "frameCount" ]
+    && (top.registers |> List.map fst |> List.take 8) = [ "id"; "start"; "busy"; "doneIrq"; "srcAddr"; "dstAddr"; "frameCount"; "cycles" ]
     // The contract the Rust driver is written against, offset by offset.
-    && (top.registers |> List.map (fun (_, e) -> e.offset) |> List.take 7) = [ 0UL; 0UL; 0x8UL; 0xcUL; 0x10UL; 0x14UL; 0x18UL ]
+    // The batch contract's offsets, pinned: `runtime/core/src/batch.rs` hard-codes
+    // them so a driver can find them with no seam file for the design.
+    && (top.registers |> List.map (fun (_, e) -> e.offset) |> List.take 8) = [ 0UL; 0UL; 0x8UL; 0xcUL; 0x10UL; 0x14UL; 0x18UL; 0x1cUL ]
     && refused
 
 // UD19 — The build directory, Vivado. The gain design on the KV260, both
