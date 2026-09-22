@@ -39,7 +39,7 @@ let freshBoxName (g: Graph) (unit: string) : string =
 /// can select it.
 let addBox (unit: string) (at: Position) (g: Graph) : Result<Graph * string, string> =
     let arguments =
-        match palette.TryFind unit, g.designs.TryFind unit with
+        match (units ()).TryFind unit, g.designs.TryFind unit with
         | Some factory, _ -> Ok(defaults factory)
         | None, Some _ -> Ok Map.empty
         | None, None -> Error $"no unit called '{unit}' in the palette or among the design's own designs"
@@ -57,7 +57,7 @@ let addBox (unit: string) (at: Position) (g: Graph) : Result<Graph * string, str
 /// these arguments, or refused naming the box and the parameter. A box that
 /// is a design has no arguments to refuse.
 let private checkBox (g: Graph) (rate: float) (b: Box) : Result<unit, string> =
-    match palette.TryFind b.unit, g.designs.TryFind b.unit with
+    match (units ()).TryFind b.unit, g.designs.TryFind b.unit with
     | Some factory, _ -> factory.make rate (complete factory b.arguments) |> Result.map ignore |> Result.mapError (fun why -> $"{b.name}: {why}")
     | None, Some _ -> Ok()
     | None, None -> Error $"{b.name}: no unit called '{b.unit}'"
@@ -65,7 +65,7 @@ let private checkBox (g: Graph) (rate: float) (b: Box) : Result<unit, string> =
 /// One creation argument of a box, as typed. The factory checks it before
 /// the box holds it; a change is a new design.
 let setArgument (name: string) (parameter: string) (value: string) (g: Graph) : Result<Graph, string> =
-    match g.boxes |> List.tryFind (fun b -> b.name = name), g.boxes |> List.tryFind (fun b -> b.name = name) |> Option.bind (fun b -> palette.TryFind b.unit) with
+    match g.boxes |> List.tryFind (fun b -> b.name = name), g.boxes |> List.tryFind (fun b -> b.name = name) |> Option.bind (fun b -> (units ()).TryFind b.unit) with
     | None, _ -> Error $"no box called '{name}'"
     | Some _, None -> Error $"{name}: a design has no creation arguments — open it to change it"
     | Some b, Some factory ->
@@ -109,7 +109,7 @@ let rec setSampleRate (rate: float) (g: Graph) : Result<Graph, string> =
 /// design's rate, named so a box can name it. Refused when the palette or
 /// this design already has the name.
 let importDesign (sub: Graph) (g: Graph) : Result<Graph, string> =
-    if palette.ContainsKey sub.name then
+    if (units ()).ContainsKey sub.name then
         Error $"'{sub.name}' is a unit in the palette"
     elif g.designs.ContainsKey sub.name then
         Error $"there is already a design called '{sub.name}' in this one"
@@ -126,7 +126,7 @@ let importDesign (sub: Graph) (g: Graph) : Result<Graph, string> =
 /// is complete. The factory itself is the session's, added by the head that
 /// compiled it; this records what it was compiled from.
 let defineUnit (name: string) (source: string) (g: Graph) : Result<Graph, string> =
-    if not (palette.ContainsKey name) then
+    if not ((units ()).ContainsKey name) then
         Error $"'{name}' is not a unit this session knows — compile it first"
     else
         Ok { g with units = g.units |> Map.add name source }

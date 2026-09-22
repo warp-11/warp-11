@@ -10,7 +10,7 @@ module Warp11.Mandelbrot.Chunked
 open System.Numerics
 open Warp11
 open Warp11.Fu
-open Warp11.Mandel
+open Warp11.Mandelbrot.Lane
 
 /// The design as a board top takes it.
 let mandelChunks (name: string) (width: int) (pixels: int) (maxIter: int) (fracBits: int) (threads: int) (lanes: int) : BoardTop.Design =

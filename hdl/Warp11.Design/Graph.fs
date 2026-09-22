@@ -186,7 +186,7 @@ let designOf (g: Graph) (b: Box) : Graph option = g.designs |> Map.tryFind b.uni
 /// arguments the factory refuses cannot be elaborated, and says which one.
 /// A box that is a design is `Elaborate.unitOf`'s to make.
 let paletteUnitOf (g: Graph) (b: Box) : ErasedFu =
-    match palette.TryFind b.unit with
+    match (units ()).TryFind b.unit with
     | None -> failwith $"{b.name}: no unit called '{b.unit}' in the palette or among the design's own designs"
     | Some factory ->
         match factory.make g.sampleRate (complete factory b.arguments) with

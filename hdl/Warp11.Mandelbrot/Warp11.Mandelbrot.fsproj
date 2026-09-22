@@ -7,12 +7,16 @@
     </PropertyGroup>
 
     <ItemGroup>
+        <Compile Include="Mandel.fs"/>
         <Compile Include="Board.fs" />
         <Compile Include="Pod.fs"/>
         <Compile Include="Harness.fs"/>
         <Compile Include="FramePod.fs"/>
         <Compile Include="FrameAxi.fs"/>
         <Compile Include="Chunked.fs"/>
+        <Compile Include="Units.fs"/>
+        <Compile Include="Example.fs"/>
+        <Compile Include="Drawn.fs"/>
         <Compile Include="FrameHost.fs"/>
         <Compile Include="Seam.fs"/>
         <Compile Include="Host.fs"/>
@@ -20,6 +24,7 @@
     </ItemGroup>
 
     <ItemGroup>
+        <ProjectReference Include="../Warp11.Design/Warp11.Design.fsproj"/>
         <ProjectReference Include="../Warp11/Warp11.fsproj"/>
         <ProjectReference Include="../Warp11.SimView.Desktop/Warp11.SimView.Desktop.fsproj"/>
     </ItemGroup>

@@ -47,6 +47,11 @@ type Factory =
       /// way a hand-written one does. `make` and `print` parse the arguments
       /// once between them, so they cannot disagree.
       print: float -> Arguments -> Result<string, string>
+      /// The modules an exported design must open for `print`'s symbol to
+      /// resolve. Empty for the units here — the export opens those anyway —
+      /// and `[ "Warp11.Mandelbrot.Lane" ]` for a unit a project brought, so
+      /// the F# a drawn design exports to still compiles where its units live.
+      opens: string list
       /// For a unit written in the GUI: the F# that defines it, printed above
       /// a design that uses it when the design is exported, and carried by
       /// the design's file so the design can be opened again where there is
@@ -69,15 +74,18 @@ let plain (symbol: string) (unit: Fu<'a, 'r>) : Factory =
 
     { name = unit.name
       parameters = []
+      opens = []
       make = fun _ _ -> Ok erased
       print = fun _ _ -> Ok symbol
       definition = None }
 
 /// A factory over a typed constructor: `parse` reads the arguments once,
 /// `build` makes the unit from what it read, `show` prints the same call.
-let private factory (name: string) (parameters: Parameter list) (parse: float -> Arguments -> Result<'p, string>) (build: float -> 'p -> Fu<'a, 'r>) (show: 'p -> string) : Factory =
+/// Public because a project declares its own units with it.
+let factory (name: string) (parameters: Parameter list) (parse: float -> Arguments -> Result<'p, string>) (build: float -> 'p -> Fu<'a, 'r>) (show: 'p -> string) : Factory =
     { name = name
       parameters = parameters
+      opens = []
       make = fun rate args -> parse rate args |> Result.map (build rate >> erase)
       print = fun rate args -> parse rate args |> Result.map show
       definition = None }
@@ -92,17 +100,17 @@ let showFloat (x: float) : string =
 
 let private invariant = System.Globalization.CultureInfo.InvariantCulture
 
-let private intArg (name: string) (args: Arguments) : Result<int, string> =
+let intArg (name: string) (args: Arguments) : Result<int, string> =
     match System.Int32.TryParse(Map.find name args, System.Globalization.NumberStyles.Integer, invariant) with
     | true, v -> Ok v
     | _ -> Error $"{name}: '{Map.find name args}' is not a whole number"
 
-let private floatArg (name: string) (args: Arguments) : Result<float, string> =
+let floatArg (name: string) (args: Arguments) : Result<float, string> =
     match System.Double.TryParse(Map.find name args, System.Globalization.NumberStyles.Float, invariant) with
     | true, v -> Ok v
     | _ -> Error $"{name}: '{Map.find name args}' is not a number"
 
-let private floatsArg (name: string) (args: Arguments) : Result<float list, string> =
+let floatsArg (name: string) (args: Arguments) : Result<float list, string> =
     let text = Map.find name args
 
     text.Split([| ','; ' ' |], System.StringSplitOptions.RemoveEmptyEntries)
@@ -116,7 +124,7 @@ let private floatsArg (name: string) (args: Arguments) : Result<float list, stri
         (Ok [])
     |> Result.map List.rev
 
-let private choiceArg (name: string) (choices: string list) (args: Arguments) : Result<string, string> =
+let choiceArg (name: string) (choices: string list) (args: Arguments) : Result<string, string> =
     let text = Map.find name args
 
     if List.contains text choices then
@@ -125,10 +133,10 @@ let private choiceArg (name: string) (choices: string list) (args: Arguments) : 
         let listed = String.concat ", " choices
         Error $"{name}: '{text}' is not one of {listed}"
 
-let private positive (name: string) (v: float) : Result<float, string> =
+let positive (name: string) (v: float) : Result<float, string> =
     if v > 0.0 then Ok v else Error $"{name}: must be above zero, not {v}"
 
-let private belowNyquist (name: string) (rate: float) (v: float) : Result<float, string> =
+let belowNyquist (name: string) (rate: float) (v: float) : Result<float, string> =
     if v > 0.0 && v < rate / 2.0 then
         Ok v
     else
@@ -339,60 +347,25 @@ let blur: Factory =
         (fun _ (columns, rows) -> blurUnit columns rows)
         (fun (columns, rows) -> $"blurUnit %d{columns} %d{rows}")
 
-let private atLeast (name: string) (low: int) (v: int) : Result<int, string> =
+/// An integer argument at or above a floor, refused by name.
+let atLeast (name: string) (low: int) (v: int) : Result<int, string> =
     if v >= low then Ok v else Error $"{name} is at least %d{low}, not %d{v}"
-
-let private chunkPixels =
-    { name = "pixels"; kind = IntParameter; ``default`` = "64"; about = "pixels a beat: a power of two, whole beats of 16" }
-
-let private chunkPixelsOk (v: int) =
-    if v >= 16 && v % 16 = 0 && (v &&& (v - 1)) = 0 then Ok v else Error $"pixels is a power of two from 16 up, not %d{v}"
-
-let mandelChunk: Factory =
-    factory
-        "mandelChunk"
-        [ chunkPixels
-          { name = "maxIter"; kind = IntParameter; ``default`` = "256"; about = "iterations before a point is called inside" }
-          { name = "fracBits"; kind = IntParameter; ``default`` = "28"; about = "fraction bits of the 32-bit view numbers" }
-          { name = "threads"; kind = IntParameter; ``default`` = "8"; about = "pixels in flight through the cone; more than its 4 stages" } ]
-        (fun _ args ->
-            match intArg "pixels" args |> Result.bind chunkPixelsOk, intArg "maxIter" args |> Result.bind (atLeast "maxIter" 2), intArg "fracBits" args, intArg "threads" args |> Result.bind (atLeast "threads" (Warp11.Mandel.mandelStepLatency + 1)) with
-            | Ok pixels, Ok maxIter, Ok fracBits, Ok threads when fracBits >= 1 && fracBits <= 30 -> Ok(pixels, maxIter, fracBits, threads)
-            | Ok _, Ok _, Ok fracBits, Ok _ -> Error $"fracBits is between 1 and 30, not %d{fracBits}"
-            | Error e, _, _, _
-            | _, Error e, _, _
-            | _, _, Error e, _
-            | _, _, _, Error e -> Error e)
-        (fun _ (pixels, maxIter, fracBits, threads) -> Warp11.Mandel.mandelChunk pixels maxIter fracBits threads)
-        (fun (pixels, maxIter, fracBits, threads) -> $"mandelChunk %d{pixels} %d{maxIter} %d{fracBits} %d{threads}")
-
-let coords: Factory =
-    factory
-        "coords"
-        [ { name = "width"; kind = IntParameter; ``default`` = "1400"; about = "pixels in a row of the frame" }
-          chunkPixels
-          { name = "fracBits"; kind = IntParameter; ``default`` = "28"; about = "fraction bits of the 32-bit view numbers" } ]
-        (fun _ args ->
-            match intArg "width" args |> Result.bind (atLeast "width" 1), intArg "pixels" args |> Result.bind chunkPixelsOk, intArg "fracBits" args with
-            | Ok width, Ok pixels, Ok fracBits when fracBits >= 1 && fracBits <= 30 -> Ok(width, pixels, fracBits)
-            | Ok _, Ok _, Ok fracBits -> Error $"fracBits is between 1 and 30, not %d{fracBits}"
-            | Error e, _, _
-            | _, Error e, _
-            | _, _, Error e -> Error e)
-        (fun _ (width, pixels, fracBits) -> Warp11.Mandel.coords width pixels fracBits)
-        (fun (width, pixels, fracBits) -> $"coords %d{width} %d{pixels} %d{fracBits}")
 
 /// A unit written in the GUI, compiled by the head that has a compiler: the
 /// erased unit, the name it goes by, and the source that defines it.
 let written (symbol: string) (unit: ErasedFu) (definition: string) : Factory =
     { name = unit.name
       parameters = []
+      opens = []
       make = fun _ _ -> Ok unit
       print = fun _ _ -> Ok symbol
       definition = Some definition }
 
-/// The units the library ships. `erase` is the only way a unit gets in, so
-/// a palette cannot disagree with the unit the typed API elaborates.
+/// The units this library ships — the general ones any design may reach for.
+/// `erase` is the only way a unit gets in, so a palette cannot disagree with
+/// the unit the typed API elaborates. A project's own units are not here:
+/// it `register`s them, which is what lets the canvas be something another
+/// project uses rather than something the library has to know about.
 let builtIn: Map<string, Factory> =
     [ plain "multiply16" multiply16
       plain "add32" add32
@@ -408,25 +381,64 @@ let builtIn: Map<string, Factory> =
       plain "waveshaper" waveshaper
       plain "tremolo" tremolo
       allpassSection
-      blur
-      mandelChunk
-      coords ]
+      blur ]
     |> List.map (fun f -> f.name, f)
     |> Map.ofList
 
-/// Every unit the GUI may offer: the library's, and the ones written in
-/// this session. Mutable so a head with a compiler can add to it; the units
-/// it starts with are the built-in ones.
-let mutable palette: Map<string, Factory> = builtIn
+/// Every unit a design may name here: the ones this library ships, plus
+/// whatever the running head registered and whatever was written in this
+/// session. A design file names its units by string, so *something* has to
+/// resolve those names, and this is it.
+///
+/// Process-wide rather than thread-local, deliberately: which units exist is
+/// a fact about the program, not about the thread elaborating — and a design
+/// opened on a background thread that could not see a registered unit would
+/// fail as "no unit called 'mandelChunk'", which names the wrong cause. The
+/// ambient *builder* is thread-local for the opposite reason: each thread
+/// elaborates its own module.
+let mutable private registered: Map<string, Factory> = builtIn
+
+/// The units a design may name right now.
+let units () : Map<string, Factory> = registered
+
+/// Offer a project's units from now on. A head calls this before it opens
+/// anything — `Warp11.Mandelbrot.Units.register ()` is the shape. Refused
+/// when a name is already taken, since two units under one name would make
+/// a design file mean different things in different heads.
+let register (factories: Factory list) : Result<unit, string> =
+    match factories |> List.tryFind (fun f -> registered.ContainsKey f.name) with
+    | Some clash -> Error $"'{clash.name}' is already a unit here"
+    | None ->
+        registered <- (registered, factories) ||> List.fold (fun m f -> Map.add f.name f m)
+        Ok()
+
+/// The same, for the span of `body` — what a check uses so it does not
+/// leave the next one a different palette.
+let using (factories: Factory list) (body: unit -> 'a) : 'a =
+    let saved = registered
+
+    try
+        match register factories with
+        | Ok() -> body ()
+        | Error why -> failwith why
+    finally
+        registered <- saved
+
+/// `body` with exactly these units beside the built-in ones and nothing
+/// else — what a check uses when it is testing what happens to a design
+/// that names a unit nobody registered.
+let only (factories: Factory list) (body: unit -> 'a) : 'a =
+    let saved = registered
+
+    try
+        registered <- (builtIn, factories) ||> List.fold (fun m f -> Map.add f.name f m)
+        body ()
+    finally
+        registered <- saved
 
 /// A unit written in this session, offered from now on. Refused when the
-/// name is a library unit's.
-let addSessionUnit (f: Factory) : Result<unit, string> =
-    if builtIn.ContainsKey f.name then
-        Error $"'{f.name}' is a unit the library ships"
-    else
-        palette <- palette |> Map.add f.name f
-        Ok()
+/// name is one already here.
+let addSessionUnit (f: Factory) : Result<unit, string> = register [ f ]
 
 /// How this head compiles a unit's source into a factory, when it can: the
 /// desktop canvas sets this over the compiler service; a head without a

@@ -6,7 +6,7 @@
 module Warp11.MandelView.Twin
 
 open System.Threading.Tasks
-open Warp11.Mandel
+open Warp11.Mandelbrot.Lane
 open Warp11.MandelView.Bus
 
 /// Rows in parallel: 1.12M pixels at up to 256 iterations is a second of

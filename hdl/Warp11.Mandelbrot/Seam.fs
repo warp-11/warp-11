@@ -1,7 +1,7 @@
 module Warp11.Mandelbrot.Seam
 
 open Warp11
-open Warp11.Mandel
+open Warp11.Mandelbrot.Lane
 open Warp11.Mandelbrot.Board
 open Warp11.Mandelbrot.Pod
 open Warp11.Mandelbrot.FrameAxi

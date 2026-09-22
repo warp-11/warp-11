@@ -6,7 +6,7 @@
 module Warp11.Mandelbrot.FrameAxi
 
 open Warp11
-open Warp11.Mandel
+open Warp11.Mandelbrot.Lane
 open Warp11.Mandelbrot.FramePod
 
 /// The register map, one definition consumed twice: the slave elaboration below

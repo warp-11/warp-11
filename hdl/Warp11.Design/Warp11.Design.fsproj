@@ -24,6 +24,7 @@
         <Compile Include="Elaborate.fs"/>
         <Compile Include="Export.fs"/>
         <Compile Include="Devices.fs"/>
+        <Compile Include="Verbs.fs"/>
     </ItemGroup>
 
     <ItemGroup>

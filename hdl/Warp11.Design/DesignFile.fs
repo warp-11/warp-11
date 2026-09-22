@@ -204,7 +204,7 @@ let private readBox (rate: float) (designs: Map<string, Graph>) (n: JsonNode) : 
 
     match get "name" asString, get "unit" asString, get "copies" asInt with
     | Ok name, Ok unit, Ok copies ->
-        match palette.TryFind unit, designs.TryFind unit with
+        match (units ()).TryFind unit, designs.TryFind unit with
         | None, None -> Error $"box '{name}': no unit called '{unit}' in the palette or among the design's designs"
         | factory, _ ->
             let settings =
@@ -305,7 +305,7 @@ let rec private readGraph (root: JsonNode) : Result<Graph, string> =
                     |> each (fun (KeyValue(k, v)) ->
                         asString $"unit '{k}'" v
                         |> Result.bind (fun source ->
-                            if palette.ContainsKey k then
+                            if (units ()).ContainsKey k then
                                 Ok(k, source)
                             else
                                 match compileUnit with

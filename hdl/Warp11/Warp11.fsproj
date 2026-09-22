@@ -69,7 +69,6 @@
         <Compile Include="Csv.fs"/>
         <Compile Include="Fu.fs"/>
         <Compile Include="Units.fs"/>
-        <Compile Include="Mandel.fs"/>
         <Compile Include="Pedal.fs"/>
         <Compile Include="BoardTop.fs"/>
         <Compile Include="Build.fs"/>

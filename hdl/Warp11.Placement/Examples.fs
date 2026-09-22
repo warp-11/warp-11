@@ -123,48 +123,6 @@ let adder: Graph =
         .present
     |> inARow [ "input"; "add32"; "output" ]
 
-/// The Mandelbrot frame as the canvas draws it: a count in, `coords` minting
-/// each chunk's view from the origin and steps on the input box,
-/// `mandelChunk` spent `lanes` times, sixteen pixels a beat out. Opened with
-/// `frame:<width>x<height>`, drawn a frame at a time; on the KV260 it is
-/// the counted path.
-let mandelbrot (width: int) (pixels: int) (maxIter: int) (fracBits: int) (threads: int) (lanes: int) : Graph =
-    let view = Warp11.Mandel.viewFormat fracBits
-
-    (history (emptyGraph "Mandelbrot" defaultSampleRate)
-     |> step (addInputPin Warp11.Mandel.beatPin)
-     |> step (addControl ("cxOrigin", view))
-     |> step (addControl ("cyOrigin", view))
-     |> step (addControl ("dx", view))
-     |> step (addControl ("dy", view))
-     |> step (addOutputPin Warp11.Mandel.pixelsPin)
-     |> step (addBox "coords" (0.0, 0.0) >> Result.map fst)
-     |> step (setArgument "coords" "width" (string width))
-     |> step (setArgument "coords" "pixels" (string pixels))
-     |> step (setArgument "coords" "fracBits" (string fracBits))
-     |> step (addBox "mandelChunk" (0.0, 0.0) >> Result.map fst)
-     |> step (setArgument "mandelChunk" "pixels" (string pixels))
-     |> step (setArgument "mandelChunk" "maxIter" (string maxIter))
-     |> step (setArgument "mandelChunk" "fracBits" (string fracBits))
-     |> step (setArgument "mandelChunk" "threads" (string threads))
-     |> step (setCopies "mandelChunk" lanes)
-     |> step (wire (pin "input" "beat") (pin "coords" "beat"))
-     |> step (wire (pin "input" "cxOrigin") (pin "coords" "cxOrigin"))
-     |> step (wire (pin "input" "cyOrigin") (pin "coords" "cyOrigin"))
-     |> step (wire (pin "input" "dx") (pin "coords" "dx"))
-     |> step (wire (pin "input" "dy") (pin "coords" "dy"))
-     |> step (wire (pin "coords" "cx0") (pin "mandelChunk" "cx0"))
-     |> step (wire (pin "coords" "cy") (pin "mandelChunk" "cy"))
-     |> step (wire (pin "coords" "dx") (pin "mandelChunk" "dx"))
-     |> step (wire (pin "mandelChunk" "pixels") (pin "output" "pixels")))
-        .present
-    |> inARow [ "input"; "coords"; "mandelChunk"; "output" ]
-
-/// The Mandelbrot example's mapping: the KV260 on the counted path, at the
-/// clock the frame design proved — 166.67 MHz fills the part's DSPs at 104
-/// lanes with timing to spare.
-let mandelbrotMapping: Warp11.Mapping.Mapping = { board = kv260At 166_666_672; path = Counted }
-
 /// A 64×64 test image: a diagonal gradient with a bright square, so a blur
 /// has edges to soften.
 let gradient: Grey =
@@ -191,10 +149,7 @@ let all (rate: float) : (string * Graph) list =
       "controls.json", controls rate
       "twice.json", twice rate
       "blur.json", imageBlur gradient.width gradient.height
-      "adder.json", adder
-      // The silicon config, but four lanes: a frame in the Sim in minutes
-      // rather than hours. Copies is the number to change for the board.
-      "mandelbrot.json", { mandelbrot 1400 128 256 28 8 4 with mapping = Some "mandelbrot.kv260.json" } ]
+      "adder.json", adder ]
 
 /// Write every example into `dir`, and the image and table they open with.
 let write (dir: string) =
@@ -204,7 +159,6 @@ let write (dir: string) =
         Warp11.DesignFile.save (System.IO.Path.Combine(dir, file)) g
 
     Warp11.Mapping.save (System.IO.Path.Combine(dir, "gain.kv260.json")) gainMapping
-    Warp11.Mapping.save (System.IO.Path.Combine(dir, "mandelbrot.kv260.json")) mandelbrotMapping
 
     writePgm (System.IO.Path.Combine(dir, "gradient.pgm")) gradient
     writeCsv (System.IO.Path.Combine(dir, "numbers.csv")) numbers

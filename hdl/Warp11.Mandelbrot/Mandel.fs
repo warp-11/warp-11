@@ -1,10 +1,10 @@
-/// The Mandelbrot lane, in the library so the canvas can place it: the
+/// The Mandelbrot lane: the
 /// pipelined `z² + c` cone, the barrel lane that keeps it full, the row
 /// coalescer, the raster coord-gen and the pod that chains them — one
 /// row-run in, aligned 128-bit beats out — plus the pod at one beat wide
 /// as a unit, `mandelChunk`. Each section keeps the header it was written
-/// under in `Warp11.Mandelbrot`, where the frame tops and harnesses stay.
-module Warp11.Mandel
+/// under when these were four files.
+module Warp11.Mandelbrot.Lane
 
 open Warp11
 open Warp11.Fu

@@ -4,7 +4,7 @@
 module Warp11.Mandelbrot.Harness
 
 open Warp11
-open Warp11.Mandel
+open Warp11.Mandelbrot.Lane
 
 /// The cone at ports, for the oracle: the testbench pokes a NEW random vector
 /// every cycle and checks every cycle, so II=1 is differentially exercised,

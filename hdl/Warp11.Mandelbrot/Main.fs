@@ -4,7 +4,7 @@ module Warp11.Mandelbrot.Main
 
 open System.Numerics
 open Warp11
-open Warp11.Mandel
+open Warp11.Mandelbrot.Lane
 open Warp11.Mandelbrot.Harness
 open Warp11.Mandelbrot.Pod
 open Warp11.Mandelbrot.FramePod
@@ -304,6 +304,10 @@ let private mainDemo () =
     let boardOk = boardPixels = boardTwin
     printfn $"counted board top vs twin ({boardTop.name}, 2 lanes): %b{boardOk} (%d{boardCycles} cycles)"
 
+    // The drawn form of the same design, against the typed one — the head
+    // registered this project's units before anything could name them.
+    printfn $"the frame drawn vs typed, to the byte: %b{Drawn.mandelbrotDrawn ()}"
+
     0
 
 /// What `debug` will open, by label — the pod designs on this side of the
@@ -318,6 +322,15 @@ let private debuggable =
 
 [<EntryPoint>]
 let main argv =
+    // This project's units, then the verbs every drawn design answers to —
+    // which is all a project has to do to get `emit`, `export`, `frame`,
+    // `board`, `build` and `batchserve` over designs that name them.
+    Units.register ()
+
+    match Warp11.Design.Verbs.run argv with
+    | Some code -> code
+    | None ->
+
     match argv with
     | [| "debug"; label |] ->
         match debuggable |> List.tryFind (fst >> (=) label) with
@@ -345,6 +358,10 @@ let main argv =
         let ok = FrameHost.frameIsIndifferentToMemoryTiming ()
         printfn $"frame is indifferent to memory timing (4 seeds): %b{ok}"
         if ok then 0 else 1
+    // This project's example design as a file: `example <dir>`.
+    | [| "example"; dir |] ->
+        Example.write dir
+        0
     | [| "lanescale" |] ->
         FrameHost.laneScale [ (64, 208, 48, 26); (64, 208, 48, 52); (64, 208, 48, 104) ]
         0

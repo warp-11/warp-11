@@ -246,7 +246,9 @@ let private boxView (g: Graph) (selected: Selection option) (name: string) (bx: 
 
             // The arguments as typed, as Pure Data writes them in the box.
             let arguments =
-                palette[b.unit].parameters
+                let factory = (units ())[b.unit]
+
+                factory.parameters
                 |> List.map (fun p -> b.arguments |> Map.tryFind p.name |> Option.defaultValue p.``default``)
                 |> String.concat " "
 
@@ -1034,7 +1036,7 @@ let view (opening: Opening) : Control =
             | None -> []
             | Some((wx, wy), text) ->
                 let matches =
-                    Seq.append palette.Keys g.designs.Keys
+                    Seq.append (units ()).Keys g.designs.Keys
                     |> Seq.filter (fun n -> text = "" || n.StartsWith(text, System.StringComparison.OrdinalIgnoreCase))
                     |> Seq.sort
                     |> List.ofSeq
@@ -1090,7 +1092,7 @@ let view (opening: Opening) : Control =
                 [ StackPanel.margin (Thickness 6.0)
                   StackPanel.children (
                       [ TextBlock.create [ TextBlock.text "palette"; TextBlock.fontWeight FontWeight.Bold; TextBlock.margin (Thickness(4.0, 2.0)) ] :> Types.IView ]
-                      @ [ for name in palette.Keys |> Seq.sort ->
+                      @ [ for name in (units ()).Keys |> Seq.sort ->
                               Button.create
                                   [ Button.content name
                                     Button.horizontalAlignment Layout.HorizontalAlignment.Stretch
@@ -1845,7 +1847,7 @@ let view (opening: Opening) : Control =
                 @ (controlPorts sub |> List.map (fun (n, f) -> row (n, describeFormat f)))
             | None ->
 
-            let factory = palette[b.unit]
+            let factory = (units ())[b.unit]
 
             // A creation argument: typed, committed on Enter, refused by the
             // factory naming the parameter. A change is a new design.

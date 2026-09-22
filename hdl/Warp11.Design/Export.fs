@@ -99,7 +99,7 @@ let rec private printDesign (g: Graph) : Result<string, string> =
                         | Error e, _
                         | _, Error e -> Error e
                     | None ->
-                        let factory = palette[b.unit]
+                        let factory = (units ())[b.unit]
                         factory.print g.sampleRate (complete factory b.arguments)
 
                 printed
@@ -231,7 +231,7 @@ let rec private designsInOrder (g: Graph) : Graph list =
 let rec private definitionsOf (g: Graph) : string list =
     let own =
         [ for b in g.boxes do
-              match palette.TryFind b.unit with
+              match (units ()).TryFind b.unit with
               | Some { definition = Some source } -> yield source
               | _ -> () ]
 
@@ -320,9 +320,17 @@ let exportWith (mapping: Warp11.Mapping.Mapping option) (g: Graph) : Result<stri
                "open Warp11.Fu"
                "open Warp11.Units"
                "open Warp11.Pedal"
-               "open Warp11.Mandel"
                "open Warp11.Factories"
                "open Warp11.Elaborate"
+               // What the units this design names came from, so the source
+               // compiles where they live rather than only where it was
+               // written.
+               yield!
+                   (g.boxes
+                    |> List.collect (fun b -> (units ()) |> Map.tryFind b.unit |> Option.map (fun f -> f.opens) |> Option.defaultValue [])
+                    |> List.distinct
+                    |> List.sort
+                    |> List.map (fun m -> $"open {m}"))
                ""
                $"let sampleRate = {showFloat g.sampleRate}"
                "" ]

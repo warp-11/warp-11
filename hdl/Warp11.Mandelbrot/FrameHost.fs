@@ -6,7 +6,7 @@ module Warp11.Mandelbrot.FrameHost
 
 open System.Numerics
 open Warp11
-open Warp11.Mandel
+open Warp11.Mandelbrot.Lane
 open Warp11.Mandelbrot.FramePod
 open Warp11.Mandelbrot.FrameAxi
 
