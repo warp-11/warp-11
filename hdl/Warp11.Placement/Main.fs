@@ -149,7 +149,7 @@ let main argv =
                     eprintfn $"{path}: the batch bridge serves a design on the host's memory, and the mapping puts it on the pins"
                     1
                 | path ->
-                    Warp11.BoardTop.batchServe (Warp11.BoardTop.boardTopOf m.board path g)
+                    Warp11.BoardTop.batchServe (Warp11.Elaborate.boardTopOf m.board path g)
                     0
     // A saved design's build directory: `build design.json [mapping.json] <dir>`
     // — the design's default mapping when none is named — writes everything
@@ -174,7 +174,7 @@ let main argv =
                 1
             | Ok m ->
                 try
-                    let top = Warp11.BoardTop.boardTopOf m.board m.path g
+                    let top = Warp11.Elaborate.boardTopOf m.board m.path g
                     let out = Warp11.Build.write dir top
 
                     for file in out.files do
@@ -206,7 +206,7 @@ let main argv =
             1
         | Ok g, Ok m ->
             try
-                let top = Warp11.BoardTop.boardTopOf m.board m.path g
+                let top = Warp11.Elaborate.boardTopOf m.board m.path g
                 let out = Warp11.Build.write dir top
 
                 for file in out.files do
@@ -232,7 +232,7 @@ let main argv =
             1
         | Ok g, Ok board ->
             try
-                let top = Warp11.BoardTop.boardTopOf board Pins g
+                let top = Warp11.Elaborate.boardTopOf board Pins g
 
                 for file in Warp11.BoardTop.write dir top do
                     printfn $"wrote {file}"

@@ -33,3 +33,8 @@ let unsignedFixed totalWidth fracBits : NumberFormat =
 let describeFormat (f: NumberFormat) =
     let sign = if f.signed then "signed" else "unsigned"
     $"%d{f.totalWidth}w/%d{f.fracBits}f/{sign}"
+
+/// A boundary's pins as a person reads them — what a refusal names when a
+/// design's boundary is not what a device or a board needs.
+let describePins (pins: (string * NumberFormat) list) =
+    pins |> List.map (fun (n, f) -> $"{n}: {describeFormat f}") |> String.concat ", "

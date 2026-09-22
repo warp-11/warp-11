@@ -1048,7 +1048,7 @@ let writtenUnitTravels () : bool =
 // CHECK
 let designOnABoard () : bool =
     let onKv260 = { gainGraph with name = "GainBoard"; sampleRate = stockSampleRate }
-    let top = Warp11.BoardTop.boardTopOf kv260 Pins onKv260
+    let top = Warp11.Elaborate.boardTopOf kv260 Pins onKv260
     let sim = Sim top.top
     let axi = SimAxi.client sim
     let volume = top.registers |> List.find (fun (n, _) -> n = "volume") |> snd
@@ -1067,19 +1067,19 @@ let designOnABoard () : bool =
 
     let iceBoard = iceBreakerAt 24_000_000
     let onIce = { onKv260 with name = "GainIce"; sampleRate = Warp11.BoardTop.boardRate iceBoard 48_000.0 }
-    let ice = Warp11.BoardTop.boardTopOf iceBoard Pins onIce
-    let bare = Warp11.BoardTop.boardTopOf { iceBoard with host = NoHost } Pins onIce
+    let ice = Warp11.Elaborate.boardTopOf iceBoard Pins onIce
+    let bare = Warp11.Elaborate.boardTopOf { iceBoard with host = NoHost } Pins onIce
 
     let refused =
         try
-            Warp11.BoardTop.boardTopOf kv260 Pins { onKv260 with sampleRate = 48_000.0 } |> ignore
+            Warp11.Elaborate.boardTopOf kv260 Pins { onKv260 with sampleRate = 48_000.0 } |> ignore
             false
         with e ->
             e.Message.Contains "48000" && e.Message.Contains "48828.125"
 
     let impossible =
         try
-            Warp11.BoardTop.boardTopOf { iceBoard with host = AxiLiteAt 0UL } Pins onIce |> ignore
+            Warp11.Elaborate.boardTopOf { iceBoard with host = AxiLiteAt 0UL } Pins onIce |> ignore
             false
         with e ->
             e.Message.Contains "no processing system"
@@ -1106,7 +1106,7 @@ let designOnABoard () : bool =
 // CHECK
 let designOnHostMemory () : bool =
     let g = { gainGraph with name = "GainMemory"; sampleRate = stockSampleRate }
-    let top = Warp11.BoardTop.boardTopOf kv260 HostMemory g
+    let top = Warp11.Elaborate.boardTopOf kv260 HostMemory g
     let batch = top.batch.Value
     let sim = Sim top.top
     let ddr = SimAxiDdr(sim, 0x20000)
@@ -1152,7 +1152,7 @@ let designOnHostMemory () : bool =
 
     let refused =
         try
-            Warp11.BoardTop.boardTopOf (iceBreakerAt 24_000_000) HostMemory g |> ignore
+            Warp11.Elaborate.boardTopOf (iceBreakerAt 24_000_000) HostMemory g |> ignore
             false
         with e ->
             e.Message.Contains "no host memory"
@@ -1185,8 +1185,8 @@ let buildDirectoryVivado () : bool =
         System.IO.File.ReadAllText(System.IO.Path.Combine(dir, sub, file))
 
     try
-        let pins = Warp11.Build.write (System.IO.Path.Combine(dir, "pins")) (Warp11.BoardTop.boardTopOf kv260 Pins g)
-        let memory = Warp11.Build.write (System.IO.Path.Combine(dir, "memory")) (Warp11.BoardTop.boardTopOf kv260 HostMemory g)
+        let pins = Warp11.Build.write (System.IO.Path.Combine(dir, "pins")) (Warp11.Elaborate.boardTopOf kv260 Pins g)
+        let memory = Warp11.Build.write (System.IO.Path.Combine(dir, "memory")) (Warp11.Elaborate.boardTopOf kv260 HostMemory g)
 
         let bd = read "pins" "gain_build_axi_bd.tcl"
         let xdc = read "pins" "gain_build_axi_pins.xdc"
@@ -1238,7 +1238,7 @@ let buildDirectoryVivado () : bool =
 
         let refused =
             try
-                Warp11.Build.write (System.IO.Path.Combine(dir, "short")) (Warp11.BoardTop.boardTopOf shortBoard Pins g)
+                Warp11.Build.write (System.IO.Path.Combine(dir, "short")) (Warp11.Elaborate.boardTopOf shortBoard Pins g)
                 |> ignore
 
                 false
@@ -1268,7 +1268,7 @@ let buildDirectoryOpenFlow () : bool =
         System.IO.File.ReadAllText(System.IO.Path.Combine(dir, file))
 
     try
-        let out = Warp11.Build.write dir (Warp11.BoardTop.boardTopOf board Pins g)
+        let out = Warp11.Build.write dir (Warp11.Elaborate.boardTopOf board Pins g)
         let wrapper = read "gain_ice_uart_top.v"
         let pins = read "gain_ice_uart_top.pcf"
         let sh = read "build.sh"
@@ -1287,12 +1287,12 @@ let buildDirectoryOpenFlow () : bool =
                               "sd_out", { pin = "31"; standard = None } ] } ] }
 
         let sharedDir = System.IO.Path.Combine(dir, "shared")
-        Warp11.Build.write sharedDir (Warp11.BoardTop.boardTopOf shared Pins g) |> ignore
+        Warp11.Build.write sharedDir (Warp11.Elaborate.boardTopOf shared Pins g) |> ignore
         let sharedPins = System.IO.File.ReadAllText(System.IO.Path.Combine(sharedDir, "gain_ice_uart_top.pcf"))
 
         let both =
             try
-                Warp11.BoardTop.boardTopOf { shared with connectors = shared.connectors @ (board.connectors |> List.filter (fun c -> c.role = I2sSeparateCodecs)) } Pins g
+                Warp11.Elaborate.boardTopOf { shared with connectors = shared.connectors @ (board.connectors |> List.filter (fun c -> c.role = I2sSeparateCodecs)) } Pins g
                 |> ignore
 
                 false
@@ -1405,7 +1405,7 @@ let mandelbrotDrawn () : bool =
         | Ok text -> text
         | Error why -> failwith why
 
-    let top = Warp11.BoardTop.boardTopOf kv260 Counted g
+    let top = Warp11.Elaborate.boardTopOf kv260 Counted g
 
     sameBytes
     && frame.width = 32

@@ -350,3 +350,26 @@ let unitOf (g: Graph) (b: Box) : ErasedFu = unitOfWith false g b
 
 /// The production form: no probes.
 let elaborate (g: Graph) : TypedModule<GraphPorts> = elaborateWith false g
+
+// ---------------------------------------------------------------------------
+// The drawn design on a board: `BoardTop`'s typed `Design`, made from a graph.
+
+/// A drawn design, as a board top takes it.
+let ofGraph (g: Graph) : BoardTop.Design =
+    { name = g.name
+      sampleRate = g.sampleRate
+      streams = g.streams
+      inputs = g.inputs
+      outputs = g.outputs
+      controls = controlPorts g
+      starting = startingValues g
+      answers = answersOf g
+      rig =
+        fun instance ->
+            let io = (elaborate g).NewNamed instance
+
+            { through = streamThroughInstance io.ins.Head io.outs.Head
+              ports = io.controls } }
+
+/// `Warp11.BoardTop.boardTop` for a drawn design.
+let boardTopOf (board: Board) (path: DataPath) (g: Graph) : BoardTop.BoardTop = BoardTop.boardTop board path (ofGraph g)

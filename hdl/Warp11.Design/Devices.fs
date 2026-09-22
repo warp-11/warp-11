@@ -89,9 +89,6 @@ type SimMapping =
 /// sample pins each way.
 let private stereo = [ "left", signedInt sampleWidth; "right", signedInt sampleWidth ]
 
-let describePins (pins: (string * NumberFormat) list) =
-    pins |> List.map (fun (n, f) -> $"{n}: {describeFormat f}") |> String.concat ", "
-
 /// Does the mapping fit what the graph declares? Said before anything runs,
 /// naming the side that does not.
 let private check (g: Graph) (m: SimMapping) =

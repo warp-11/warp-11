@@ -1309,7 +1309,7 @@ let view (opening: Opening) : Control =
             | Some m ->
                 pickFolder "Build into" (fun dir ->
                     try
-                        let out = Warp11.Build.write dir (Warp11.BoardTop.boardTopOf m.board m.path root)
+                        let out = Warp11.Build.write dir (Warp11.Elaborate.boardTopOf m.board m.path root)
                         message.Set $"wrote %d{out.files.Length} files to {dir} — build with {out.run}"
                     with e ->
                         message.Set $"refused: {e.Message}")

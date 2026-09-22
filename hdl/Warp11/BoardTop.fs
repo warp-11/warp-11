@@ -10,10 +10,6 @@
 /// what `Build` hands the board's toolchain.
 module Warp11.BoardTop
 
-open Warp11.Graph
-open Warp11.Edit
-open Warp11.Elaborate
-open Warp11.Devices
 
 /// The rate a board's I2S master frames at for a design's rate: the same
 /// divisor arithmetic `i2sMasterHz` performs, so the number a design is
@@ -47,23 +43,6 @@ type Design =
       answers: int
       /// The instance under a name.
       rig: string -> Rig }
-
-/// A drawn design, as a board top takes it.
-let ofGraph (g: Graph) : Design =
-    { name = g.name
-      sampleRate = g.sampleRate
-      streams = g.streams
-      inputs = g.inputs
-      outputs = g.outputs
-      controls = controlPorts g
-      starting = startingValues g
-      answers = answersOf g
-      rig =
-        fun instance ->
-            let io = (elaborate g).NewNamed instance
-
-            { through = streamThroughInstance io.ins.Head io.outs.Head
-              ports = io.controls } }
 
 /// The I2S pinout the board's connector says: the Pmod I2S2's separate
 /// converters, or a shared bus. Both at once is refused — one header, one
@@ -590,9 +569,6 @@ let boardTop (board: Board) (path: DataPath) (d: Design) : BoardTop =
     | Pins -> pinsTop board d
     | HostMemory -> hostMemoryTop board false d
     | Counted -> hostMemoryTop board true d
-
-/// `boardTop` for a drawn design.
-let boardTopOf (board: Board) (path: DataPath) (g: Graph) : BoardTop = boardTop board path (ofGraph g)
 
 /// The register map as the Rust seam prints it, headed for the top it serves.
 let seamLines (t: BoardTop) : string list =

@@ -28,6 +28,7 @@
 
     <ItemGroup>
         <ProjectReference Include="../Warp11.Placement/Warp11.Placement.fsproj" />
+        <ProjectReference Include="../Warp11.Design/Warp11.Design.fsproj" />
     </ItemGroup>
 
 </Project>

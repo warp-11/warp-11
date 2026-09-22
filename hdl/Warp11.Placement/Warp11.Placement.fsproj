@@ -20,7 +20,7 @@
     </ItemGroup>
 
     <ItemGroup>
-        <ProjectReference Include="../Warp11/Warp11.fsproj"/>
+        <ProjectReference Include="../Warp11.Design/Warp11.Design.fsproj"/>
     </ItemGroup>
 
 </Project>

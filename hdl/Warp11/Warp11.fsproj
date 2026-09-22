@@ -71,13 +71,6 @@
         <Compile Include="Units.fs"/>
         <Compile Include="Mandel.fs"/>
         <Compile Include="Pedal.fs"/>
-        <Compile Include="Factories.fs"/>
-        <Compile Include="Graph.fs"/>
-        <Compile Include="Edit.fs"/>
-        <Compile Include="DesignFile.fs"/>
-        <Compile Include="Elaborate.fs"/>
-        <Compile Include="Export.fs"/>
-        <Compile Include="Devices.fs"/>
         <Compile Include="BoardTop.fs"/>
         <Compile Include="Build.fs"/>
     </ItemGroup>

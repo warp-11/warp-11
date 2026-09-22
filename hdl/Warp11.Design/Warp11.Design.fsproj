@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+    <!-- A design as data, and everything that reads it: boxes and wires
+         (`Graph`), every change an editor makes as `Graph -> Graph` (`Edit`),
+         the file (`DesignFile`), the units a design may name (`Factories`),
+         the data back into a typed design (`Elaborate`), the data as the F#
+         a person would have written (`Export`), what satisfies its boundary
+         in the simulator (`Devices`); `Elaborate` also makes the board top.
+
+         Apart from `Warp11` on purpose: the library is the HDL, and the
+         design-as-data model is a layer over it that only an editor and its
+         checks need. A project brings its own units here — that is what makes
+         the canvas something another project can use. -->
+    <PropertyGroup>
+        <TargetFramework>net10.0</TargetFramework>
+        <WarningsAsErrors>FS0025</WarningsAsErrors>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <Compile Include="Factories.fs"/>
+        <Compile Include="Graph.fs"/>
+        <Compile Include="Edit.fs"/>
+        <Compile Include="DesignFile.fs"/>
+        <Compile Include="Elaborate.fs"/>
+        <Compile Include="Export.fs"/>
+        <Compile Include="Devices.fs"/>
+    </ItemGroup>
+
+    <ItemGroup>
+        <ProjectReference Include="../Warp11/Warp11.fsproj"/>
+    </ItemGroup>
+
+</Project>
