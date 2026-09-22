@@ -14,5 +14,13 @@ let main argv =
           SemanticTests.tests
           RegistryTests.tests
           StructuralTests.tests
-          EmitterTests.tests ]
+          EmitterTests.tests
+          DebugTests.tests
+          UtilityTests.tests
+          BusIntegrationTests.tests
+          AxiIntegrationTests.tests
+          SerialRegMapTests.tests
+          I2sTests.tests
+          AudioTests.tests
+          WavTests.tests ]
     |> runTestsWithCLIArgs [] argv
