@@ -838,19 +838,76 @@ let mandelChunk (pixels: int) (maxIter: int) (fracBits: int) (threads: int) : Fu
             |> streamMapTo (layout1 ("pixels", beatBits)) snd)
     |> answering (pixels / pixelsPerBeat)
 
+/// The same chunk, **addressed**: the pod's beats leave carrying where they
+/// go — the beat's offset within its own chunk, which the design turns into
+/// a frame-wide index by adding the chunk's own. The pod already produces
+/// this; `mandelChunk` throws it away because the counted path has nowhere
+/// to put it.
+///
+/// That one extra field is what buys the unordered farm: a lane that draws an
+/// interior chunk and runs the full `maxIter` holds nothing up, because no
+/// consumer is waiting to learn where its beats belong.
+let mandelChunkAddressed (pixels: int) (maxIter: int) (fracBits: int) (threads: int) : Fu<Expr * Expr * Expr, Expr * Expr> =
+    if pixels % pixelsPerBeat <> 0 then
+        failwith $"mandelChunkAddressed: a chunk is whole beats of %d{pixelsPerBeat} pixels, not %d{pixels}"
+
+    let view = viewFormat fracBits
+    let run = lanePodRunTransporter pixels 1
+    // The pod addresses its chunk by byte; a beat is `pixelsPerBeat` of them.
+    let beatShift = ceilLog2 pixelsPerBeat
+    let localBits = max 1 (ceilLog2 (pixels / pixelsPerBeat))
+
+    moduleUnit
+        "mandelChunkAddressed"
+        (pins3 ("cx0", view) ("cy", view) ("dx", view))
+        (pins2 ("local", unsignedInt localBits) ("pixels", pixelsFormat))
+        []
+        (fun instance _ s ->
+            let runs =
+                s
+                |> streamMapTo (layout1 ("data", run.width)) (fun (cx0, cy, dx) -> run.dematerialize (lit 0UL (lanePodAddrWidth pixels 1), asUInt cy, asUInt cx0, asUInt dx))
+
+            mandelLanePod pixels 1 maxIter fracBits threads instance runs
+            |> streamMapTo (layout2 ("local", localBits) ("pixels", beatBits)) (fun (addr, beat) ->
+                slice (localBits + beatShift - 1) beatShift addr, beat))
+    |> answering (pixels / pixelsPerBeat)
+
 /// The raster as chunk views: beat `k` of the frame becomes the view of its
 /// chunk — `cx0` steps by `pixels` `dx` a beat and returns to `cxOrigin` at
 /// each row's start, `cy` steps by `dy` a row — both from the origin at beat
 /// zero. Adders and a counter; the frame's width says how many chunks a row
 /// is, and the host says how many beats a frame is by how many it asks for.
+/// `e` times a constant known at elaboration, as shifts and adds. Used where
+/// a count used to have to be a power of two so the step could be a shift:
+/// the constant is known here, so it need not be round, and the constraint
+/// that survives is the one that matters — a chunk should divide the padded
+/// row, since padding is pixels computed and thrown away.
+///
+/// `e` must be a declared signal: the shifts slice it.
+let private timesConstant (k: int) (e: Expr) : Expr =
+    if k < 1 then
+        failwith $"timesConstant: {k}"
+
+    [ for i in 0..31 do
+          if (k >>> i) &&& 1 = 1 then
+              yield (if i = 0 then e else cat (slice (31 - i) 0 e) (lit 0UL i)) ]
+    |> List.reduce (+)
+
 let coords (width: int) (pixels: int) (fracBits: int) : Fu<Expr, Expr * Expr * Expr> =
     let chunks = chunkedWidth pixels width / pixels
     let chunkWidth = max 1 (ceilLog2 chunks)
     let view = viewFormat fracBits
-    let stepShift = ceilLog2 pixels
+    if pixels % pixelsPerBeat <> 0 then
+        failwith $"coords: a chunk is whole beats of %d{pixelsPerBeat} pixels, not %d{pixels}"
 
-    if 1 <<< stepShift <> pixels then
-        failwith $"coords: a chunk is a power of two pixels wide, not %d{pixels}"
+    // The chunk used to have to be a power of two, because the step across
+    // one was a shift. It is a constant at elaboration, so it can be a few
+    // shifts and adds instead, and then the constraint that remains is the
+    // one that was always the real one: a chunk should **divide the padded
+    // row**, because padding is pixels computed and thrown away. At 1400 wide
+    // that admits 128, 352 and 704 alike — all padding to 1408 — where the
+    // powers of two jump to 1536 at 256 and 2048 at 1024.
+
 
     { name = "coords"
       operands = pins1 ("beat", unsignedInt 32)
@@ -882,7 +939,7 @@ let coords (width: int) (pixels: int) (fracBits: int) : Fu<Expr, Expr * Expr * E
             let cy = mux first cyOrigin cyNext
             let lastOfRow = eq thisChunk (lit (uint64 (chunks - 1)) chunkWidth)
             // The step across one chunk, at the view's width.
-            let dxChunk = cat (slice (31 - stepShift) 0 dx) (lit 0UL stepShift)
+            let dxChunk = timesConstant pixels dx
 
             If fire (fun () ->
                 ifElse
@@ -905,6 +962,11 @@ let coords (width: int) (pixels: int) (fracBits: int) : Fu<Expr, Expr * Expr * E
 /// The design's pins, as the boundary sees them.
 let beatPin = "beat", unsignedInt 32
 let pixelsPin = "pixels", pixelsFormat
+
+/// Where a scattered beat goes: its index among the frame's beats, counted
+/// the way the host lays the frame out. The scatter path reads it off the
+/// output box's first field.
+let indexPin = "index", unsignedInt 32
 
 let viewControls (fracBits: int) =
     let view = viewFormat fracBits
@@ -931,4 +993,67 @@ let mandelChunksDef (name: string) (width: int) (pixels: int) (maxIter: int) (fr
             [ streamSource in1 ]
             |> fuStagesWith [ cxOrigin; cyOrigin; dx; dy ] coords "coords" (pins3 ("cx0", view) ("cy", view) ("dx", view)) id (fun r _ -> r)
             |> fuStagesWith [] lane "mandelChunk" (pins1 pixelsPin) id (fun r _ -> r)
+            |> List.iter2 streamSink [ out1 ])
+
+/// The frame as **scattered** chunk beats: the same `coords` and the same
+/// lane pod, farmed with nothing keeping order, every beat carrying the index
+/// of the word it belongs in.
+///
+/// The only structural difference from `mandelChunksDef` is where position
+/// comes from. There, a beat's place is where it lands in the output stream,
+/// so the farm has to hold the raster together — a queue of lane indices, and
+/// a merge that waits on the lane owning the oldest beat while lanes with
+/// finished work sit behind it. Here the beat says where it goes, so a lane
+/// that drew an interior chunk and ran the full `maxIter` delays only itself.
+/// That is the whole of it: one field, and the ordering machinery is not
+/// needed rather than made faster.
+let mandelScatterDef (name: string) (width: int) (pixels: int) (maxIter: int) (fracBits: int) (threads: int) (lanes: int) =
+    let beatsPerChunk = pixels / pixelsPerBeat
+
+    if beatsPerChunk < 2 then
+        failwith $"mandelScatterDef: a chunk is at least two beats of %d{pixelsPerBeat} pixels, not %d{pixels}"
+
+    let coordsUnit = coords width pixels fracBits
+    let lane = copies lanes (mandelChunkAddressed pixels maxIter fracBits threads)
+    let view = viewFormat fracBits
+
+    defModule
+        name
+        (fun p ->
+            streamInputPorts p "in1" (pins1 beatPin),
+            streamOutputPorts p "out1" (pins2 indexPin pixelsPin),
+            p.inPort "cxOrigin" 32,
+            p.inPort "cyOrigin" 32,
+            p.inPort "dx" 32,
+            p.inPort "dy" 32)
+        (fun (in1, out1, cxOrigin, cyOrigin, dx, dy) ->
+            [ streamSource in1 ]
+            // The beat index rides along beside the view, because it is what
+            // says where this chunk's beats belong.
+            |> fuStagesWith
+                [ cxOrigin; cyOrigin; dx; dy ]
+                coordsUnit
+                "coords"
+                (pins4 ("cx0", view) ("cy", view) ("dx", view) beatPin)
+                id
+                (fun (cx0, cy, dxOut) beat -> (cx0, cy, dxOut, beat))
+            // ...and the lanes run in no order at all.
+            |> fuStagesUnorderedWith
+                []
+                lane
+                "mandelChunk"
+                (pins2 indexPin pixelsPin)
+                (fun (cx0, cy, dxIn, _) -> (cx0, cy, dxIn))
+                (fun (local, px) (_, _, _, beat) ->
+                    // The chunk's own beats sit together in the frame, so the
+                    // destination is the chunk index times the beats in a
+                    // chunk, plus the beat's offset inside it. A concatenation
+                    // would do it only while a chunk is a power of two beats,
+                    // which it stopped being when the chunk was sized to
+                    // divide its row. The chunk index comes back out of the
+                    // context FIFO computed, and the shifts want a declared
+                    // signal.
+                    let chunk = wire "scatter_chunk" 32
+                    beat ==> chunk
+                    timesConstant beatsPerChunk chunk + pad 32 local, px)
             |> List.iter2 streamSink [ out1 ])

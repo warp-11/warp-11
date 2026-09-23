@@ -256,11 +256,27 @@ let private prefixed (prefix: string) (l: Layout<'x>) : Layout<'x> =
 let private orderedFarm (name: string) (n: int) (k: int) (worker: int -> Stream<'p> -> Stream<'q>) (s: Stream<'p>) : Stream<'q> =
     streamFarmOrdered name n (2 * n) k worker s
 
+/// `n` copies over one stream, in **no** order: a beat goes to whichever lane
+/// is free and leaves whenever its lane is done. Nothing records where a beat
+/// went, because nothing has to — this is for a stream whose beats say where
+/// they belong (`DataPath.Scatter`), and it is the whole of what ordering
+/// costs, removed: no queue of lane indices, no per-lane answer FIFO, and a
+/// merge that never waits on one lane while another has a beat ready.
+///
+/// Use it only where the consumer does not read position from arrival. A
+/// sample stream cannot; a frame whose beats carry their own address can.
+let private unorderedFarm (name: string) (n: int) (worker: int -> Stream<'p> -> Stream<'q>) (s: Stream<'p>) : Stream<'q> =
+    if n = 1 then
+        worker 0 s
+    else
+        streamBalanceClustered n s |> List.mapi worker |> streamMergeClustered
+
 /// A stage over a sequential unit, `k` copies for this stream. The unit sees
 /// only its operands; the rest of the beat waits beside it in a context FIFO
 /// and is handed back paired with the result — `withContext`, per lane. At
 /// `k` = 1 there is no farm; the copy is the stage.
 let private sequentialStage
+    (ordered: bool)
     (unit: Fu<'a, 'r>)
     (law: string -> Stream<'a> -> Stream<'r>)
     (name: string)
@@ -279,7 +295,13 @@ let private sequentialStage
         let instance = if k = 1 then $"{name}_{unit.name}" else $"{name}_{unit.name}%d{i}"
         withContextExpanding unit.answers instance 2 opLayout resLayout ctxLayout (law instance)
 
-    orderedFarm name k unit.answers copy src |> streamMapTo (outPins) (fun (r, p) -> finish r p)
+    let farmed =
+        if ordered then
+            orderedFarm name k unit.answers copy src
+        else
+            unorderedFarm name k copy src
+
+    farmed |> streamMapTo (outPins) (fun (r, p) -> finish r p)
 
 /// The M streams that need a unit, handed over together, so the row of the
 /// matrix is decided here:
@@ -294,7 +316,8 @@ let private sequentialStage
 /// the next stage sees. Built: every combinational row at one shared copy,
 /// and the sequential rows at one copy per stream or a multiple. The rest
 /// say so.
-let fuStagesWith
+let private fuStagesOrderedBy
+    (ordered: bool)
     (controls: Expr list)
     (unit: Fu<'a, 'r>)
     (name: string)
@@ -329,7 +352,7 @@ let fuStagesWith
     | Sequential law when n >= m && n % m = 0 ->
         // One copy per stream, or k per stream farmed in order.
         streams
-        |> List.mapi (fun i s -> sequentialStage unit (fun instance -> law instance controls) $"{name}%d{i}" outPins operands finish (n / m) s)
+        |> List.mapi (fun i s -> sequentialStage ordered unit (fun instance -> law instance controls) $"{name}%d{i}" outPins operands finish (n / m) s)
     | Sequential _ when n < m ->
         // Not `warpFu`: a sequential unit accepts a beat every few cycles and
         // has no pipeline to run a tag delay-line beside. The shape is
@@ -340,6 +363,23 @@ let fuStagesWith
         failwith
             $"'{name}': %d{n} copies of '{unit.name}' over %d{m} streams — copies must be a multiple of streams (Q2)"
 
+/// The placement above, **in order**: beat `i` leaves before beat `i + 1`
+/// whatever the lanes cost. The default, and what a sample stream needs.
+let fuStagesWith controls unit name outPins operands finish streams =
+    fuStagesOrderedBy true controls unit name outPins operands finish streams
+
+/// The placement above, in **no** order: a beat leaves when its lane is done.
+/// For a stream whose beats carry their own destination — `DataPath.Scatter`
+/// — where putting them back in order would cost a queue and a merge that
+/// stalls behind the slowest lane, to rebuild a position the beat already
+/// states.
+let fuStagesUnorderedWith controls unit name outPins operands finish streams =
+    fuStagesOrderedBy false controls unit name outPins operands finish streams
+
 /// `fuStagesWith` for a unit with no controls.
 let fuStages (unit: Fu<'a, 'r>) name outPins operands finish streams =
     fuStagesWith [] unit name outPins operands finish streams
+
+/// `fuStagesUnorderedWith` for a unit with no controls.
+let fuStagesUnordered (unit: Fu<'a, 'r>) name outPins operands finish streams =
+    fuStagesUnorderedWith [] unit name outPins operands finish streams

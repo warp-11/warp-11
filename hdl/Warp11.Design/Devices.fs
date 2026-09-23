@@ -218,7 +218,7 @@ let runImageInSim (idleLimit: int) (g: Graph) (m: ImageMapping) : Grey =
 /// count of beats, the index on the input box's one field, and the output
 /// box's one field read as pixels — a byte each, as many a beat as the
 /// field holds — assembled into a frame `width` pixels wide. The board's
-/// `Counted` path, in the simulator.
+/// `viaCount` path, in the simulator.
 type FrameMapping =
     { width: int
       height: int

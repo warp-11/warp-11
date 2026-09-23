@@ -359,17 +359,25 @@ let ofGraph (g: Graph) : BoardTop.Design =
     { name = g.name
       sampleRate = g.sampleRate
       streams = g.streams
-      inputs = g.inputs
-      outputs = g.outputs
-      controls = controlPorts g
-      starting = startingValues g
+      // The drawn boundary as needs, in the order the seam reads them:
+      // the stream in, the stream out, then the controls as declared.
+      needs =
+        [ yield BoardTop.streamIn "in" g.inputs
+          yield BoardTop.streamOut "out" g.outputs
+          let starting = startingValues g |> Map.ofList
+
+          for name, format in controlPorts g ->
+              BoardTop.valueFrom name format (starting |> Map.tryFind name |> Option.defaultValue 0UL) ]
       answers = answersOf g
       rig =
         fun instance ->
             let io = (elaborate g).NewNamed instance
 
             { through = streamThroughInstance io.ins.Head io.outs.Head
-              ports = io.controls } }
+              ports = io.controls
+              // A drawn design has no way to declare telemetry yet: the
+              // canvas has control inlets and no report outlets.
+              readbacks = [] } }
 
 /// `Warp11.BoardTop.boardTop` for a drawn design.
 let boardTopOf (board: Board) (path: DataPath) (g: Graph) : BoardTop.BoardTop = BoardTop.boardTop board path (ofGraph g)

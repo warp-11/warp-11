@@ -88,36 +88,35 @@ drive, and its first light is `mandel_frame_first_light` after
 
 See [docs/dev-workflow.md](../../docs/dev-workflow.md) for the deploy path.
 
-## The same frame, drawn
+## The same frame, as chunk beats
 
-The lane also lives in the library (`Warp11/Mandel.fs`), so the frame can
-be **drawn on the design canvas** as four boxes and built by the generator
-with nothing written by hand:
+The lane composes a second way: instead of a pod sweeping whole rows, the
+frame becomes a stream of **chunk beats**, `coords` minting each chunk's
+view and the chunk spent once per lane, farmed.
 
 ```
-input ──beat──▶ coords ──cx0 cy dx──▶ mandelChunk × 104 ──pixels──▶ output
-  cxOrigin cyOrigin dx dy (controls = registers)         16 px a beat, in order
+beat ──▶ coords ──cx0 cy dx──▶ mandelChunk x 104 ──pixels──▶ out
+  cxOrigin cyOrigin dx dy (controls = registers)   16 px a beat, in order
 ```
 
 - `coords` turns the beat index into each chunk's view; `mandelChunk` is
   the lane pod at one chunk wide (128 pixels), answering eight beats for
-  one; **copies** is the lanes, and the placement farms them — a beat to
-  whichever lane is free, out in raster order, clustered above sixteen.
+  one; the placement farms the lanes — a beat to whichever is free, out in
+  raster order, clustered above sixteen.
 - The boundary is the **counted** path: nothing read, the host writes the
   chunk count and the view, the frame lands in DDR in raster order — the
   batch contract, so `warp11_batch frame:1400x800 out.pgm --chunk 128
-  --set cxOrigin=… ` drives it on the board and, through the bridge, in
+  --set cxOrigin=... ` drives it on the board and, through the bridge, in
   the Sim.
-- `Chunked.fs` is the typed twin — the same four boxes as F#, assembled
-  with the same placement — and `Warp11.Placement`'s UD22 holds the drawn
-  design to its bytes. `Warp11.Placement.Canvas/examples/mandelbrot.json`
-  is the drawing.
+- `Chunked.fs` is the design, and `-- bitstream <dir> [lanes]` writes the
+  directory the KV260's toolchain builds from — block design, overlay,
+  flow and the Rust seam, all derived from the design itself.
 
 Measured against the frame design at equal configurations in the Sim
 (`-- lanescale` beside `-- chunkscale w h pixels maxIter lanes`): 16-pixel
 chunks cost 39% more cycles — the barrel drains its tail every chunk —
-64-pixel chunks 1% fewer, 128-pixel chunks 6% fewer (256×52, maxIter 48,
-13 lanes: 18 161 → 17 157). Not yet built for silicon.
+64-pixel chunks 1% fewer, 128-pixel chunks 6% fewer (256x52, maxIter 48,
+13 lanes: 18 161 -> 17 157). Not yet built for silicon.
 
 ## Files
 

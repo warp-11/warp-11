@@ -39,7 +39,7 @@ let gain (rate: float) : Graph =
 
 /// The gain example's mapping: the KV260 preset, the boundary in the
 /// host's memory — a WAV in, the design, a WAV out, no codec needed.
-let gainMapping: Warp11.Mapping.Mapping = { board = kv260; path = HostMemory }
+let gainMapping: Warp11.Mapping.Mapping = { board = kv260; path = viaHostMemory }
 
 /// M2's design: three `eq` sections with creation arguments — a low shelf,
 /// a peaking cut, a high shelf — designed for the rate.

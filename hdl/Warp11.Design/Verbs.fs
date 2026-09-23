@@ -92,7 +92,7 @@ let run (argv: string[]) : int option =
     | [| "batchserve"; path; _ |]
     | [| "batchserve"; path; _; "count" |] ->
         let which = if argv.Length >= 3 then Some argv[2] else None
-        let dataPath = if argv.Length = 4 then Counted else HostMemory
+        let dataPath = if argv.Length = 4 then viaCount else viaHostMemory
 
         let mapping (g: Warp11.Graph.Graph) =
             match which with
@@ -110,11 +110,12 @@ let run (argv: string[]) : int option =
                 eprintfn $"{why}"
                 Some 1
             | Ok m ->
-                match m.path with
-                | Pins ->
+                match Warp11.Mapping.pathText m.path with
+                | "pins" ->
                     eprintfn $"{path}: the batch bridge serves a design on the host's memory, and the mapping puts it on the pins"
                     Some 1
-                | path ->
+                | _ ->
+                    let path = m.path
                     Warp11.BoardTop.batchServe (Warp11.Elaborate.boardTopOf m.board path g)
                     Some 0
     // A saved design's build directory: `build design.json [mapping.json] <dir>`
@@ -158,8 +159,8 @@ let run (argv: string[]) : int option =
     | [| "build"; path; which; way; dir |] ->
         let dataPath =
             match way with
-            | "pins" -> Ok Pins
-            | "memory" -> Ok HostMemory
+            | "pins" -> Ok viaPins
+            | "memory" -> Ok viaHostMemory
             | other -> Error $"a data path is pins or memory, not '{other}'"
 
         // `which` is a preset's name or a board file's path.
@@ -198,7 +199,7 @@ let run (argv: string[]) : int option =
             Some 1
         | Ok g, Ok board ->
             try
-                let top = Warp11.Elaborate.boardTopOf board Pins g
+                let top = Warp11.Elaborate.boardTopOf board viaPins g
 
                 for file in Warp11.BoardTop.write dir top do
                     printfn $"wrote {file}"

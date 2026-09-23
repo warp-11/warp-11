@@ -247,9 +247,18 @@ let exportWith (mapping: Warp11.Mapping.Mapping option) (g: Graph) : Result<stri
         | Some m ->
             let path =
                 match m.path with
-                | Pins -> "Pins"
-                | HostMemory -> "HostMemory"
-                | Counted -> "Counted"
+                // The exported F# names the preset, which is what a person
+                // would have written; a path that is not one prints as its
+                // bindings.
+                | p ->
+                    match Warp11.Mapping.pathText p with
+                    | "pins" -> "viaPins"
+                    | "memory" -> "viaHostMemory"
+                    | "count" -> "viaCount"
+                    | "scatter" -> "viaScatter"
+                    | _ ->
+                        let binding (b: Binding) = $"{{ need = {b.need}; carrier = {b.carrier} }}"
+                        $"""{{ bindings = [ {String.concat "; " (List.map binding p.bindings)} ] }}"""
 
             let provenance =
                 match Warp11.Mapping.presetOf m.board with

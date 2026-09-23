@@ -10,6 +10,7 @@ let main argv =
           MemoryTests.tests
           RegMapTests.tests
           StreamTests.tests
+          ForkTests.tests
           ImageTests.tests
           SemanticTests.tests
           RegistryTests.tests

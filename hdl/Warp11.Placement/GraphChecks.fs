@@ -694,7 +694,7 @@ let exportIsTheDesign () : bool =
     // build function are compiled too.
     let mappingFor (g: Graph) : Warp11.Mapping.Mapping option =
         if g.name = Warp11.Graph.gainGraph.name then
-            Some { board = kv260; path = HostMemory }
+            Some { board = kv260; path = viaHostMemory }
         else
             None
 
@@ -1049,7 +1049,7 @@ let writtenUnitTravels () : bool =
 // CHECK
 let designOnABoard () : bool =
     let onKv260 = { gainGraph with name = "GainBoard"; sampleRate = stockSampleRate }
-    let top = Warp11.Elaborate.boardTopOf kv260 Pins onKv260
+    let top = Warp11.Elaborate.boardTopOf kv260 viaPins onKv260
     let sim = Sim top.top
     let axi = SimAxi.client sim
     let volume = top.registers |> List.find (fun (n, _) -> n = "volume") |> snd
@@ -1068,19 +1068,19 @@ let designOnABoard () : bool =
 
     let iceBoard = iceBreakerAt 24_000_000
     let onIce = { onKv260 with name = "GainIce"; sampleRate = Warp11.BoardTop.boardRate iceBoard 48_000.0 }
-    let ice = Warp11.Elaborate.boardTopOf iceBoard Pins onIce
-    let bare = Warp11.Elaborate.boardTopOf { iceBoard with host = NoHost } Pins onIce
+    let ice = Warp11.Elaborate.boardTopOf iceBoard viaPins onIce
+    let bare = Warp11.Elaborate.boardTopOf { iceBoard with host = NoHost } viaPins onIce
 
     let refused =
         try
-            Warp11.Elaborate.boardTopOf kv260 Pins { onKv260 with sampleRate = 48_000.0 } |> ignore
+            Warp11.Elaborate.boardTopOf kv260 viaPins { onKv260 with sampleRate = 48_000.0 } |> ignore
             false
         with e ->
             e.Message.Contains "48000" && e.Message.Contains "48828.125"
 
     let impossible =
         try
-            Warp11.Elaborate.boardTopOf { iceBoard with host = AxiLiteAt 0UL } Pins onIce |> ignore
+            Warp11.Elaborate.boardTopOf { iceBoard with host = AxiLiteAt 0UL } viaPins onIce |> ignore
             false
         with e ->
             e.Message.Contains "no processing system"
@@ -1107,7 +1107,7 @@ let designOnABoard () : bool =
 // CHECK
 let designOnHostMemory () : bool =
     let g = { gainGraph with name = "GainMemory"; sampleRate = stockSampleRate }
-    let top = Warp11.Elaborate.boardTopOf kv260 HostMemory g
+    let top = Warp11.Elaborate.boardTopOf kv260 viaHostMemory g
     let batch = top.batch.Value
     let sim = Sim top.top
     let ddr = SimAxiDdr(sim, 0x20000)
@@ -1173,7 +1173,7 @@ let designOnHostMemory () : bool =
 
     let refused =
         try
-            Warp11.Elaborate.boardTopOf (iceBreakerAt 24_000_000) HostMemory g |> ignore
+            Warp11.Elaborate.boardTopOf (iceBreakerAt 24_000_000) viaHostMemory g |> ignore
             false
         with e ->
             e.Message.Contains "no host memory"
@@ -1212,8 +1212,8 @@ let buildDirectoryVivado () : bool =
         System.IO.File.ReadAllText(System.IO.Path.Combine(dir, sub, file))
 
     try
-        let pins = Warp11.Build.write (System.IO.Path.Combine(dir, "pins")) (Warp11.Elaborate.boardTopOf kv260 Pins g)
-        let memory = Warp11.Build.write (System.IO.Path.Combine(dir, "memory")) (Warp11.Elaborate.boardTopOf kv260 HostMemory g)
+        let pins = Warp11.Build.write (System.IO.Path.Combine(dir, "pins")) (Warp11.Elaborate.boardTopOf kv260 viaPins g)
+        let memory = Warp11.Build.write (System.IO.Path.Combine(dir, "memory")) (Warp11.Elaborate.boardTopOf kv260 viaHostMemory g)
 
         let bd = read "pins" "gain_build_axi_bd.tcl"
         let xdc = read "pins" "gain_build_axi_pins.xdc"
@@ -1265,7 +1265,7 @@ let buildDirectoryVivado () : bool =
 
         let refused =
             try
-                Warp11.Build.write (System.IO.Path.Combine(dir, "short")) (Warp11.Elaborate.boardTopOf shortBoard Pins g)
+                Warp11.Build.write (System.IO.Path.Combine(dir, "short")) (Warp11.Elaborate.boardTopOf shortBoard viaPins g)
                 |> ignore
 
                 false
@@ -1295,7 +1295,7 @@ let buildDirectoryOpenFlow () : bool =
         System.IO.File.ReadAllText(System.IO.Path.Combine(dir, file))
 
     try
-        let out = Warp11.Build.write dir (Warp11.Elaborate.boardTopOf board Pins g)
+        let out = Warp11.Build.write dir (Warp11.Elaborate.boardTopOf board viaPins g)
         let wrapper = read "gain_ice_uart_top.v"
         let pins = read "gain_ice_uart_top.pcf"
         let sh = read "build.sh"
@@ -1314,12 +1314,12 @@ let buildDirectoryOpenFlow () : bool =
                               "sd_out", { pin = "31"; standard = None } ] } ] }
 
         let sharedDir = System.IO.Path.Combine(dir, "shared")
-        Warp11.Build.write sharedDir (Warp11.Elaborate.boardTopOf shared Pins g) |> ignore
+        Warp11.Build.write sharedDir (Warp11.Elaborate.boardTopOf shared viaPins g) |> ignore
         let sharedPins = System.IO.File.ReadAllText(System.IO.Path.Combine(sharedDir, "gain_ice_uart_top.pcf"))
 
         let both =
             try
-                Warp11.Elaborate.boardTopOf { shared with connectors = shared.connectors @ (board.connectors |> List.filter (fun c -> c.role = I2sSeparateCodecs)) } Pins g
+                Warp11.Elaborate.boardTopOf { shared with connectors = shared.connectors @ (board.connectors |> List.filter (fun c -> c.role = I2sSeparateCodecs)) } viaPins g
                 |> ignore
 
                 false
@@ -1372,19 +1372,19 @@ let mappingIsAFile () : bool =
     let carried = Warp11.DesignFile.parse (Warp11.DesignFile.write g)
 
     let exported =
-        match Warp11.Export.exportWith (Some { board = kv260; path = HostMemory }) g with
+        match Warp11.Export.exportWith (Some { board = kv260; path = viaHostMemory }) g with
         | Ok text -> text
         | Error why -> failwith why
 
     let refused =
-        match Warp11.Mapping.parse (Warp11.Mapping.write { board = { ice with host = AxiLiteAt 0UL }; path = Pins }) with
+        match Warp11.Mapping.parse (Warp11.Mapping.write { board = { ice with host = AxiLiteAt 0UL }; path = viaPins }) with
         | Error why -> why.Contains "no processing system"
         | Ok _ -> false
 
-    roundTrips { board = kv260; path = HostMemory }
-    && roundTrips { board = kv260; path = Pins }
-    && roundTrips { board = ice; path = Pins }
-    && roundTrips { board = custom; path = HostMemory }
+    roundTrips { board = kv260; path = viaHostMemory }
+    && roundTrips { board = kv260; path = viaPins }
+    && roundTrips { board = ice; path = viaPins }
+    && roundTrips { board = custom; path = viaHostMemory }
     && boardRoundTrips kv260
     && boardRoundTrips ice
     && boardRoundTrips { ice with connectors = [ { role = I2sSharedBus; pins = [ "bclk", { pin = "43"; standard = None } ] } ] }
@@ -1395,7 +1395,7 @@ let mappingIsAFile () : bool =
         | Error _ -> false)
     && exported.Contains "/// The target: the `kv260` preset"
     && exported.Contains "let board ="
-    && exported.Contains "let path = HostMemory"
+    && exported.Contains "let path = viaHostMemory"
     && exported.Contains "let build (dir: string) = Warp11.Build.write dir (Warp11.BoardTop.boardTop board path design)"
     && exported.Contains "let design: Warp11.BoardTop.Design ="
     && Warp11.Mapping.fileFor "/tmp/x/gain.json" "kv260" = "/tmp/x/gain.kv260.json"

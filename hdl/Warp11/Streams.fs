@@ -800,6 +800,99 @@ let withContext
     : Stream<'b * 'c> =
     withContextExpanding 1 name depth operands results context stage s
 
+/// What a branch of a fork does when it cannot keep up.
+type ForkPolicy =
+    /// The branch back-pressures the source — and so, through it, every other
+    /// branch. What a consumer that must not miss a beat asks for.
+    | Blocking
+    /// The branch drops the beat and counts it; the source never waits. What
+    /// an observer asks for — a recorder that skips a sample is a worse
+    /// recording, an earphone that skips one is a click.
+    | Dropping
+
+/// One branch of a fork: how it behaves when full, and how much slack it has
+/// before that happens.
+type ForkBranch = { policy: ForkPolicy; depth: int }
+
+/// A blocking branch `depth` deep.
+let blockingBranch depth = { policy = Blocking; depth = depth }
+
+/// A dropping branch `depth` deep.
+let droppingBranch depth = { policy = Dropping; depth = depth }
+
+/// What a fork hands back: the branches, and how many beats each dropped.
+type Fork<'p> =
+    { branches: Stream<'p> list
+      /// A saturating count per branch — zero for a blocking one, since it
+      /// cannot drop.
+      dropped: Expr list }
+
+/// **Elastic** broadcast: every branch sees every beat, each through its own
+/// buffer, and a branch that falls behind does not automatically take the
+/// others down with it.
+///
+/// This is `streamBroadcast` with the lockstep taken out. That one ANDs every
+/// consumer's ready into the source's, which is right when the branches are
+/// parts of one datapath and wrong when they are *destinations* — it means
+/// attaching an observer changes the timing of what it observes. A recorder
+/// on the aid's output must not be able to do that (`notes/DEVICES.md` §10h,
+/// rung 4), so each branch buffers, and a `Dropping` branch that fills is
+/// skipped rather than allowed to stall the source.
+///
+/// The beat is offered to every branch in the same cycle, so a blocking
+/// branch still sees every beat in order. What a dropping branch loses is
+/// beats, never ordering.
+let streamFork (name: string) (branches: ForkBranch list) (s: Stream<'p>) : Fork<'p> =
+    if branches.IsEmpty then
+        failwith $"{name}: a fork has at least one branch"
+
+    let b = current ()
+
+    // Each branch's buffer tells us, through its own ready, whether it can
+    // take this beat.
+    let enqReady =
+        branches |> List.mapi (fun i _ -> wireBit (b.FreshName $"{name}_b%d{i}_enq_ready"))
+
+    // Only the blocking branches hold the source up.
+    let holders =
+        List.zip branches enqReady
+        |> List.choose (fun (br, r) -> if br.policy = Blocking then Some r else None)
+
+    let sourceReady =
+        match holders with
+        | [] -> lit 1UL 1
+        | rs -> List.reduce (&&&) rs
+
+    sourceReady ==> s.ready
+    let fire = s.valid &&& sourceReady
+
+    let outs, drops =
+        List.zip branches enqReady
+        |> List.mapi (fun i (br, ready) ->
+            // A dropping branch is offered the beat only when it can take it;
+            // the beat goes past it otherwise.
+            let offered =
+                match br.policy with
+                | Blocking -> fire
+                | Dropping -> fire &&& ready
+
+            let into = { s with valid = offered; ready = ready }
+            let out = streamFifo $"{name}_b%d{i}" br.depth into
+
+            let dropped =
+                match br.policy with
+                | Blocking -> lit 0UL 32
+                | Dropping ->
+                    let count = reg $"{name}_b%d{i}_dropped" 32
+                    let saturated = eq count (lit 0xFFFFFFFFUL 32)
+                    If (fire &&& bnot ready &&& bnot saturated) (fun () -> count + lit 1UL 32 ==> count)
+                    count
+
+            out, dropped)
+        |> List.unzip
+
+    { branches = outs; dropped = drops }
+
 /// Dispatch fan-out: each beat goes to exactly ONE consumer — the lowest-index
 /// ready one. The source's ready is the OR of consumer readies, so a beat
 /// fires the cycle any consumer can take it, and an unready lane simply

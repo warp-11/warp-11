@@ -304,10 +304,6 @@ let private mainDemo () =
     let boardOk = boardPixels = boardTwin
     printfn $"counted board top vs twin ({boardTop.name}, 2 lanes): %b{boardOk} (%d{boardCycles} cycles)"
 
-    // The drawn form of the same design, against the typed one — the head
-    // registered this project's units before anything could name them.
-    printfn $"the frame drawn vs typed, to the byte: %b{Drawn.mandelbrotDrawn ()}"
-
     0
 
 /// What `debug` will open, by label — the pod designs on this side of the
@@ -358,10 +354,6 @@ let main argv =
         let ok = FrameHost.frameIsIndifferentToMemoryTiming ()
         printfn $"frame is indifferent to memory timing (4 seeds): %b{ok}"
         if ok then 0 else 1
-    // This project's example design as a file: `example <dir>`.
-    | [| "example"; dir |] ->
-        Example.write dir
-        0
     | [| "lanescale" |] ->
         FrameHost.laneScale [ (64, 208, 48, 26); (64, 208, 48, 52); (64, 208, 48, 104) ]
         0
@@ -395,8 +387,63 @@ let main argv =
     | [| "frameserve" |] ->
         FrameHost.frameserve ()
         0
+    // The ordered counted path beside the scattered one, same configuration,
+    // same behavioural DDR: `scatterscale w h px maxIter lanes`.
+    | [| "scatterscale"; w; h; px; mi; l |] ->
+        let w, h, pixels, maxIter, lanes = int w, int h, int px, int mi, int l
+        let toQ (v: float) = uint64 (int64 (v * 268435456.0)) &&& 0xFFFFFFFFUL
+        let view = (toQ -2.25, toQ -1.125, toQ (3.0 / float w), toQ (2.25 / float h))
+        let twin = Chunked.renderTwin w h pixels maxIter 28 view
+        let ordered, orderedCycles, _ = Chunked.renderThroughBoardTop w h pixels maxIter 28 8 lanes view
+        let scattered, scatterCycles, top = Chunked.renderThroughScatterTop w h pixels maxIter 28 8 lanes view
+        printfn $"[viaScatter] %d{w}x%d{h}/px%d{pixels}/m%d{maxIter}/l%d{lanes} ({top.name})"
+        printfn $"  ordered   %d{orderedCycles} cycles | bit-exact %b{ordered = twin}"
+        printfn $"  scattered %d{scatterCycles} cycles | bit-exact %b{scattered = twin}"
+
+        if scatterCycles > 0 then
+            printfn $"  scattered is %.2f{float orderedCycles / float scatterCycles}x the ordered path's speed"
+
+        0
+    // The scatter path at several chunk widths: `chunksweep w h maxIter lanes`.
+    // Each is checked against the twin, and the padded row is printed beside
+    // the cycles because padding is pixels computed and thrown away — a wider
+    // chunk that pads further can cost more than the tail it saves.
+    | [| "chunksweep"; w; h; mi; l |] ->
+        let w, h, maxIter, lanes = int w, int h, int mi, int l
+        let toQ (v: float) = uint64 (int64 (v * 268435456.0)) &&& 0xFFFFFFFFUL
+        let view = (toQ -2.25, toQ -1.125, toQ (3.0 / float w), toQ (2.25 / float h))
+        printfn $"[ChunkSweep] %d{w}x%d{h}/m%d{maxIter}/l%d{lanes}, scatter path"
+
+        for pixels in [ 128; 352; 704 ] do
+            let padded = Lane.chunkedWidth pixels w
+            let twin = Chunked.renderTwin w h pixels maxIter 28 view
+            let frame, cycles, _ = Chunked.renderThroughScatterTop w h pixels maxIter 28 8 lanes view
+            let perPixel = float cycles / float (padded * h)
+
+            printfn
+                $"  chunk %4d{pixels}: %7d{cycles} cycles | padded row %d{padded} (%d{padded * h} px) | %.3f{perPixel} cyc/px | bit-exact %b{frame = twin}"
+
+        0
     | [| "hardware"; repoRoot |] ->
         Seam.writeHardware repoRoot
+        0
+    // The example as the directory the KV260's toolchain builds from, from
+    // the typed design: `bitstream <dir> [lanes]`. Named for what comes out
+    // of it — the directory's own `build.sh` runs Vivado and packages the
+    // app. Fewer lanes than the part holds builds faster and renders the
+    // same picture, so the count is a dial rather than a constant.
+    | [| "bitstream"; dir |]
+    | [| "bitstream"; dir; _ |]
+    | [| "bitstream-scatter"; dir |]
+    | [| "bitstream-scatter"; dir; _ |] ->
+        let lanes = if argv.Length = 3 then int argv[2] else Chunked.siliconLanes
+        let scattered = argv[0] = "bitstream-scatter"
+        let out = (if scattered then Chunked.buildScatterDirectory else Chunked.buildDirectory) dir lanes
+
+        for file in out.files do
+            printfn $"wrote {file}"
+
+        printfn $"build with: {out.run}"
         0
     | [| "simserve" |] ->
         Host.simserve ()

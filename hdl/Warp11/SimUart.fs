@@ -136,21 +136,35 @@ let serialClientWith (sim: Sim) (pins: UartSimPins) (cyclesPerBit: int) (advance
     let uart = SimUart(sim, pins, cyclesPerBit)
     let device = uart :> ISimDevice
 
+    // Frames the fabric sends unasked — a design streaming on the same wire
+    // — are dropped here, because this client's job is the register map. A
+    // real host that wants them reads the same status byte and keeps them;
+    // what neither may do is mistake one for a reply.
+    let rec dropStreamed (bytes: byte list) =
+        match bytes with
+        | sync :: status :: rest when sync = byte serialSync && status = byte serialStreamStatus ->
+            // sync, status, four data bytes, checksum.
+            if List.length rest >= 5 then dropStreamed (List.skip 5 rest) else []
+        | _ -> bytes
+
     let exchange (isRead: bool) (request: byte list) =
         uart.TakeReceived() |> ignore
         uart.Send request
         let wanted = SerialFrame.replyLength isRead
-        // Bits on the wire for the request and the reply, plus slack.
-        let budget = (List.length request + wanted) * 10 * cyclesPerBit + 64 * cyclesPerBit
+        // Bits on the wire for the request and the reply, plus slack. A
+        // streamed frame can land between them, so the budget allows for
+        // some going past while the reply is waited for.
+        let budget = (List.length request + wanted) * 10 * cyclesPerBit + 512 * cyclesPerBit
         let mutable cycles = 0
+        let mutable pending = []
 
-        while List.length uart.Received < wanted && cycles < budget do
+        while List.length (dropStreamed (pending @ uart.Received)) < wanted && cycles < budget do
             device.Drive()
             advance ()
             device.Sample()
             cycles <- cycles + 1
 
-        match SerialFrame.parse isRead (uart.TakeReceived()) with
+        match SerialFrame.parse isRead (dropStreamed (pending @ uart.TakeReceived())) with
         | Ok v -> v
         | Error why -> failwith $"serial register map: {why} after %d{cycles} cycles"
 

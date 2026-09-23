@@ -15,8 +15,6 @@
         <Compile Include="FrameAxi.fs"/>
         <Compile Include="Chunked.fs"/>
         <Compile Include="Units.fs"/>
-        <Compile Include="Example.fs"/>
-        <Compile Include="Drawn.fs"/>
         <Compile Include="FrameHost.fs"/>
         <Compile Include="Seam.fs"/>
         <Compile Include="Host.fs"/>

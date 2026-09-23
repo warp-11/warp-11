@@ -61,8 +61,8 @@ A **box** is a unit from the palette — `gain`, `eq`, `compressor`, `mixer`,
   design with two streams needs two copies of each sequential box; more
   copies than streams is a **farm** — a beat goes to whichever copy is
   free and the beats leave in the order they came, clustered above sixteen
-  so the fan clocks. The Mandelbrot example spends `mandelChunk` 104 times
-  that way.
+  so the fan clocks. Warp 11's Mandelbrot spends its `mandelChunk` unit 104
+  times that way, one per lane the part's DSPs hold.
 - **answers**: a unit may emit several beats for one it takes — `mandelChunk`
   drains a 128-pixel chunk as eight beats of sixteen. The placement carries
   the beat's context alongside each of them and keeps the order across all
@@ -259,13 +259,13 @@ place of the WAV, the design's chunk width so the host knows how many beats
 come back for each it asks for, the view as registers, a PGM out —
 
 ```sh
-warp11_batch frame:1400x800 out.pgm --sim mandelbrot.json --chunk 128 \
+warp11_batch frame:1400x800 out.pgm --sim my.json --chunk 128 \
     --set cxOrigin=0xE0000000 --set cyOrigin=0x10000000 --set dx=575219 --set dy=0xFFF5C28F
-warp11_batch frame:1400x800 out.pgm --board mandelbrot_batch --layout mandelbrot_batch_layout.rs --chunk 128 --set ...
+warp11_batch frame:1400x800 out.pgm --board my_batch --layout my_batch_layout.rs --chunk 128 --set ...
 ```
 
-and `Warp11.Mandelbrot -- frame mandelbrot.json 1400x800 out.pgm cxOrigin=…`
-draws the same through the simulator's own device, no driver in the loop.
+and `-- frame my.json 1400x800 out.pgm cxOrigin=…` draws the same through
+the simulator's own device, no driver in the loop.
 Either way the driver reports the fabric's **own** cycle count for the batch,
 read from the `cycles` register the contract carries — the work's measure,
 as against timing a poll loop over a bus.

@@ -10,10 +10,54 @@ let private openLink () =
     let link, uart = serialClient sim (uartSimPins "host") cyclesPerBit
     sim, cyclesPerBit, link, uart
 
+/// The streaming variant's link, plus the sim so a check can read how many
+/// words the fabric believes it has handed over.
+let private openStreamLink () =
+    let sim = Sim serialRegMapStream.def
+    let cyclesPerBit = uartCyclesPerBit serialFabricHz serialBaud
+    let link, uart = serialClient sim (uartSimPins "host") cyclesPerBit
+    sim, cyclesPerBit, link, uart
+
 let tests =
     testList
         "Serial register map"
-        [ testCase "UART link reads, writes, pulses, and live fields" <| fun _ ->
+        [ testCase "streamed frames come out, and register traffic still answers" <| fun _ ->
+              let sim, _, link, uart = openStreamLink ()
+
+              // The register map still works with a stream competing for the
+              // wire — this is the property that matters, because a recorder
+              // that made `wdrc show` stop answering would be unusable.
+              Expect.equal (link.read32 serialRegs.id.offset) 0x5E71A1UL "the ID should still cross the UART"
+              link.write32 serialRegs.control.offset 0xBEEFUL
+              Expect.equal (link.read32 serialRegs.control.offset) 0xBEEFUL "a write should still read back"
+              Expect.equal (sim.Peek "control_out") 0xBEEFUL "the write should still reach the design"
+
+              // ...and the fabric has been handing words over all along.
+              Expect.isGreaterThan (sim.Peek "sent") 0UL "no streamed word was ever taken"
+
+          testCase "a streamed frame is tagged apart from a reply" <| fun _ ->
+              let sim, cyclesPerBit, _, uart = openStreamLink ()
+              let device = uart :> ISimDevice
+
+              // Let the link run with nothing asked of it: every frame out is
+              // a streamed one.
+              for _ in 1 .. cyclesPerBit * 200 do
+                  device.Drive()
+                  sim.Tick()
+                  device.Sample()
+
+              let bytes = uart.TakeReceived()
+              Expect.isGreaterThan bytes.Length 6 "the fabric sent nothing unasked"
+
+              let sync = List.findIndex (fun b -> b = byte serialSync) bytes
+              let frame = bytes[sync .. sync + 6]
+              Expect.equal frame[0] (byte serialSync) "a frame starts with the sync byte"
+              Expect.equal frame[1] (byte serialStreamStatus) "an unasked frame is tagged as a streamed word"
+
+              let payloadXor = frame[2] ^^^ frame[3] ^^^ frame[4] ^^^ frame[5]
+              Expect.equal frame[6] (frame[1] ^^^ payloadXor) "the streamed frame's checksum should cover status and data"
+
+          testCase "UART link reads, writes, pulses, and live fields" <| fun _ ->
               let sim, _, link, _ = openLink ()
               Expect.equal (link.read32 serialRegs.id.offset) 0x5E71A1UL "The constant ID should cross the UART"
               Expect.equal (link.read32 serialRegs.control.offset) 0x100UL "The control register should expose its reset value"

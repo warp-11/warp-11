@@ -7,7 +7,7 @@
 /// carry a field of the beat, **control** pins hold a value across beats. A
 /// wire joins two pins of the same kind.
 ///
-/// No reflection: a unit's pins come from its `Pins` witness, hand-written
+/// No reflection: a unit's pins come from its `viaPins` witness, hand-written
 /// once per shape and read here as data. The `'p` type parameter is the
 /// compile-time face of the same information.
 module Warp11.Graph

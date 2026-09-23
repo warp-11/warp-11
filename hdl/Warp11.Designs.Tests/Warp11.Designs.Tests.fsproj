@@ -10,6 +10,7 @@
         <Compile Include="MemoryTests.fs"/>
         <Compile Include="RegMapTests.fs"/>
         <Compile Include="StreamTests.fs"/>
+        <Compile Include="ForkTests.fs"/>
         <Compile Include="ImageTests.fs"/>
         <Compile Include="SemanticTests.fs"/>
         <Compile Include="RegistryTests.fs"/>

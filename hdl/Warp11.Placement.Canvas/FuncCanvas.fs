@@ -1603,7 +1603,7 @@ let view (opening: Opening) : Control =
                         let path =
                             match mapping.Current with
                             | Some m when b.hostMemory.IsSome -> m.path
-                            | _ -> Pins
+                            | _ -> viaPins
 
                         useMapping (Some { board = b; path = path })
                     | Error why -> message.Set why
@@ -1635,8 +1635,8 @@ let view (opening: Opening) : Control =
                      row ("the design's rate lands at", $"%.3f{landed} Hz")
                      line
                          [ label "data path"
-                           combo [ "pins"; "memory"; "count" ] (match m.path with Pins -> "pins" | HostMemory -> "memory" | Counted -> "count") (fun p ->
-                               update (fun m -> { m with path = (match p with "memory" -> HostMemory | "count" -> Counted | _ -> Pins) })) ]
+                           combo [ "pins"; "memory"; "count"; "scatter" ] (Warp11.Mapping.pathText m.path) (fun p ->
+                               update (fun m -> { m with path = (match p with "memory" -> viaHostMemory | "count" -> viaCount | "scatter" -> viaScatter | _ -> viaPins) })) ]
                      (match b.hostMemory with
                       | Some hm ->
                           line

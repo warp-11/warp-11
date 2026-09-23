@@ -81,19 +81,113 @@ type HostMemoryFacts =
     { /// `S_AXI_HPC0_FPD`, `S_AXI_HP0_FPD`, …
       port: string
       width: int
-      arenaBytes: int }
+      arenaBytes: int
+      /// How many single-beat writes a master keeps in flight on this port.
+      ///
+      /// A fact about the port, not about the design, which is why it lives
+      /// here: the cost of a write is a full AW+W+B round trip, and what hides
+      /// that round trip is how many of them overlap. `Stdlib.fs`'s write
+      /// master puts the sweet spot for an HP port at 8..16.
+      ///
+      /// It is derived rather than written at the call site because it was
+      /// got wrong there: the batch top passed `4`, matching the *reader*'s
+      /// `4` on the line above — where 4 counts bursts of 16 beats, not
+      /// beats — and every hand-built design in the tree passed 8 or 16.
+      writeOutstanding: int }
 
-/// Which way a design's boundary reaches the world on a board: the
-/// converter on the board's pins, or the host's memory — rows in a DMA
-/// buffer the fabric reads, runs the design over, and writes back. A
-/// design's choice, per mapping; refused where the board has no such path.
-type DataPath =
-    | Pins
-    | HostMemory
-    /// Beats counted into the design — its input box's one field is the beat
-    /// index, `0 …` as many as the host asks for — and rows out to the host's
-    /// memory. A generator's path: a frame the design draws, nothing read.
-    | Counted
+/// What satisfies a need on a target.
+///
+/// A carrier is the "how", and it is chosen per need rather than per design:
+/// the point is that two needs may be carried differently, and the same need
+/// may be carried two ways at once (`notes/DEVICES.md` §10h, rung 4). Which
+/// *transport* a carrier then uses is the board's business — `InRegisterMap`
+/// says a word in the host's register map, and `board.host` says whether the
+/// host reaches it over AXI-Lite or a UART.
+type Carrier =
+    /// The converter on the board's pins.
+    | OnPins
+    /// A beat index minted in fabric — `0 …` as many as the host asks for —
+    /// and nothing read. Only carries a stream *in*.
+    | AsBeatCount
+    /// Rows in the host's memory, position by order: the nth row is the nth
+    /// beat. Carries a stream either way.
+    | InHostRows
+    /// Rows in the host's memory, position stated by the design — its first
+    /// output field is the destination index. Only carries a stream *out*,
+    /// and is what lets the work behind it finish in any order.
+    | InHostRowsAt
+    /// A word in the host's register map.
+    | InRegisterMap
+    /// Frames on the host link itself, interleaved with the register map's
+    /// replies — what a board with one wire and no bus has to offer. The
+    /// link back-pressures, so a design that outruns the baud waits unless
+    /// something in front of it is allowed to drop.
+    | InLinkFrames
+
+/// Which need a binding is about.
+///
+/// A preset cannot name a design's needs — `viaCount` has to work for a
+/// design whose stream is called `beats` and one whose stream is called `in`
+/// — so a binding may address a need by name *or* by kind. By-name wins over
+/// by-kind, which is what lets a mapping override one need of a preset
+/// without restating the rest.
+type NeedRef =
+    | ByName of string
+    | EveryStreamIn
+    | EveryStreamOut
+    | EveryValueIn
+
+/// What carries one of a design's needs.
+type Binding = { need: NeedRef; carrier: Carrier }
+
+/// Which way a design's boundary reaches the world on a board: a binding per
+/// need.
+///
+/// This was one enum of four values until 2026-09-22 (Jason: *"DataPath is
+/// combining input / outputs into the same enum, for no good reason"*), then
+/// briefly a source/sink pair, which UC4 showed was still too few slots — a
+/// real boundary is a list. The four names below are the four combinations
+/// anyone has built, kept as presets over the list exactly as boards are
+/// presets over their axes.
+type DataPath = { bindings: Binding list }
+
+let private everything inCarrier outCarrier =
+    { bindings =
+        [ { need = EveryStreamIn; carrier = inCarrier }
+          { need = EveryStreamOut; carrier = outCarrier }
+          { need = EveryValueIn; carrier = InRegisterMap } ] }
+
+/// The converter on the pins, both ways.
+let viaPins = everything OnPins OnPins
+
+/// Rows in from the host's memory, rows back out to it.
+let viaHostMemory = everything InHostRows InHostRows
+
+/// Counted in, rows out in the order they leave: a frame the design draws,
+/// nothing read.
+let viaCount = everything AsBeatCount InHostRows
+
+/// Counted in, and each beat written where the design says.
+let viaScatter = everything AsBeatCount InHostRowsAt
+
+/// **Everything** that carries a need. A need may be bound more than once —
+/// the aid's processed audio goes to the earphones *and* to a recorder — so
+/// this is a list, and the single-carrier `carrierFor` below is the common
+/// case of it.
+///
+/// By-name bindings shadow the by-kind ones rather than adding to them: a
+/// mapping that names a need is saying where that one goes, and a preset's
+/// "every stream out" should not then smuggle in a destination nobody asked
+/// for. So naming a need once overrides, and naming it twice forks.
+let carriersFor (path: DataPath) (kind: NeedRef) (name: string) : Carrier list =
+    match path.bindings |> List.filter (fun b -> b.need = ByName name) with
+    | [] -> path.bindings |> List.filter (fun b -> b.need = kind) |> List.map (fun b -> b.carrier)
+    | named -> named |> List.map (fun b -> b.carrier)
+
+/// What carries a need, where exactly one thing does. `None` when nothing
+/// does, which `boardTop` refuses rather than guessing.
+let carrierFor (path: DataPath) (kind: NeedRef) (name: string) : Carrier option =
+    carriersFor path kind name |> List.tryHead
 
 /// How a host reaches the design's registers.
 ///
@@ -244,7 +338,10 @@ let kv260At (fabricHz: int) =
         Some
             { port = "S_AXI_HPC0_FPD"
               width = 128
-              arenaBytes = 8 <<< 20 }
+              arenaBytes = 8 <<< 20
+              // The top of `Stdlib.fs`'s stated 8..16 sweet spot for an HP
+              // port, and what the frame design and Game of Life both use.
+              writeOutstanding = 16 }
       host = AxiLiteAt 0xB0000000UL
       loading = OsApp "/lib/firmware/xilinx"
       connectors =

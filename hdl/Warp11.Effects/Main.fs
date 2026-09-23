@@ -483,7 +483,7 @@ let private stageStallReport () =
 /// Rising edges of MCLK and SCLK across a whole number of LRCLK periods,
 /// measured off the design's own pins.
 ///
-/// **Counted between LRCLK edges rather than over a fixed window**, so the
+/// **viaCount between LRCLK edges rather than over a fixed window**, so the
 /// answer is exact rather than off by whatever a window boundary happens to cut
 /// through — which matters, because the numbers being checked are ratios a
 /// converter either locks to or does not.

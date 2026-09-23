@@ -2474,6 +2474,43 @@ let serialRegMap =
 
             control ==> controlOut)
 
+/// The same map, with a stream of words going out on the same wire: a
+/// free-running counter offered as fast as the link will carry it, so a check
+/// can watch frames interleave with register traffic and confirm neither
+/// starves the other.
+let serialRegMapStream =
+    defModule
+        "SerialRegMapStream"
+        (fun p -> (uartPins p "host", p.outPort "control_out" 16, p.outPort "sent" 32))
+        (fun (pins, controlOut, sentOut) ->
+            let word = reg "stream_word" 32
+            let sent = reg "stream_sent" 32
+            let ready = wireBit "stream_ready"
+            registerStreamReady ready
+
+            let source: Stream<Expr> =
+                { payload = word
+                  valid = lit 1UL 1
+                  ready = ready
+                  layout = layout1 ("word", 32) }
+
+            If ready (fun () ->
+                word + lit 1UL 32 ==> word
+                sent + lit 1UL 32 ==> sent)
+
+            let regs = serialRegMapSlaveWith "host" serialFabricHz serialBaud pins serialMap source
+
+            let count = reg "count_reg" 8
+            If (regs.pulse serialRegs.bump) (fun () -> count + lit 1UL 8 ==> count)
+            regs.drive serialRegs.count count
+
+            let ticks = reg "ticks_reg" 32
+            ticks + lit 1UL 32 ==> ticks
+            regs.drive serialRegs.ticks ticks
+
+            regs.value serialRegs.control ==> controlOut
+            sent ==> sentOut)
+
 /// Four animated rows (free-running counters, so every frame differs) through
 /// `snapshotSource` and `streamConflate3` at ports: the testbench's random
 /// capture/release/writer-idle/backpressure pokes differentially exercise the

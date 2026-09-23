@@ -61,6 +61,7 @@ let private boardNode (b: Board) : JsonObject =
         hm["port"] <- str m.port
         hm["width"] <- num m.width
         hm["arenaBytes"] <- num m.arenaBytes
+        hm["writeOutstanding"] <- num m.writeOutstanding
         o["hostMemory"] <- hm)
 
     let host = JsonObject()
@@ -193,7 +194,15 @@ let private readBoard (o: JsonNode) : Result<Board, string> =
                                                                  getInt hm "width"
                                                                  >>= fun width ->
                                                                      getInt hm "arenaBytes"
-                                                                     |> Result.map (fun arena -> Some { port = port; width = width; arenaBytes = arena }))
+                                                                     |> Result.map (fun arena ->
+                                                                         // Optional: board files written before the field
+                                                                         // existed still load, at the HP port's sweet spot.
+                                                                         let outstanding =
+                                                                             match optional hm "writeOutstanding" |> Option.bind (fun v -> asInt "writeOutstanding" v |> Result.toOption) with
+                                                                             | Some n -> n
+                                                                             | None -> 16
+
+                                                                         Some { port = port; width = width; arenaBytes = arena; writeOutstanding = outstanding }))
                                                         >>= fun hostMemory ->
                                                             field o "host"
                                                             >>= fun host ->
@@ -296,17 +305,30 @@ let loadBoard (path: string) : Result<Board, string> =
 // ---------------------------------------------------------------------------
 // The mapping as JSON.
 
-let private pathText (p: DataPath) =
-    match p with
-    | Pins -> "pins"
-    | HostMemory -> "memory"
-    | Counted -> "count"
+/// The path's preset name, or the pair it is when it has none. Public
+/// because the canvas names paths in its target section too.
+let pathText (p: DataPath) =
+    // A preset is recognised by the carriers it binds by kind, so a mapping
+    // that rebinds one need by name still prints as the preset it started
+    // from plus that binding — which is what a file has to round-trip.
+    let byKind kind =
+        p.bindings |> List.tryFind (fun b -> b.need = kind) |> Option.map (fun b -> b.carrier)
+
+    match byKind EveryStreamIn, byKind EveryStreamOut with
+    | Some OnPins, Some OnPins -> "pins"
+    | Some InHostRows, Some InHostRows -> "memory"
+    | Some AsBeatCount, Some InHostRows -> "count"
+    | Some AsBeatCount, Some InHostRowsAt -> "scatter"
+    // A combination with no preset name prints as the carriers it is, so a
+    // mapping file can still carry one once `boardTop` builds it.
+    | inCarrier, outCarrier -> $"%A{inCarrier}/%A{outCarrier}"
 
 let private readPath (text: string) : Result<DataPath, string> =
     match text with
-    | "pins" -> Ok Pins
-    | "memory" -> Ok HostMemory
-    | "count" -> Ok Counted
+    | "pins" -> Ok viaPins
+    | "memory" -> Ok viaHostMemory
+    | "count" -> Ok viaCount
+    | "scatter" -> Ok viaScatter
     | other -> Error $"'path': a data path is pins, memory or count, not '{other}'"
 
 let write (m: Mapping) : string =
@@ -418,7 +440,7 @@ let showBoard (b: Board) : string =
 
     let memory =
         b.hostMemory
-        |> showOption (fun m -> $"{{ port = {quote m.port}; width = %d{m.width}; arenaBytes = %d{m.arenaBytes} }}")
+        |> showOption (fun m -> $"{{ port = {quote m.port}; width = %d{m.width}; arenaBytes = %d{m.arenaBytes}; writeOutstanding = %d{m.writeOutstanding} }}")
 
     String.concat
         "\n"
