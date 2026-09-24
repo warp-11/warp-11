@@ -253,6 +253,441 @@ let gainFracBits = 8
 /// The gain register value that passes a sample through unchanged.
 let gainUnity = 1UL <<< gainFracBits
 
+// ---------------------------------------------------------------------------
+// The gain table: a compression law as a table of dB gains, indexed by the
+// envelope's logarithm.
+//
+// **Why a table and not the formula.** The four-region curve a prescription is
+// written in (expansion, linear, compression, limiting) is affine in dB in
+// every region, and evaluating it in fabric costs two or three multiplies a
+// band-sample plus a log whose piecewise-linear error lands straight on the
+// curve's slope. A table bakes the exact log into its entries, costs one
+// multiply-add, and expresses *any* dB curve rather than one family of them.
+//
+// **Why dB and not linear gain.** Every later term — a noise-reduction
+// decision, a volume control, a feedback suppressor — is then an *add* on one
+// adder rather than a multiply, the interpolation of a curve that is
+// piecewise-linear in dB is exact inside a region, and the safety ceiling is
+// one saturate on the sum, in one place, across every source of gain.
+// (`~/projects/fsharp/HearingAid/docs/DSP_ROADMAP.md` § The gain table.)
+
+/// Width of a gain in the log domain: Q5.11 signed, which reaches ±96 dB in
+/// steps of 0.003 dB. Wide enough that no prescription and no sum of terms over
+/// one comes near the ends, and narrow enough that two of them fit a table word.
+let gainLogWidth = 16
+
+/// Fraction bits in a `gainLogWidth` gain.
+let gainLogFracBits = 11
+
+/// **A gain travels as the base-two logarithm of itself, and every number a
+/// person reads is in decibels.** The two differ by a constant, so the choice
+/// decides one thing only: whether the exponential that turns a gain back into
+/// a multiplier gets its integer part for free. In log2 the integer part *is*
+/// the shift and the fraction *is* the table index; in decibels both need a
+/// multiply by 1/6.0206 first, once per band and ear.
+///
+/// So the stored unit is log2 and the spoken unit is decibels: `gainTableWords`
+/// takes a curve in dB, the host converts what it writes, and `gainLogOfDb` /
+/// `gainDbOfLog` are the only place the constant appears.
+let gainLogPerDb = 1.0 / (20.0 * log10 2.0)
+
+/// Decibels as the log2 gain the fabric carries.
+let gainLogOfDb (db: float) = db * gainLogPerDb
+
+/// A log2 gain back in decibels, for anything a person reads.
+let gainDbOfLog (gain: float) = gain / gainLogPerDb
+
+/// How finely one octave of envelope is divided. Two steps is 3.01 dB an
+/// entry, and a prescription is tabulated to within 0.6 dB on that grid —
+/// three quarters of it at a knee, where the law's slope changes inside one
+/// entry, and the rest the bow below.
+///
+/// **The interpolation walks the envelope, not the decibel.** The fraction
+/// bits it uses are the mantissa's, so the chord is straight in amplitude
+/// while the law is straight in dB, and across 3.01 dB the two bow apart by
+/// up to 0.19 dB. Walking the decibel instead would need the logarithm this
+/// table exists to avoid, and the bow is a quarter of what a knee already
+/// costs — so it is paid rather than removed. Four steps an octave would
+/// halve the knee and near enough erase the bow, at two words a band.
+let gainTableStepsPerOctave = 2
+
+/// Entries the table uses: one per step of every octave the envelope spans.
+let gainTableEntries = sampleWidth * gainTableStepsPerOctave
+
+/// Fraction bits the lookup interpolates on, and the width of the multiply's
+/// unsigned operand.
+let gainTableFracBits = 8
+
+/// Bits of the address the step within an octave takes.
+let gainTableStepBits = log2Exact gainTableStepsPerOctave
+
+/// Bits of the address the octave takes.
+let gainTableOctaveBits = bitsToHold sampleWidth
+
+/// Bits the address takes: the octave with the step under it.
+let gainTableAddrBits = gainTableOctaveBits + gainTableStepBits
+
+/// Words the table occupies. This is the address's own range rather than the
+/// entry count rounded up, which is why the fabric's address is the octave
+/// concatenated with the step and needs no compare: a table sized to
+/// `gainTableEntries` would leave the top octaves addressing past its end.
+/// The words between the last entry and the end are unreachable.
+let gainTableSize = 1 <<< gainTableAddrBits
+
+/// The envelope level entry `e` stands for, as a fraction of full scale.
+/// Entry 0 is the smallest envelope there is, and is what `env = 0` reads.
+let gainTableLevel (e: int) =
+    let octave = e / gainTableStepsPerOctave
+    let step = e % gainTableStepsPerOctave
+    let mantissa = 1.0 + float step / float gainTableStepsPerOctave
+    mantissa * (2.0 ** float octave) / (2.0 ** float sampleWidth)
+
+/// Width of a table word: the entry's gain with the step to the next above it.
+let gainTableWordWidth = 2 * gainLogWidth
+
+/// A dB gain curve, tabulated for the fabric.
+///
+/// `curve` takes the envelope's level in **dBFS** — 0 at full scale, negative
+/// below — and returns the gain to apply there, in **dB**. Anything in dB
+/// SPL is the caller's own offset folded into the curve, so the stdlib holds
+/// no opinion about microphones.
+///
+/// A word is the entry's gain in the low sixteen bits and the signed step to
+/// the next entry in the high sixteen, both Q8.8, so the fabric's lookup is
+/// one multiply-add and the gain is continuous — no zipper across an entry
+/// boundary.
+let gainTableWords (curve: float -> float) : uint64[] =
+    let one = float (1 <<< gainLogFracBits)
+    let mostNegative = -(float (1 <<< (gainLogWidth - 1))) / one
+    let mostPositive = float ((1 <<< (gainLogWidth - 1)) - 1) / one
+
+    let toGainLog (db: float) =
+        uint64 (int16 (round (max mostNegative (min mostPositive (gainLogOfDb db)) * one)))
+        &&& ((1UL <<< gainLogWidth) - 1UL)
+
+    // One point past the last entry, so every entry has a step to the next
+    // and the top of the range interpolates like the rest of it. Without it
+    // the last entry is flat across its 3 dB while the limiting region is
+    // still falling, which costs over two decibels exactly where the ceiling
+    // matters most.
+    let gains = [| for e in 0..gainTableEntries -> curve (20.0 * log10 (gainTableLevel e)) |]
+
+    [| for e in 0 .. gainTableSize - 1 ->
+           if e >= gainTableEntries then
+               0UL
+           else
+               (toGainLog (gains[e + 1] - gains[e]) <<< gainLogWidth) ||| toGainLog gains[e] |]
+
+/// What the fabric's lookup computes for an envelope, from the same words —
+/// the model its own path is held to, and the way a host predicts what the
+/// band will do without running it. In log2, like the words; `gainDbOfLog` puts
+/// it back in the unit the curve was written in.
+let gainTableLookup (words: uint64[]) (env: int) : float =
+    let mantissaBits = gainTableStepBits + gainTableFracBits
+    let low bits x = x &&& ((1 <<< bits) - 1)
+    let signedGainLog raw = float (int16 (uint16 (low gainLogWidth raw))) / float (1 <<< gainLogFracBits)
+
+    if env <= 0 then
+        signedGainLog (words[0] |> int)
+    else
+        // The leading one names the octave, and the bits under it place the
+        // envelope within it — the same split the fabric's priority encoder and
+        // mantissa select make, written the same way round so the two can be
+        // read against each other.
+        let octave =
+            let rec find b = if b < 0 || (env >>> b) &&& 1 = 1 then b else find (b - 1)
+            find (sampleWidth - 1)
+
+        let mantissa =
+            if octave >= mantissaBits then
+                low mantissaBits (env >>> (octave - mantissaBits))
+            else
+                low mantissaBits (env <<< (mantissaBits - octave))
+
+        let entry = octave * gainTableStepsPerOctave + (mantissa >>> gainTableFracBits)
+        let fraction = low gainTableFracBits mantissa
+
+        // In integers and with the same truncating shift the fabric uses, so
+        // this predicts the gain rather than approximating it — the two agree to
+        // the last of the sixteen bits, which is what lets a check hold one to
+        // the other instead of to a tolerance.
+        let word = int words[entry]
+        let here = int (int16 (uint16 (low gainLogWidth word)))
+        let step = int (int16 (uint16 (low gainLogWidth (word >>> gainLogWidth))))
+        // The shift divides out the *fraction's* scale, not the gain's. They
+        // were the same number while a gain was Q8.8 decibels, which is exactly
+        // the kind of coincidence that hides a wrong constant.
+        float (here + ((step * fraction) >>> gainTableFracBits)) / float (1 <<< gainLogFracBits)
+
+/// Where an envelope reads in the table, and how far past that entry it falls.
+type GainTableIndex =
+    { /// The word to read — the octave with the step under it.
+      address: Expr
+      /// How far along the entry the envelope sits, unsigned Q0.`gainTableFracBits`.
+      fraction: Expr }
+
+/// Split an envelope into the table address and the fraction past it.
+///
+/// The address is the position of the envelope's leading one with the mantissa
+/// bits under it — which is the exponent and mantissa of a float, and is why
+/// the logarithm the curve is written in costs a priority encoder rather than
+/// an approximation whose error lands on the curve's slope.
+///
+/// `env` must be a declared unsigned signal, since the mantissa is read out of
+/// it by slicing. A zero envelope reads entry zero with no interpolation, which
+/// is the floor the curve's first entry states.
+let gainTableIndex (name: string) (env: Expr) : GainTableIndex =
+    if width env <> sampleWidth then
+        failwith $"gainTableIndex '{name}' expects a %d{sampleWidth}-bit envelope, got %d{width env} bits"
+
+    let mantissaBits = gainTableStepBits + gainTableFracBits
+
+    // The octave is the highest set bit. Listing the bits most-significant
+    // first turns `priorityPick`'s lowest-index-first tree into a
+    // highest-bit-first one at log depth.
+    let bits = [ for b in sampleWidth - 1 .. -1 .. 0 -> slice b b env ]
+    let indices = [ [ for b in sampleWidth - 1 .. -1 .. 0 -> lit (uint64 b) gainTableOctaveBits ] ]
+    let _, picked = priorityPick bits indices
+
+    let octave = wire $"{name}_octave" gainTableOctaveBits
+    picked[0] ==> octave
+
+    // The mantissa bits below that leading one. A dynamic shift would widen to
+    // every position the amount could reach; selecting among static slices is
+    // the same mux tree without the width.
+    let mantissa = wire $"{name}_mantissa" mantissaBits
+
+    selectIndexed
+        octave
+        [ for o in 0 .. sampleWidth - 1 ->
+              if o = 0 then lit 0UL mantissaBits
+              elif o < mantissaBits then catAll [ slice (o - 1) 0 env; lit 0UL (mantissaBits - o) ]
+              else slice (o - 1) (o - mantissaBits) env ]
+    ==> mantissa
+
+    let address = wire $"{name}_address" gainTableAddrBits
+    catAll [ octave; slice (mantissaBits - 1) gainTableFracBits mantissa ] ==> address
+
+    let fraction = wire $"{name}_fraction" gainTableFracBits
+    slice (gainTableFracBits - 1) 0 mantissa ==> fraction
+
+    { address = address; fraction = fraction }
+
+/// The multiply's two operands and the addend that outlives it — the first half
+/// of `gainTableGain`, for an engine that puts a shared multiplier between them.
+let private gainTableOperands (name: string) (word: Expr) (fraction: Expr) : Expr * Expr * Expr =
+    if width word <> gainTableWordWidth then
+        failwith $"gainTableOperands '{name}' expects a %d{gainTableWordWidth}-bit word, got %d{width word} bits"
+
+    let here = wire $"{name}_here" (SInt gainLogWidth)
+    asSInt (slice (gainLogWidth - 1) 0 word) ==> here
+
+    let step = wire $"{name}_step" (SInt gainLogWidth)
+    asSInt (slice (gainTableWordWidth - 1) gainLogWidth word) ==> step
+
+    let along = wire $"{name}_along" (SInt(gainTableFracBits + 1))
+    widenUnsigned (gainTableFracBits + 1) fraction ==> along
+
+    step, along, here
+
+/// The gain from the interpolation product — the second half of `gainTableGain`.
+/// `product` must be a declared signal, since the shift names it.
+let private gainTableFromProduct (name: string) (product: Expr) (here: Expr) : Expr =
+    let shifted = wire $"{name}_shifted" (SInt(width product))
+    sra gainTableFracBits product ==> shifted
+
+    let scaled = wire $"{name}_scaled" (SInt gainLogWidth)
+    asSInt (slice (gainLogWidth - 1) 0 shifted) ==> scaled
+
+    let gain = wire $"{name}_gain" (SInt gainLogWidth)
+    add here scaled ==> gain
+    gain
+
+/// The gain a table word means at a fraction past its entry: the entry's gain
+/// plus the stored step scaled by the fraction, in Q8.8 decibels.
+///
+/// One multiply and one add, and the sum cannot overflow — it lies between the
+/// entry's gain and the next entry's, both of which the word already holds.
+///
+/// `multiply` is whichever multiplier the caller owns, as in `envelopeStep`: a
+/// spatial engine hands it `mul` and a folded one hands it a slot on a shared
+/// unit, so whether the table gets a block of its own is decided here and is
+/// invisible to every caller. The halves are `gainTableOperands` and
+/// `gainTableFromProduct`, for an engine that puts a pipeline between them.
+let gainTableGain (multiply: Expr -> Expr -> Expr) (name: string) (word: Expr) (fraction: Expr) : Expr =
+    let step, along, here = gainTableOperands name word fraction
+
+    let product = wire $"{name}_scaled_wide" (SInt(gainLogWidth + gainTableFracBits + 1))
+    multiply step along ==> product
+
+    gainTableFromProduct name product here
+
+// ---------------------------------------------------------------------------
+// The exponential: a log2 gain back into a multiplier.
+//
+// `2^(n + f)` is `2^f` shifted by `n`, and a log2 gain hands both over for free
+// — the integer part *is* the shift and the fraction *is* the index. So the only
+// arithmetic here is one octave of `2^f`, tabulated, and the shift, which is the
+// one place a variable shifter appears in the audio path.
+
+/// How finely the mantissa is tabulated — sixteen points across one octave. A
+/// chord across a sixteenth of an octave of `2^f` is wrong by `(h·ln2)²/8`,
+/// which is 0.002 dB, so the exponential is nowhere near what limits the curve.
+let gainExpBits = 4
+
+/// Points in the mantissa table.
+let gainExpEntries = 1 <<< gainExpBits
+
+/// Fraction bits left inside one of those points.
+let gainExpFracBits = gainLogFracBits - gainExpBits
+
+/// Width of the mantissa: Q1.15 across [1, 2).
+let gainExpMantissaBits = 16
+
+/// Width of a mantissa word: the point, and the step to the next above it.
+let gainExpWordWidth = 2 * gainExpMantissaBits
+
+/// Bits the exponent takes, and so the width of the shift it becomes.
+let gainExpExponentBits = gainLogWidth - gainLogFracBits
+
+/// `2^f` across one octave, as a point and a step per word — the same word shape
+/// the gain table uses, interpolated the same way.
+let gainExpWords: uint64[] =
+    let one = float (1 <<< (gainExpMantissaBits - 1))
+    let at e = int (round (2.0 ** (float e / float gainExpEntries) * one))
+
+    [| for e in 0 .. gainExpEntries - 1 ->
+           (uint64 (at (e + 1) - at e) <<< gainExpMantissaBits) ||| uint64 (at e) |]
+
+/// The mantissa the fabric computes for a log2 gain's fraction — `2^f` in Q1.15,
+/// as an integer, so the host predicts the fabric rather than approximating it.
+let gainExpMantissaOfLog (gainLog: int) : int =
+    let fraction = gainLog &&& ((1 <<< gainLogFracBits) - 1)
+    let word = int gainExpWords[fraction >>> gainExpFracBits]
+    let within = fraction &&& ((1 <<< gainExpFracBits) - 1)
+    let here = word &&& ((1 <<< gainExpMantissaBits) - 1)
+    let step = word >>> gainExpMantissaBits
+    here + ((step * within) >>> gainExpFracBits)
+
+/// What the fabric's apply produces for a log2 gain and a sample — the model the
+/// apply path is held to. `gainLog` is the signed Q5.11 value, `sample` a signed
+/// sample; the shift and the clamp are the fabric's, floor and two's complement.
+let gainApplyToSample (gainLog: int) (sample: int) : int =
+    let exponent = gainLog >>> gainLogFracBits
+    // In 64 bits: a full-scale sample times a mantissa is 2^38, and the fabric's
+    // product wire is wider than an int.
+    let product = int64 sample * int64 (gainExpMantissaOfLog gainLog)
+    let scaled = product >>> (gainExpMantissaBits - 1 - exponent)
+    let ceiling = int64 ((1 <<< (sampleWidth - 1)) - 1)
+    int (max (-ceiling - 1L) (min ceiling scaled))
+
+/// The exponential's multiply operands and the addend that outlives them — the
+/// first half of the mantissa, for an engine that puts a shared multiplier
+/// between the two.
+///
+/// The table is a select over literals rather than a `rom`, because at sixteen
+/// words it is the mux tree a synthesiser builds from one anyway, and because it
+/// exports as FIRRTL where a preloaded memory does not.
+let gainExpOperands (name: string) (gainLog: Expr) : Expr * Expr * Expr =
+    let entry = wire $"{name}_exp_entry" gainExpBits
+    slice (gainLogFracBits - 1) gainExpFracBits gainLog ==> entry
+
+    let within = wire $"{name}_exp_within" gainExpFracBits
+    slice (gainExpFracBits - 1) 0 gainLog ==> within
+
+    let word = wire $"{name}_exp_word" gainExpWordWidth
+    selectIndexed entry [ for w in gainExpWords -> lit w gainExpWordWidth ] ==> word
+
+    let here = wire $"{name}_exp_here" (gainExpMantissaBits + 1)
+    widenUnsigned (gainExpMantissaBits + 1) (slice (gainExpMantissaBits - 1) 0 word) ==> here
+
+    let step = wire $"{name}_exp_step" (SInt(gainExpMantissaBits + 1))
+    widenUnsigned (gainExpMantissaBits + 1) (slice (gainExpWordWidth - 1) gainExpMantissaBits word) ==> step
+
+    let along = wire $"{name}_exp_along" (SInt(gainExpFracBits + 1))
+    widenUnsigned (gainExpFracBits + 1) within ==> along
+
+    step, along, here
+
+/// Width of the exponential's product.
+let gainExpProductWidth = gainExpMantissaBits + gainExpFracBits + 2
+
+/// The mantissa from that product — the second half. `2^f` in Q1.15, one bit
+/// wider than the format so the top of the octave has somewhere to sit.
+let gainExpFromProduct (name: string) (product: Expr) (here: Expr) : Expr =
+    let shifted = wire $"{name}_exp_shifted" (SInt(width product))
+    sra gainExpFracBits product ==> shifted
+
+    let scaled = wire $"{name}_exp_scaled" (gainExpMantissaBits + 1)
+    asUInt (slice gainExpMantissaBits 0 shifted) ==> scaled
+
+    let mantissa = wire $"{name}_exp_mantissa" (gainExpMantissaBits + 1)
+    add here scaled ==> mantissa
+    mantissa
+
+/// The apply's operands: the value, and the mantissa as something to multiply
+/// it by.
+let gainApplyOperands (name: string) (value: Expr) (mantissa: Expr) : Expr * Expr =
+    let mantissaSigned = wire $"{name}_mantissa_signed" (SInt(gainExpMantissaBits + 2))
+    widenUnsigned (gainExpMantissaBits + 2) mantissa ==> mantissaSigned
+    value, mantissaSigned
+
+/// The scaled value from the apply's product: shifted by the gain's integer
+/// part, then saturated.
+///
+/// **The shift is the only variable shifter in the audio path**, and it is what
+/// a gain spanning octaves costs wherever it is kept. A folded engine has one of
+/// them however many bands it serves, which is the shape that makes it cheap: on
+/// an iCE40 UP5K the exponential, this shift and the saturate are 362 LUT4
+/// together.
+let gainApplyFromProduct (name: string) (gainLog: Expr) (product: Expr) (toWidth: int) : Expr =
+    // The shift is `15 - exponent`, computed one bit wide of the exponent
+    // because the exponent reaches -16 where the shift reaches 31.
+    let exponentNarrow = wire $"{name}_exponent_narrow" (SInt gainExpExponentBits)
+    asSInt (slice (gainLogWidth - 1) gainLogFracBits gainLog) ==> exponentNarrow
+
+    let exponent = wire $"{name}_exponent" (SInt(gainExpExponentBits + 1))
+    pad (gainExpExponentBits + 1) exponentNarrow ==> exponent
+
+    let shiftWide = wire $"{name}_shift_wide" (SInt(gainExpExponentBits + 1))
+    sub (lit (uint64 (gainExpMantissaBits - 1)) (gainExpExponentBits + 1)) exponent ==> shiftWide
+
+    let shift = wire $"{name}_shift" gainExpExponentBits
+    asUInt (slice (gainExpExponentBits - 1) 0 shiftWide) ==> shift
+
+    let shifted = wire $"{name}_shifted" (SInt(width product))
+    shrBy shift product ==> shifted
+
+    let scaled = wire $"{name}_scaled" (SInt toWidth)
+    saturate toWidth shifted ==> scaled
+    scaled
+
+/// Apply a log2 gain to a sample: the fraction becomes a mantissa, the integer
+/// part becomes the shift, and the result saturates at the value's own width.
+///
+/// `multiply` is the caller's, as everywhere else in here: two of them, the
+/// mantissa's interpolation and the apply, so a folded engine spends two slots
+/// on its shared unit and a spatial one two blocks of its own. The halves are
+/// `gainExpOperands` / `gainExpFromProduct` and `gainApplyOperands` /
+/// `gainApplyFromProduct`, for an engine that puts a pipeline between them.
+let gainApply (multiply: Expr -> Expr -> Expr) (name: string) (gainLog: Expr) (value: Expr) : Expr =
+    if width gainLog <> gainLogWidth then
+        failwith $"gainApply '{name}' expects a %d{gainLogWidth}-bit log gain, got %d{width gainLog} bits"
+
+    let step, along, here = gainExpOperands name gainLog
+
+    let expProduct = wire $"{name}_exp_product" (SInt gainExpProductWidth)
+    multiply step along ==> expProduct
+
+    let mantissa = gainExpFromProduct name expProduct here
+    let a, b = gainApplyOperands name value mantissa
+
+    let product = wire $"{name}_product" (SInt(width a + width b))
+    multiply a b ==> product
+
+    gainApplyFromProduct name gainLog product (width value)
+
+
 /// The volume stage's ports.
 type AudioGainPorts =
     { /// The stereo stream through the stage.
@@ -1468,7 +1903,23 @@ type I2sTxPorts =
 /// it, because the codec model's receive side had been written to the same
 /// timing. After the 25 ticks the register has zero-filled, so the padding
 /// ticks emit zeros without a case for them.
-let i2sTxDef (name: string) : TypedModule<I2sTxPorts> =
+/// A transmitter that sends the top `sentBits` of each sample.
+///
+/// The stream's samples stay `sampleWidth` wide — what changes is how many of
+/// their bits reach the wire, taken from the **top**, which is what a
+/// narrower receiver reads anyway. `sentBits = sampleWidth` is the whole
+/// sample and emits exactly what this module always emitted.
+///
+/// It exists because a slot cannot always be as wide as the sample: a
+/// receiver's bit clock has a ceiling, and at a fixed frame rate the only
+/// thing left to give is depth. A 24-bit sample in a 16-bit slot at 46 875 Hz
+/// is 1.5 MHz of bit clock where the full sample would be 2.25 — and the
+/// eight bits it drops are below the noise floor of any microphone that fed
+/// it.
+let i2sTxDefAt (sentBits: int) (name: string) : TypedModule<I2sTxPorts> =
+    if sentBits < 1 || sentBits > sampleWidth then
+        failwith $"i2sTx '{name}': sends %d{sentBits} bits of a %d{sampleWidth}-bit sample"
+
     defModule
         name
         (fun p ->
@@ -1477,8 +1928,16 @@ let i2sTxDef (name: string) : TypedModule<I2sTxPorts> =
               lrclk = p.inPort "lrclk" 1
               sdin = p.outPort "sdin" 1 })
         (fun io ->
+            // The top of a sample, where the whole sample is the whole thing —
+            // spelled that way so the unnarrowed case emits what it always did.
+            let sent (e: Expr) =
+                if sentBits = sampleWidth then
+                    e
+                else
+                    slice (sampleWidth - 1) (sampleWidth - sentBits) e
+
             // The leading zero is the transition bit.
-            let shiftWidth = sampleWidth + 1
+            let shiftWidth = sentBits + 1
             let leftShift = reg "left_shift" shiftWidth
             let rightShift = reg "right_shift" shiftWidth
             let pendingLeft = reg "pending_left" sampleWidth
@@ -1511,8 +1970,8 @@ let i2sTxDef (name: string) : TypedModule<I2sTxPorts> =
                         lit 0UL 6 ==> bitCount
 
                         If (eq io.lrclk (lit 0UL 1) &&& pendingValid) (fun () ->
-                            cat (lit 0UL 1) pendingLeft ==> leftShift
-                            cat (lit 0UL 1) pendingRight ==> rightShift
+                            cat (lit 0UL 1) (sent pendingLeft) ==> leftShift
+                            cat (lit 0UL 1) (sent pendingRight) ==> rightShift
                             lit 0UL 1 ==> pendingValid))
                     (otherwise, fun () ->
                     bitCount + lit 1UL 6 ==> bitCount
@@ -1523,6 +1982,20 @@ let i2sTxDef (name: string) : TypedModule<I2sTxPorts> =
                                 cat (slice (shiftWidth - 2) 0 leftShift) (lit 0UL 1) ==> leftShift)
                             (otherwise, fun () ->
                             cat (slice (shiftWidth - 2) 0 rightShift) (lit 0UL 1) ==> rightShift) ])) ]))
+
+/// The transmitter at the design's own sample width — every bit of it.
+let i2sTxDef (name: string) : TypedModule<I2sTxPorts> = i2sTxDefAt sampleWidth name
+
+/// One transmitter under `instName`, sending the top `sentBits` of each
+/// sample: wire the clocking, sink the stream, hand back the serial line out.
+let i2sTxAt (sentBits: int) (name: string) instName =
+    let io = (i2sTxDefAt sentBits name).NewNamed instName
+
+    fun (sclkTick: Expr) (lrclk: Expr) (s: Stream<Expr * Expr>) ->
+        sclkTick ==> io.sclkTick
+        lrclk ==> io.lrclk
+        stereoSink io.s s
+        io.sdin
 
 /// One transmitter under `instName`, called as a function: wire the clocking,
 /// sink the stream, hand back the serial line out.
@@ -1627,6 +2100,39 @@ let i2sPins (p: Ports) (pinout: I2sPinout) : I2sPins =
           dataIn = sdout }
 
 /// Declare a transmit-only link's pins. Call from a module's io factory.
+/// A transmit-only link's pins **under a prefix**, so a design can declare
+/// more than one. An empty prefix is the bare names every design used before
+/// there was a second port, and emits exactly those.
+///
+/// A second transmitter is not an exotic case: a recorder is one — the same
+/// audio leaving on its own three wires, at its own slot width, to something
+/// that is not the converter.
+let i2sTxPinsNamed (p: Ports) (prefix: string) (pinout: I2sPinout) : I2sTxPins =
+    let named (n: string) = if prefix = "" then n else $"{prefix}_{n}"
+
+    match pinout with
+    | SharedBus ->
+        let bclk = p.outPort (named "bclk") 1
+        let ws = p.outPort (named "ws") 1
+        let sdOut = p.outPort (named "sd_out") 1
+
+        { txClocks =
+            { mclkPins = []
+              sclkPins = [ bclk ]
+              lrclkPins = [ ws ] }
+          dataOut = sdOut }
+    | SeparateCodecs ->
+        let mclk = p.outPort (named "mclk") 1
+        let sclk = p.outPort (named "sclk") 1
+        let lrclk = p.outPort (named "lrclk") 1
+        let sdin = p.outPort (named "sdin") 1
+
+        { txClocks =
+            { mclkPins = [ mclk ]
+              sclkPins = [ sclk ]
+              lrclkPins = [ lrclk ] }
+          dataOut = sdin }
+
 let i2sTxPins (p: Ports) (pinout: I2sPinout) : I2sTxPins =
     match pinout with
     | SharedBus ->
@@ -1694,6 +2200,12 @@ let private driveClocks (pins: I2sClockPins) (m: I2sMasterPorts) =
 /// a record about *targets* into the signature of everything that divides a
 /// clock, and a stage that needs a number should ask for the number. Callers
 /// that have one write `kv260.fabricHz`, which reads as what it is.
+let private checkSlotFor (name: string) (sentBits: int) (bitsPerSlot: int) =
+    if bitsPerSlot < sentBits then
+        failwith
+            ($"i2sLink '{name}': bitsPerSlot is %d{bitsPerSlot} and the link sends %d{sentBits} bits — "
+             + "a slot cannot be narrower than what goes in it.")
+
 let private checkSlot (name: string) (bitsPerSlot: int) =
     if bitsPerSlot < sampleWidth then
         failwith
@@ -1716,6 +2228,27 @@ let i2sTxLink (prefix: string) (pins: I2sTxPins) (fabricHz: int) (targetFs: int)
     driveClocks pins.txClocks clocks
 
     { sendOnly = fun s -> i2sTx "I2sTx" $"{prefix}_tx" clocks.sclkTxTick clocks.lrclk s ==> pins.dataOut }
+
+/// A transmit-only link that sends **`sentBits` of each sample** into slots
+/// `bitsPerSlot` wide, at its own frame rate.
+///
+/// The duplex `i2sLink` deliberately refuses a slot narrower than the sample,
+/// because there that is a confusion between two different numbers. Here it
+/// is a choice: the sample is narrowed on purpose, to fit a receiver whose
+/// bit clock will not go faster.
+let i2sTxLinkAt
+    (sentBits: int)
+    (prefix: string)
+    (pins: I2sTxPins)
+    (fabricHz: int)
+    (targetFs: int)
+    (bitsPerSlot: int)
+    : I2sTxLink =
+    checkSlotFor prefix sentBits bitsPerSlot
+    let clocks = instanceNamed $"{prefix}_clocks" (i2sMasterHz fabricHz targetFs bitsPerSlot "I2sMaster")
+    driveClocks pins.txClocks clocks
+
+    { sendOnly = fun s -> i2sTxAt sentBits "I2sTxNarrow" $"{prefix}_tx" clocks.sclkTxTick clocks.lrclk s ==> pins.dataOut }
 
 // ---------------------------------------------------------------------------
 // Multiband compression. Generic DSP: an 8-band crossover feeding a compressor
@@ -1847,6 +2380,50 @@ let bandWidth = sampleWidth + 1
 /// Width of a band after its makeup boost, kept wide so the band sum can be
 /// saturated once at the end rather than per band.
 let gainedWidth = bandWidth + 9
+
+/// One band's compressor with its law in a host-written table: detect on the raw
+/// band, index the table with the envelope, and apply in the log domain what it
+/// says. Returns the gained band and the envelope.
+///
+/// **Detection is on the raw band, not on a boosted copy.** The table returns
+/// *total* gain, so there is no makeup multiply to come first — which is what
+/// retires the boost-then-detect topology and its one global threshold, and it
+/// makes `envelope` the band's own input level in a fixed calibration, which is
+/// what a fitting meter wants to read.
+///
+/// `table` is how the caller's memory answers an address. It is a function
+/// rather than a port because the memory belongs to whoever owns the register
+/// map, and a `defModule` boundary cannot carry a read: the law is inline logic
+/// for that reason, which is a definition-site choice no caller can see.
+///
+/// Four multiplies a band and a sample, the same four the formula cost: the
+/// envelope step, the table's interpolation, the exponential's, and the apply.
+let bandGainTable
+    (multiply: Expr -> Expr -> Expr)
+    (name: string)
+    (table: Expr -> Expr)
+    (attack: Expr)
+    (releaseRate: Expr)
+    (advance: Expr)
+    (band: Expr)
+    : Expr * Expr =
+    let w = width band
+
+    let negated = wire $"{name}_negated" (SInt w)
+    sub (lit 0UL w) band ==> negated
+    let absolute = wire $"{name}_absolute" w
+    mux (slice (w - 1) (w - 1) band) negated band ==> absolute
+    let peak = wire $"{name}_peak" sampleWidth
+    saturate sampleWidth absolute ==> peak
+
+    let env, _ = envelopeFollower peak attack releaseRate advance
+
+    let index = gainTableIndex name env
+    let word = wire $"{name}_word" gainTableWordWidth
+    table index.address ==> word
+
+    let gainLog = gainTableGain multiply $"{name}_curve" word index.fraction
+    gainApply multiply $"{name}_apply" gainLog band, env
 
 /// One band's compressor ports. The multiband stage instantiates one of these
 /// per band and sums what comes back.
@@ -2622,6 +3199,53 @@ let private offer (layout: Layout<'q>) (out: Stream<'q>) (value: 'q) =
 
 /// A stage that reads words from one store for each beat: the addresses the
 /// beat names, one a cycle, and the beat handed on with the words attached.
+/// A stage that reads words for each beat — one a cycle — **each from its own
+/// store**. One store for every address is the common case and has its own
+/// entry below; several exist because two fields of one band's state live in
+/// separate memories, so that the stages writing them cannot collide on a
+/// single write port.
+let private readStageFrom
+    (name: string)
+    (inLayout: Layout<'p>)
+    (outLayout: Layout<'q>)
+    (sources: 'p -> (Mem * Expr) list)
+    (attach: 'p -> Expr list -> 'q)
+    (s: Stream<'p>)
+    : Stream<'q> =
+    let st, out = workerFsm name s outLayout
+    let accept = s.valid &&& s.ready
+    let beat = holdBeat name inLayout accept s
+    let pairs = sources beat
+    let count = List.length pairs
+
+    let issuing = regBit $"{name}_issuing"
+    If accept (fun () -> lit 1UL 1 ==> issuing)
+    let which = counter $"{name}_which" count (st.Is Working &&& issuing)
+    If which.wrap (fun () -> lit 0UL 1 ==> issuing)
+
+    // Each word lands its port's depth after its address, with its index. A
+    // port per store: the reads are free to happen together, and the cycle
+    // `which` is on picks whose word lands.
+    let reads = [ for store, addr in pairs -> memReadPort store addr ]
+    let first = List.head reads
+    let arrived = first.through $"{name}_arrived" (st.Is Working &&& issuing)
+    let arrivedIndex = first.through $"{name}_arrived_index" which.count
+    let words = [ for i in 0 .. count - 1 -> reg $"{name}_word%d{i}" (width first.data) ]
+
+    If arrived (fun () ->
+        ifElse
+            [ for i, (w, r) in List.indexed (List.zip words reads) ->
+                  (eq arrivedIndex (lit (uint64 i) (width arrivedIndex)), fun () -> r.data ==> w) ])
+
+    // Offer from the edge the last word lands on: the word register and the
+    // state move together.
+    If (st.Is Working &&& arrived &&& eq arrivedIndex (lit (uint64 (count - 1)) (width arrivedIndex))) (fun () ->
+        st.Goto Offering)
+
+    offer outLayout out (attach beat words)
+    out
+
+/// The common case: every word read from the same store.
 let private readStage
     (name: string)
     (store: Mem)
@@ -2631,33 +3255,7 @@ let private readStage
     (attach: 'p -> Expr list -> 'q)
     (s: Stream<'p>)
     : Stream<'q> =
-    let st, out = workerFsm name s outLayout
-    let accept = s.valid &&& s.ready
-    let beat = holdBeat name inLayout accept s
-    let addrs = addresses beat
-    let count = List.length addrs
-
-    let issuing = regBit $"{name}_issuing"
-    If accept (fun () -> lit 1UL 1 ==> issuing)
-    let which = counter $"{name}_which" count (st.Is Working &&& issuing)
-    If which.wrap (fun () -> lit 0UL 1 ==> issuing)
-
-    // Each word lands its port's depth after its address, with its index.
-    let read = memReadPort store (selectIndexed which.count addrs)
-    let arrived = read.through $"{name}_arrived" (st.Is Working &&& issuing)
-    let arrivedIndex = read.through $"{name}_arrived_index" which.count
-    let words = [ for i in 0 .. count - 1 -> reg $"{name}_word%d{i}" (width read.data) ]
-
-    If arrived (fun () ->
-        ifElse [ for i, w in List.indexed words -> (eq arrivedIndex (lit (uint64 i) (width arrivedIndex)), fun () -> read.data ==> w) ])
-
-    // Offer from the edge the last word lands on: the word register and the
-    // state move together.
-    If (st.Is Working &&& arrived &&& eq arrivedIndex (lit (uint64 (count - 1)) (width arrivedIndex))) (fun () ->
-        st.Goto Offering)
-
-    offer outLayout out (attach beat words)
-    out
+    readStageFrom name inLayout outLayout (fun b -> [ for a in addresses b -> store, a ]) attach s
 
 /// A stage that writes words to one store for each beat — one a cycle, from
 /// the beat — and hands the beat on unchanged.
@@ -2970,7 +3568,17 @@ let private gainedLayout: Layout<Gained> =
 type private FoldStores =
     { history: Mem
       coefficients: Mem
-      state: Mem
+      /// A band's envelope and last sample's boosted value, in **separate**
+      /// memories rather than two fields of one.
+      ///
+      /// They are written by two different stages, and two writes to one mem
+      /// fold to a single priority-muxed port — so a cycle where both fired
+      /// would silently drop one of them. Separate memories give each stage
+      /// its own port and make the collision impossible to express, where
+      /// before it was merely prevented by a buffer nobody could explain
+      /// (2026-09-23).
+      envelopes: Mem
+      detecteds: Mem
       nodes: Mem
       /// One register per ear, a bit per node.
       written: Expr list }
@@ -2989,7 +3597,8 @@ let private foldStores (t: TreeShape) : FoldStores =
             [| for sec in t.tree.sections do
                    yield! sec.coefficients
                    yield! Array.zeroCreate (coeffSlots - biquadIssues) |]
-      state = blockMem "band_state" (1 + slotBits + stateFieldBits) gainedWidth
+      envelopes = blockMem "band_envelope" (1 + slotBits) gainedWidth
+      detecteds = blockMem "band_detected" (1 + slotBits) gainedWidth
       nodes = blockMem "nodes" (1 + t.nodeBits) sampleWidth
       written = [ for ear in 0..1 -> reg $"written_%d{ear}" (1 <<< t.nodeBits) ] }
 
@@ -3001,7 +3610,7 @@ let private foldStores (t: TreeShape) : FoldStores =
 let private historyAddrOf (ear: Expr) (section: Expr) (kind: Expr) (slot: Expr) =
     cat ear (cat section (cat kind slot))
 let private coefficientAddr (s: Section) (tap: int) = cat s.section (lit (uint64 tap) (ceilLog2 (1 <<< ceilLog2 biquadIssues)))
-let private stateAddr (ear: Expr) (band: Expr) (field: uint64) = cat ear (cat band (lit field stateFieldBits))
+let private stateAddr (ear: Expr) (band: Expr) = cat ear band
 
 // ---------------------------------------------------------------------------
 // The stages, in the order the body chains them.
@@ -3334,12 +3943,11 @@ let private bands (s: Stream<SectionDone>) : Stream<Band> =
 /// Read a band's state: its envelope, and last sample's boosted value — the
 /// detector's input — two words from the state store.
 let private readState (stores: FoldStores) =
-    readStage
+    readStageFrom
         "state_read"
-        stores.state
         bandLayout
         bandStateLayout
-        (fun b -> [ stateAddr b.ear b.band envelopeField; stateAddr b.ear b.band detectedField ])
+        (fun b -> [ stores.envelopes, stateAddr b.ear b.band; stores.detecteds, stateAddr b.ear b.band ])
         (fun b words ->
             { ear = b.ear
               band = b.band
@@ -3424,7 +4032,7 @@ let private boost (pod: SharedMultiplier) (io: MultibandFoldedPorts) (s: Stream<
 
 /// Keep this sample's boosted value as next sample's detector input.
 let private writeDetected (stores: FoldStores) =
-    writeThrough stores.state (fun (b: Boosted) -> stateAddr b.ear b.band detectedField, b.boosted)
+    writeThrough stores.detecteds (fun (b: Boosted) -> stateAddr b.ear b.band, b.boosted)
 
 /// The detector: the magnitude of last sample's boosted value, clipped to
 /// sample scale. Costs no beat; its chain — negate, pick, saturate — lands in
@@ -3465,7 +4073,7 @@ let private envelope (pod: SharedMultiplier) (io: MultibandFoldedPorts) =
 
 /// Keep the stepped envelope for the next sample.
 let private writeEnvelope (stores: FoldStores) =
-    writeThrough stores.state (fun (b: Stepped) -> stateAddr b.ear b.band envelopeField, widenUnsigned gainedWidth b.envNext)
+    writeThrough stores.envelopes (fun (b: Stepped) -> stateAddr b.ear b.band, widenUnsigned gainedWidth b.envNext)
 
 /// The gain, from the envelope before this sample's step — `gainComputer`'s
 /// two halves around the shared multiplier.
@@ -3636,7 +4244,6 @@ let multibandCompressor8FoldedDef (name: string) (crossovers: float list) (sampl
                 |> writeDetected stores
                 |> detect
                 |> envelope pod io
-                |> skidBuffer "stepped_skid" steppedLayout
                 |> writeEnvelope stores
                 |> reduction pod io
                 |> apply pod

@@ -118,6 +118,12 @@ let catalog =
           |> poking [ "enable", 1UL; "tap", 8UL ]
           entry "Echo (memory delay line)" (nameof audioEchoStage) (fun () -> audioEchoStage.def)
           |> poking [ "delay", 64UL; "feedback", 128UL; "in_valid", 1UL; "out_ready", 1UL ]
+          entry "Gain table (host-written dB curve)" (nameof gainTableStage) (fun () -> gainTableStage.def)
+          |> poking [ "env", 1UL <<< (sampleWidth - 4) ]
+          entry "Gain apply (log gain to a sample)" (nameof gainApplyStage) (fun () -> gainApplyStage.def)
+          |> poking [ "sample", 1UL <<< (sampleWidth - 4) ]
+          entry "Band compressor (table law)" (nameof bandTableStage) (fun () -> bandTableStage.def)
+          |> poking [ "advance", 1UL; "attack", 0x7000UL; "releaseRate", 0x7000UL; "band", 1UL <<< (sampleWidth - 4) ]
           entry "Multiband compressor (spatial)" (nameof multibandStage) (fun () -> multibandStage.def)
           |> poking multibandDemo
           // The folded bank's makeup table boots at unity, so the law is all

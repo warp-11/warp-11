@@ -180,4 +180,248 @@ let private integrationTests =
               Expect.equal (emitDesign i2sLinkPassthru.def) (emitDesign handWiredShared.def) "Shared link abstraction should add no structure"
               Expect.equal (emitDesign i2sLinkCodec.def) (emitDesign handWiredCodec.def) "Codec link abstraction should add no structure" ]
 
-let tests = testList "Audio" [ dspTests; integrationTests ]
+let private gainTableTests =
+    // A four-region prescription in dB, the shape every fitting rule takes:
+    // expansion below a knee, linear gain through conversation, compression
+    // above a second knee, then a hard ceiling.
+    let prescription dbFs =
+        let dbSpl = dbFs + 115.0
+        let linear = 25.0
+        let gain =
+            if dbSpl < 45.0 then linear - (45.0 - dbSpl) * (1.0 / 0.57 - 1.0)
+            elif dbSpl < 50.0 then linear
+            else linear - (dbSpl - 50.0) * (1.0 - 1.0 / 1.5)
+        min gain (92.0 - dbSpl)
+
+    let dbFsOf env = 20.0 * log10 (float env / 2.0 ** float sampleWidth)
+    let envelopes = [ 1..4096 ] @ [ 4096 .. 977 .. (1 <<< sampleWidth) - 1 ]
+
+    // What the fabric's interpolant can say about the law: the chord across
+    // the entry the envelope falls in, walked in the **envelope** rather than
+    // in dB, because the fraction bits the lookup interpolates on are the
+    // mantissa's. Separating this from the law itself is what keeps the checks
+    // free of a written-down list of the law's knees, which is the thing that
+    // would rot when a prescription changes.
+    let chord env =
+        let level = float env / 2.0 ** float sampleWidth
+        let entry =
+            [ 0 .. gainTableEntries - 1 ] |> List.findBack (fun e -> gainTableLevel e <= level)
+        let below, above = gainTableLevel entry, gainTableLevel (entry + 1)
+        let along = (level - below) / (above - below)
+        let gainAt l = prescription (20.0 * log10 l)
+        gainAt below + along * (gainAt above - gainAt below)
+
+    testList
+        "Gain table"
+        [ testCase "the table is the law's chord on its own grid" <| fun _ ->
+              let words = gainTableWords prescription
+              Expect.equal words.Length gainTableSize "Table should occupy its declared words"
+              // Above octave nine the envelope carries all eight fraction
+              // bits the lookup interpolates on, so the only slack left is
+              // rounding the entry and its step to Q8.8.
+              let errors =
+                  [ for env in envelopes do
+                        if env >= (1 <<< 9) then yield abs (gainDbOfLog (gainTableLookup words env) - chord env), env ]
+              let worst, at = List.max errors
+              Expect.isLessThan worst 0.02 $"Lookup should be the chord to rounding (worst at env {at})"
+
+          testCase "the grid is fine enough for a prescription" <| fun _ ->
+              let words = gainTableWords prescription
+              // A region is affine in dB, so a chord is only wrong where a
+              // knee falls inside an entry: the slope change over a quarter
+              // step, and the steepest knee here is 0.754 over 3.01 dB.
+              let worst, at =
+                  [ for env in envelopes -> abs (gainDbOfLog (gainTableLookup words env) - prescription (dbFsOf env)), env ]
+                  |> List.max
+              Expect.isLessThan worst 0.75 $"Tabulation should hold the law to a quarter step (worst at env {at})"
+
+          testCase "a flat law reads flat, and silence reads the floor" <| fun _ ->
+              let words = gainTableWords (fun _ -> 12.0)
+              for env in [ 0; 1; 2; 3; 255; 4096; (1 <<< sampleWidth) - 1 ] do
+                  Expect.isLessThan (abs (gainDbOfLog (gainTableLookup words env) - 12.0)) 0.01 $"A constant law should read constant at env {env}"
+              let ramp = gainTableWords prescription
+              Expect.equal (gainTableLookup ramp 0) (gainTableLookup ramp 1) "Silence should read entry zero's gain"
+
+          testCase "the fabric reads the table the host wrote" <| fun _ ->
+              let words = gainTableWords prescription
+              let sim = Sim gainTableStage.def
+              sim.Poke("wr_enable", 1UL)
+              for address in 0 .. words.Length - 1 do
+                  sim.Poke("wr_addr", uint64 address)
+                  sim.Poke("wr_data", words[address])
+                  sim.Tick()
+              sim.Poke("wr_enable", 0UL)
+              // Every octave and a scatter within each, so the priority encoder
+              // and the mantissa select are both exercised at every position.
+              let probes =
+                  [ 0; 1; 2; 3; 7 ]
+                  @ [ for octave in 3 .. sampleWidth - 1 do
+                          for offset in [ 0; 1; 37; 255; 4095 ] do
+                              let env = (1 <<< octave) + offset
+                              if env < (1 <<< sampleWidth) then yield env ]
+              for env in probes do
+                  sim.Poke("env", uint64 env)
+                  let got = float (int16 (uint16 (sim.Peek "gain"))) / float (1 <<< gainLogFracBits)
+                  Expect.equal got (gainTableLookup words env) $"Fabric and host should agree at env {env}"
+
+          testCase "the curve never steps further than the law does" <| fun _ ->
+              let words = gainTableWords prescription
+              // The stored step is what removes the zipper an entry boundary
+              // would otherwise put in a tone. It is inaudible in a sweep, so
+              // only walking neighbours finds it. Below octave nine adjacent
+              // envelopes are more than a decibel apart on their own, so there
+              // is no zipper down there to find — and nothing audible either.
+              for env in [ 512..4096 ] @ [ 4096 .. 977 .. (1 <<< sampleWidth) - 1 ] do
+                  let jump = abs (gainDbOfLog (gainTableLookup words env - gainTableLookup words (env - 1)))
+                  let allowed = abs (prescription (dbFsOf env) - prescription (dbFsOf (env - 1))) + 0.05
+                  Expect.isLessThan jump allowed $"Envelope {env} should not step further than the law" ]
+
+let private gainExpTests =
+    let signedSample (raw: uint64) =
+        let bits = int64 raw
+        if bits >= (1L <<< (sampleWidth - 1)) then int (bits - (1L <<< sampleWidth)) else int bits
+
+    let logs =
+        // Every octave the gain reaches, and a scatter of fractions inside each,
+        // so the mantissa select and the shift are both exercised end to end.
+        [ for exponent in -16 .. 15 do
+              for fraction in [ 0; 1; 337; 1024; 2047 ] -> (exponent <<< gainLogFracBits) ||| fraction ]
+
+    testList
+        "Gain apply"
+        [ testCase "the mantissa table is 2^f" <| fun _ ->
+              let worst =
+                  [ for gainLog in logs do
+                        let fraction = float (gainLog &&& ((1 <<< gainLogFracBits) - 1)) / float (1 <<< gainLogFracBits)
+                        let want = 2.0 ** fraction * float (1 <<< (gainExpMantissaBits - 1))
+                        yield abs (float (gainExpMantissaOfLog gainLog) - want) / want ]
+                  |> List.max
+              // As decibels, because that is the unit the error has to be small in.
+              Expect.isLessThan (gainDbOfLog (log (1.0 + worst) / log 2.0)) 0.01 "The mantissa should reproduce 2^f"
+
+          testCase "unity gain is exactly transparent" <| fun _ ->
+              for sample in [ 0; 1; -1; 4095; -4096; (1 <<< (sampleWidth - 1)) - 1; -(1 <<< (sampleWidth - 1)) ] do
+                  Expect.equal (gainApplyToSample 0 sample) sample $"A zero log gain should pass sample {sample}"
+
+          testCase "the applied gain is the gain it was asked for" <| fun _ ->
+              // Well inside full scale, so nothing saturates and the ratio is
+              // the whole story. The bound is stated as what the arithmetic can
+              // cost rather than as a decibel figure: the final shift truncates,
+              // which is one count whatever the level, and the mantissa's chord
+              // is 0.0003 of the value. Written as a decibel tolerance it would
+              // have to be loose enough for the quietest case it is checked at,
+              // which would stop saying anything about the loudest.
+              let sample = 1 <<< (sampleWidth - 6)
+              for gainLog in logs do
+                  let want = float sample * 2.0 ** (float gainLog / float (1 <<< gainLogFracBits))
+                  if want < float ((1 <<< (sampleWidth - 1)) - 1) then
+                      let got = float (gainApplyToSample gainLog sample)
+                      Expect.isLessThan (abs (got - want)) (1.0 + want * 0.0003) $"The apply should hit the gain asked at {gainLog}"
+
+          testCase "full scale saturates rather than wrapping" <| fun _ ->
+              let loudest = (1 <<< (sampleWidth - 1)) - 1
+              for gainLog in [ 1 <<< gainLogFracBits; 8 <<< gainLogFracBits; 15 <<< gainLogFracBits ] do
+                  Expect.equal (gainApplyToSample gainLog loudest) loudest $"Gain {gainLog} on full scale should clamp"
+                  Expect.equal (gainApplyToSample gainLog (-loudest - 1)) (-loudest - 1) $"Gain {gainLog} on negative full scale should clamp"
+
+          testCase "the fabric applies the gain the host predicts" <| fun _ ->
+              let sim = Sim gainApplyStage.def
+              let samples = [ 0; 1; -1; 1023; -4097; 1 <<< (sampleWidth - 6); -(1 <<< (sampleWidth - 3)); (1 <<< (sampleWidth - 1)) - 1 ]
+              for gainLog in logs do
+                  sim.Poke("gain", uint64 gainLog &&& ((1UL <<< gainLogWidth) - 1UL))
+                  for sample in samples do
+                      sim.Poke("sample", uint64 sample &&& ((1UL <<< sampleWidth) - 1UL))
+                      Expect.equal
+                          (signedSample (sim.Peek "scaled"))
+                          (gainApplyToSample gainLog sample)
+                          $"Fabric and host should agree at gain {gainLog}, sample {sample}" ]
+
+let private bandTableTests =
+    // The same four-region prescription the table checks use, so a failure here
+    // is the composition and not the curve.
+    let prescription dbFs =
+        let dbSpl = dbFs + 115.0
+        let gain =
+            if dbSpl < 45.0 then 25.0 - (45.0 - dbSpl) * (1.0 / 0.57 - 1.0)
+            elif dbSpl < 50.0 then 25.0
+            else 25.0 - (dbSpl - 50.0) * (1.0 - 1.0 / 1.5)
+        min gain (92.0 - dbSpl)
+
+    testList
+        "Band table law"
+        [ testCase "a level in comes out with the gain the prescription asks for" <| fun _ ->
+              let sim = Sim bandTableStage.def
+              let words = gainTableWords prescription
+              sim.Poke("wr_enable", 1UL)
+              for address in 0 .. words.Length - 1 do
+                  sim.Poke("wr_addr", uint64 address)
+                  sim.Poke("wr_data", words[address])
+                  sim.Tick()
+              sim.Poke("wr_enable", 0UL)
+              // Near-unity coefficients, so the envelope tracks in a handful of
+              // samples and the check is about the law rather than the detector.
+              sim.Poke("attack", 0x7FF0UL)
+              sim.Poke("releaseRate", 0x7FF0UL)
+              sim.Poke("advance", 1UL)
+
+              let settle level =
+                  // A square wave at the level, so the envelope settles on it
+                  // exactly and the gained magnitude is the level times the gain.
+                  let mutable last = 0, 0
+                  for beat in 0 .. 63 do
+                      let value = if beat % 2 = 0 then level else -level
+                      sim.Poke("band", uint64 value &&& ((1UL <<< bandWidth) - 1UL))
+                      let raw = int64 (sim.Peek "gained")
+                      let signed =
+                          if raw >= (1L <<< (bandWidth - 1)) then int (raw - (1L <<< bandWidth)) else int raw
+                      last <- int (sim.Peek "envelope"), signed
+                      sim.Tick()
+                  last
+
+              // Every decade of level the law has an opinion about, from the
+              // expansion floor up to where limiting takes over.
+              for shift in 6 .. sampleWidth - 2 do
+                  let level = 1 <<< shift
+                  let envelope, gainedValue = settle level
+                  // The detector stops one count short at any level, because
+                  // `alpha*(peak-env) >> 15` truncates to zero once the gap is
+                  // one — so the bound is a count, not a fraction. The law is
+                  // then checked against the envelope it actually reached, which
+                  // keeps this about the lookup and the apply.
+                  Expect.isLessThanOrEqual
+                      (abs (envelope - level))
+                      1
+                      $"The envelope should track the level at 2^{shift}"
+                  let dbFs = 20.0 * log10 (float envelope / 2.0 ** float sampleWidth)
+                  let want = float level * 10.0 ** (prescription dbFs / 20.0)
+                  if want < float ((1 <<< (bandWidth - 1)) - 1) then
+                      // One count for the apply's truncation, and the tabulation's
+                      // own 0.6 dB where a knee falls inside an entry.
+                      let allowed = 1.0 + want * (10.0 ** (0.6 / 20.0) - 1.0)
+                      Expect.isLessThan
+                          (abs (float (abs gainedValue) - want))
+                          allowed
+                          $"At 2^{shift} the band should come out {want} and came out {abs gainedValue}"
+
+          testCase "a silent band stays silent" <| fun _ ->
+              let sim = Sim bandTableStage.def
+              let words = gainTableWords prescription
+              sim.Poke("wr_enable", 1UL)
+              for address in 0 .. words.Length - 1 do
+                  sim.Poke("wr_addr", uint64 address)
+                  sim.Poke("wr_data", words[address])
+                  sim.Tick()
+              sim.Poke("wr_enable", 0UL)
+              sim.Poke("attack", 0x7FF0UL)
+              sim.Poke("releaseRate", 0x7FF0UL)
+              sim.Poke("advance", 1UL)
+              sim.Poke("band", 0UL)
+              for _ in 0 .. 63 do
+                  sim.Tick()
+              // The floor entry is a large negative gain, and zero times anything
+              // is zero — but a wrong shift or a wrong sign would not be.
+              Expect.equal (sim.Peek "gained") 0UL "Silence in should be silence out"
+              Expect.equal (sim.Peek "envelope") 0UL "The envelope should be at rest" ]
+
+let tests =
+    testList "Audio" [ dspTests; gainTableTests; gainExpTests; bandTableTests; integrationTests ]

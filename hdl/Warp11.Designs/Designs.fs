@@ -2912,6 +2912,72 @@ let delayTap =
         (fun (value, enable, tap, delayed) ->
             delayBuffer "line" delayBufferMinimum enable tap value ==> delayed)
 
+/// The dB gain table, host-written and read back as a gain — the shape a
+/// compressor band uses it in.
+///
+/// The table is written over the same port a register map would drive, because
+/// the whole point of a table over a formula is that the curve arrives from the
+/// host: a fitting change is a memory write, not a bitstream. Reading is
+/// combinational here so the toy is a pure function of the envelope and can be
+/// held to `gainTableLookup` word for word; an engine puts its own register
+/// after the read.
+let gainTableStage =
+    defModule
+        "GainTableStage"
+        (fun p ->
+            (p.inPort "env" sampleWidth,
+             p.inPort "wr_addr" gainTableAddrBits,
+             p.inPort "wr_data" gainTableWordWidth,
+             p.inPort "wr_enable" 1,
+             p.outPortAs "gain" (SInt gainLogWidth)))
+        (fun (env, wrAddr, wrData, wrEnable, gain) ->
+            let curve = distributedMem "curve" gainTableAddrBits gainTableWordWidth
+            memWrite curve wrAddr wrData wrEnable
+
+            let index = gainTableIndex "lookup" env
+            let word = wire "word" gainTableWordWidth
+            memRead curve index.address ==> word
+            gainTableGain mul "lookup" word index.fraction ==> gain)
+
+/// A log2 gain applied to a sample — the exponential and the shift, which is
+/// what the gain table's answer has to go through before it multiplies anything.
+///
+/// Combinational, so the toy is a pure function of the two inputs and can be
+/// held to `gainApplyToSample` exactly; an engine registers it.
+let gainApplyStage =
+    defModule
+        "GainApplyStage"
+        (fun p ->
+            (p.inPortAs "gain" (SInt gainLogWidth),
+             p.inPortAs "sample" (SInt sampleWidth),
+             p.outPortAs "scaled" (SInt sampleWidth)))
+        (fun (gain, sample, scaled) -> gainApply mul "apply" gain sample ==> scaled)
+
+/// A whole band compressor whose law is a host-written table — the envelope, the
+/// lookup, the exponential and the apply in one design, which is where the four
+/// pieces are worth checking together: each is exact against its own model, and
+/// only driving a known level through all four says the law came out right.
+let bandTableStage =
+    defModule
+        "BandTableStage"
+        (fun p ->
+            (p.inPortAs "band" (SInt bandWidth),
+             p.inPort "advance" 1,
+             p.inPort "attack" 16,
+             p.inPort "releaseRate" 16,
+             p.inPort "wr_addr" gainTableAddrBits,
+             p.inPort "wr_data" gainTableWordWidth,
+             p.inPort "wr_enable" 1,
+             p.outPortAs "gained" (SInt bandWidth),
+             p.outPort "envelope" sampleWidth))
+        (fun (band, advance, attack, releaseRate, wrAddr, wrData, wrEnable, gained, envelope) ->
+            let curve = distributedMem "curve" gainTableAddrBits gainTableWordWidth
+            memWrite curve wrAddr wrData wrEnable
+
+            let scaled, env = bandGainTable mul "law" (memRead curve) attack releaseRate advance band
+            scaled ==> gained
+            env ==> envelope)
+
 /// The stereo echo, stream-driven, so a test picks the signal rather than
 /// taking whatever an oscillator gives it.
 ///

@@ -540,6 +540,9 @@ type Builder(name: string, ?clockSpec: ClockSpec) =
                       [ for m, a, d, e, k in memWrites do
                             if m = memName then yield a, d, e, k ]
 
+                  if ws.Length > 1 then
+                      eprintfn $"MULTIWRITE {memName} {ws.Length}"
+
                   // Every write on one mem has to agree on the lane count, or
                   // the merged site would have no single meaning for a mask bit.
                   let laneCounts =
@@ -579,6 +582,37 @@ type Builder(name: string, ?clockSpec: ClockSpec) =
                           enable,
                           Some(asWire $"{memName}_wmask" k)) ]
 
+        // **The folding above is only correct while the writes are mutually
+        // exclusive, and nothing can prove that statically** — so it is claimed
+        // instead, once per mem, and checked every cycle in simulation.
+        //
+        // Two write calls that fire together do not both land: the priority
+        // pick chooses one address and one datum, and the other write is gone
+        // with no error anywhere. That is the same silent failure the
+        // one-driver rule exists to catch on a wire, and a mem is a wire's
+        // worth of state with a port on it. It cost the folded compressor a
+        // buffer that nobody could explain for ten days (2026-09-23).
+        //
+        // The enables already carry their enclosing `If` conditions, so no
+        // further qualification is needed here.
+        let writeExclusion =
+            [ for memName in List.distinct [ for m, _, _, _, _ in memWrites -> m ] do
+                  let enables =
+                      [ for m, _, _, e, _ in memWrites do
+                            if m = memName then
+                                yield e ]
+
+                  if enables.Length > 1 then
+                      let pairs =
+                          [ for i in 0 .. enables.Length - 2 do
+                                for j in i + 1 .. enables.Length - 1 -> Not(And(enables[i], enables[j])) ]
+
+                      yield
+                          Assert(
+                              List.reduce (fun a b -> And(a, b)) pairs,
+                              $"two writes to '{memName}' fired in the same cycle — they fold to one priority-muxed write site, so one of them did not land"
+                          ) ]
+
         { name = name
           decls = List.ofSeq declColl.Decls @ [ for d, _ in laneWires -> d ]
           stmts =
@@ -586,6 +620,7 @@ type Builder(name: string, ?clockSpec: ClockSpec) =
             @ [ for _, a in laneWires -> a ]
             @ mergedWrites
             @ [ for cond, message in asserts -> Assert(cond, message) ]
+            @ writeExclusion
           instances = List.ofSeq instances
           clock = clock
           streamReadies =
@@ -1023,6 +1058,18 @@ let blockRom name width (values: uint64[]) = romOf name width values Block
 
 /// Write under the enclosing If conditions ANDed into `enable`. Multiple writes
 /// to one mem merge into a single priority-muxed write site at finalize.
+///
+/// **The merge is only correct while the writes are mutually exclusive.** Two
+/// that fire in the same cycle do not both land: the pick chooses one address
+/// and one datum, and the other write is gone, with nothing to say so. That
+/// cannot be proved at elaboration, so it is **claimed and checked every
+/// cycle in simulation** — one assertion per mem, compiled out of the silicon
+/// — and a design that trips it names the mem.
+///
+/// Where the writes are genuinely exclusive (one per state of a machine, one
+/// per branch of a condition) the fold is a convenience and the claim is free.
+/// Where they are independent pipeline stages, it is a bug, and it cost the
+/// folded compressor ten days and a buffer nobody could explain (2026-09-23).
 let memWrite m addr data enable =
     (current ()).Write(m, addr, data, enable, None)
 

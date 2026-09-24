@@ -31,7 +31,7 @@ The cost is real and was measured before being accepted: two toolchains, and one
 | **Clash** | Haskell (GHC) | Verilog/VHDL/SV | Functional stdlib (Vec, signals); narrower than Chisel-class | Interactive REPL, simulation in GHC | Via standard tools | Decent (Hackage + tutorial) | QBayLogic, niche academic |
 | **Bluespec (BSV)** | BSV (own lang, SV-or-Haskell flavored) | Verilog | Guarded-atomic-actions stdlib (rules, methods, FIFOs, BRAMs, NoC fabric) | bluesim included | Recent partnership w/ Axiomise for RISC-V cores | Decent, BSC has 20+ yrs of materials | Flute, Piccolo, Shakti RISC-V; Achronix integrations |
 | **Veryl** | own lang (Rust-syntax-inspired) | SystemVerilog | Thin (it's a transpiler, leans on SV ecosystem) | Defer to SV simulators (Verilator, VCS) | Defer to SV tools | Good, modern site, LSP integration | Early adopters, growing |
-| **Warp 11** | F# (DSL) + Rust (runtime) | Verilog (multi-module, hierarchical) | Audio (biquad EQ + RBJ cookbook, FIR, broadband compressor, limiter, gain, tone, I2S); AXI-Lite slave from a declarative register map with generated Rust layouts (registers, pulse/W1C bits, and windows in both directions — host-written with arbitrated readback, and design-written for the host to read), AXI4 master read+write (burst, multi-outstanding); typed streams with `wormhole` connect + operator chains, replication, unions, merge/dispatch trees, stall telemetry; snapshot buffer (CONFLATE/N=3); `reduceTree`/`countWhere`/`neighborhood`/`warpFu`/xoshiro; state machines over a union of states, decoded by name in the debugger; one numeric layer over the width-only IR — width, fraction bits and signedness in one format, so signed/unsigned integers and signed/unsigned fixed point are one type and the five sign-dependent primitives are chosen by the format rather than by the call site. no image-processing or crypto modules | Compiled cycle-based interpreter; Verilator differential across narrow + wide; **step-through debugger with signal breakpoints**; Rust driver runs against the F# sim over a bridge | None | This file + README + per-area design docs | One developer; three accelerators (Mandelbrot, GoL, GEP) running on a KV260, F#-elaborated and driven by the Rust runtime |
+| **Warp 11** | F# (DSL) + Rust (runtime) | Verilog (multi-module, hierarchical) | Audio (biquad EQ + RBJ cookbook, FIR, broadband compressor, limiter, gain, tone, host-written dB gain tables, I2S); AXI-Lite slave from a declarative register map with generated Rust layouts (registers, pulse/W1C bits, and windows in both directions — host-written with arbitrated readback, and design-written for the host to read), AXI4 master read+write (burst, multi-outstanding); typed streams with `wormhole` connect + operator chains, replication, unions, merge/dispatch trees, stall telemetry; snapshot buffer (CONFLATE/N=3); `reduceTree`/`countWhere`/`neighborhood`/`warpFu`/xoshiro; state machines over a union of states, decoded by name in the debugger; one numeric layer over the width-only IR — width, fraction bits and signedness in one format, so signed/unsigned integers and signed/unsigned fixed point are one type and the five sign-dependent primitives are chosen by the format rather than by the call site. no image-processing or crypto modules | Compiled cycle-based interpreter; Verilator differential across narrow + wide; **step-through debugger with signal breakpoints**; Rust driver runs against the F# sim over a bridge | None | This file + README + per-area design docs | One developer; three accelerators (Mandelbrot, GoL, GEP) running on a KV260, F#-elaborated and driven by the Rust runtime |
 
 ## Per-HDL deep dive
 
@@ -953,6 +953,57 @@ and wrong here, and the discriminator is which resource binds: LUTs on GEP,
 the eight multiplier blocks on a UP5K. What one-beat stages cost is
 *registers*: every stage holds its beat, and the first draft, holding each
 twice, did not place.
+
+### A nonlinear curve: formula, generated ROM, or host-written table
+
+A compression law is four straight lines in decibels, and there are three
+places the bend can live. Most HDLs make the first two easy and leave the third
+to the design.
+
+| Where the curve lives | What it costs | What changing it costs |
+|---|---|---|
+| Evaluated in fabric | a logarithm, or an approximation to one whose error lands on the curve's slope | a parameter, if the shape was parameterised; a rewrite if not |
+| A ROM the elaborator fills | a memory, and a Verilog `initial` block most flows accept | a re-synthesis |
+| A memory the host writes | the same memory, plus the write port it already has for its registers | a memory write |
+
+Every entry can express all three — a table is a `mem` and a host write is a
+bus transaction. The difference is whether the stdlib ships the third one's
+arithmetic, because that is where the work is: the index is the envelope's
+exponent and mantissa, so the logarithm becomes a priority encoder, and the
+interpolation has to be the same arithmetic on both sides of the seam or the
+host cannot predict what the fabric will do.
+
+Warp 11's `gainTableWords` tabulates any `float -> float` in decibels and
+`gainTableIndex`/`gainTableGain` read it back, and `gainTableLookup` is the
+host's model of that read — integer, truncating where the fabric truncates, so
+the living check holds the two to the last of sixteen bits rather than to a
+tolerance. The grid is two entries an octave, which puts a prescription within
+0.6 dB: three quarters of that is a knee falling inside one entry, where no
+interpolation on that grid could do better, and the rest is the chord being
+straight in amplitude while the law is straight in decibels. Both numbers are
+in the entry's own comment, because the choice between them and a finer grid is
+two words a band.
+
+What this buys is that a fitting change — a different prescription, a quiet-room
+curve against a quiet-talker one — is something the phone writes, not something
+the toolchain builds.
+
+**And a logarithmic gain has to come back.** `gainApply` is the other half: the
+fraction of a log2 gain picks a mantissa out of sixteen interpolated points of
+`2^f`, the integer part is the shift, and the product saturates. Storing the
+gain in log2 rather than decibels is what makes both of those free — the
+alternative is a multiply by 1/6.0206 per band and sample — while every
+host-facing number stays in decibels, which is the unit a curve is written in.
+Sixteen points with one multiply-add is more accurate than 256 points without
+(`(h·ln2)²/8` is 0.002 dB), and a select over literals is the mux tree a
+synthesiser would build from a small ROM anyway while staying FIRRTL-exportable,
+which a preloaded memory is not.
+
+The **variable shifter** is what a gain spanning octaves costs, and it is the
+only one in the audio path: 362 LUT4 on an iCE40 UP5K for the exponential, the
+shift and the saturate together. A folded engine has one of them however many
+bands it serves, which is the shape that makes it affordable on a part that
+size.
 
 ### Clock frequency, and rates derived from it
 

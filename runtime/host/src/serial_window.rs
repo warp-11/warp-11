@@ -32,6 +32,23 @@ pub const SYNC: u8 = 0xA5;
 /// The widest map the command byte can address: seven bits of word.
 pub const MAX_WORDS: usize = 128;
 
+/// The status byte of a frame the fabric sent **unasked**, carrying one
+/// streamed word — a recorder, a trace, a log sharing the wire the register
+/// map is on (`serialRegMapSlaveWith` on the fabric side). 0 and 1 are a
+/// reply's accepted and refused, so it cannot be mistaken for either.
+///
+/// Every request here has to cope with one arriving mid-exchange, which is
+/// why the frames are read one at a time rather than a fixed count of bytes:
+/// a design may start streaming at any moment, and a driver that did not
+/// expect it would parse a streamed word as its reply.
+pub const STREAM_STATUS: u8 = 0x02;
+
+/// How many streamed frames a single request will step over before giving
+/// up. A design streaming flat out must not be able to make `read32` hang
+/// forever; at that point the link is oversubscribed and the caller should
+/// know rather than block.
+const MAX_STREAMED_PER_EXCHANGE: usize = 4096;
+
 #[derive(Debug)]
 pub enum SerialError {
     Io(std::io::Error),
@@ -44,6 +61,8 @@ pub enum SerialError {
     /// A reply arrived with the wrong sync byte or checksum — noise on the
     /// line, or not the design this window expects.
     Malformed([u8; 7], usize),
+    /// The fabric streamed so much that the reply never got a turn.
+    Flooded,
 }
 
 impl From<std::io::Error> for SerialError {
@@ -58,6 +77,10 @@ impl std::fmt::Display for SerialError {
             SerialError::Io(e) => write!(f, "serial: {e}"),
             SerialError::BadOffset(o) => write!(f, "offset {o:#x} is not a word in the aperture"),
             SerialError::Refused => write!(f, "the fabric refused the request (checksum)"),
+            SerialError::Flooded => write!(
+                f,
+                "the fabric streamed {MAX_STREAMED_PER_EXCHANGE} frames without answering — the link is oversubscribed"
+            ),
             SerialError::Timeout { wanted, got } => write!(f, "no reply: {got} of {wanted} bytes"),
             SerialError::Malformed(bytes, n) => write!(f, "malformed reply {:02x?}", &bytes[..*n]),
         }
@@ -124,6 +147,58 @@ pub fn parse_reply(is_read: bool, reply: &[u8]) -> Result<Option<u32>, SerialErr
     }
 }
 
+/// One frame off the wire, told apart by its status byte.
+#[derive(Debug, PartialEq)]
+pub enum Frame {
+    /// A word the fabric sent unasked.
+    Streamed(u32),
+    /// The reply to the request in flight — `Some` for a read.
+    Reply(Option<u32>),
+}
+
+/// How many bytes follow the status byte, the checksum included.
+///
+/// A streamed frame always carries a word; a reply carries one only when the
+/// request was a read. So the length cannot be known from the request alone,
+/// which is the whole reason frames are read a piece at a time here.
+pub fn tail_length(status: u8, is_read: bool) -> usize {
+    if status == STREAM_STATUS || (status == 0 && is_read) {
+        5
+    } else {
+        1
+    }
+}
+
+/// A whole frame, given its status byte and everything after it.
+pub fn parse_frame(status: u8, tail: &[u8], is_read: bool) -> Result<Frame, SerialError> {
+    let malformed = || {
+        let mut copy = [0u8; 7];
+        copy[0] = SYNC;
+        copy[1] = status;
+        let n = tail.len().min(5);
+        copy[2..2 + n].copy_from_slice(&tail[..n]);
+        SerialError::Malformed(copy, 2 + n)
+    };
+
+    if tail.len() != tail_length(status, is_read) {
+        return Err(malformed());
+    }
+
+    // The xor covers the status byte and any data, but not itself.
+    let body_xor = tail[..tail.len() - 1].iter().fold(status, |a, b| a ^ b);
+    if body_xor != tail[tail.len() - 1] {
+        return Err(malformed());
+    }
+
+    match status {
+        STREAM_STATUS => Ok(Frame::Streamed(u32::from_le_bytes([tail[0], tail[1], tail[2], tail[3]]))),
+        0 if is_read => Ok(Frame::Reply(Some(u32::from_le_bytes([tail[0], tail[1], tail[2], tail[3]])))),
+        0 => Ok(Frame::Reply(None)),
+        1 => Err(SerialError::Refused),
+        _ => Err(malformed()),
+    }
+}
+
 // ---- the tty ---------------------------------------------------------------
 
 /// glibc's `struct termios` on Linux, both x86_64 and aarch64.
@@ -181,6 +256,11 @@ fn speed_code(baud: u32) -> Option<u32> {
 /// `write32` returning means the register holds the value.
 pub struct SerialWindow {
     tty: File,
+    /// Words the fabric streamed while this window was doing something else.
+    /// They are kept rather than dropped: a recorder's data arriving during a
+    /// `wdrc show` is still the recorder's data, and throwing it away would
+    /// put a hole in the recording for every register read.
+    streamed: std::collections::VecDeque<u32>,
 }
 
 impl SerialWindow {
@@ -223,24 +303,77 @@ impl SerialWindow {
             tcflush(fd, TCIOFLUSH);
         }
 
-        Ok(SerialWindow { tty })
+        Ok(SerialWindow { tty, streamed: std::collections::VecDeque::new() })
+    }
+
+    fn fill(&mut self, buf: &mut [u8]) -> Result<(), SerialError> {
+        let wanted = buf.len();
+        let mut got = 0;
+        while got < wanted {
+            let n = self.tty.read(&mut buf[got..])?;
+            if n == 0 {
+                return Err(SerialError::Timeout { wanted, got });
+            }
+            got += n;
+        }
+        Ok(())
+    }
+
+    /// One frame off the wire. The status byte decides how much follows it,
+    /// so a streamed word and a reply can share the link without the reader
+    /// having to know in advance which is coming.
+    fn next_frame(&mut self, is_read: bool) -> Result<Frame, SerialError> {
+        let mut head = [0u8; 2];
+        self.fill(&mut head)?;
+
+        if head[0] != SYNC {
+            return Err(SerialError::Malformed([head[0], head[1], 0, 0, 0, 0, 0], 2));
+        }
+
+        let mut tail = [0u8; 5];
+        let n = tail_length(head[1], is_read);
+        self.fill(&mut tail[..n])?;
+        parse_frame(head[1], &tail[..n], is_read)
     }
 
     fn exchange(&mut self, request: &[u8], is_read: bool) -> Result<Option<u32>, SerialError> {
         self.tty.write_all(request)?;
         self.tty.flush()?;
 
-        let wanted = reply_length(is_read);
-        let mut reply = [0u8; 7];
-        let mut got = 0;
-        while got < wanted {
-            let n = self.tty.read(&mut reply[got..wanted])?;
-            if n == 0 {
-                return Err(SerialError::Timeout { wanted, got });
+        // Step over whatever the fabric streams in the meantime, keeping it.
+        for _ in 0..MAX_STREAMED_PER_EXCHANGE {
+            match self.next_frame(is_read)? {
+                Frame::Streamed(word) => self.streamed.push_back(word),
+                Frame::Reply(value) => return Ok(value),
             }
-            got += n;
         }
-        parse_reply(is_read, &reply[..wanted])
+
+        Err(SerialError::Flooded)
+    }
+
+    /// Words the fabric has streamed so far, taken out of the window.
+    ///
+    /// They accumulate during ordinary register traffic, so a recorder loses
+    /// nothing to a `wdrc show` running beside it.
+    pub fn take_streamed(&mut self) -> Vec<u32> {
+        self.streamed.drain(..).collect()
+    }
+
+    /// Read streamed words until `want` of them have arrived or the link goes
+    /// quiet, sending nothing. This is the recording loop: no request is in
+    /// flight, so every frame should be a streamed one, and a reply arriving
+    /// here would mean something else is talking to the same tty.
+    pub fn read_streamed(&mut self, want: usize) -> Result<Vec<u32>, SerialError> {
+        while self.streamed.len() < want {
+            match self.next_frame(false) {
+                Ok(Frame::Streamed(word)) => self.streamed.push_back(word),
+                Ok(Frame::Reply(_)) => continue,
+                Err(SerialError::Timeout { got: 0, .. }) => break,
+                Err(e) => return Err(e),
+            }
+        }
+
+        Ok(self.streamed.drain(..self.streamed.len().min(want)).collect())
     }
 }
 
@@ -273,6 +406,46 @@ mod tests {
     fn read_frame_matches_the_fabric_side() {
         assert_eq!(read_frame(0x000).unwrap(), [0xA5, 0x00, 0x00]);
         assert_eq!(read_frame(0x04C).unwrap(), [0xA5, 0x13, 0x13]);
+    }
+
+    // A streamed frame is `A5 | 02 | d0 d1 d2 d3 | xor`, and the xor covers
+    // the status byte as well as the data — the same rule the fabric's
+    // `replyXor` follows for a read's reply.
+    #[test]
+    fn a_streamed_frame_parses_as_a_word() {
+        let word: u32 = 0x1234_5678;
+        let [d0, d1, d2, d3] = word.to_le_bytes();
+        let xor = STREAM_STATUS ^ d0 ^ d1 ^ d2 ^ d3;
+        assert_eq!(parse_frame(STREAM_STATUS, &[d0, d1, d2, d3, xor], false).unwrap(), Frame::Streamed(word));
+        // ...and it parses the same while a *read* is in flight, which is the
+        // case that matters: the status byte decides, not the request.
+        assert_eq!(parse_frame(STREAM_STATUS, &[d0, d1, d2, d3, xor], true).unwrap(), Frame::Streamed(word));
+    }
+
+    // The length of what follows the status byte cannot be known from the
+    // request alone once frames are interleaved.
+    #[test]
+    fn the_status_byte_decides_the_frame_length() {
+        assert_eq!(tail_length(STREAM_STATUS, false), 5, "a streamed frame always carries a word");
+        assert_eq!(tail_length(STREAM_STATUS, true), 5);
+        assert_eq!(tail_length(0, true), 5, "a read's reply carries its value");
+        assert_eq!(tail_length(0, false), 1, "a write's reply is status and checksum");
+        assert_eq!(tail_length(1, true), 1, "a refusal carries nothing, whatever was asked");
+    }
+
+    #[test]
+    fn a_replys_frame_still_parses_as_it_did() {
+        let value: u32 = 0xDEAD_BEEF;
+        let [d0, d1, d2, d3] = value.to_le_bytes();
+        assert_eq!(parse_frame(0, &[d0, d1, d2, d3, d0 ^ d1 ^ d2 ^ d3], true).unwrap(), Frame::Reply(Some(value)));
+        assert_eq!(parse_frame(0, &[0], false).unwrap(), Frame::Reply(None));
+        assert!(matches!(parse_frame(1, &[1], false), Err(SerialError::Refused)));
+    }
+
+    #[test]
+    fn a_streamed_frame_with_a_bad_checksum_is_malformed() {
+        let xor = STREAM_STATUS ^ 1 ^ 2 ^ 3 ^ 4;
+        assert!(matches!(parse_frame(STREAM_STATUS, &[1, 2, 3, 4, xor ^ 0xFF], false), Err(SerialError::Malformed(..))));
     }
 
     #[test]

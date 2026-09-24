@@ -115,7 +115,10 @@ let private diffDesignsAtDefault () =
       selectLadder.def
       multibandStage.def
       delayTap.def
-      audioEchoStage.def ]
+      audioEchoStage.def
+      gainTableStage.def
+      gainApplyStage.def
+      bandTableStage.def ]
 
 /// Each design with the length of testbench it needs — the default for all but
 /// the one whose unit of work is a pass rather than a beat.
