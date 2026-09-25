@@ -250,14 +250,18 @@ let private ambientInstanceTest =
             "A default-domain child created inside the block should be clocked by it — same as inline logic"
 
 let private domainRefusalsTest =
-    testCase "the periodless Sim, the FIRRTL export and the default name refuse domains by name" <| fun _ ->
+    testCase "the periodless Sim refuses by name; the FIRRTL export carries the second clock" <| fun _ ->
         Expect.throwsC
             (fun () -> Sim((twoDomainToy ()).def) |> ignore)
             (fun ex -> Expect.stringContains ex.Message "give the Sim its period" "A multi-domain Sim needs every foreign domain's period")
 
-        Expect.throwsC
-            (fun () -> Firrtl.emitFirrtl (twoDomainToy ()).def |> ignore)
-            (fun ex -> Expect.stringContains ex.Message "audio" "The FIRRTL export should name the domain it cannot express yet")
+        let fir = Firrtl.emitFirrtl (twoDomainToy ()).def
+        Expect.stringContains fir "input audio_clk : Clock" "The FIRRTL export should carry the second clock as a Clock port"
+
+        Expect.stringContains
+            fir
+            "regreset a : UInt<8>, audio_clk, audio_rst"
+            "An audio register should be clocked and reset by the audio pair"
 
         Expect.throwsC
             (fun () -> clockDomain "default" |> ignore)

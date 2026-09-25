@@ -118,7 +118,13 @@ let private diffDesignsAtDefault () =
       audioEchoStage.def
       gainTableStage.def
       gainApplyStage.def
-      bandTableStage.def ]
+      bandTableStage.def
+      holdChain.def
+      // The multi-domain toys: their testbenches drive each clock at its own
+      // period and assert per edge (notes/CLOCK_DOMAINS.md increment 5).
+      twoDomainCounters.def
+      synchronizedFlag.def
+      pinnedAudioCounter.def ]
 
 /// Each design with the length of testbench it needs — the default for all but
 /// the one whose unit of work is a pass rather than a beat.

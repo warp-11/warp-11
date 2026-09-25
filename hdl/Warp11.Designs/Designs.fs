@@ -2996,3 +2996,80 @@ let audioEchoStage =
             streamSource inPorts
             |> audioEcho "AudioEcho" echoDemoCapacity "echo" delay feedback
             |> streamSink outPorts)
+
+/// The clock domain the multi-domain toys put their second clock in. One
+/// value on purpose — a domain's name is its identity, and two spellings of
+/// one name are an elaboration error.
+let audioDomain = clockDomain "audio"
+
+/// Two free-running counters, one per domain — the smallest design where two
+/// clocks exist at all. Nothing crosses: each counter is read at its own
+/// domain's edges, and the differential's per-edge assertions are what check
+/// that the emitted always blocks really run at their own periods.
+let twoDomainCounters =
+    defModule
+        "TwoDomainCounters"
+        (fun p -> (p.outPort "count" 8, p.outPort "acount" 8))
+        (fun (count, acount) ->
+            let c = reg "c" 8
+            c + lit 1UL 8 ==> c
+            c ==> count
+
+            withDomain audioDomain (fun () ->
+                let a = reg "a" 8
+                a + lit 1UL 8 ==> a
+                a ==> acount))
+
+/// A bit crossing domains through `synchronize` — the CDC entry under the
+/// oracle. The audio side counts cycles it sees the flag high; the two-flop
+/// delay and every interleaving of the drifting phases must agree between the
+/// Sim's scheduler and the emitted Verilog for the count to match per edge.
+let synchronizedFlag =
+    defModule
+        "SynchronizedFlag"
+        (fun p -> (p.inPort "flag_in" 1, p.outPort "seen" 8))
+        (fun (flagIn, seen) ->
+            withDomain audioDomain (fun () ->
+                let synced = synchronize audioDomain flagIn
+                let seenCount = reg "seenCount" 8
+                If synced (fun () -> seenCount + lit 1UL 8 ==> seenCount)
+                seenCount ==> seen))
+
+/// A module declared in the audio domain, instantiated from a default-domain
+/// parent — the pinned form. The parent conjures the audio pair and wires it
+/// through; the child's own clock pair *is* the audio spelling.
+let audioTickChild =
+    defModuleIn
+        audioDomain
+        "AudioTickChild"
+        (fun p -> p.outPort "tick" 8)
+        (fun tick ->
+            let t = reg "t" 8
+            t + lit 1UL 8 ==> t
+            t ==> tick)
+
+let pinnedAudioCounter =
+    defModule
+        "PinnedAudioCounter"
+        (fun p -> p.outPort "ticks" 8)
+        (fun ticks ->
+            let tick = instanceNamed "atick" audioTickChild
+            tick ==> ticks)
+
+/// A no-reset register feeding an ordinary one. This is the shape that tells
+/// a real flop from a combinational assign: `second` must lag `value` by two
+/// edges. The Sim classified `regNoReset` as combinational until 2026-09-25,
+/// and every earlier catalog use read one straight from an input — the one
+/// arrangement where the difference is invisible — so this design is what
+/// keeps that bug found.
+let holdChain =
+    defModule
+        "HoldChain"
+        (fun p -> (p.inPort "value" 8, p.outPort "first" 8, p.outPort "second" 8))
+        (fun (value, first, second) ->
+            let held = regNoReset "held" 8
+            let chained = reg "chained" 8
+            value ==> held
+            held ==> chained
+            held ==> first
+            chained ==> second)

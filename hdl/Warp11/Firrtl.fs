@@ -262,6 +262,40 @@ let internal emitModule (isPublic: bool) (m: ModuleDef) =
     let rstInternal =
         if m.clock.resetActiveLow then m.clock.resetPort + "_pos" else m.clock.resetPort
 
+    // A foreign domain's active-high reset, same arrangement.
+    let foreignRst (fd: ClockDomain) =
+        if fd.clock.resetActiveLow then fd.clock.resetPort + "_pos" else fd.clock.resetPort
+
+    // The clock and active-high reset a domain's logic uses inside this module
+    // — its own pair, or a foreign domain's conjured pins, exactly mirroring
+    // the Verilog emitter.
+    let netsFor (domainName: string) =
+        if domainName = m.domain.domainName then
+            clk, rstInternal
+        else
+            match m.foreignDomains |> List.tryFind (fun fd -> fd.domainName = domainName) with
+            | Some fd -> fd.clock.clockPort, foreignRst fd
+            | None -> fail $"'{m.name}': logic clocked in '{domainName}', which the module does not carry"
+
+    let declDomain = dict m.declDomains
+
+    let domainOf n =
+        match declDomain.TryGetValue n with
+        | true, d -> d
+        | _ -> m.domain.domainName
+
+    // Which domain's edge each assertion is checked on — derived from its
+    // cone, exactly as the Sim does it. Only worth the walk when a foreign
+    // domain exists at all.
+    let assertDomains =
+        if List.isEmpty m.foreignDomains then
+            [ for st in m.stmts do
+                  match st with
+                  | Assert _ -> yield m.domain.domainName
+                  | _ -> () ]
+        else
+            Crossings.assertDomainsOf m
+
     let clocked = needsClk m
 
     let reads = readsOf m
@@ -338,6 +372,9 @@ let internal emitModule (isPublic: bool) (m: ModuleDef) =
         [ if clocked then
               yield $"{body}input {clk} : Clock"
               yield $"{body}input {m.clock.resetPort} : UInt<1>"
+          for fd in m.foreignDomains do
+              yield $"{body}input {fd.clock.clockPort} : Clock"
+              yield $"{body}input {fd.clock.resetPort} : UInt<1>"
           for d in m.decls do
               match d with
               | Input (n, t) -> yield $"{body}input {n} : {typeText t}"
@@ -348,13 +385,18 @@ let internal emitModule (isPublic: bool) (m: ModuleDef) =
         [ if m.clock.resetActiveLow then
               yield $"{body}node {rstInternal} = not({m.clock.resetPort})"
 
+          for fd in m.foreignDomains do
+              if fd.clock.resetActiveLow then
+                  yield $"{body}node {foreignRst fd} = not({fd.clock.resetPort})"
+
           for d in m.decls do
               match d with
               | Wire (n, t) -> yield $"{body}wire {n} : {typeText t}"
               | Reg (n, t, Some init) ->
-                  yield $"{body}regreset {n} : {typeText t}, {clk}, {rstInternal}, {litText init t}"
+                  let regClk, regRst = netsFor (domainOf n)
+                  yield $"{body}regreset {n} : {typeText t}, {regClk}, {regRst}, {litText init t}"
               // FIRRTL's plain `reg` is exactly ours-without-a-reset.
-              | Reg (n, t, None) -> yield $"{body}reg {n} : {typeText t}, {clk}"
+              | Reg (n, t, None) -> yield $"{body}reg {n} : {typeText t}, {fst (netsFor (domainOf n))}"
               | Memory(n, aw, w, init, _) ->
                   if init.IsSome then
                       fail
@@ -405,12 +447,23 @@ let internal emitModule (isPublic: bool) (m: ModuleDef) =
               yield $"{body}inst {inst.instName} of {inst.child.name}"
 
               if needsClk inst.child then
-                  yield $"{body}connect {inst.instName}.{inst.child.clock.clockPort}, {clk}"
+                  let instClk, instRst = netsFor inst.domain
+                  yield $"{body}connect {inst.instName}.{inst.child.clock.clockPort}, {instClk}"
 
                   let childReset =
-                      if inst.child.clock.resetActiveLow then $"not({rstInternal})" else rstInternal
+                      if inst.child.clock.resetActiveLow then $"not({instRst})" else instRst
 
                   yield $"{body}connect {inst.instName}.{inst.child.clock.resetPort}, {childReset}"
+
+                  // The other domains the child carries, wired through by name.
+                  for fd in inst.child.foreignDomains do
+                      let fdClk, fdRst = netsFor fd.domainName
+                      yield $"{body}connect {inst.instName}.{fd.clock.clockPort}, {fdClk}"
+
+                      let fdReset =
+                          if fd.clock.resetActiveLow then $"not({fdRst})" else fdRst
+
+                      yield $"{body}connect {inst.instName}.{fd.clock.resetPort}, {fdReset}"
 
               for d in inst.child.decls do
                   let staging n = inst.instName + "_" + n
@@ -433,7 +486,9 @@ let internal emitModule (isPublic: bool) (m: ModuleDef) =
               let addrType, _ = memShape[mem]
               yield $"{body}connect {r}.addr, {atPortType addrType (resolve addr)}"
               yield $"{body}connect {r}.en, UInt<1>(1)"
-              yield $"{body}connect {r}.clk, {clk}" ]
+              yield $"{body}connect {r}.clk, {fst (netsFor (domainOf mem))}" ]
+
+    let mutable assertIndex = 0
 
     let connects =
         [ for st in m.stmts do
@@ -444,6 +499,7 @@ let internal emitModule (isPublic: bool) (m: ModuleDef) =
                   | _ -> fail $"'{t}' is driven in '{m.name}' but never declared"
               | MemWrite (mem, addr, data, enable, maskExpr) ->
                   let addrType, dataType = memShape[mem]
+                  let memClk, memRst = netsFor (domainOf mem)
                   yield $"{body}connect {mem}.w.addr, {atPortType addrType (resolve addr)}"
                   // Held off during reset. Our Verilog puts every sequential
                   // action inside `always @(posedge clk) if (rst) … else …`, so
@@ -451,9 +507,9 @@ let internal emitModule (isPublic: bool) (m: ModuleDef) =
                   // port has no reset of its own, so the gate is explicit here —
                   // without it a register file takes a write during reset and
                   // runs a cycle ahead ever after.
-                  let gated = $"and({atPortType (UInt 1) (resolve enable)}, not({rstInternal}))"
+                  let gated = $"and({atPortType (UInt 1) (resolve enable)}, not({memRst}))"
                   yield $"{body}connect {mem}.w.en, {gated}"
-                  yield $"{body}connect {mem}.w.clk, {clk}"
+                  yield $"{body}connect {mem}.w.clk, {memClk}"
                   match maskExpr with
                   | None ->
                       yield $"{body}connect {mem}.w.data, {atPortType dataType (resolve data)}"
@@ -477,9 +533,13 @@ let internal emitModule (isPublic: bool) (m: ModuleDef) =
                           yield $"{body}connect {mem}.w.mask[%d{i}], {atPortType (UInt 1) (Slice(k, i, i))}"
               | Assert (c, message) ->
                   let escaped = message.Replace("\\", "\\\\").Replace("\"", "\\\"")
+                  // Checked on the edge of the domain its cone lives in, with
+                  // that domain's reset as the disable — the Sim's rule.
+                  let aClk, aRst = netsFor assertDomains[assertIndex]
+                  assertIndex <- assertIndex + 1
 
                   yield
-                      $"{body}assert({clk}, {expr (resolve c)}, not({rstInternal}), \"{escaped}\")" ]
+                      $"{body}assert({aClk}, {expr (resolve c)}, not({aRst}), \"{escaped}\")" ]
 
     let unusedReg =
         // A register nothing drives holds its reset value forever, which is
@@ -508,13 +568,6 @@ let internal emitModule (isPublic: bool) (m: ModuleDef) =
 /// The version line matters — the textual format changed `x <= y` to
 /// `connect x, y` at 3.0, and a reader picks its parser from this line.
 let emitFirrtl (m: ModuleDef) =
-    // FIRRTL has explicit clocks, so this is expressible — it lands with the
-    // differential's multi-clock leg (notes/CLOCK_DOMAINS.md increment 5).
-    for c in allModules m |> List.distinctBy (fun c -> c.name) do
-        match c.foreignDomains with
-        | [] -> ()
-        | fd :: _ -> fail $"'{c.name}' uses clock domain '{fd.domainName}' — multi-domain FIRRTL export is not built yet"
-
     let modules =
         allModules m
         |> List.distinctBy (fun c -> c.name)

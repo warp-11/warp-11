@@ -45,6 +45,7 @@ let catalog =
           entry "Delay chain (4 deep)" (nameof loopPipeline) (fun () -> loopPipeline.def)
           entry "Gated counter" (nameof gatedCounter) (fun () -> gatedCounter.def)
           entry "Hold through reset" (nameof holdThroughReset) (fun () -> holdThroughReset.def)
+          entry "Hold chain" (nameof holdChain) (fun () -> holdChain.def)
           entry "Dynamic shifts" (nameof dynamicShifts) (fun () -> dynamicShifts.def)
           entry "Bit reductions" (nameof bitReductions) (fun () -> bitReductions.def)
           entry "Constant division" (nameof constantDivision) (fun () -> constantDivision.def)
