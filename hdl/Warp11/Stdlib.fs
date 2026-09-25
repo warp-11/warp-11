@@ -1980,3 +1980,39 @@ let axiMasterWriterTrackedOn
 let axiMasterWriterWithIdleOn (bus: AxiWriteBus) (maxOutstanding: int) (beats: Stream<Expr * Expr * Expr>) : Expr =
     (axiMasterWriterCoreOn true bus maxOutstanding beats).idle.Value
 
+
+// ---------------------------------------------------------------------------
+// Clock-domain crossing (notes/CLOCK_DOMAINS.md). The entries here are the
+// only constructs the crossing check accepts on a domain boundary.
+
+/// A one-bit signal from another domain, made safe to sample in `d`: two
+/// flops clocked by `d`, the first marked as the crossing point, the second
+/// the value handed back — metastability on the first edge has a full cycle
+/// to resolve before anything reads it.
+///
+/// One bit on purpose. Two bits through two of these can arrive on different
+/// edges, so a multi-bit value needs a Gray counter or an `AsyncFifo` — the
+/// rest of the CDC family — and asking for one here is an error rather than a
+/// hazard.
+let synchronize (d: ClockDomain) (signal: Expr) : Expr =
+    if width signal <> 1 then
+        failwith
+            $"synchronize crosses one bit, and this signal is %d{width signal} wide — two bits can land on different edges, so a multi-bit value crosses through a Gray counter or an AsyncFifo"
+
+    let b = current ()
+    let metaName = b.FreshName "sync_meta"
+    let outName = b.FreshName "sync_out"
+    let mutable result = signal
+
+    b.WithDomain(
+        d,
+        fun () ->
+            let meta = declareReg metaName (UInt 1) 0UL
+            let out = declareReg outName (UInt 1) 0UL
+            signal ==> meta
+            meta ==> out
+            result <- out
+    )
+
+    b.MarkCrossing metaName
+    result

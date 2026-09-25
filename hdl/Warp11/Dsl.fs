@@ -163,6 +163,9 @@ type Builder(name: string, ?clockSpec: ClockSpec, ?domain: ClockDomain) =
     // (decl name, domain name) for registers and memories clocked outside the
     // module's own domain.
     let declDomains = ResizeArray<string * string>()
+    // Registers a CDC entry marked as its own sampling flop — the one place
+    // the crossing check lets a foreign signal arrive.
+    let crossings = ResizeArray<string>()
     let names = NameCounter()
     let declColl = DeclCollector(name)
     let streams = StreamTracker()
@@ -234,6 +237,11 @@ type Builder(name: string, ?clockSpec: ClockSpec, ?domain: ClockDomain) =
         match currentDomain with
         | Some d when d.domainName <> ownDomain.domainName -> declDomains.Add(n, d.domainName)
         | _ -> ()
+
+    /// Mark a register as a CDC entry's sampling flop: the crossing check
+    /// accepts a foreign-domain signal there and nowhere else. Internal on
+    /// purpose — the CDC stdlib entries are the only constructs that cross.
+    member internal _.MarkCrossing(regName: string) = crossings.Add regName
 
     /// Run the body with `d` as the current domain — see `withDomain`.
     member this.WithDomain(d: ClockDomain, body: unit -> unit) =
@@ -710,6 +718,8 @@ type Builder(name: string, ?clockSpec: ClockSpec, ?domain: ClockDomain) =
 
                   yield fd ]
           declDomains = List.ofSeq declDomains
+          crossings = List.ofSeq crossings
+          portDomains = []
           streamReadies =
             [ for n in streams.Readies ->
                   n,
@@ -718,6 +728,16 @@ type Builder(name: string, ?clockSpec: ClockSpec, ?domain: ClockDomain) =
                    | _ -> 0) ]
           probes = List.ofSeq streams.Probes
           stateMachines = [ for machine in machines.Machines -> machine.stateReg, machine.states ] }
+        // The crossing check runs here — at elaboration, once the statements
+        // are folded — and only when a foreign domain is present at all, so a
+        // single-domain module pays nothing. It throws naming the module, the
+        // register and the signal; what survives records its port domains for
+        // the parent's own run.
+        |> fun def ->
+            if List.isEmpty def.foreignDomains then
+                def
+            else
+                { def with portDomains = Crossings.analyze def }
 
 /// A module definition together with the typed view of its ports. `defModule`
 /// builds one; instantiating (`.New`, `.NewNamed`) re-runs `io` over the

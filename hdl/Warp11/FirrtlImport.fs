@@ -868,6 +868,8 @@ let private readModule (known: Map<string, ModuleDef>) (header: string) (body: L
       // learns domains (notes/CLOCK_DOMAINS.md increment 5).
       foreignDomains = []
       declDomains = []
+      crossings = []
+      portDomains = []
       streamReadies = []
       probes = []
       stateMachines = [] }

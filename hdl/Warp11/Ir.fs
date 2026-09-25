@@ -806,6 +806,19 @@ type ModuleDef =
       /// the module's own domain: (declaration name, domain name), recorded at
       /// declaration inside `withDomain`. Absence means the module's own.
       declDomains: (string * string) list
+      /// Registers allowed to sample a signal from another domain: the CDC
+      /// entries' own sampling flops (`synchronize`'s first stage), marked
+      /// where the entry is built. The crossing check refuses every other
+      /// foreign sample, so this list is the whole of what makes a crossing
+      /// legal.
+      crossings: string list
+      /// What the crossing check learned about this module's boundary, for
+      /// the parent's judgement: each output with the domains driving it, and
+      /// each input with the domains that sample it (unsampled inputs are
+      /// absent). A name equal to the module's own domain means "wherever the
+      /// instance is clocked". Empty for a single-domain module — the check
+      /// never ran, and its ports are all its own domain.
+      portDomains: (string * string list) list
       /// Ready nets of streams created in this module, with how many times each
       /// was driven — a stream has exactly one consumer, and after If-folding the
       /// final stmts hold one assign per target, so the raw drive count is

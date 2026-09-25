@@ -54,6 +54,8 @@ let private bare name =
       domain = defaultDomain
       foreignDomains = []
       declDomains = []
+      crossings = []
+      portDomains = []
       streamReadies = []
       probes = []
       stateMachines = [] }
@@ -261,6 +263,79 @@ let private domainRefusalsTest =
             (fun () -> clockDomain "default" |> ignore)
             (fun ex -> Expect.stringContains ex.Message "already in" "The default domain is not declarable")
 
+let private crossingRefusedTest =
+    testCase "an unsynchronised crossing is an elaboration error naming the register and the signal" <| fun _ ->
+        Expect.throwsC
+            (fun () ->
+                defModule "BadCross" (fun p -> p.outPort "o" 1) (fun o ->
+                    let flag = declareReg "flag" (UInt 1) 0UL
+                    Not flag ==> flag
+
+                    withDomain audio (fun () ->
+                        let t = declareReg "t" (UInt 1) 0UL
+                        t ^^^ flag ==> t
+                        t ==> o))
+                |> ignore)
+            (fun ex ->
+                Expect.stringContains ex.Message "register 't'" "The error should name the sampling register"
+                Expect.stringContains ex.Message "'flag'" "The error should name the crossing signal"
+                Expect.stringContains ex.Message "synchronize" "The error should point at the CDC entry")
+
+let private synchronizeTest =
+    testCase "synchronize is the accepted crossing, and emits the two flops in the target domain" <| fun _ ->
+        let good =
+            defModule "GoodCross" (fun p -> p.outPort "o" 1) (fun o ->
+                let flag = declareReg "flag" (UInt 1) 0UL
+                Not flag ==> flag
+
+                withDomain audio (fun () ->
+                    let t = declareReg "t" (UInt 1) 0UL
+                    t ^^^ synchronize audio flag ==> t
+                    t ==> o))
+
+        let verilog = emitDesign good.def
+        Expect.stringContains verilog "sync_meta_1 <= flag;" "The first flop should sample the foreign signal"
+        Expect.stringContains verilog "sync_out_1 <= sync_meta_1;" "The second flop should sample the first"
+
+        let audioBlock = verilog.Substring(verilog.IndexOf "always @(posedge audio_clk)")
+        Expect.stringContains audioBlock "sync_meta_1 <= flag;" "Both flops should live in the audio always block"
+
+let private crossingFeedTest =
+    testCase "feeding a pinned instance's input from another domain is refused at the wiring" <| fun _ ->
+        let audioSink =
+            defModuleIn audio "AudioSink" (fun p -> p.inPort "d" 1, p.outPort "q" 1) (fun (d, q) ->
+                let r = declareReg "r" (UInt 1) 0UL
+                d ==> r
+                r ==> q)
+
+        Expect.throwsC
+            (fun () ->
+                defModule "BadFeed" (fun p -> p.outPort "o" 1) (fun o ->
+                    let flag = declareReg "flag" (UInt 1) 0UL
+                    Not flag ==> flag
+                    let d, q = instanceNamed "sink" audioSink
+                    flag ==> d
+                    q ==> o)
+                |> ignore)
+            (fun ex ->
+                Expect.stringContains ex.Message "instance 'sink' input 'd'" "The error should name the instance and port"
+                Expect.stringContains ex.Message "'flag'" "The error should name the wrongly-clocked driver")
+
+let private synchronizeWidthTest =
+    testCase "synchronize refuses a multi-bit signal" <| fun _ ->
+        Expect.throwsC
+            (fun () ->
+                defModule "WideCross" (fun p -> p.outPort "o" 8) (fun o ->
+                    let c = declareReg "c" (UInt 8) 0UL
+                    c + lit 1UL 8 ==> c
+
+                    withDomain audio (fun () ->
+                        let t = declareReg "t" (UInt 8) 0UL
+                        synchronize audio c ==> t
+                        t ==> o))
+                |> ignore)
+            (fun ex -> Expect.stringContains ex.Message "Gray counter" "The refusal should point at the multi-bit entries")
+
 let tests =
     testList
         "FIRRTL and emitter"
@@ -347,4 +422,8 @@ let tests =
           withDomainTest
           pinnedModuleTest
           ambientInstanceTest
-          domainRefusalsTest ]
+          domainRefusalsTest
+          crossingRefusedTest
+          synchronizeTest
+          crossingFeedTest
+          synchronizeWidthTest ]

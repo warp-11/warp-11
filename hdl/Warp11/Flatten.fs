@@ -66,15 +66,16 @@ let rec private flattenUnchecked (m: ModuleDef) : ModuleDef =
                             // which.
                             Assert(renameRefs prefix cond, $"{prefix}: {message}") ]
 
-              yield decls, stmts, declDomains ]
+              yield decls, stmts, declDomains, [ for c in child.crossings -> $"{prefix}_{c}" ] ]
 
     { m with
-        decls = m.decls @ List.collect (fun (d, _, _) -> d) inlined
-        stmts = m.stmts @ List.collect (fun (_, s, _) -> s) inlined
+        decls = m.decls @ List.collect (fun (d, _, _, _) -> d) inlined
+        stmts = m.stmts @ List.collect (fun (_, s, _, _) -> s) inlined
         instances = []
         // `foreignDomains` is already transitive — an instance registers every
         // domain its child carries — so only the per-decl tags need merging.
-        declDomains = m.declDomains @ List.collect (fun (_, _, dd) -> dd) inlined }
+        declDomains = m.declDomains @ List.collect (fun (_, _, dd, _) -> dd) inlined
+        crossings = m.crossings @ List.collect (fun (_, _, _, c) -> c) inlined }
 
 let private declaredName =
     function
