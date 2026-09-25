@@ -694,7 +694,7 @@ let exportIsTheDesign () : bool =
     // build function are compiled too.
     let mappingFor (g: Graph) : Warp11.Mapping.Mapping option =
         if g.name = Warp11.Graph.gainGraph.name then
-            Some { board = kv260; path = viaHostMemory }
+            Some { board = kv260; path = viaHostMemory; plugged = [] }
         else
             None
 
@@ -1308,10 +1308,10 @@ let buildDirectoryOpenFlow () : bool =
                     (board.connectors |> List.filter (fun c -> c.role <> I2sSeparateCodecs))
                     @ [ { role = I2sSharedBus
                           pins =
-                            [ "bclk", { pin = "43"; standard = None }
-                              "ws", { pin = "38"; standard = None }
-                              "sd_in", { pin = "34"; standard = None }
-                              "sd_out", { pin = "31"; standard = None } ] } ] }
+                            [ "bclk", { pin = "43"; standard = None; activeLow = false }
+                              "ws", { pin = "38"; standard = None; activeLow = false }
+                              "sd_in", { pin = "34"; standard = None; activeLow = false }
+                              "sd_out", { pin = "31"; standard = None; activeLow = false } ] } ] }
 
         let sharedDir = System.IO.Path.Combine(dir, "shared")
         Warp11.Build.write sharedDir (Warp11.Elaborate.boardTopOf shared viaPins g) |> ignore
@@ -1372,22 +1372,22 @@ let mappingIsAFile () : bool =
     let carried = Warp11.DesignFile.parse (Warp11.DesignFile.write g)
 
     let exported =
-        match Warp11.Export.exportWith (Some { board = kv260; path = viaHostMemory }) g with
+        match Warp11.Export.exportWith (Some { board = kv260; path = viaHostMemory; plugged = [] }) g with
         | Ok text -> text
         | Error why -> failwith why
 
     let refused =
-        match Warp11.Mapping.parse (Warp11.Mapping.write { board = { ice with host = AxiLiteAt 0UL }; path = viaPins }) with
+        match Warp11.Mapping.parse (Warp11.Mapping.write { board = { ice with host = AxiLiteAt 0UL }; path = viaPins; plugged = [] }) with
         | Error why -> why.Contains "no processing system"
         | Ok _ -> false
 
-    roundTrips { board = kv260; path = viaHostMemory }
-    && roundTrips { board = kv260; path = viaPins }
-    && roundTrips { board = ice; path = viaPins }
-    && roundTrips { board = custom; path = viaHostMemory }
+    roundTrips { board = kv260; path = viaHostMemory; plugged = [] }
+    && roundTrips { board = kv260; path = viaPins; plugged = [] }
+    && roundTrips { board = ice; path = viaPins; plugged = [] }
+    && roundTrips { board = custom; path = viaHostMemory; plugged = [] }
     && boardRoundTrips kv260
     && boardRoundTrips ice
-    && boardRoundTrips { ice with connectors = [ { role = I2sSharedBus; pins = [ "bclk", { pin = "43"; standard = None } ] } ] }
+    && boardRoundTrips { ice with connectors = [ { role = I2sSharedBus; pins = [ "bclk", { pin = "43"; standard = None; activeLow = false } ] } ] }
     && Warp11.Mapping.presetOf kv260 = Some "kv260"
     && Warp11.Mapping.presetOf custom = None
     && (match carried with

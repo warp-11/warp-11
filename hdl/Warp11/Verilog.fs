@@ -337,16 +337,22 @@ let rec internal needsClk m =
 /// attribute 'ram_style = block' … forced mapping to block RAM"*. Measured, not
 /// assumed — it was the reason to check rather than to strip.
 ///
-/// Deliberately not here yet: **ECP5**. It also refuses `Distributed`, but for
-/// a different reason — `TRELLIS_DPR16X4` exists and a *ROM* cannot map to it,
-/// having no write port — and whether a distributed `mem` maps is untested. A
-/// case that cannot be specified from measurement does not belong in the type.
+/// **ECP5**, measured 2026-09-25 with yosys 0.68 `synth_ecp5`: a written
+/// memory marked `distributed` maps to `TRELLIS_DPR16X4` (a 16x8 one took
+/// two), `block` maps to `DP16KD` — and a memory with **no write port**
+/// marked `distributed` fails with *"no valid mapping found"*, because the
+/// LUT-RAM primitive is a RAM. The same ROM marked `logic` maps to LUTs with
+/// the combinational read intact, which is exactly what `distributedRom`
+/// promises. So on ECP5 a distributed ROM is emitted as `logic`, and a
+/// distributed RAM as `distributed`.
 type Target =
     /// Vivado, UltraScale+ and friends. What every existing call site means,
     /// and what `emitDesign` still does.
     | Xilinx
     /// Lattice iCE40 through yosys.
     | Ice40
+    /// Lattice ECP5 through yosys.
+    | Ecp5
 
 /// One module's Verilog. Instances are emitted as instantiations, not inlined,
 /// so the emitted hierarchy is the elaborated one.
@@ -424,6 +430,15 @@ let internal emitVerilogFor (target: Target) m =
                       Option.map (split mem) mask)
               | Assert (cond, message) -> Assert(split "assert" cond, message) ]
 
+    // The memories something writes: on ECP5 the rest are ROMs, and a ROM
+    // cannot take the LUT-RAM primitive.
+    let written =
+        m.stmts
+        |> List.choose (function
+            | MemWrite(mem, _, _, _, _) -> Some mem
+            | _ -> None)
+        |> Set.ofList
+
     let bodyDecls =
         [ if needsClk m && m.clock.resetActiveLow then
               yield $"    wire {rstInternal} = ~{m.clock.resetPort};"
@@ -452,6 +467,13 @@ let internal emitVerilogFor (target: Target) m =
                       | Ice40, Ultra ->
                           failwith
                               $"memory '{n}' in '{m.name}' is an ultraMem, which is Xilinx UltraRAM and has no iCE40 counterpart. Declare it blockMem — an iCE40 EBR is 4 kbit, so check the array still fits"
+                      // Measured — see `Target`: the LUT-RAM primitive is a
+                      // RAM, so a ROM goes to LUTs as logic, read the same way.
+                      | Ecp5, Distributed when written.Contains n -> "(* ram_style = \"distributed\" *) "
+                      | Ecp5, Distributed -> "(* ram_style = \"logic\" *) "
+                      | Ecp5, Ultra ->
+                          failwith
+                              $"memory '{n}' in '{m.name}' is an ultraMem, which is Xilinx UltraRAM and has no ECP5 counterpart. Declare it blockMem — an ECP5 DP16KD is 18 kbit"
 
                   yield $"    {attribute}reg {range w}{n} [0:%d{(1 <<< aw) - 1}];"
               | _ -> ()

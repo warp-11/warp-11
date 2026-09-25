@@ -1311,7 +1311,7 @@ let view (opening: Opening) : Control =
             | Some m ->
                 pickFolder "Build into" (fun dir ->
                     try
-                        let out = Warp11.Build.write dir (Warp11.Elaborate.boardTopOf m.board m.path root)
+                        let out = Warp11.Build.write dir (Warp11.Elaborate.boardTopOf (Warp11.Mapping.boardOf m) m.path root)
                         message.Set $"wrote %d{out.files.Length} files to {dir} — build with {out.run}"
                     with e ->
                         message.Set $"refused: {e.Message}")
@@ -1605,7 +1605,7 @@ let view (opening: Opening) : Control =
                             | Some m when b.hostMemory.IsSome -> m.path
                             | _ -> viaPins
 
-                        useMapping (Some { board = b; path = path })
+                        useMapping (Some { board = b; path = path; plugged = [] })
                     | Error why -> message.Set why
 
             [ heading "target"; line [ label "preset"; combo presetNames current pick ] ]

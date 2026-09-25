@@ -44,16 +44,22 @@ type Family =
     | UltraScalePlus
     /// Lattice iCE40 UltraPlus: no PS, no LUTRAM; EBR and SPRAM.
     | Ice40UltraPlus
+    /// Lattice ECP5: no PS; LUT RAM for what is written, DP16KD block RAM,
+    /// 18x18 multipliers.
+    | Ecp5
 
 /// The part, as the toolchain names it.
 type Part =
     { family: Family
-      /// Vivado's `-part` (`xck26-sfvc784-2LV-c`), nextpnr's `--up5k`.
+      /// Vivado's `-part` (`xck26-sfvc784-2LV-c`), nextpnr's `--up5k`,
+      /// nextpnr-ecp5's `--25k`.
       device: string
       /// nextpnr's `--package`; empty where the device string carries it.
       package: string
-      /// Vivado's board part (`xilinx.com:kv260_som:part0:1.4`), which owns
-      /// the PS configuration; none for a bare part.
+      /// The toolchain's own name for the board: Vivado's board part
+      /// (`xilinx.com:kv260_som:part0:1.4`), which owns the PS
+      /// configuration, or openFPGALoader's `-b` (`icepi-zero`), which knows
+      /// the board's programmer. None for a bare part.
       boardPart: string option }
 
 /// Which flow builds the bitstream.
@@ -123,6 +129,10 @@ type Carrier =
     /// link back-pressures, so a design that outruns the baud waits unless
     /// something in front of it is allowed to drop.
     | InLinkFrames
+    /// A one-bit value the design reports, on the package pin behind a
+    /// connector port — an LED. The pin's own polarity decides whether the
+    /// top inverts it, so a design never knows which way an LED is wired.
+    | OnPin of port: string
 
 /// Which need a binding is about.
 ///
@@ -229,16 +239,37 @@ type DeviceRole =
     /// The board's LEDs, active low where the wrapper says so.
     | Leds
 
-/// One package pin, with the IO standard where the toolchain wants one.
+/// One package pin, with the IO standard where the toolchain wants one, and
+/// whether what is on it is lit (or asserted) by driving it low — a fact
+/// about the board's wiring, never the design's.
 type Pin =
     { pin: string
-      standard: string option }
+      standard: string option
+      activeLow: bool }
 
 /// Where a device role's ports land on this board.
 type Connector =
     { role: DeviceRole
       /// Port name → package pin.
       pins: (string * Pin) list }
+
+/// A socket on the board something plugs into — a Pmod, a Pi header — as the
+/// package pin behind each of its positions. What is plugged in is a
+/// `Harness`, which says what is on each position; the two meet at the
+/// position number, so a cable moves between boards unchanged.
+type Socket =
+    { name: string
+      /// `pmod`, `pi40`: a harness plugs only into a socket of its own kind.
+      kind: string
+      positions: (int * Pin) list }
+
+/// A cable, or a hub, as its plug sees it: the device role and port on each
+/// position. Written once, from the wiring, and shared by every board whose
+/// socket it plugs into.
+type Harness =
+    { name: string
+      plug: string
+      positions: (int * (DeviceRole * string)) list }
 
 /// One target: every choice a build needs, stated once.
 type Board =
@@ -254,18 +285,23 @@ type Board =
       hostMemory: HostMemoryFacts option
       host: HostDriver
       loading: Loading
-      connectors: Connector list }
+      connectors: Connector list
+      /// Where a harness can plug in. A board with none takes only what its
+      /// connectors already carry.
+      sockets: Socket list }
 
 /// Whether the part has a processing system beside the fabric.
 let hasPs (part: Part) =
     match part.family with
     | UltraScalePlus -> true
-    | Ice40UltraPlus -> false
+    | Ice40UltraPlus
+    | Ecp5 -> false
 
 /// Whether the fabric has LUT RAM — the storage `distributedMem` asks for.
 let hasLutRam (part: Part) =
     match part.family with
-    | UltraScalePlus -> true
+    | UltraScalePlus
+    | Ecp5 -> true
     | Ice40UltraPlus -> false
 
 /// The pins a board gives a role, if it has that role at all.
@@ -278,6 +314,7 @@ let checkBoard (board: Board) =
 
     match board.tool, board.part.family with
     | Vivado, Ice40UltraPlus -> refuse "Vivado does not build an iCE40 part"
+    | Vivado, Ecp5 -> refuse "Vivado does not build an ECP5 part"
     | OpenFlow, UltraScalePlus -> refuse "the open flow does not build an UltraScale+ part"
     | _ -> ()
 
@@ -323,7 +360,7 @@ let checkBoard (board: Board) =
 /// So a project writes `let board = kv260At <its own clock>` once, beside the
 /// design, and everything derived comes off that.
 let kv260At (fabricHz: int) =
-    let lvcmos33 (pin: string) = { pin = pin; standard = Some "LVCMOS33" }
+    let lvcmos33 (pin: string) = { pin = pin; standard = Some "LVCMOS33"; activeLow = false }
 
     { name = "kv260"
       part =
@@ -354,7 +391,21 @@ let kv260At (fabricHz: int) =
                 "mclk2", lvcmos33 "B10"
                 "lrclk2", lvcmos33 "E12"
                 "sclk2", lvcmos33 "D11"
-                "sdout", lvcmos33 "B11" ] } ] }
+                "sdout", lvcmos33 "B11" ] } ]
+      // Carrier connector J2, the one Pmod: the Pmod I2S2 above is what is
+      // usually in it, and a harness plugged here replaces it.
+      sockets =
+        [ { name = "J2"
+            kind = "pmod"
+            positions =
+              [ 1, lvcmos33 "H12"
+                2, lvcmos33 "E10"
+                3, lvcmos33 "D10"
+                4, lvcmos33 "C11"
+                7, lvcmos33 "B10"
+                8, lvcmos33 "E12"
+                9, lvcmos33 "D11"
+                10, lvcmos33 "B11" ] } ] }
 
 /// The KV260 at the clock the **audio** apps' overlays program — the one
 /// binding shared by more than one project, because `audio-tone`,
@@ -389,7 +440,7 @@ let iceBreakerBaud = 115_200
 /// on pins 6 (into the fabric) and 9 (out); the LEDs are wired to ground, so
 /// the wrapper drives them low to light them.
 let iceBreakerAt (fabricHz: int) =
-    let bare (pin: int) = { pin = string pin; standard = None }
+    let bare (pin: int) = { pin = string pin; standard = None; activeLow = false }
 
     { name = "icebreaker"
       part =
@@ -418,7 +469,13 @@ let iceBreakerAt (fabricHz: int) =
           { role = HostUart
             pins = [ "host_rx", bare 6; "host_tx", bare 9 ] }
           { role = Leds
-            pins = [ "ledr_n", bare 11; "ledg_n", bare 37 ] } ] }
+            pins =
+              [ "ledr_n", { bare 11 with activeLow = true }
+                "ledg_n", { bare 37 with activeLow = true } ] } ]
+      sockets =
+        [ { name = "PMOD1B"
+            kind = "pmod"
+            positions = [ 1, bare 43; 2, bare 38; 3, bare 34; 4, bare 31; 7, bare 42; 8, bare 36; 9, bare 32; 10, bare 28 ] } ] }
 
 /// The iCEBreaker clocked straight off its 12 MHz crystal — no PLL, the shape
 /// a design with no converter attached to it takes. No AXI on this part, which
@@ -426,11 +483,108 @@ let iceBreakerAt (fabricHz: int) =
 /// assumption about the KV260 baked into something generic.
 let iceBreaker = iceBreakerAt 12_000_000
 
+/// The Icepi Zero at a fabric clock **the caller pins**: a Lattice ECP5-25F
+/// (CABGA256) in a Raspberry Pi Zero footprint, a 50 MHz oscillator on M1,
+/// the FT231X's UART on K16 (into the fabric) and K15 (out), five LEDs wired
+/// pin → 1 kΩ → LED → ground, so **active high**, and the Pi's 40-pin header
+/// as the one socket a harness plugs into. All of it from the board's own
+/// `gateware/icepi-zero.lpf` and schematic (`cheyao/icepi-zero`, v1.4), every
+/// I/O bank at 3.3 V.
+///
+/// **24 MHz, the iCEBreaker's clock, is not reachable from here**: the PLL's
+/// phase detector wants 3.125 MHz or more, and 24/50 = 12/25 would need a
+/// reference divisor of 25 — 2 MHz. `ecppll` lands on 23.333. 25 MHz is
+/// 50/2 exactly, and a 48 kHz converter frames at 48 828.125 Hz there —
+/// the KV260's rate at 100 MHz, so the two boards agree sample for sample.
+///
+/// The host link runs at 1 Mbaud: 25 cycles a bit at 25 MHz, and well inside
+/// what the FT231X does.
+let icepiAt (fabricHz: int) =
+    let pin (site: string) = { pin = site; standard = Some "LVCMOS33"; activeLow = false }
+
+    { name = "icepi"
+      part =
+        { family = Ecp5
+          device = "25k"
+          package = "CABGA256"
+          boardPart = Some "icepi-zero" }
+      tool = OpenFlow
+      // An oscillator on the board, but `Crystal` in this record's sense:
+      // what reaches the fabric goes through the wrapper's PLL.
+      clock = Crystal 50_000_000
+      fabricHz = fabricHz
+      hostMemory = None
+      host = UartAt 1_000_000
+      loading = Sram
+      connectors =
+        [ { role = ClockIn; pins = [ "clk50", pin "M1" ] }
+          { role = HostUart
+            pins = [ "host_rx", pin "K16"; "host_tx", pin "K15" ] }
+          { role = Leds
+            pins = [ "led0", pin "E13"; "led1", pin "D14"; "led2", pin "E12"; "led3", pin "C13"; "led4", pin "D13" ] } ]
+      // The header by physical pin number, as the board's constraints
+      // comment each GPIO; power and ground positions carry nothing.
+      sockets =
+        [ { name = "PI40"
+            kind = "pi40"
+            positions =
+              [ 3, pin "T2"; 5, pin "R2"; 7, pin "R1"; 8, pin "P1"; 10, pin "N1"
+                11, pin "R3"; 12, pin "N4"; 13, pin "P3"; 15, pin "P2"; 16, pin "M2"
+                18, pin "L1"; 19, pin "L2"; 21, pin "J1"; 22, pin "J2"; 23, pin "G2"
+                24, pin "H2"; 26, pin "G1"; 27, pin "G3"; 28, pin "K3"; 29, pin "E1"
+                31, pin "F3"; 32, pin "J3"; 33, pin "E3"; 35, pin "E4"; 36, pin "H3"
+                37, pin "D4"; 38, pin "F1"; 40, pin "F2" ] } ] }
+
+/// The Icepi Zero at 25 MHz, 50/2 exactly — see `icepiAt`.
+let icepi = icepiAt 25_000_000
+
+/// A harness plugged into one of a board's sockets: the board with the
+/// connectors that plugging it in gives it — each role the harness carries,
+/// its ports on the pins behind their positions, in place of whatever was in
+/// that socket before.
+/// Refused by name when the socket does not exist, is the wrong kind, or
+/// lacks a position the harness uses.
+let plug (harness: Harness) (socketName: string) (board: Board) : Board =
+    let socket =
+        match board.sockets |> List.tryFind (fun s -> s.name = socketName) with
+        | Some s -> s
+        | None ->
+            let names = board.sockets |> List.map (fun s -> s.name) |> String.concat ", "
+            failwith $"{harness.name}: the {board.name} has no socket '{socketName}' — it has [{names}]"
+
+    if socket.kind <> harness.plug then
+        failwith $"{harness.name}: a {harness.plug} plug does not go into {socketName}, a {socket.kind} socket"
+
+    let pinAt (position: int) =
+        match socket.positions |> List.tryFind (fun (p, _) -> p = position) with
+        | Some(_, pin) -> pin
+        | None -> failwith $"{harness.name}: position %d{position} is not wired on the {board.name}'s {socketName}"
+
+    let given =
+        harness.positions
+        |> List.groupBy (fun (_, (role, _)) -> role)
+        |> List.map (fun (role, positions) -> { role = role; pins = [ for position, (_, port) in positions -> port, pinAt position ] })
+
+    // A socket holds one thing: whatever the board had on its pins — the
+    // KV260's Pmod I2S2 in J2 — is unplugged, as is any connector of a role
+    // the harness now gives.
+    let roles = given |> List.map (fun c -> c.role)
+    let socketPins = socket.positions |> List.map (fun (_, pin) -> pin.pin) |> Set.ofList
+
+    let kept =
+        board.connectors
+        |> List.filter (fun c ->
+            not (List.contains c.role roles)
+            && not (c.pins |> List.exists (fun (_, pin) -> socketPins.Contains pin.pin)))
+
+    { board with connectors = kept @ given }
+
 /// The presets by name, for a verb or a dialog: the two boards this
 /// repository has been built for, at the clocks their audio designs use.
 let presets: (string * Board) list =
     [ "kv260", kv260
-      "icebreaker", iceBreakerAt 24_000_000 ]
+      "icebreaker", iceBreakerAt 24_000_000
+      "icepi", icepi ]
 
 /// A preset by name, or the names there are.
 let preset (name: string) : Result<Board, string> =

@@ -16,16 +16,19 @@ open Warp11.Mandelbrot.Lane
 let mandelChunks (name: string) (width: int) (pixels: int) (maxIter: int) (fracBits: int) (threads: int) (lanes: int) : BoardTop.Design =
     let def = mandelChunksDef name width pixels maxIter fracBits threads lanes
 
-    { name = name
-      sampleRate = 0.0
-      streams = 1
-      needs =
+    let needs =
         [ yield BoardTop.streamIn "beats" [ beatPin ]
           yield BoardTop.streamOut "pixels" [ pixelsPin ]
           for name, format in viewControls fracBits -> BoardTop.valueIn name format ]
+
+    { name = name
+      sampleRate = 0.0
+      streams = 1
+      needs = needs
       answers = pixels / pixelsPerBeat
-      rig =
-        fun instance ->
+      atClocking = None
+      body =
+        BoardTop.rigged needs (fun instance ->
             let in1, out1, cxOrigin, cyOrigin, dx, dy = def.NewNamed instance
 
             { through =
@@ -35,7 +38,7 @@ let mandelChunks (name: string) (width: int) (pixels: int) (maxIter: int) (fracB
                     |> streamThroughInstance in1 out1
                     |> streamMapTo (layoutOfList [ pixelsPin ]) List.singleton
               ports = [ "cxOrigin", cxOrigin; "cyOrigin", cyOrigin; "dx", dx; "dy", dy ]
-              readbacks = [] } }
+              readbacks = [] }) }
 
 /// A frame through the design in the Sim: beats `0 .. height × chunks - 1`
 /// offered as fast as they are taken, the pixels collected in the order
@@ -124,18 +127,21 @@ let renderThroughBoardTop (width: int) (height: int) (pixels: int) (maxIter: int
 let mandelScatter (name: string) (width: int) (pixels: int) (maxIter: int) (fracBits: int) (threads: int) (lanes: int) : BoardTop.Design =
     let def = mandelScatterDef name width pixels maxIter fracBits threads lanes
 
-    { name = name
-      sampleRate = 0.0
-      streams = 1
-      needs =
+    let needs =
         [ yield BoardTop.streamIn "beats" [ beatPin ]
           // The destination rides at the head of the output row: the scatter
           // sink reads it there and the rest is the payload.
           yield BoardTop.streamOut "pixels" [ indexPin; pixelsPin ]
           for name, format in viewControls fracBits -> BoardTop.valueIn name format ]
+
+    { name = name
+      sampleRate = 0.0
+      streams = 1
+      needs = needs
       answers = pixels / pixelsPerBeat
-      rig =
-        fun instance ->
+      atClocking = None
+      body =
+        BoardTop.rigged needs (fun instance ->
             let in1, out1, cxOrigin, cyOrigin, dx, dy = def.NewNamed instance
 
             { through =
@@ -145,7 +151,7 @@ let mandelScatter (name: string) (width: int) (pixels: int) (maxIter: int) (frac
                     |> streamThroughInstance in1 out1
                     |> streamMapTo (layoutOfList [ indexPin; pixelsPin ]) (fun (index, px) -> [ index; px ])
               ports = [ "cxOrigin", cxOrigin; "cyOrigin", cyOrigin; "dx", dx; "dy", dy ]
-              readbacks = [] } }
+              readbacks = [] }) }
 
 /// A frame through the **scattered** counted top in the Sim, driven exactly
 /// as `renderThroughBoardTop` drives the ordered one — same registers, same

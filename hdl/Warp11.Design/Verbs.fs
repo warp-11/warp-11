@@ -116,7 +116,7 @@ let run (argv: string[]) : int option =
                     Some 1
                 | _ ->
                     let path = m.path
-                    Warp11.BoardTop.batchServe (Warp11.Elaborate.boardTopOf m.board path g)
+                    Warp11.BoardTop.batchServe (Warp11.Elaborate.boardTopOf (Warp11.Mapping.boardOf m) path g)
                     Some 0
     // A saved design's build directory: `build design.json [mapping.json] <dir>`
     // — the design's default mapping when none is named — writes everything
@@ -141,7 +141,7 @@ let run (argv: string[]) : int option =
                 Some 1
             | Ok m ->
                 try
-                    let top = Warp11.Elaborate.boardTopOf m.board m.path g
+                    let top = Warp11.Elaborate.boardTopOf (Warp11.Mapping.boardOf m) m.path g
                     let out = Warp11.Build.write dir top
 
                     for file in out.files do
@@ -173,7 +173,7 @@ let run (argv: string[]) : int option =
             Some 1
         | Ok g, Ok m ->
             try
-                let top = Warp11.Elaborate.boardTopOf m.board m.path g
+                let top = Warp11.Elaborate.boardTopOf (Warp11.Mapping.boardOf m) m.path g
                 let out = Warp11.Build.write dir top
 
                 for file in out.files do

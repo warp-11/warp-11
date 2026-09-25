@@ -11,6 +11,7 @@ let main argv =
           RegMapTests.tests
           StreamTests.tests
           ForkTests.tests
+          BoardTopTests.tests
           ImageTests.tests
           SemanticTests.tests
           RegistryTests.tests

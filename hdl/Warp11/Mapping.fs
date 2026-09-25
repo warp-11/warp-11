@@ -14,7 +14,13 @@ open System.Text.Json.Nodes
 
 type Mapping =
     { board: Board
-      path: DataPath }
+      path: DataPath
+      /// Each harness and the socket it is plugged into.
+      plugged: (Harness * string) list }
+
+/// The board a mapping builds for: its board with every harness plugged in.
+let boardOf (m: Mapping) : Board =
+    m.plugged |> List.fold (fun board (harness, socket) -> plug harness socket board) m.board
 
 /// The preset a board equals, if any: the provenance a dialog shows.
 let presetOf (board: Board) : string option =
@@ -26,12 +32,38 @@ let presetOf (board: Board) : string option =
 let private str (s: string) : JsonNode = JsonValue.Create s
 let private num (n: int) : JsonNode = JsonValue.Create n
 
+let private roleText (r: DeviceRole) =
+    match r with
+    | I2sSeparateCodecs -> "I2sSeparateCodecs"
+    | I2sSharedBus -> "I2sSharedBus"
+    | HostUart -> "HostUart"
+    | ClockIn -> "ClockIn"
+    | Leds -> "Leds"
+
+let private readRole (text: string) : Result<DeviceRole, string> =
+    match text with
+    | "I2sSeparateCodecs" -> Ok I2sSeparateCodecs
+    | "I2sSharedBus" -> Ok I2sSharedBus
+    | "HostUart" -> Ok HostUart
+    | "ClockIn" -> Ok ClockIn
+    | "Leds" -> Ok Leds
+    | other -> Error $"'role': no device role called '{other}'"
+
+/// A pin as JSON. `activeLow` is written only when it is true, so a board
+/// file from before it existed reads the same and writes the same bytes.
+let private pinNode (pin: Pin) : JsonNode =
+    let po = JsonObject()
+    po["pin"] <- JsonValue.Create pin.pin
+    pin.standard |> Option.iter (fun st -> po["standard"] <- JsonValue.Create st)
+    if pin.activeLow then po["activeLow"] <- JsonValue.Create true
+    po
+
 let private boardNode (b: Board) : JsonObject =
     let o = JsonObject()
     o["name"] <- str b.name
 
     let part = JsonObject()
-    part["family"] <- str (match b.part.family with UltraScalePlus -> "UltraScalePlus" | Ice40UltraPlus -> "Ice40UltraPlus")
+    part["family"] <- str (match b.part.family with UltraScalePlus -> "UltraScalePlus" | Ice40UltraPlus -> "Ice40UltraPlus" | Family.Ecp5 -> "Ecp5")
     part["device"] <- str b.part.device
     part["package"] <- str b.part.package
     b.part.boardPart |> Option.iter (fun bp -> part["boardPart"] <- str bp)
@@ -93,27 +125,34 @@ let private boardNode (b: Board) : JsonObject =
             [| for c in b.connectors ->
                    let co = JsonObject()
 
-                   co["role"] <-
-                       str (
-                           match c.role with
-                           | I2sSeparateCodecs -> "I2sSeparateCodecs"
-                           | I2sSharedBus -> "I2sSharedBus"
-                           | HostUart -> "HostUart"
-                           | ClockIn -> "ClockIn"
-                           | Leds -> "Leds"
-                       )
+                   co["role"] <- str (roleText c.role)
 
                    let pins = JsonObject()
 
                    for port, pin in c.pins do
-                       let po = JsonObject()
-                       po["pin"] <- str pin.pin
-                       pin.standard |> Option.iter (fun st -> po["standard"] <- str st)
-                       pins[port] <- po
+                       pins[port] <- pinNode pin
 
                    co["pins"] <- pins
                    co :> JsonNode |]
         )
+
+    // Sockets only when there are any, so a board file written before they
+    // existed round-trips to the same bytes.
+    if not b.sockets.IsEmpty then
+        o["sockets"] <-
+            JsonArray(
+                [| for socket in b.sockets ->
+                       let so = JsonObject()
+                       so["name"] <- str socket.name
+                       so["kind"] <- str socket.kind
+                       let positions = JsonObject()
+
+                       for position, pin in socket.positions do
+                           positions[string position] <- pinNode pin
+
+                       so["positions"] <- positions
+                       so :> JsonNode |]
+            )
 
     o
 
@@ -145,6 +184,60 @@ let private asInt (what: string) (n: JsonNode) : Result<int, string> =
 let private getString (o: JsonNode) (name: string) = field o name |> Result.bind (asString $"'{name}'")
 let private getInt (o: JsonNode) (name: string) = field o name |> Result.bind (asInt $"'{name}'")
 
+let private asBool (what: string) (n: JsonNode) : Result<bool, string> =
+    try
+        Ok(n.GetValue<bool>())
+    with _ ->
+        Error $"{what}: expected true or false"
+
+let private readPin (po: JsonNode) : Result<Pin, string> =
+    getString po "pin"
+    |> Result.bind (fun pin ->
+        (match optional po "standard" with
+         | Some st -> asString "'standard'" st |> Result.map Some
+         | None -> Ok None)
+        |> Result.bind (fun standard ->
+            (match optional po "activeLow" with
+             | Some low -> asBool "'activeLow'" low
+             | None -> Ok false)
+            |> Result.map (fun activeLow -> { pin = pin; standard = standard; activeLow = activeLow })))
+
+/// Each entry of a JSON object keyed by position number, read by `read`.
+let private readPositions (what: string) (read: JsonNode -> Result<'a, string>) (o: JsonNode) : Result<(int * 'a) list, string> =
+    match o with
+    | :? JsonObject as positions ->
+        positions
+        |> List.ofSeq
+        |> List.fold
+            (fun acc (KeyValue(key, node)) ->
+                acc
+                |> Result.bind (fun items ->
+                    match System.Int32.TryParse key with
+                    | true, position -> read node |> Result.map (fun item -> items @ [ position, item ])
+                    | _ -> Error $"{what}: '{key}' is not a position number"))
+            (Ok [])
+    | _ -> Error $"{what}: expected an object keyed by position"
+
+let private readSockets (o: JsonNode) : Result<Socket list, string> =
+    match optional o "sockets" with
+    | None -> Ok []
+    | Some(:? JsonArray as arr) ->
+        arr
+        |> List.ofSeq
+        |> List.fold
+            (fun acc so ->
+                acc
+                |> Result.bind (fun sockets ->
+                    getString so "name"
+                    |> Result.bind (fun name ->
+                        getString so "kind"
+                        |> Result.bind (fun kind ->
+                            field so "positions"
+                            |> Result.bind (readPositions $"socket '{name}'" readPin)
+                            |> Result.map (fun positions -> sockets @ [ { name = name; kind = kind; positions = positions } ])))))
+            (Ok [])
+    | Some _ -> Error "'sockets': expected an array"
+
 let private readBoard (o: JsonNode) : Result<Board, string> =
     let (>>=) r f = Result.bind f r
 
@@ -157,6 +250,7 @@ let private readBoard (o: JsonNode) : Result<Board, string> =
                 (match family with
                  | "UltraScalePlus" -> Ok UltraScalePlus
                  | "Ice40UltraPlus" -> Ok Ice40UltraPlus
+                 | "Ecp5" -> Ok Family.Ecp5
                  | other -> Error $"'family': no family called '{other}'")
                 >>= fun family ->
                     getString part "device"
@@ -240,13 +334,7 @@ let private readBoard (o: JsonNode) : Result<Board, string> =
                                                                                                  >>= fun cs ->
                                                                                                      getString c "role"
                                                                                                      >>= fun role ->
-                                                                                                         (match role with
-                                                                                                          | "I2sSeparateCodecs" -> Ok I2sSeparateCodecs
-                                                                                                          | "I2sSharedBus" -> Ok I2sSharedBus
-                                                                                                          | "HostUart" -> Ok HostUart
-                                                                                                          | "ClockIn" -> Ok ClockIn
-                                                                                                          | "Leds" -> Ok Leds
-                                                                                                          | other -> Error $"'role': no device role called '{other}'")
+                                                                                                         readRole role
                                                                                                          >>= fun role ->
                                                                                                              (match field c "pins" with
                                                                                                               | Ok(:? JsonObject as pins) ->
@@ -256,18 +344,15 @@ let private readBoard (o: JsonNode) : Result<Board, string> =
                                                                                                                       (fun acc (KeyValue(port, po)) ->
                                                                                                                           acc
                                                                                                                           >>= fun ps ->
-                                                                                                                              getString po "pin"
-                                                                                                                              >>= fun pin ->
-                                                                                                                                  (match optional po "standard" with
-                                                                                                                                   | Some st -> asString "'standard'" st |> Result.map Some
-                                                                                                                                   | None -> Ok None)
-                                                                                                                                  |> Result.map (fun st -> ps @ [ port, { pin = pin; standard = st } ]))
+                                                                                                                              readPin po |> Result.map (fun pin -> ps @ [ port, pin ]))
                                                                                                                       (Ok [])
                                                                                                               | _ -> Error "'pins': expected an object")
                                                                                                              |> Result.map (fun pins -> cs @ [ { role = role; pins = pins } ]))
                                                                                              (Ok [])
                                                                                      | _ -> Error "'connectors': expected an array")
-                                                                                    |> Result.map (fun connectors ->
+                                                                                    >>= fun connectors ->
+                                                                                    readSockets o
+                                                                                    |> Result.map (fun sockets ->
                                                                                         { name = name
                                                                                           part =
                                                                                             { family = family
@@ -280,7 +365,8 @@ let private readBoard (o: JsonNode) : Result<Board, string> =
                                                                                           hostMemory = hostMemory
                                                                                           host = host
                                                                                           loading = loading
-                                                                                          connectors = connectors })
+                                                                                          connectors = connectors
+                                                                                          sockets = sockets })
 
 let private options = JsonSerializerOptions(WriteIndented = true)
 
@@ -331,11 +417,154 @@ let private readPath (text: string) : Result<DataPath, string> =
     | "scatter" -> Ok viaScatter
     | other -> Error $"'path': a data path is pins, memory or count, not '{other}'"
 
+/// A carrier as a mapping file names it: the case, and for a pin, which.
+let carrierText (c: Carrier) =
+    match c with
+    | OnPins -> "OnPins"
+    | AsBeatCount -> "AsBeatCount"
+    | InHostRows -> "InHostRows"
+    | InHostRowsAt -> "InHostRowsAt"
+    | InRegisterMap -> "InRegisterMap"
+    | InLinkFrames -> "InLinkFrames"
+    | OnPin port -> $"OnPin:{port}"
+
+let readCarrier (text: string) : Result<Carrier, string> =
+    match text with
+    | "OnPins" -> Ok OnPins
+    | "AsBeatCount" -> Ok AsBeatCount
+    | "InHostRows" -> Ok InHostRows
+    | "InHostRowsAt" -> Ok InHostRowsAt
+    | "InRegisterMap" -> Ok InRegisterMap
+    | "InLinkFrames" -> Ok InLinkFrames
+    | pin when pin.StartsWith "OnPin:" && pin.Length > 6 -> Ok(OnPin(pin.Substring 6))
+    | other -> Error $"'bind': no carrier called '{other}'"
+
+// ---------------------------------------------------------------------------
+// A harness as JSON.
+
+let private harnessNode (h: Harness) : JsonObject =
+    let o = JsonObject()
+    o["name"] <- str h.name
+    o["plug"] <- str h.plug
+    let positions = JsonObject()
+
+    for position, (role, port) in h.positions do
+        let po = JsonObject()
+        po["role"] <- str (roleText role)
+        po["port"] <- str port
+        positions[string position] <- po
+
+    o["positions"] <- positions
+    o
+
+let private readHarness (o: JsonNode) : Result<Harness, string> =
+    getString o "name"
+    |> Result.bind (fun name ->
+        getString o "plug"
+        |> Result.bind (fun plugKind ->
+            field o "positions"
+            |> Result.bind (
+                readPositions $"harness '{name}'" (fun po ->
+                    getString po "role"
+                    |> Result.bind readRole
+                    |> Result.bind (fun role -> getString po "port" |> Result.map (fun port -> role, port)))
+            )
+            |> Result.map (fun positions -> { name = name; plug = plugKind; positions = positions })))
+
+/// A harness as JSON text.
+let writeHarness (h: Harness) : string = harnessNode(h).ToJsonString options
+
+/// JSON text as a harness, or the first thing wrong with it.
+let parseHarness (text: string) : Result<Harness, string> =
+    try
+        readHarness (JsonNode.Parse text)
+    with e ->
+        Error e.Message
+
+let loadHarness (path: string) : Result<Harness, string> =
+    if System.IO.File.Exists path then
+        parseHarness (System.IO.File.ReadAllText path)
+    else
+        Error $"{path}: no such file"
+
 let write (m: Mapping) : string =
     let o = JsonObject()
     o["board"] <- boardNode m.board
     o["path"] <- str (pathText m.path)
+
+    // What the mapping binds by name, over the preset — the per-need part a
+    // board switch actually edits. Written only when there is any, so a
+    // preset-only mapping reads and writes as it always did.
+    let named =
+        m.path.bindings
+        |> List.choose (fun b ->
+            match b.need with
+            | ByName need -> Some(need, b.carrier)
+            | _ -> None)
+
+    if not named.IsEmpty then
+        let bind = JsonObject()
+
+        for need, carriers in named |> List.groupBy fst do
+            bind[need] <- JsonArray([| for _, c in carriers -> str (carrierText c) |])
+
+        o["bind"] <- bind
+
+    if not m.plugged.IsEmpty then
+        o["plugged"] <-
+            JsonArray(
+                [| for harness, socket in m.plugged ->
+                       let po = JsonObject()
+                       po["socket"] <- str socket
+                       po["harness"] <- harnessNode harness
+                       po :> JsonNode |]
+            )
+
     o.ToJsonString options
+
+let private readBind (root: JsonNode) : Result<Binding list, string> =
+    match optional root "bind" with
+    | None -> Ok []
+    | Some(:? JsonObject as bind) ->
+        bind
+        |> List.ofSeq
+        |> List.fold
+            (fun acc (KeyValue(need, carriers)) ->
+                acc
+                |> Result.bind (fun bindings ->
+                    match carriers with
+                    | :? JsonArray as arr ->
+                        arr
+                        |> List.ofSeq
+                        |> List.fold
+                            (fun acc c ->
+                                acc
+                                |> Result.bind (fun bs ->
+                                    asString $"'bind.{need}'" c
+                                    |> Result.bind readCarrier
+                                    |> Result.map (fun carrier -> bs @ [ { need = ByName need; carrier = carrier } ])))
+                            (Ok bindings)
+                    | _ -> Error $"'bind.{need}': expected a list of carriers"))
+            (Ok [])
+    | Some _ -> Error "'bind': expected an object keyed by need"
+
+let private readPlugged (root: JsonNode) : Result<(Harness * string) list, string> =
+    match optional root "plugged" with
+    | None -> Ok []
+    | Some(:? JsonArray as arr) ->
+        arr
+        |> List.ofSeq
+        |> List.fold
+            (fun acc po ->
+                acc
+                |> Result.bind (fun plugged ->
+                    getString po "socket"
+                    |> Result.bind (fun socket ->
+                        field po "harness"
+                        |> Result.bind readHarness
+                        |> Result.map (fun harness -> plugged @ [ harness, socket ]))))
+            (Ok [])
+    | Some _ -> Error "'plugged': expected an array"
 
 let parse (text: string) : Result<Mapping, string> =
     try
@@ -346,7 +575,14 @@ let parse (text: string) : Result<Mapping, string> =
         |> Result.bind (fun board ->
             getString root "path"
             |> Result.bind readPath
-            |> Result.map (fun path -> { board = board; path = path }))
+            |> Result.bind (fun path ->
+                readBind root
+                |> Result.bind (fun named ->
+                    readPlugged root
+                    |> Result.map (fun plugged ->
+                        { board = board
+                          path = { path with bindings = path.bindings @ named }
+                          plugged = plugged }))))
         |> Result.bind (fun m -> checkBoard m.board; Ok m)
     with e ->
         Error e.Message
@@ -362,8 +598,8 @@ let load (path: string) : Result<Mapping, string> =
 /// A mapping from a preset by name, or a board file's path.
 let ofBoard (nameOrFile: string) (path: DataPath) : Result<Mapping, string> =
     match preset nameOrFile with
-    | Ok b -> Ok { board = b; path = path }
-    | Error _ when System.IO.File.Exists nameOrFile -> loadBoard nameOrFile |> Result.map (fun b -> { board = b; path = path })
+    | Ok b -> Ok { board = b; path = path; plugged = [] }
+    | Error _ when System.IO.File.Exists nameOrFile -> loadBoard nameOrFile |> Result.map (fun b -> { board = b; path = path; plugged = [] })
     | Error why -> Error why
 
 /// Where a design's mapping for a board lives: `gain.json` on the `kv260`
@@ -397,6 +633,7 @@ let showBoard (b: Board) : string =
         match b.part.family with
         | UltraScalePlus -> "UltraScalePlus"
         | Ice40UltraPlus -> "Ice40UltraPlus"
+        | Family.Ecp5 -> "Ecp5"
 
     let tool =
         match b.tool with
@@ -429,8 +666,17 @@ let showBoard (b: Board) : string =
         | ClockIn -> "ClockIn"
         | Leds -> "Leds"
 
-    let pin (port: string, p: Pin) =
-        $"{quote port}, {{ pin = {quote p.pin}; standard = {showOption quote p.standard} }}"
+    let pinValue (p: Pin) =
+        let low = if p.activeLow then "true" else "false"
+        $"{{ pin = {quote p.pin}; standard = {showOption quote p.standard}; activeLow = {low} }}"
+
+    let pin (port: string, p: Pin) = $"{quote port}, {pinValue p}"
+
+    let socket (s: Socket) =
+        let positions = s.positions |> List.map (fun (n, p) -> $"%d{n}, {pinValue p}") |> String.concat "; "
+        $"{{ name = {quote s.name}; kind = {quote s.kind}; positions = [ {positions} ] }}"
+
+    let sockets = b.sockets |> List.map (fun s -> "          " + socket s) |> String.concat "\n"
 
     let connector (c: Connector) =
         let pins = c.pins |> List.map pin |> String.concat "; "
@@ -455,4 +701,8 @@ let showBoard (b: Board) : string =
           "      connectors ="
           "        ["
           connectors
+          "        ]"
+          "      sockets ="
+          "        ["
+          sockets
           "        ] }" ]

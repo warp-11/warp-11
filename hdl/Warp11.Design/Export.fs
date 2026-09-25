@@ -270,7 +270,10 @@ let exportWith (mapping: Warp11.Mapping.Mapping option) (g: Graph) : Result<stri
             let q (text: string) = "\"" + text + "\""
             let fmtList (pins: (string * NumberFormat) list) = pins |> List.map (fun (n, f) -> q n + ", " + showFormat f) |> String.concat "; "
             let listOf (items: string) = if items = "" then "[]" else "[ " + items + " ]"
-            let starting = startingValues g |> List.map (fun (n, v) -> q n + ", " + string v + "UL") |> String.concat "; "
+            let startingOf = startingValues g |> Map.ofList
+            let needValues =
+                [ for n, f in ports ->
+                      "Warp11.BoardTop.valueFrom " + q n + " (" + showFormat f + ") " + string (startingOf |> Map.tryFind n |> Option.defaultValue 0UL) + "UL" ]
             let fieldsIn = [ for i in 0 .. g.inputs.Length - 1 -> "fields[" + string i + "]" ]
             let outNames = [ for n, _ in g.outputs -> ident n ]
             let portList = [ for (n, _), v in List.zip ports controls -> q n + ", " + v ] |> String.concat "; "
@@ -285,32 +288,37 @@ let exportWith (mapping: Warp11.Mapping.Mapping option) (g: Graph) : Result<stri
               ""
               "let path = " + path
               ""
-              "/// The design as a board top takes it: its boundary, its controls and"
-              "/// where they start, and the instance under a name."
+              "/// The design as a board top takes it: its boundary as needs, and the"
+              "/// instance under a name."
               "let design: Warp11.BoardTop.Design ="
-              "    { name = " + q g.name
-              "      sampleRate = sampleRate"
-              "      streams = " + string g.streams
-              "      inputs = " + listOf (fmtList g.inputs)
-              "      outputs = " + listOf (fmtList g.outputs)
-              "      controls = " + listOf (fmtList ports)
-              "      starting = " + listOf starting
-              "      answers = " + string (answersOf g)
-              "      rig ="
-              "        fun instance ->"
-              "            let " + ioPattern + " = " + valueName g.name + ".NewNamed instance"
-              ""
-              "            { through ="
-              "                fun s ->"
-              "                    s"
-              "                    |> streamMapTo (" + inPins + ") (fun fields -> " + tupleValue fieldsIn + ")"
-              "                    |> streamThroughInstance " + ins.Head + " " + outs.Head
-              "                    |> streamMapTo (layoutOfList " + listOf (fmtList g.outputs) + ") (fun " + tuple outNames + " -> " + outList + ")"
-              "              ports = " + listOf portList + " } }"
-              ""
-              "/// The build directory for this design on the board: `build \"out\"` writes"
-              "/// what the board's toolchain builds from, and says how to run it."
-              "let build (dir: string) = Warp11.Build.write dir (Warp11.BoardTop.boardTop board path design)" ]
+              "    let needs ="
+              "        [ Warp11.BoardTop.streamIn \"in\" " + listOf (fmtList g.inputs)
+              "          Warp11.BoardTop.streamOut \"out\" " + listOf (fmtList g.outputs) + (if needValues = [] then " ]" else "")
+            ]
+            @ [ for i, v in List.indexed needValues -> "          " + v + (if i = needValues.Length - 1 then " ]" else "") ]
+            @ [ ""
+                "    { name = " + q g.name
+                "      sampleRate = sampleRate"
+                "      streams = " + string g.streams
+                "      needs = needs"
+                "      answers = " + string (answersOf g)
+                "      atClocking = None"
+                "      body ="
+                "        Warp11.BoardTop.rigged needs (fun instance ->"
+                "            let " + ioPattern + " = " + valueName g.name + ".NewNamed instance"
+                ""
+                "            { through ="
+                "                fun s ->"
+                "                    s"
+                "                    |> streamMapTo (" + inPins + ") (fun fields -> " + tupleValue fieldsIn + ")"
+                "                    |> streamThroughInstance " + ins.Head + " " + outs.Head
+                "                    |> streamMapTo (layoutOfList " + listOf (fmtList g.outputs) + ") (fun " + tuple outNames + " -> " + outList + ")"
+                "              ports = " + listOf portList
+                "              readbacks = [] }) }"
+                ""
+                "/// The build directory for this design on the board: `build \"out\"` writes"
+                "/// what the board's toolchain builds from, and says how to run it."
+                "let build (dir: string) = Warp11.Build.write dir (Warp11.BoardTop.boardTop board path design)" ]
 
     designsInOrder g
     |> List.distinctBy (fun d -> d.name)

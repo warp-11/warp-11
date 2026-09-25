@@ -54,6 +54,10 @@ type Need =
     /// A value the design reports and the host reads — telemetry. The design
     /// drives it; nobody writes it.
     | ValueOut of name: string * format: NumberFormat
+    /// A table the host sets and the design reads by index: `entries` words
+    /// of `format`, kept in `storage`, starting as `starting`. The aid's gain
+    /// curves are one — 512 words a host refits while the design runs.
+    | TableIn of name: string * format: NumberFormat * entries: int * storage: RamStyle * starting: uint64 list
 
 /// Rows into the design, under a name.
 let streamIn name fields = StreamIn(name, fields)
@@ -70,6 +74,32 @@ let valueFrom name format starting = ValueIn(name, format, starting)
 /// A value the design reports.
 let valueOut name format = ValueOut(name, format)
 
+/// A table the host sets and the design reads.
+let tableIn name format entries storage starting = TableIn(name, format, entries, storage, starting)
+
+/// A design's boundary as its body meets it: each need realised by whatever
+/// the mapping bound it to, reached by the need's name. From inside, a
+/// converter, a ring in the host's memory and a register are the same kind
+/// of thing — which is `notes/DEVICES.md`'s goal seen from the design's side.
+type Boundary =
+    { /// The rows a `StreamIn` need delivers.
+      streamIn: string -> Stream<Expr list>
+      /// Hand a `StreamOut` need its rows. Call once a need.
+      streamOut: string -> Stream<Expr list> -> unit
+      /// What a `ValueIn` need holds: a register, or its starting value baked
+      /// in where nothing can write it.
+      valueIn: string -> Expr
+      /// Report a `ValueOut` need.
+      valueOut: string -> Expr -> unit
+      /// A `TableIn` need's read port: hand it the index, once.
+      tableIn: string -> Expr -> HostArrayPort }
+
+/// What a board's clock makes of a design's streams: the rate its converter
+/// frames at, and the fabric cycles each beat gets.
+type Clocking =
+    { rate: float
+      cyclesPerBeat: int }
+
 type Design =
     { name: string
       sampleRate: float
@@ -79,8 +109,141 @@ type Design =
       needs: Need list
       /// Beats out for one in — one, unless a unit in it answers several.
       answers: int
-      /// The instance under a name.
-      rig: string -> Rig }
+      /// The design itself, given its boundary.
+      body: Boundary -> unit
+      /// A design whose needs depend on the rate its streams arrive at — a
+      /// starting coefficient computed from it — is only known once it meets
+      /// a board. `boardTop` hands it the board's clocking first, and builds
+      /// what comes back. `None` for a design that is the same on every board.
+      atClocking: (Clocking -> Design) option }
+
+/// The body of a design that is one instance with one stream through it —
+/// every drawn design, and the typed ones written before a boundary could
+/// hold more than a pair. The instance is `drawn`, because `design` is a
+/// Verilog reserved word.
+let rigged (needs: Need list) (rig: string -> Rig) : Boundary -> unit =
+    let first pick =
+        match List.tryPick pick needs with
+        | Some name -> name
+        | None -> failwith "a rigged design has one stream in and one stream out"
+
+    let inName = first (function StreamIn(name, _) -> Some name | _ -> None)
+    let outName = first (function StreamOut(name, _) -> Some name | _ -> None)
+
+    fun boundary ->
+        let r = rig "drawn"
+
+        for name, port in r.ports do
+            boundary.valueIn name ==> port
+
+        for name, port in r.readbacks do
+            boundary.valueOut name port
+
+        boundary.streamIn inName |> r.through |> boundary.streamOut outName
+
+/// A stream the design takes, as its body sees it: the stream, and what the
+/// board's clock made of it. `rate` is the one a coefficient is designed at —
+/// it is the rate the binding delivers, never one the design asserts.
+type Incoming<'p> =
+    { stream: Stream<'p>
+      rate: float
+      /// Fabric cycles a beat — what a folded engine checks its schedule
+      /// against.
+      cyclesPerBeat: int }
+
+/// What a design declares its boundary with. Each call records a need and
+/// hands back its handle; the design's own record of handles is then its io,
+/// and its body reads `aid.attack` and writes `processed |> aid.earphones`
+/// with no name in sight.
+///
+/// **The factory that calls these runs twice** — once to learn the needs,
+/// once inside the top to hand out the real handles — the same re-runnable
+/// factory that types a module's io. So it declares and does nothing else:
+/// the handles of the first run are stand-ins, and a stream touched there is
+/// an error. What it *may* read on either run is the clocking, which is the
+/// point — a starting value derived from the rate is right on every board.
+type Needs internal (clocking: Clocking, boundary: Boundary option) =
+    let declared = ResizeArray<Need>()
+
+    member internal _.Declared = List.ofSeq declared
+
+    /// The rate the board's clock makes of this design's streams.
+    member _.clocking = clocking
+
+    /// Rows in, typed by their layout.
+    member _.streamIn(name: string, layout: Layout<'p>) : Incoming<'p> =
+        declared.Add(StreamIn(name, layout.fields))
+
+        let stream =
+            match boundary with
+            | Some b -> b.streamIn name |> streamMapTo layout layout.unpack
+            | None -> Unchecked.defaultof<Stream<'p>>
+
+        { stream = stream
+          rate = clocking.rate
+          cyclesPerBeat = clocking.cyclesPerBeat }
+
+    /// Rows out: hand it the stream, once.
+    member _.streamOut(name: string, layout: Layout<'p>) : Stream<'p> -> unit =
+        declared.Add(StreamOut(name, layout.fields))
+
+        match boundary with
+        | Some b -> fun s -> s |> streamMapTo (layoutOfList layout.fields) layout.pack |> b.streamOut name
+        | None -> fun _ -> failwith $"'{name}': a needs factory declares its streams, and does not drive them"
+
+    /// A value the host sets, starting at `starting`.
+    member _.valueIn(name: string, format: NumberFormat, ?starting: uint64) : Expr =
+        declared.Add(ValueIn(name, format, defaultArg starting 0UL))
+
+        match boundary with
+        | Some b -> b.valueIn name
+        | None -> lit 0UL format.totalWidth
+
+    /// A value the design reports: hand it the value, once.
+    member _.valueOut(name: string, format: NumberFormat) : Expr -> unit =
+        declared.Add(ValueOut(name, format))
+
+        match boundary with
+        | Some b -> b.valueOut name
+        | None -> fun _ -> failwith $"'{name}': a needs factory declares what it reports, and does not report it"
+
+    /// A table the host sets and the design reads: hand it the index, once.
+    member _.tableIn(name: string, format: NumberFormat, entries: int, storage: RamStyle, ?starting: uint64 list) : Expr -> HostArrayPort =
+        declared.Add(TableIn(name, format, entries, storage, defaultArg starting []))
+
+        match boundary with
+        | Some b -> b.tableIn name
+        | None -> fun _ -> failwith $"'{name}': a needs factory declares its tables, and does not read them"
+
+/// The converter's rate when nothing says otherwise: a board frames at the
+/// nearest rate its clock divides to from here — 46 875 Hz at 24 MHz,
+/// 48 828.125 Hz at 100 MHz.
+let nominalRate = 48_000.0
+
+/// A design as its boundary and its body: `needs` declares the boundary and
+/// returns the handles, `body` is the design given them. Nothing in it names
+/// a pin, a bus or a clock — the board says those, and the design takes the
+/// rate it is handed.
+let design (name: string) (needs: Needs -> 'io) (body: 'io -> unit) : Design =
+    let atClocking (clocking: Clocking) =
+        let collecting = Needs(clocking, None)
+        needs collecting |> ignore
+
+        { name = name
+          sampleRate = clocking.rate
+          streams = 1
+          needs = collecting.Declared
+          answers = 1
+          body = fun boundary -> body (needs (Needs(clocking, Some boundary)))
+          atClocking = None }
+
+    { name = name
+      sampleRate = 0.0
+      streams = 1
+      needs = []
+      answers = 1
+      body = fun _ -> failwith $"{name}: a design takes its needs from the board it is on — build it through `boardTop`"
+      atClocking = Some atClocking }
 
 /// What carries the design's input stream, and its output stream. Each asks
 /// the path by the need's own name first, so a mapping can rebind one need
@@ -91,6 +254,16 @@ let private carrierOfNeed (path: DataPath) (need: Need) =
     | StreamOut(name, _) -> carrierFor path EveryStreamOut name
     | ValueIn(name, _, _) -> carrierFor path EveryValueIn name
     | ValueOut(name, _) -> carrierFor path EveryValueIn name
+    | TableIn(name, _, _, _, _) -> carrierFor path EveryValueIn name
+
+/// Every carrier bound to a need, in binding order.
+let internal carriersOfNeed (path: DataPath) (need: Need) =
+    match need with
+    | StreamIn(name, _) -> carriersFor path EveryStreamIn name
+    | StreamOut(name, _) -> carriersFor path EveryStreamOut name
+    | ValueIn(name, _, _) -> carriersFor path EveryValueIn name
+    | ValueOut(name, _) -> carriersFor path EveryValueIn name
+    | TableIn(name, _, _, _, _) -> carriersFor path EveryValueIn name
 
 let internal carrierOfInput (path: DataPath) (d: Design) =
     d.needs
@@ -103,6 +276,15 @@ let internal carrierOfOutput (path: DataPath) (d: Design) =
     |> List.tryPick (function
         | StreamOut _ as n -> carrierOfNeed path n
         | _ -> None)
+
+/// The fields of the stream need called `name`.
+let fieldsOf (d: Design) (name: string) =
+    d.needs
+    |> List.tryPick (function
+        | StreamIn(n, fields)
+        | StreamOut(n, fields) when n = name -> Some fields
+        | _ -> None)
+    |> Option.defaultWith (fun () -> failwith $"{d.name}: no stream called '{name}'")
 
 /// The fields of the design's input row.
 let inputsOf (d: Design) =
@@ -133,6 +315,13 @@ let telemetryOf (d: Design) =
         | ValueOut(name, format) -> Some(name, format)
         | _ -> None)
 
+/// The tables the host sets, in declaration order.
+let tablesOf (d: Design) =
+    d.needs
+    |> List.choose (function
+        | TableIn(name, format, entries, _, _) -> Some(name, format, entries)
+        | _ -> None)
+
 /// Where each of those starts.
 let startingOf (d: Design) =
     d.needs
@@ -150,64 +339,81 @@ let pinoutOf (board: Board) : I2sPinout =
     | Some _, None -> SharedBus
     | None, _ -> SeparateCodecs
 
-/// What a board asks of a design before it will carry it: one stream, the
-/// stereo boundary, and a rate the board's clock divides into — said with
-/// the rate it would land on, so a design can be made for it.
-let check (board: Board) (d: Design) =
+/// What a board asks of a design before it will carry it on its converter:
+/// one stream, the stereo boundary on whichever stream needs the converter
+/// carries, and a rate the board's clock divides into — said with the rate it
+/// would land on, so a design can be made for it.
+let check (board: Board) (path: DataPath) (d: Design) =
     if d.streams <> 1 then
         failwith $"{d.name}: a board carries one stream, and the design declares %d{d.streams}"
 
-    for side, pins in [ "input", (inputsOf d); "output", (outputsOf d) ] do
-        if pins <> stereo then
-            failwith $"{d.name}: the {board.name}'s converter needs the {side} box to be [{describePins stereo}], and it is [{describePins pins}]"
+    let onPins side pick =
+        d.needs
+        |> List.choose (fun need ->
+            match pick need with
+            | Some fields when List.contains OnPins (carriersOfNeed path need) -> Some fields
+            | _ -> None)
+        |> function
+            | [] -> ()
+            | [ pins ] ->
+                if pins <> stereo then
+                    failwith $"{d.name}: the {board.name}'s converter needs the {side} box to be [{describePins stereo}], and it is [{describePins pins}]"
+            | several -> failwith $"{d.name}: %d{several.Length} {side} streams are bound to the {board.name}'s one converter"
+
+    onPins "input" (function StreamIn(_, fields) -> Some fields | _ -> None)
+    onPins "output" (function StreamOut(_, fields) -> Some fields | _ -> None)
 
     let landed = boardRate board d.sampleRate
 
     if round landed <> round d.sampleRate then
         failwith $"{d.name}: the design is made for %g{d.sampleRate} Hz, and the {board.name}'s clock frames at %.3f{landed} Hz for it — make the design for that rate"
 
-/// Register words the aperture holds: 256 bytes, as every audio app's.
+/// The smallest aperture an assembled map takes: 256 bytes, as every audio
+/// app's. A map with a table in it that does not fit grows to the next power
+/// of two.
 let apertureAddrWidth = 8
 
-/// The design between the converter and the registers: the stream from the
-/// link through the design's instance and back, every control port driven
-/// from its register.
-let private through
+/// The design's boundary on the converter: its stream in off the link, its
+/// stream out onto it — forked first when the need is bound to a recorder as
+/// well — and its values from wherever `values` says.
+let private onPins
     (d: Design)
-    (control: string -> Expr -> Expr)
-    (report: (string -> Expr -> unit))
+    (path: DataPath)
+    (values: string -> Expr)
+    (report: string -> Expr -> unit)
+    (tables: string -> Expr -> HostArrayPort)
     (record: (Stream<Expr list> -> Expr -> unit) option)
     (i2s: I2sLink)
-    =
-    // `design` is a Verilog reserved word; the instance is the drawn one.
-    let rig = d.rig "drawn"
+    : Boundary =
+    { streamIn = fun name -> i2s.input |> Stream.mapTo (layoutOfList (fieldsOf d name)) (fun (l, r) -> [ l; r ])
+      streamOut =
+        fun name produced ->
+            let toConverter (s: Stream<Expr list>) =
+                s |> Stream.mapTo sampleLayout (fun fields -> fields[0], fields[1]) |> i2s.send
 
-    for name, port in rig.ports do
-        control name port ==> port
+            let need = d.needs |> List.find (function StreamOut(n, _) -> n = name | _ -> false)
 
-    for name, port in rig.readbacks do
-        report name port
-
-    let produced =
-        i2s.input
-        |> Stream.mapTo (layoutOfList (inputsOf d)) (fun (l, r) -> [ l; r ])
-        |> rig.through
-
-    match record with
-    | None -> produced |> Stream.mapTo sampleLayout (fun fields -> fields[0], fields[1]) |> i2s.send
-    | Some sink ->
-        // The converter blocks and the recorder drops. That asymmetry is the
-        // whole point: an observer must not be able to change what it
-        // observes, and at this boundary the two failure modes are not
-        // comparable — a recording that skips a sample is a worse recording,
-        // an earphone that skips one is a click.
-        let fork = streamFork "record" [ blockingBranch 2; droppingBranch 16 ] produced
-
-        fork.branches[0]
-        |> Stream.mapTo sampleLayout (fun fields -> fields[0], fields[1])
-        |> i2s.send
-
-        sink fork.branches[1] fork.dropped[1]
+            match carriersOfNeed path need, record with
+            | [ OnPins ], _ -> toConverter produced
+            | [ OnPins; _ ], Some sink ->
+                // The converter blocks and the recorder drops. That asymmetry is the
+                // whole point: an observer must not be able to change what it
+                // observes, and at this boundary the two failure modes are not
+                // comparable — a recording that skips a sample is a worse recording,
+                // an earphone that skips one is a click.
+                let fork = streamFork "record" [ blockingBranch 2; droppingBranch 16 ] produced
+                toConverter fork.branches[0]
+                sink fork.branches[1] fork.dropped[1]
+            | [ _ ], Some sink ->
+                // A stream the design sends only to be kept: the recorder still
+                // drops rather than blocks, so a host that falls behind costs
+                // the recording samples and never costs the design a stall.
+                let fork = streamFork "record" [ droppingBranch 16 ] produced
+                sink fork.branches[0] fork.dropped[0]
+            | carriers, _ -> failwith $"{d.name}: nothing builds '{name}' carried by %A{carriers} on the converter top"
+      valueIn = values
+      valueOut = report
+      tableIn = tables }
 
 /// The registers the host-memory path adds ahead of the design's controls:
 /// the batch contract every such top speaks, so one driver runs any of them.
@@ -298,24 +504,32 @@ let recordArmOf =
     | RecordToMemory(arm, _, _, _, _) -> arm
     | RecordToFrames(arm, _, _) -> arm
 
-/// Every carrier bound to a need, in binding order.
-let internal carriersOfNeed (path: DataPath) (need: Need) =
-    match need with
-    | StreamIn(name, _) -> carriersFor path EveryStreamIn name
-    | StreamOut(name, _) -> carriersFor path EveryStreamOut name
-    | ValueIn(name, _, _) -> carriersFor path EveryValueIn name
-    | ValueOut(name, _) -> carriersFor path EveryValueIn name
-
-/// A design's output need bound **twice** — the recording case, whatever the
-/// second carrier is. `None` when the output is singly bound.
+/// The output need a converter top records, and what carries the recording:
+/// a need bound twice — the converter and a recorder, the fork case — or a
+/// need bound to a recorder alone, a stream the design sends only to be kept.
+/// `None` when nothing is recorded. One recorder a top is what is built.
 let internal recordingCarrier (path: DataPath) (d: Design) =
-    d.needs
-    |> List.tryPick (function
-        | StreamOut _ as n ->
-            match carriersOfNeed path n with
-            | _ :: second :: _ -> Some second
-            | _ -> None
-        | _ -> None)
+    let recorders =
+        d.needs
+        |> List.choose (function
+            | StreamOut(name, _) as n ->
+                match carriersOfNeed path n with
+                | [ OnPins; second ] -> Some(name, second)
+                | [ (InHostRows | InLinkFrames) as only ] -> Some(name, only)
+                | _ -> None
+            | _ -> None)
+
+    match recorders with
+    | [] -> None
+    | [ one ] -> Some one
+    | several ->
+        failwith $"""{d.name}: {several |> List.map fst |> String.concat " and "} are each bound to a recorder, and a top builds one"""
+
+/// A register a binding contributes, named for the need it serves and the
+/// carrier serving it — `outMemArm`, `recordLinkSent` — so it can never
+/// collide with a design's own values, and the seam says whose each one is
+/// (`notes/DEVICES.md` §10i).
+let private bindingRegister (need: string) (carrier: string) (what: string) = need + carrier + what
 
 /// What a carrier adds to the host's register map.
 ///
@@ -333,25 +547,32 @@ let private contributesBatchContract =
     | OnPins
     | AsBeatCount
     | InRegisterMap
-    | InLinkFrames -> false
+    | InLinkFrames
+    | OnPin _ -> false
 
 /// The host's register map, **assembled** from what the design's needs and
 /// their bindings require rather than declared: the sink's contract first
-/// where a binding wants one, then the design's own values in declaration
-/// order. Declaration order is therefore register order, and so part of the
+/// where a binding wants one, then the design's own values and reports in
+/// declaration order, then what a recording binding needs, then the design's
+/// tables. Declaration order is therefore register order, and so part of the
 /// seam — which is why the map is pinned.
-let private registersFor (path: DataPath) (d: Design) : BatchRegs option * RecordRegs option * (string * RegEntry) list * RegMap =
-    let starting = startingOf d |> Map.ofList
+let private registersFor (path: DataPath) (recording: (string * Carrier) option) (d: Design) : BatchRegs option * RecordRegs option * (string * RegEntry) list * RegMap =
+    // A recorder brings its own registers, and never the batch contract: a
+    // stream bound to the host's memory only to be kept is not a batch.
+    let recorded = recording |> Option.map fst
 
     let wantsContract =
         d.needs
         |> List.exists (fun n ->
-            carrierOfNeed path n
-            |> Option.map contributesBatchContract
-            |> Option.defaultValue false)
+            match n with
+            | StreamOut(name, _) when Some name = recorded -> false
+            | _ ->
+                carrierOfNeed path n
+                |> Option.map contributesBatchContract
+                |> Option.defaultValue false)
 
     let (batch, recorder, controls), map =
-        buildRegMapPinned apertureAddrWidth (fun r ->
+        buildRegMapAtLeast apertureAddrWidth (fun r ->
             let batch =
                 if not wantsContract then
                     None
@@ -369,39 +590,60 @@ let private registersFor (path: DataPath) (d: Design) : BatchRegs option * Recor
                           frameCount = r.RwReg("frameCount", 32, 0UL)
                           cycles = r.RoField("cycles", 32) }
 
-            // A second carrier on one need contributes too, after the
-            // sink's contract and before the design's own values — which is
-            // the generalisation rung 3 left for rung 4.
+            // The design's own words first, values and reports in the order
+            // they were declared — telemetry read-only by construction, since
+            // the design drives it and a writable register would only invite
+            // someone to try. A report bound to nothing but a pin takes none.
+            let scalars =
+                [ for need in d.needs do
+                      match need with
+                      | ValueIn(name, f, starting) -> yield name, r.RwReg(name, f.totalWidth, starting)
+                      | ValueOut(name, f) when List.contains InRegisterMap (carriersOfNeed path need) -> yield name, r.RoField(name, f.totalWidth)
+                      | _ -> () ]
+
+            // A recording binding contributes too — **after** the design's
+            // own words, so those sit at the same offsets on every board and
+            // one driver's layout serves them all; only what the carrier
+            // needs moves with the carrier (`notes/DEVICES.md` §10i).
             // What the recording binding contributes depends on its carrier:
             // a ring in memory has to be described, frames on a link do not.
             let recorder =
-                match recordingCarrier path d with
-                | Some InHostRows ->
+                match recording with
+                | Some(need, InHostRows) ->
+                    let named = bindingRegister need "Mem"
                     // The host writes the arm bit, so it is a register and
                     // not a field the fabric drives.
                     Some(
                         RecordToMemory(
-                            r.RwReg("recordArm", 1, 0UL),
-                            r.RwReg("recordAddr", 32, 0UL),
-                            r.RwReg("recordBeats", 32, 0UL),
-                            r.RoField("recordWritten", 32),
-                            r.RoField("recordDropped", 32)
+                            r.RwReg(named "Arm", 1, 0UL),
+                            r.RwReg(named "Addr", 32, 0UL),
+                            r.RwReg(named "Beats", 32, 0UL),
+                            r.RoField(named "Written", 32),
+                            r.RoField(named "Dropped", 32)
                         )
                     )
-                | Some InLinkFrames ->
-                    Some(RecordToFrames(r.RwReg("recordArm", 1, 0UL), r.RoField("recordSent", 32), r.RoField("recordDropped", 32)))
+                | Some(need, InLinkFrames) ->
+                    let named = bindingRegister need "Link"
+                    Some(RecordToFrames(r.RwReg(named "Arm", 1, 0UL), r.RoField(named "Sent", 32), r.RoField(named "Dropped", 32)))
                 | _ -> None
 
-            let controls =
-                [ for name, f in controlsOf d ->
-                      name, r.RwReg(name, f.totalWidth, (starting |> Map.tryFind name |> Option.defaultValue 0UL)) ]
+            // Tables last: each is aligned to its own size, so it lands at
+            // the same offset whatever the scalars before it came to, and the
+            // scalars after it would otherwise start past it and double the
+            // aperture.
+            let tables =
+                d.needs
+                |> List.choose (function
+                    | TableIn(name, f, entries, storage, starting) ->
+                        if f.totalWidth > 32 then
+                            failwith $"{d.name}: the table '{name}' holds %d{f.totalWidth}-bit words, and a register map's words are 32"
 
-            // Telemetry is read-only by construction: the design drives it,
-            // so there is nothing for the host to write and a writable
-            // register would only invite someone to try.
-            let telemetry = [ for name, f in telemetryOf d -> name, r.RoField(name, f.totalWidth) ]
+                        match starting with
+                        | [] -> Some(name, r.RwArray(name, entries, storage))
+                        | words -> Some(name, r.RwArray(name, entries, storage, words))
+                    | _ -> None)
 
-            batch, recorder, controls @ telemetry)
+            batch, recorder, scalars @ tables)
 
     batch, recorder, controls, map
 
@@ -516,6 +758,7 @@ let targetOf (part: Part) =
     match part.family with
     | UltraScalePlus -> Xilinx
     | Ice40UltraPlus -> Ice40
+    | Family.Ecp5 -> Target.Ecp5
 
 /// The design on the board's I2S pins, the registers reached the way the
 /// board's host reaches them.
@@ -664,40 +907,102 @@ let private recordFrames
       layout = layout1 ("word", 32) }
 
 let private pinsTop (board: Board) (path: DataPath) (d: Design) : BoardTop =
-    check board d
+    check board path d
     // No binding here wants a contract, so the map is exactly the design's
     // own values — which is what the pins path always had, now by assembly
     // rather than by a second builder.
-    let _, recorder, entries, map = registersFor path d
+    let recording = recordingCarrier path d
+    let _, recorder, entries, map = registersFor path recording d
+
+    // The recorded need's own row — not every output's fields run together,
+    // which only ever agreed while a design had one output.
+    let recordedFields () =
+        match recording with
+        | Some(name, _) -> fieldsOf d name
+        | None -> []
     let rate = int (round d.sampleRate)
 
     let fromRegisters (regs: SlaveRegs) =
         let byName = Map.ofList entries
-        fun (name: string) (_: Expr) -> regs.value byName[name]
+        fun (name: string) -> regs.value byName[name]
 
-    // The other direction: what the design reports goes into its read-only
-    // field. With no host there is nowhere for it to go, and the port is left
-    // for whatever else the board top does with it.
-    let toRegisters (regs: SlaveRegs) =
+    // The pins reported values are bound to — an LED — each one bit, and
+    // each its own output port on the top.
+    let pinned =
+        [ for need in d.needs do
+              match need with
+              | ValueOut(name, f) ->
+                  for carrier in carriersOfNeed path need do
+                      match carrier with
+                      | OnPin port ->
+                          if f.totalWidth <> 1 then
+                              failwith $"{d.name}: '{name}' is %d{f.totalWidth} bits, and a pin carries one"
+
+                          yield name, port
+                      | _ -> ()
+              | _ -> () ]
+
+    let pinOuts (p: Ports) = [ for _, port in pinned -> port, p.outPort port 1 ]
+
+    // Whether what is on a pin lights when driven low: the board's wiring,
+    // so the design's `limit` means lit whichever way the LED is wired.
+    let activeLow (port: string) =
+        board.connectors
+        |> List.collect (fun c -> c.pins)
+        |> List.tryFind (fun (p, _) -> p = port)
+        |> Option.map (fun (_, pin) -> pin.activeLow)
+        |> Option.defaultValue false
+
+    // The other direction: what the design reports goes to every carrier it
+    // is bound to — its read-only field, a pin. With no host there is no
+    // field, and a register binding reaches nothing.
+    let reporter (regs: SlaveRegs option) (outs: (string * Expr) list) =
         let byName = Map.ofList entries
-        fun (name: string) (port: Expr) -> regs.drive byName[name] port
+        let outs = Map.ofList outs
+
+        fun (name: string) (value: Expr) ->
+            let need = d.needs |> List.find (function ValueOut(n, _) -> n = name | _ -> false)
+
+            for carrier in carriersOfNeed path need do
+                match carrier, regs with
+                | InRegisterMap, Some regs -> regs.drive byName[name] value
+                | InRegisterMap, None -> ()
+                | OnPin port, _ -> (if activeLow port then bnot value else value) ==> outs[port]
+                | other, _ -> failwith $"{d.name}: '{name}' is a value it reports, and nothing carries one as {other}"
+
+    let toRegisters (regs: SlaveRegs) = reporter (Some regs)
+
+    let tablesIn (regs: SlaveRegs) =
+        let byName = Map.ofList entries
+        fun (name: string) (index: Expr) -> regs.readArray byName[name] index
 
     let baked =
         let starting = (startingOf d) |> Map.ofList
-        fun (name: string) (port: Expr) -> lit (starting |> Map.tryFind name |> Option.defaultValue 0UL) (width port)
+        let formats = controlsOf d |> Map.ofList
+        fun (name: string) -> lit (starting |> Map.tryFind name |> Option.defaultValue 0UL) formats[name].totalWidth
+
+    // A table on a board with no host has nothing to write it and nothing to
+    // read it back through; baking it as a ROM is sayable, and not built.
+    let unwritable (name: string) (_: Expr) : HostArrayPort =
+        failwith $"{d.name}: the table '{name}' needs a host to write it, and the {board.name} has none — a table baked at its starting words is not built"
+
+    // A recorder this board cannot carry is refused rather than dropped: the
+    // design would build, and the recording it was bound to would silently
+    // not exist.
+    match recorder, board.host with
+    | Some(RecordToMemory _), (UartAt _ | NoHost) ->
+        failwith $"{d.name}: its output is bound to the host's memory as well as the pins, and the {board.name}'s host has no memory the fabric can write"
+    | Some(RecordToFrames _), (AxiLiteAt _ | NoHost) ->
+        failwith $"{d.name}: its output is bound to frames on the host link as well as the pins, and the {board.name} has no host link to carry them"
+    | _ -> ()
 
     // What the recording binding added to the map, whichever kind it is, so
     // both host branches expose it the same way.
     let recorderEntries: (string * RegEntry) list =
         match recorder with
         | None -> []
-        | Some(RecordToMemory(arm, ringAddr, ringBeats, written, dropped)) ->
-            [ "recordArm", arm
-              "recordAddr", ringAddr
-              "recordBeats", ringBeats
-              "recordWritten", written
-              "recordDropped", dropped ]
-        | Some(RecordToFrames(arm, sent, dropped)) -> [ "recordArm", arm; "recordSent", sent; "recordDropped", dropped ]
+        | Some(RecordToMemory(arm, ringAddr, ringBeats, written, dropped)) -> [ arm; ringAddr; ringBeats; written; dropped ] |> List.map (fun e -> e.name, e)
+        | Some(RecordToFrames(arm, sent, dropped)) -> [ arm; sent; dropped ] |> List.map (fun e -> e.name, e)
 
     let name, top, registers =
         match board.host with
@@ -722,18 +1027,19 @@ let private pinsTop (board: Board) (path: DataPath) (d: Design) : BoardTop =
                         i2sPins p (pinoutOf board),
                         (match recorder, memory with
                          | Some _, Some m -> Some(axiWriteBusPorts p "m_axi" 32 m.width)
-                         | _ -> None))
-                    (fun (slavePorts, pins, writeBusPorts) ->
+                         | _ -> None),
+                        pinOuts p)
+                    (fun (slavePorts, pins, writeBusPorts, outs) ->
                         let regs = regMapSlave slavePorts map
                         let i2s = i2sLink "audio" pins board.fabricHz rate stockBitsPerSlot
 
                         let sink =
                             match recorder, writeBusPorts, memory with
                             | Some (RecordToMemory(arm, ringAddr, ringBeats, written, dropped)), Some busPorts, Some m ->
-                                Some(recordInto regs arm ringAddr ringBeats written dropped m (axiWriteBusOf busPorts) (outputsOf d))
+                                Some(recordInto regs arm ringAddr ringBeats written dropped m (axiWriteBusOf busPorts) (recordedFields ()))
                             | _ -> None
 
-                        through d (fromRegisters regs) (toRegisters regs) sink i2s)
+                        d.body (onPins d path (fromRegisters regs) (toRegisters regs outs) (tablesIn regs) sink i2s))
 
             name, top.def, recorderEntries @ entries
         | UartAt baud ->
@@ -742,8 +1048,8 @@ let private pinsTop (board: Board) (path: DataPath) (d: Design) : BoardTop =
             let top =
                 defModule
                     name
-                    (fun p -> uartPins p "host", i2sPins p (pinoutOf board))
-                    (fun (uart, pins) ->
+                    (fun p -> uartPins p "host", i2sPins p (pinoutOf board), pinOuts p)
+                    (fun (uart, pins, outs) ->
                         let i2s = i2sLink "audio" pins board.fabricHz rate stockBitsPerSlot
 
                         match recorder with
@@ -766,15 +1072,15 @@ let private pinsTop (board: Board) (path: DataPath) (d: Design) : BoardTop =
                             let regs = serialRegMapSlaveWith "host" board.fabricHz baud uart map stream
 
                             let sink (rows: Stream<Expr list>) (dropCount: Expr) =
-                                let produced = recordFrames regs arm sent dropped (outputsOf d) rows dropCount
+                                let produced = recordFrames regs arm sent dropped (recordedFields ()) rows dropCount
                                 produced.payload ==> words
                                 produced.valid ==> wordsValid
                                 wordsReady ==> produced.ready
 
-                            through d (fromRegisters regs) (toRegisters regs) (Some sink) i2s
+                            d.body (onPins d path (fromRegisters regs) (toRegisters regs outs) (tablesIn regs) (Some sink) i2s)
                         | _ ->
                             let regs = serialRegMapSlave "host" board.fabricHz baud uart map
-                            through d (fromRegisters regs) (toRegisters regs) None i2s)
+                            d.body (onPins d path (fromRegisters regs) (toRegisters regs outs) (tablesIn regs) None i2s))
 
             name, top.def, recorderEntries @ entries
         | NoHost ->
@@ -783,10 +1089,10 @@ let private pinsTop (board: Board) (path: DataPath) (d: Design) : BoardTop =
             let top =
                 defModule
                     name
-                    (fun p -> i2sPins p (pinoutOf board))
-                    (fun pins ->
+                    (fun p -> i2sPins p (pinoutOf board), pinOuts p)
+                    (fun (pins, outs) ->
                         let i2s = i2sLink "audio" pins board.fabricHz rate stockBitsPerSlot
-                        through d baked (fun _ _ -> ()) None i2s)
+                        d.body (onPins d path baked (reporter None outs) unwritable None i2s))
 
             name, top.def, []
 
@@ -797,6 +1103,17 @@ let private pinsTop (board: Board) (path: DataPath) (d: Design) : BoardTop =
       batch = None
       map = map
       target = targetOf board.part }
+
+/// The counters a batch top's read and write sides share.
+type private BatchCounters =
+    { frameCount: Expr
+      bursts: Expr
+      beatsTotal: Expr
+      running: Expr
+      arIssued: Expr
+      beatsWritten: Expr
+      cycleCount: Expr
+      burstAddrShift: int }
 
 /// The design on the host's memory: rows at `srcAddr`, through the design,
 /// rows at `dstAddr`. The batch contract is `Warp11.Effects.Batch`'s, with
@@ -856,7 +1173,7 @@ let private hostMemoryTop (board: Board) (path: DataPath) (d: Design) : BoardTop
     let destPin = if scattered then Some (outputsOf d).Head else None
     let payloadPins = if scattered then List.tail (outputsOf d) else (outputsOf d)
 
-    let batchOption, _, entries, map = registersFor path d
+    let batchOption, _, entries, map = registersFor path None d
 
     let batch =
         match batchOption with
@@ -891,36 +1208,51 @@ let private hostMemoryTop (board: Board) (path: DataPath) (d: Design) : BoardTop
             (fun (slavePorts, readBusPorts, writeBusPorts) ->
                 let regs = regMapSlave slavePorts map
                 let byName = Map.ofList entries
-                let rig = d.rig "drawn"
 
-                for n, port in rig.ports do
-                    regs.value byName[n] ==> port
+                // The counters both sides share are built by whichever side the
+                // body asks for first — its rows in, as it happens — so they
+                // land after the instance, where they always were.
+                let counters =
+                    lazy
+                        let frameCount = regs.value batch.frameCount
 
-                let frameCount = regs.value batch.frameCount
+                        // Rows → bursts on the way in, rows → beats on the way out;
+                        // both shapes are powers of two, so each is a shift.
+                        let bursts = wire "bursts" 32
+                        let burstShift = ceilLog2 inShape.rowsPerBurst
+                        pad 32 (slice 31 burstShift frameCount) ==> bursts
 
-                // Rows → bursts on the way in, rows → beats on the way out;
-                // both shapes are powers of two, so each is a shift.
-                let bursts = wire "bursts" 32
-                let burstShift = ceilLog2 inShape.rowsPerBurst
-                pad 32 (slice 31 burstShift frameCount) ==> bursts
+                        // `frameCount` is rows in; the rows out are `answers` as many.
+                        let rowsOut = wire "rows_out" 32
 
-                // `frameCount` is rows in; the rows out are `answers` as many.
-                let rowsOut = wire "rows_out" 32
+                        timesAnswers frameCount ==> rowsOut
 
-                timesAnswers frameCount ==> rowsOut
+                        let beatsTotal = wire "beats_total" 32
+                        let outShift = ceilLog2 outShape.rowsPerBeat
+                        pad 32 (slice 31 outShift rowsOut) ==> beatsTotal
 
-                let beatsTotal = wire "beats_total" 32
-                let outShift = ceilLog2 outShape.rowsPerBeat
-                pad 32 (slice 31 outShift rowsOut) ==> beatsTotal
+                        let running = regBit "running"
+                        let arIssued = reg "ar_issued" 32
+                        let beatsWritten = reg "beats_written" 32
+                        let cycleCount = reg "cycle_count" 32
 
-                let running = regBit "running"
-                let arIssued = reg "ar_issued" 32
-                let beatsWritten = reg "beats_written" 32
-                let cycleCount = reg "cycle_count" 32
+                        let burstAddrShift = ceilLog2 burstBytes
 
-                let burstAddrShift = ceilLog2 burstBytes
+                        { frameCount = frameCount
+                          bursts = bursts
+                          beatsTotal = beatsTotal
+                          running = running
+                          arIssued = arIssued
+                          beatsWritten = beatsWritten
+                          cycleCount = cycleCount
+                          burstAddrShift = burstAddrShift }
 
-                let rows: Stream<Expr list> =
+                let writerIdle = ref None
+
+                let rowsIn (_: string) : Stream<Expr list> =
+                    let { frameCount = frameCount; bursts = bursts; running = running; arIssued = arIssued; burstAddrShift = burstAddrShift } =
+                        counters.Force()
+
                     match readBusPorts with
                     | Some readBusPorts ->
                         // --- the read side: one descriptor per burst -------
@@ -958,55 +1290,72 @@ let private hostMemoryTop (board: Board) (path: DataPath) (d: Design) : BoardTop
                           ready = countReady
                           layout = layoutOfList (inputsOf d) }
 
+                let rowsOut (_: string) (produced: Stream<Expr list>) =
+                    let { beatsWritten = beatsWritten } = counters.Force()
+
+                    // On the scatter path the first field is the destination and
+                    // the rest are the payload; the index is read in the same
+                    // cycle as the beat it belongs to, which holds because a
+                    // scattered payload fills a whole word (checked above), so
+                    // the pack below is combinational and buffers nothing.
+                    let destIndex, payloadRows =
+                        if scattered then
+                            Some produced.payload.Head, { produced with payload = List.tail produced.payload; layout = layoutOfList payloadPins }
+                        else
+                            None, produced
+
+                    let outBeats = payloadRows |> rowsToBeats outShape payloadPins memory.width
+
+                    // --- the write side -----------------------------------------
+                    let wrAddr = wire "wr_addr" 32
+                    let beatAddrShift = ceilLog2 beatBytes
+
+                    // Where the beat goes: the count of beats written so far, or —
+                    // on the scatter path — where the design said. That single
+                    // choice is the whole of the difference, and it is what lets
+                    // the farm above be unordered: position is stated, not implied
+                    // by arrival.
+                    let destBeat =
+                        match destIndex with
+                        | Some index -> pad 32 index
+                        | None -> beatsWritten
+
+                    (regs.value batch.dstAddr + asUInt (shl beatAddrShift (slice (31 - beatAddrShift) 0 destBeat))) ==> wrAddr
+
+                    let wrReady = wireBit "wr_ready"
+
+                    let writeBeats: Stream<Expr * Expr * Expr> =
+                        { payload = (wrAddr, outBeats.payload, lit ((1UL <<< beatBytes) - 1UL) beatBytes)
+                          valid = outBeats.valid
+                          ready = wrReady
+                          layout = axiWriteBeatLayout 32 memory.width }
+
+                    wrReady ==> outBeats.ready
+
+                    // How many writes stay in flight is the board's port's
+                    // business, not this top's: the cost of a write here is a full
+                    // AW+W+B round trip, and overlapping them is what hides it.
+                    let idle =
+                        axiMasterWriterWithIdleOn (axiWriteBusOf writeBusPorts) memory.writeOutstanding writeBeats
+
+                    If (outBeats.valid &&& wrReady) (fun () -> beatsWritten + lit 1UL 32 ==> beatsWritten)
+                    writerIdle.Value <- Some idle
+
                 // --- the design ---------------------------------------------
-                let produced = rows |> rig.through
+                d.body
+                    { streamIn = rowsIn
+                      streamOut = rowsOut
+                      valueIn = fun name -> regs.value byName[name]
+                      valueOut = fun name value -> regs.drive byName[name] value
+                      tableIn = fun name index -> regs.readArray byName[name] index }
 
-                // On the scatter path the first field is the destination and
-                // the rest are the payload; the index is read in the same
-                // cycle as the beat it belongs to, which holds because a
-                // scattered payload fills a whole word (checked above), so
-                // the pack below is combinational and buffers nothing.
-                let destIndex, payloadRows =
-                    if scattered then
-                        Some produced.payload.Head, { produced with payload = List.tail produced.payload; layout = layoutOfList payloadPins }
-                    else
-                        None, produced
+                let { running = running; arIssued = arIssued; beatsWritten = beatsWritten; beatsTotal = beatsTotal; cycleCount = cycleCount; frameCount = frameCount; burstAddrShift = burstAddrShift } =
+                    counters.Force()
 
-                let outBeats = payloadRows |> rowsToBeats outShape payloadPins memory.width
-
-                // --- the write side -----------------------------------------
-                let wrAddr = wire "wr_addr" 32
-                let beatAddrShift = ceilLog2 beatBytes
-
-                // Where the beat goes: the count of beats written so far, or —
-                // on the scatter path — where the design said. That single
-                // choice is the whole of the difference, and it is what lets
-                // the farm above be unordered: position is stated, not implied
-                // by arrival.
-                let destBeat =
-                    match destIndex with
-                    | Some index -> pad 32 index
-                    | None -> beatsWritten
-
-                (regs.value batch.dstAddr + asUInt (shl beatAddrShift (slice (31 - beatAddrShift) 0 destBeat))) ==> wrAddr
-
-                let wrReady = wireBit "wr_ready"
-
-                let writeBeats: Stream<Expr * Expr * Expr> =
-                    { payload = (wrAddr, outBeats.payload, lit ((1UL <<< beatBytes) - 1UL) beatBytes)
-                      valid = outBeats.valid
-                      ready = wrReady
-                      layout = axiWriteBeatLayout 32 memory.width }
-
-                wrReady ==> outBeats.ready
-
-                // How many writes stay in flight is the board's port's
-                // business, not this top's: the cost of a write here is a full
-                // AW+W+B round trip, and overlapping them is what hides it.
                 let writerIdle =
-                    axiMasterWriterWithIdleOn (axiWriteBusOf writeBusPorts) memory.writeOutstanding writeBeats
-
-                If (outBeats.valid &&& wrReady) (fun () -> beatsWritten + lit 1UL 32 ==> beatsWritten)
+                    match writerIdle.Value with
+                    | Some idle -> idle
+                    | None -> failwith $"{d.name}: the design never handed its rows out, so the batch has nothing to write"
 
                 // --- control ------------------------------------------------
                 let finished = wireBit "finished"
@@ -1064,6 +1413,13 @@ let private hostMemoryTop (board: Board) (path: DataPath) (d: Design) : BoardTop
 /// or the host's memory.
 let boardTop (board: Board) (path: DataPath) (d: Design) : BoardTop =
     checkBoard board
+
+    let d =
+        match d.atClocking with
+        | None -> d
+        | Some resolve ->
+            let rate = boardRate board nominalRate
+            resolve { rate = rate; cyclesPerBeat = int (float board.fabricHz / rate) }
 
     // Four combinations of carriers are built. The rest are sayable — which
     // is the point of binding per need — and are refused here by name, so

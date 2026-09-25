@@ -382,6 +382,19 @@ let buildRegMap (build: RegBuilder -> 'a) : 'a * RegMap =
     { apertureAddrWidth = aperture
       entries = b.EntriesFingerprinted aperture }
 
+/// Build a map whose aperture is at least `minAddrWidth` — pinned there for as
+/// long as the map fits, and grown to the next power of two only when it does
+/// not. What an assembled map wants: the seam's offsets never move while the
+/// contents fit, and a large table does not have to be refused to get them.
+let buildRegMapAtLeast (minAddrWidth: int) (build: RegBuilder -> 'a) : 'a * RegMap =
+    let b = RegBuilder()
+    let value = build b
+    let aperture = max minAddrWidth (ceilLog2 (int b.HighWater))
+
+    value,
+    { apertureAddrWidth = aperture
+      entries = b.EntriesFingerprinted aperture }
+
 /// A host-writable window's read port, as the design sees it. `MemReadPort`
 /// plus the one thing that is different here: the port is shared with the
 /// host, so a design consuming the window statefully has to know whose cycle

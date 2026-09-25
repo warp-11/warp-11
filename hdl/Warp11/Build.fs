@@ -39,7 +39,7 @@ let private isBusPort (n: string) =
     n.StartsWith "s_axi_" || n.StartsWith "m_axi_"
 
 /// The pin gate: every pin port of the top lands on a pin the board's
-/// connectors name, and a connector the top uses is used whole. Refused by
+/// connectors name, and a connector the top uses is used whole — LEDs aside. Refused by
 /// name, before any tool runs — nextpnr places an unpinned port wherever it
 /// likes and carries on with a warning, and Vivado's version of the same
 /// mistake is a constraints warning nobody reads.
@@ -57,7 +57,9 @@ let pinGate (t: BoardTop) : Pinned list =
         let names = String.concat ", " unpinned
         failwith $"{t.name} on the {board.name}: no pin for {names} — the board's connectors do not place them"
 
-    for c in board.connectors do
+    // LEDs are the exception: each is its own device, and a design lighting
+    // one of a board's two is using what it asked for.
+    for c in board.connectors |> List.filter (fun c -> c.role <> Leds) do
         let present, missing =
             c.pins |> List.map fst |> List.partition (fun p -> ports |> List.exists (fun (n, _, _) -> n = p))
 
@@ -114,6 +116,14 @@ let private withBusInterfaceAttribute (verilog: string) =
 
     verilog.Insert(at, attribute)
 
+/// Whether the top masters the host's memory — a batch top, or a converter
+/// top with a recorder bound there. Asked of the ports, since that is what
+/// the block design has to wire, whichever binding put them there.
+let private hasMaster (t: BoardTop) =
+    t.top.decls |> List.exists (function
+        | Output(n, _) -> n = "m_axi_awaddr" || n = "m_axi_araddr"
+        | _ -> false)
+
 /// `100`, `99.999001`, `166.666672`: the megahertz the PS configuration
 /// takes.
 let private megahertz (hz: int) = (float hz / 1e6).ToString("0.######", System.Globalization.CultureInfo.InvariantCulture)
@@ -131,10 +141,10 @@ let private blockDesignTcl (t: BoardTop) (pinned: Pinned list) (psClock: int) =
         | _ -> failwith "a block design wants an AXI-Lite host"
 
     let memory =
-        match t.batch, t.board.hostMemory with
-        | Some _, Some m -> Some m
-        | Some _, None -> failwith "a batch top on a board with no host memory"
-        | None, _ -> None
+        match hasMaster t, t.board.hostMemory with
+        | true, Some m -> Some m
+        | true, None -> failwith "a top that masters the host's memory, on a board with none"
+        | false, _ -> None
 
     let psConfig =
         [ "CONFIG.PSU__USE__M_AXI_GP0 {1}"
@@ -346,8 +356,8 @@ let private overlayDts (t: BoardTop) (app: string) (psClock: int) =
         | _ -> failwith "an overlay wants an AXI-Lite host"
 
     let arena =
-        match t.batch, t.board.hostMemory with
-        | Some _, Some m ->
+        match hasMaster t, t.board.hostMemory with
+        | true, Some m ->
             $"""
     udmabuf_{snake}: udmabuf-{app} {{
         compatible = "ikwzm,u-dma-buf";
@@ -447,7 +457,7 @@ let private writeVivado (dir: string) (t: BoardTop) : BuildOutput =
 
     let verilog =
         let text = emitDesignFor t.target t.top + "\n"
-        if t.batch.IsSome then withBusInterfaceAttribute text else text
+        if hasMaster t then withBusInterfaceAttribute text else text
 
     let files =
         [ $"{t.name}.v", verilog
@@ -770,6 +780,306 @@ case "${{PROG:-0}}" in
 esac
 """
 
+// ---------------------------------------------------------------------------
+// The ECP5 flow: the same shape — a wrapper with the PLL, the pin map, and
+// yosys → nextpnr-ecp5 → ecppack — with the family's primitive and its
+// constraint format.
+
+/// `EHXPLLL`'s parameters for an oscillator to a fabric rate, chosen under
+/// the rules `ecppll` applies: the phase detector between 3.125 and 400 MHz,
+/// the VCO between 400 and 800 MHz, the closest output to the target and,
+/// among equals, the VCO nearest 600 MHz.
+type Ecp5Pll =
+    { referenceDiv: int
+      feedbackDiv: int
+      outputDiv: int
+      achievedHz: float }
+
+let ecp5Pll (inputHz: int) (targetHz: int) : Ecp5Pll =
+    let fin = float inputHz
+    let target = float targetHz
+
+    let candidates =
+        [ for referenceDiv in 1..128 do
+              let pfd = fin / float referenceDiv
+
+              if pfd >= 3.125e6 && pfd <= 400e6 then
+                  for feedbackDiv in 1..80 do
+                      let out = pfd * float feedbackDiv
+
+                      for outputDiv in 1..128 do
+                          let vco = out * float outputDiv
+
+                          if vco >= 400e6 && vco <= 800e6 then
+                              yield
+                                  { referenceDiv = referenceDiv
+                                    feedbackDiv = feedbackDiv
+                                    outputDiv = outputDiv
+                                    achievedHz = out } ]
+
+    if candidates.IsEmpty then
+        failwith $"no ECP5 PLL setting takes %d{inputHz} Hz anywhere near %d{targetHz} Hz"
+
+    candidates
+    |> List.minBy (fun c -> abs (c.achievedHz - target), abs (c.achievedHz * float c.outputDiv - 600e6))
+
+let private ecp5Wrapper (t: BoardTop) (clockPort: string) (clockHz: int) (passthrough: Pinned list) =
+    let top = $"{snakeOf t.name}_top"
+
+    let portDecls =
+        [ yield $"    input  wire {clockPort},"
+          for p in passthrough ->
+              let dir = if p.input then "input " else "output"
+              let range = if p.width = 1 then "" else $"[%d{p.width - 1}:0] "
+              $"    {dir} wire {range}{p.port}," ]
+        |> String.concat "\n"
+
+    let portDecls = portDecls.TrimEnd(',')
+
+    let connections =
+        [ yield "        .clk(clk),"
+          yield "        .rst(rst),"
+          for p in passthrough -> $"        .{p.port}({p.port})," ]
+        |> String.concat "\n"
+
+    let connections = connections.TrimEnd(',')
+
+    let clock =
+        if clockHz = t.board.fabricHz then
+            $"""    // The oscillator is the fabric clock: no PLL, and the reset counts from
+    // power-on alone.
+    wire clk = {clockPort};
+    wire pll_locked = 1'b1;
+"""
+        else
+            let pll = ecp5Pll clockHz t.board.fabricHz
+            let mhz (hz: float) = (hz / 1e6).ToString("0.####", System.Globalization.CultureInfo.InvariantCulture)
+            let achieved = mhz pll.achievedHz
+
+            if round pll.achievedHz <> float t.board.fabricHz then
+                failwith
+                    $"{t.board.name}: the ECP5 PLL cannot make %d{t.board.fabricHz} Hz from {mhz (float clockHz)} MHz — the nearest it lands on is {achieved} MHz; pin the board at that, or at a rate it reaches exactly"
+
+            $"""    // {megahertz clockHz} MHz in, {achieved} MHz out — the parameters `ecppll -i {megahertz clockHz} -o {megahertz t.board.fabricHz}` picks.
+    wire clk;
+    wire pll_locked;
+
+    (* FREQUENCY_PIN_CLKI="{megahertz clockHz}" *)
+    (* FREQUENCY_PIN_CLKOP="{achieved}" *)
+    (* ICP_CURRENT="12" *) (* LPF_RESISTOR="8" *) (* MFG_ENABLE_FILTEROPAMP="1" *) (* MFG_GMCREF_SEL="2" *)
+    EHXPLLL #(
+        .PLLRST_ENA("DISABLED"),
+        .INTFB_WAKE("DISABLED"),
+        .STDBY_ENABLE("DISABLED"),
+        .DPHASE_SOURCE("DISABLED"),
+        .OUTDIVIDER_MUXA("DIVA"),
+        .OUTDIVIDER_MUXB("DIVB"),
+        .OUTDIVIDER_MUXC("DIVC"),
+        .OUTDIVIDER_MUXD("DIVD"),
+        .CLKI_DIV(%d{pll.referenceDiv}),
+        .CLKOP_ENABLE("ENABLED"),
+        .CLKOP_DIV(%d{pll.outputDiv}),
+        .CLKOP_CPHASE(%d{pll.outputDiv / 2 - 1}),
+        .CLKOP_FPHASE(0),
+        .FEEDBK_PATH("CLKOP"),
+        .CLKFB_DIV(%d{pll.feedbackDiv})
+    ) pll (
+        .RST(1'b0),
+        .STDBY(1'b0),
+        .CLKI({clockPort}),
+        .CLKOP(clk),
+        .CLKFB(clk),
+        .CLKINTFB(),
+        .PHASESEL0(1'b0),
+        .PHASESEL1(1'b0),
+        .PHASEDIR(1'b1),
+        .PHASESTEP(1'b1),
+        .PHASELOADREG(1'b1),
+        .PLLWAKESYNC(1'b0),
+        .ENCLKOP(1'b0),
+        .LOCK(pll_locked)
+    );
+"""
+
+    $"""// {top}.v — {t.name} on the {t.board.name}, generated by Warp11.Build.
+//
+// The board's clock and reset, which the design cannot make for itself, and
+// the design instance; every other port passes straight through to a pin.
+
+`default_nettype none
+
+module {top} (
+{portDecls}
+);
+
+{clock}
+    // The board has no reset pin, so one is made here: held while the PLL is
+    // unlocked, and for fifteen cycles after it locks, so every divider in
+    // the design starts from its reset value on a clock that is already
+    // steady. The counter powers up at zero because ECP5 flip-flops take
+    // their initial value from the bitstream.
+    reg [3:0] por = 4'd0;
+
+    always @(posedge clk) begin
+        if (!pll_locked)
+            por <= 4'd0;
+        else if (por != 4'd15)
+            por <= por + 4'd1;
+    end
+
+    wire rst = (por != 4'd15);
+
+    {t.name} design (
+{connections}
+    );
+
+endmodule
+
+`default_nettype wire
+"""
+
+/// The pin map in the ECP5's own format: a site and an IO type a port, and
+/// the oscillator's frequency so nextpnr constrains what the PLL is fed.
+let private lpf (clockPort: string) (clockHz: int) (pinned: Pinned list) =
+    [ yield "BLOCK RESETPATHS;"
+      yield "BLOCK ASYNCPATHS;"
+      for p in pinned do
+          yield $"LOCATE COMP \"{p.port}\" SITE \"{p.pin.pin}\";"
+
+          match p.pin.standard with
+          | Some standard -> yield $"IOBUF PORT \"{p.port}\" IO_TYPE={standard};"
+          | None -> ()
+      yield $"FREQUENCY PORT \"{clockPort}\" {megahertz clockHz} MHZ;" ]
+    |> String.concat "\n"
+
+let private ecp5FlowSh (t: BoardTop) (top: string) (sources: string list) =
+    let device = t.board.part.device
+    let package = t.board.part.package
+    let freq = megahertz t.board.fabricHz
+    let loader = t.board.part.boardPart |> Option.defaultWith (fun () -> failwith $"{t.board.name}: an ECP5 board names its openFPGALoader board in `boardPart`")
+    let sourceList = sources |> List.map (fun f -> $"\"$here/{f}\"") |> String.concat " "
+
+    $"""#!/usr/bin/env bash
+# build.sh — {t.name} on the {t.board.name}: yosys → nextpnr-ecp5 → ecppack,
+# generated by Warp11.Build.
+#
+#   ./build.sh            builds {top}.bit
+#   PROG=sram ./build.sh  ...and loads it into the FPGA (gone at power-off)
+#   PROG=1 ./build.sh     ...and writes the SPI flash
+#
+# OSS_CAD_BIN (default ~/tools/bin) is where the pinned oss-cad-suite lives;
+# hdl/tools/install-oss-cad-suite.sh puts it there.
+set -euo pipefail
+
+here=$(cd "$(dirname "$0")" && pwd)
+top={top}
+lpf="$here/{top}.lpf"
+sources=({sourceList})
+device={device}
+package={package}
+freq={freq}
+out="$here/build"
+mkdir -p "$out"
+
+# The pinned suite goes first on PATH, and nothing on LD_LIBRARY_PATH: these
+# binaries carry their own RPATH and ship a complete lib/.
+bindir=${{OSS_CAD_BIN:-$HOME/tools/bin}}
+export PATH="$bindir:$PATH"
+unset LD_LIBRARY_PATH
+
+for tool in yosys nextpnr-ecp5 ecppack; do
+    if ! command -v "$tool" > /dev/null; then
+        echo "$tool is not on PATH — run hdl/tools/install-oss-cad-suite.sh" >&2
+        exit 1
+    fi
+done
+
+echo "yosys:   $(command -v yosys) — $(yosys -V)"
+echo "nextpnr: $(command -v nextpnr-ecp5)"
+
+json="$out/$top.json"
+config="$out/$top.config"
+bit="$out/$top.bit"
+
+echo
+echo "== synth =="
+yosys -p "read_verilog ${{sources[*]}}; synth_ecp5 -top $top -json $json"
+
+# Every port is pinned: nextpnr places an unpinned port wherever it likes, so
+# the netlist is checked against the map, against what synthesis kept.
+echo
+echo "== pins =="
+python3 - "$json" "$lpf" "$top" <<'PY'
+import json, re, sys
+
+design, lpf, top = sys.argv[1], sys.argv[2], sys.argv[3]
+
+with open(design) as f:
+    ports = set(json.load(f)["modules"][top]["ports"])
+
+pinned = set(re.findall(r'LOCATE COMP "([^"\[]+)', open(lpf).read()))
+
+unpinned = sorted(ports - pinned)
+unknown = sorted(pinned - ports)
+
+for name in unpinned:
+    print(f"  port '{{name}}' has no LOCATE in {{lpf}}")
+for name in unknown:
+    print(f"  LOCATE '{{name}}' names no port of {{top}}")
+
+if unpinned or unknown:
+    print("pin map and design disagree — see above", file=sys.stderr)
+    sys.exit(1)
+
+print(f"  {{len(ports)}} ports, all pinned")
+PY
+
+echo
+echo "== place and route =="
+nextpnr-ecp5 "--$device" --package "$package" --lpf "$lpf" --json "$json" \
+    --textcfg "$config" --freq "$freq" 2>&1 | tee "$out/$top.pnr.log"
+
+# The simulators have no timing model, so this is the only place a cone too
+# slow for the clock shows up — read out of the log, not the exit code.
+echo
+echo "== timing =="
+python3 - "$out/$top.pnr.log" "$freq" <<'PY'
+import re, sys
+
+log, target = sys.argv[1], float(sys.argv[2])
+achieved = [float(m) for m in re.findall(r"Max frequency for clock.*?:\s*([\d.]+)\s*MHz", open(log).read())]
+
+if not achieved:
+    print("nextpnr reported no clock frequency — cannot gate on timing", file=sys.stderr)
+    sys.exit(1)
+
+worst = min(achieved)
+print(f"  Fmax {{worst:.2f}} MHz against {{target:.2f}} MHz target — {{worst / target:.2f}}x")
+
+if worst < target:
+    print(f"TIMING FAILED: {{worst:.2f}} MHz < {{target:.2f}} MHz", file=sys.stderr)
+    sys.exit(1)
+PY
+
+echo
+echo "== pack =="
+ecppack --compress "$config" "$bit"
+ls -l "$bit"
+
+case "${{PROG:-0}}" in
+    sram)
+        echo
+        echo "== program (volatile) =="
+        openFPGALoader -b {loader} "$bit"
+        ;;
+    1)
+        echo
+        echo "== program (SPI flash) =="
+        openFPGALoader -b {loader} --write-flash "$bit"
+        ;;
+esac
+"""
+
 /// Every file the open flow needs for this top, into `dir`.
 let private writeOpenFlow (dir: string) (t: BoardTop) : BuildOutput =
     let snake = snakeOf t.name
@@ -800,11 +1110,22 @@ let private writeOpenFlow (dir: string) (t: BoardTop) : BuildOutput =
     let pinned = pinGate { t with top = wrapperTop }
     let passthrough = pinned |> List.filter (fun p -> p.port <> crystalPort)
 
+    let familyFiles =
+        match t.board.part.family with
+        | Ice40UltraPlus ->
+            [ $"{t.name}.v", emitDesignFor t.target t.top + "\n"
+              $"{top}.v", iceWrapper t crystalPort crystalHz passthrough
+              $"{top}.pcf", pcf pinned + "\n"
+              "build.sh", openFlowSh t top [ $"{t.name}.v"; $"{top}.v" ] ]
+        | Family.Ecp5 ->
+            [ $"{t.name}.v", emitDesignFor t.target t.top + "\n"
+              $"{top}.v", ecp5Wrapper t crystalPort crystalHz passthrough
+              $"{top}.lpf", lpf crystalPort crystalHz pinned + "\n"
+              "build.sh", ecp5FlowSh t top [ $"{t.name}.v"; $"{top}.v" ] ]
+        | UltraScalePlus -> failwith $"{t.board.name}: the open flow does not build an UltraScale+ part"
+
     let files =
-        [ $"{t.name}.v", emitDesignFor t.target t.top + "\n"
-          $"{top}.v", iceWrapper t crystalPort crystalHz passthrough
-          $"{top}.pcf", pcf pinned + "\n"
-          "build.sh", openFlowSh t top [ $"{t.name}.v"; $"{top}.v" ] ]
+        familyFiles
         @ (match t.board.host with
            | NoHost -> []
            | _ -> [ $"{snake}_layout.rs", String.concat "\n" (seamLines t) + "\n" ])
