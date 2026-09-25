@@ -419,6 +419,9 @@ let gainTableLookup (words: uint64[]) (env: int) : float =
         // the kind of coincidence that hides a wrong constant.
         float (here + ((step * fraction) >>> gainTableFracBits)) / float (1 <<< gainLogFracBits)
 
+/// Width of the interpolation's product.
+let gainTableProductWidth = gainLogWidth + gainTableFracBits + 1
+
 /// Where an envelope reads in the table, and how far past that entry it falls.
 type GainTableIndex =
     { /// The word to read — the octave with the step under it.
@@ -473,14 +476,19 @@ let gainTableIndex (name: string) (env: Expr) : GainTableIndex =
 
     { address = address; fraction = fraction }
 
-/// The multiply's two operands and the addend that outlives it — the first half
-/// of `gainTableGain`, for an engine that puts a shared multiplier between them.
-let private gainTableOperands (name: string) (word: Expr) (fraction: Expr) : Expr * Expr * Expr =
-    if width word <> gainTableWordWidth then
-        failwith $"gainTableOperands '{name}' expects a %d{gainTableWordWidth}-bit word, got %d{width word} bits"
-
+/// The entry's own gain, out of a table word.
+let private gainTableHere (name: string) (word: Expr) : Expr =
     let here = wire $"{name}_here" (SInt gainLogWidth)
     asSInt (slice (gainLogWidth - 1) 0 word) ==> here
+    here
+
+/// The interpolation's two multiply operands — the first half of
+/// `gainTableGain`. The addend is `gainTableHere`, separately, because a stage
+/// that puts a shared multiplier between the halves computes it on the far side,
+/// out of a word it carried through.
+let private gainTableOperands (name: string) (word: Expr) (fraction: Expr) : Expr * Expr =
+    if width word <> gainTableWordWidth then
+        failwith $"gainTableOperands '{name}' expects a %d{gainTableWordWidth}-bit word, got %d{width word} bits"
 
     let step = wire $"{name}_step" (SInt gainLogWidth)
     asSInt (slice (gainTableWordWidth - 1) gainLogWidth word) ==> step
@@ -488,7 +496,7 @@ let private gainTableOperands (name: string) (word: Expr) (fraction: Expr) : Exp
     let along = wire $"{name}_along" (SInt(gainTableFracBits + 1))
     widenUnsigned (gainTableFracBits + 1) fraction ==> along
 
-    step, along, here
+    step, along
 
 /// The gain from the interpolation product — the second half of `gainTableGain`.
 /// `product` must be a declared signal, since the shift names it.
@@ -515,12 +523,12 @@ let private gainTableFromProduct (name: string) (product: Expr) (here: Expr) : E
 /// invisible to every caller. The halves are `gainTableOperands` and
 /// `gainTableFromProduct`, for an engine that puts a pipeline between them.
 let gainTableGain (multiply: Expr -> Expr -> Expr) (name: string) (word: Expr) (fraction: Expr) : Expr =
-    let step, along, here = gainTableOperands name word fraction
+    let step, along = gainTableOperands name word fraction
 
-    let product = wire $"{name}_scaled_wide" (SInt(gainLogWidth + gainTableFracBits + 1))
+    let product = wire $"{name}_scaled_wide" (SInt gainTableProductWidth)
     multiply step along ==> product
 
-    gainTableFromProduct name product here
+    gainTableFromProduct name product (gainTableHere name word)
 
 // ---------------------------------------------------------------------------
 // The exponential: a log2 gain back into a multiplier.
@@ -547,8 +555,29 @@ let gainExpMantissaBits = 16
 /// Width of a mantissa word: the point, and the step to the next above it.
 let gainExpWordWidth = 2 * gainExpMantissaBits
 
-/// Bits the exponent takes, and so the width of the shift it becomes.
+/// Bits the exponent takes.
 let gainExpExponentBits = gainLogWidth - gainLogFracBits
+
+/// Octaves of gain the apply delivers, either side of unity — ±48 dB.
+///
+/// **This number sizes the variable shifter, which is the one expensive thing
+/// in the audio path**, so it is bounded on purpose rather than left at what the
+/// gain format could hold. Two things follow from it and each is worth about as
+/// much: the shift is never less than `gainExpMantissaBits - gainApplyOctaves`,
+/// so that much of it is constant and therefore free wiring; and what is left
+/// spans `2 * gainApplyOctaves` positions rather than the format's 32, which is
+/// one barrel stage fewer.
+///
+/// The gain *format* stays wider, because a sum of terms — a volume control, a
+/// noise-reduction decision — needs headroom above what any one of them asks
+/// for. It is the apply that clamps, which is where the shifter is.
+let gainApplyOctaves = 8
+
+/// The part of the shift that is the same for every gain, and so costs nothing.
+let private gainApplyShiftFloor = gainExpMantissaBits - gainApplyOctaves
+
+/// Bits the varying part of the shift takes.
+let private gainApplyShiftBits = log2Exact (2 * gainApplyOctaves)
 
 /// `2^f` across one octave, as a point and a step per word — the same word shape
 /// the gain table uses, interpolated the same way.
@@ -573,7 +602,10 @@ let gainExpMantissaOfLog (gainLog: int) : int =
 /// apply path is held to. `gainLog` is the signed Q5.11 value, `sample` a signed
 /// sample; the shift and the clamp are the fabric's, floor and two's complement.
 let gainApplyToSample (gainLog: int) (sample: int) : int =
-    let exponent = gainLog >>> gainLogFracBits
+    let exponent =
+        gainLog >>> gainLogFracBits
+        |> max -gainApplyOctaves
+        |> min (gainApplyOctaves - 1)
     // In 64 bits: a full-scale sample times a mantissa is 2^38, and the fabric's
     // product wire is wider than an int.
     let product = int64 sample * int64 (gainExpMantissaOfLog gainLog)
@@ -581,14 +613,25 @@ let gainApplyToSample (gainLog: int) (sample: int) : int =
     let ceiling = int64 ((1 <<< (sampleWidth - 1)) - 1)
     int (max (-ceiling - 1L) (min ceiling scaled))
 
-/// The exponential's multiply operands and the addend that outlives them — the
-/// first half of the mantissa, for an engine that puts a shared multiplier
-/// between the two.
+/// The mantissa point an exponent's fraction lands on.
 ///
 /// The table is a select over literals rather than a `rom`, because at sixteen
 /// words it is the mux tree a synthesiser builds from one anyway, and because it
 /// exports as FIRRTL where a preloaded memory does not.
-let gainExpOperands (name: string) (gainLog: Expr) : Expr * Expr * Expr =
+let gainExpHere (name: string) (gainLog: Expr) : Expr =
+    let entry = wire $"{name}_base_entry" gainExpBits
+    slice (gainLogFracBits - 1) gainExpFracBits gainLog ==> entry
+
+    let word = wire $"{name}_base_word" gainExpWordWidth
+    selectIndexed entry [ for w in gainExpWords -> lit w gainExpWordWidth ] ==> word
+
+    let here = wire $"{name}_base_here" (gainExpMantissaBits + 1)
+    widenUnsigned (gainExpMantissaBits + 1) (slice (gainExpMantissaBits - 1) 0 word) ==> here
+    here
+
+/// The exponential's two multiply operands. The addend is `gainExpHere`,
+/// separately, for the same reason the table's is.
+let gainExpOperands (name: string) (gainLog: Expr) : Expr * Expr =
     let entry = wire $"{name}_exp_entry" gainExpBits
     slice (gainLogFracBits - 1) gainExpFracBits gainLog ==> entry
 
@@ -598,16 +641,13 @@ let gainExpOperands (name: string) (gainLog: Expr) : Expr * Expr * Expr =
     let word = wire $"{name}_exp_word" gainExpWordWidth
     selectIndexed entry [ for w in gainExpWords -> lit w gainExpWordWidth ] ==> word
 
-    let here = wire $"{name}_exp_here" (gainExpMantissaBits + 1)
-    widenUnsigned (gainExpMantissaBits + 1) (slice (gainExpMantissaBits - 1) 0 word) ==> here
-
     let step = wire $"{name}_exp_step" (SInt(gainExpMantissaBits + 1))
     widenUnsigned (gainExpMantissaBits + 1) (slice (gainExpWordWidth - 1) gainExpMantissaBits word) ==> step
 
     let along = wire $"{name}_exp_along" (SInt(gainExpFracBits + 1))
     widenUnsigned (gainExpFracBits + 1) within ==> along
 
-    step, along, here
+    step, along
 
 /// Width of the exponential's product.
 let gainExpProductWidth = gainExpMantissaBits + gainExpFracBits + 2
@@ -641,22 +681,30 @@ let gainApplyOperands (name: string) (value: Expr) (mantissa: Expr) : Expr * Exp
 /// an iCE40 UP5K the exponential, this shift and the saturate are 362 LUT4
 /// together.
 let gainApplyFromProduct (name: string) (gainLog: Expr) (product: Expr) (toWidth: int) : Expr =
-    // The shift is `15 - exponent`, computed one bit wide of the exponent
-    // because the exponent reaches -16 where the shift reaches 31.
-    let exponentNarrow = wire $"{name}_exponent_narrow" (SInt gainExpExponentBits)
-    asSInt (slice (gainLogWidth - 1) gainLogFracBits gainLog) ==> exponentNarrow
+    let exponentWide = wire $"{name}_exponent_wide" (SInt gainExpExponentBits)
+    asSInt (slice (gainLogWidth - 1) gainLogFracBits gainLog) ==> exponentWide
 
-    let exponent = wire $"{name}_exponent" (SInt(gainExpExponentBits + 1))
-    pad (gainExpExponentBits + 1) exponentNarrow ==> exponent
+    // Clamped to the octaves the apply delivers, which is what bounds the
+    // shift. A signed saturate to `gainApplyShiftBits` is exactly the range.
+    let exponent = wire $"{name}_exponent" (SInt gainApplyShiftBits)
+    saturate gainApplyShiftBits exponentWide ==> exponent
 
-    let shiftWide = wire $"{name}_shift_wide" (SInt(gainExpExponentBits + 1))
-    sub (lit (uint64 (gainExpMantissaBits - 1)) (gainExpExponentBits + 1)) exponent ==> shiftWide
+    let exponentRoom = wire $"{name}_exponent_room" (SInt(gainApplyShiftBits + 1))
+    pad (gainApplyShiftBits + 1) exponent ==> exponentRoom
 
-    let shift = wire $"{name}_shift" gainExpExponentBits
-    asUInt (slice (gainExpExponentBits - 1) 0 shiftWide) ==> shift
+    let shiftWide = wire $"{name}_shift_wide" (SInt(gainApplyShiftBits + 1))
+    sub (lit (uint64 (gainApplyOctaves - 1)) (gainApplyShiftBits + 1)) exponentRoom ==> shiftWide
 
-    let shifted = wire $"{name}_shifted" (SInt(width product))
-    shrBy shift product ==> shifted
+    let shift = wire $"{name}_shift" gainApplyShiftBits
+    asUInt (slice (gainApplyShiftBits - 1) 0 shiftWide) ==> shift
+
+    // The constant part first, which is wiring, and it narrows what the barrel
+    // has to move by exactly as much.
+    let narrowed = wire $"{name}_narrowed" (SInt(width product - gainApplyShiftFloor))
+    slice (width product - 1) gainApplyShiftFloor product ==> narrowed
+
+    let shifted = wire $"{name}_shifted" (SInt(width narrowed))
+    shrBy shift narrowed ==> shifted
 
     let scaled = wire $"{name}_scaled" (SInt toWidth)
     saturate toWidth shifted ==> scaled
@@ -670,22 +718,27 @@ let gainApplyFromProduct (name: string) (gainLog: Expr) (product: Expr) (toWidth
 /// on its shared unit and a spatial one two blocks of its own. The halves are
 /// `gainExpOperands` / `gainExpFromProduct` and `gainApplyOperands` /
 /// `gainApplyFromProduct`, for an engine that puts a pipeline between them.
-let gainApply (multiply: Expr -> Expr -> Expr) (name: string) (gainLog: Expr) (value: Expr) : Expr =
+/// `toWidth` is the width to saturate into, which is the caller's business and
+/// not the value's: a band arrives at its own width and leaves wide enough that
+/// a sum of bands can saturate once at the end. **Do not pre-widen the value to
+/// get there** — the product, and so the shifter, is as wide as what goes in,
+/// and nine bits of sign extension is nine more bits through four barrel stages.
+let gainApply (multiply: Expr -> Expr -> Expr) (name: string) (toWidth: int) (gainLog: Expr) (value: Expr) : Expr =
     if width gainLog <> gainLogWidth then
         failwith $"gainApply '{name}' expects a %d{gainLogWidth}-bit log gain, got %d{width gainLog} bits"
 
-    let step, along, here = gainExpOperands name gainLog
+    let step, along = gainExpOperands name gainLog
 
     let expProduct = wire $"{name}_exp_product" (SInt gainExpProductWidth)
     multiply step along ==> expProduct
 
-    let mantissa = gainExpFromProduct name expProduct here
+    let mantissa = gainExpFromProduct name expProduct (gainExpHere name gainLog)
     let a, b = gainApplyOperands name value mantissa
 
     let product = wire $"{name}_product" (SInt(width a + width b))
     multiply a b ==> product
 
-    gainApplyFromProduct name gainLog product (width value)
+    gainApplyFromProduct name gainLog product toWidth
 
 
 /// The volume stage's ports.
@@ -2245,7 +2298,13 @@ let i2sTxLinkAt
     (bitsPerSlot: int)
     : I2sTxLink =
     checkSlotFor prefix sentBits bitsPerSlot
-    let clocks = instanceNamed $"{prefix}_clocks" (i2sMasterHz fabricHz targetFs bitsPerSlot "I2sMaster")
+
+    // The master's *module* name carries its slot width, because its contents
+    // depend on it: a design with two links at different rates would otherwise
+    // declare two different modules called `I2sMaster`, which the elaborator
+    // refuses — correctly, and only once both exist.
+    let clocks =
+        instanceNamed $"{prefix}_clocks" (i2sMasterHz fabricHz targetFs bitsPerSlot $"I2sMaster%d{bitsPerSlot}")
     driveClocks pins.txClocks clocks
 
     { sendOnly = fun s -> i2sTxAt sentBits "I2sTxNarrow" $"{prefix}_tx" clocks.sclkTxTick clocks.lrclk s ==> pins.dataOut }
@@ -2401,6 +2460,7 @@ let gainedWidth = bandWidth + 9
 let bandGainTable
     (multiply: Expr -> Expr -> Expr)
     (name: string)
+    (toWidth: int)
     (table: Expr -> Expr)
     (attack: Expr)
     (releaseRate: Expr)
@@ -2423,7 +2483,7 @@ let bandGainTable
     table index.address ==> word
 
     let gainLog = gainTableGain multiply $"{name}_curve" word index.fraction
-    gainApply multiply $"{name}_apply" gainLog band, env
+    gainApply multiply $"{name}_apply" toWidth gainLog band, env
 
 /// One band's compressor ports. The multiband stage instantiates one of these
 /// per band and sums what comes back.
@@ -2890,77 +2950,83 @@ let makeupWidth = 16
 /// where a register file costs the fabric — on an iCE40 the difference is the
 /// fit — and because everything the fitting side will add to a band later is
 /// another word.
-type MakeupTable = Expr -> HostArrayPort
+type GainTable = Expr -> HostArrayPort
 
 /// The folded bank's settings: the spatial engine's law, and the makeup gains
 /// as a table rather than sixteen wires — the one place the two engines'
 /// surfaces differ, since a bank that runs its bands one at a time reads one
 /// gain at a time, and one that runs them at once needs them all.
 type MultibandFoldedSettings =
-    { threshold: Expr
-      ratio: Expr
-      attack: Expr
+    { attack: Expr
       releaseRate: Expr
-      makeup: MakeupTable }
+      /// The per-band gain curves, as one table the bank reads by
+      /// `ear ++ band ++ entry`. **This replaces the threshold and the ratio as
+      /// well as the makeup gains** — the curve says what the total gain is at
+      /// every level, so there is nothing left for a knob to mean.
+      curve: GainTable }
 
-/// The bank's side of the makeup table: a request stream of word indices out,
-/// a flow of gains back.
-type MakeupLookupPorts =
+/// The bank's side of its gain table: a request stream of word indices out, a
+/// flow of curve words back.
+type CurveLookupPorts =
     { request: StreamOutputPorts<Expr>
       answer: FlowInputPorts<Expr> }
 
-let private makeupLookupPorts (p: Ports) : MakeupLookupPorts =
-    { request = streamOutputPorts p "makeup_request" (layout1 ("index", 1 + ceilLog2 multibandBands))
-      answer = flowInputPorts p "makeup_answer" (layout1 ("gain", makeupWidth)) }
+/// Bits the curve's index takes: the ear, the band, and where in that band's
+/// curve the envelope reads.
+let curveIndexBits = 1 + ceilLog2 multibandBands + gainTableAddrBits
 
-/// The folded bank's ports: the spatial bank's, with the makeup lookup in
-/// place of the sixteen gain inputs.
+let private curveLookupPorts (p: Ports) : CurveLookupPorts =
+    { request = streamOutputPorts p "curve_request" (layout1 ("index", curveIndexBits))
+      answer = flowInputPorts p "curve_answer" (layout1 ("word", gainTableWordWidth)) }
+
+/// The folded bank's ports: the stereo stream, the detector's two coefficients,
+/// and the curve lookup — which is all the law there is, since the curve carries
+/// what a threshold and a ratio used to say.
 type MultibandFoldedPorts =
     { s: StereoPorts
-      threshold: Input
-      ratio: Input
       attack: Input
       releaseRate: Input
-      /// The bank's side of its makeup table.
-      makeup: MakeupLookupPorts
+      /// The bank's side of its gain table.
+      curve: CurveLookupPorts
       envelope: Output }
 
 /// The folded settings as a module's own ports, for a design with no host: the
-/// law's four, and three that load a makeup table — `makeup_index`,
-/// `makeup_gain`, `makeup_write` — the way a host loads the window.
+/// detector's two, and three that load the curve — `curve_index`, `curve_word`,
+/// `curve_write` — the way a host loads the window.
 type MultibandFoldedSettingsPorts =
-    { threshold: Input
-      ratio: Input
-      attack: Input
+    { attack: Input
       releaseRate: Input
-      makeupIndex: Input
-      makeupGain: Input
-      makeupWrite: Input }
+      curveIndex: Input
+      curveWord: Input
+      curveWrite: Input }
 
 let multibandFoldedSettingsPorts (p: Ports) : MultibandFoldedSettingsPorts =
-    { threshold = p.inPort "threshold" sampleWidth
-      ratio = p.inPort "ratio" 8
-      attack = p.inPort "attack" 16
+    { attack = p.inPort "attack" 16
       releaseRate = p.inPort "releaseRate" 16
-      makeupIndex = p.inPort "makeup_index" (1 + ceilLog2 multibandBands)
-      makeupGain = p.inPort "makeup_gain" makeupWidth
-      makeupWrite = p.inPort "makeup_write" 1 }
+      curveIndex = p.inPort "curve_index" curveIndexBits
+      curveWord = p.inPort "curve_word" gainTableWordWidth
+      curveWrite = p.inPort "curve_write" 1 }
 
-/// The body half of `multibandFoldedSettingsPorts`: the makeup table itself,
-/// in block storage, unity from boot and written from the load ports. A test
-/// writes the sixteen gains before it streams; the debugger's toy runs at
-/// unity untouched.
+/// The body half of `multibandFoldedSettingsPorts`: the curve itself, in block
+/// storage, written from the load ports.
+///
+/// **A zeroed table is unity gain**, which is what makes the boot state
+/// transparent for nothing: a word of zero is a gain of zero log2, and two to the
+/// zero is one. The old makeup table had to be preloaded with `gainUnity` to say
+/// the same thing.
 let multibandFoldedSettingsOf (ports: MultibandFoldedSettingsPorts) : MultibandFoldedSettings =
     let store =
-        preloadedBlockMem "makeup" (1 + ceilLog2 multibandBands) makeupWidth (Array.create (2 * multibandBands) gainUnity)
+        preloadedBlockMem
+            "curve"
+            curveIndexBits
+            gainTableWordWidth
+            (Array.zeroCreate (1 <<< curveIndexBits))
 
-    memWrite store ports.makeupIndex ports.makeupGain ports.makeupWrite
+    memWrite store ports.curveIndex ports.curveWord ports.curveWrite
 
-    { threshold = ports.threshold
-      ratio = ports.ratio
-      attack = ports.attack
+    { attack = ports.attack
       releaseRate = ports.releaseRate
-      makeup = fun at -> { read = memReadPort store at; hostTurn = lit 0UL 1 } }
+      curve = fun at -> { read = memReadPort store at; hostTurn = lit 0UL 1 } }
 
 /// Wire one bank's settings and splice the stream through it — the call shape
 /// both engines share, so a caller cannot tell which it has.
@@ -3230,7 +3296,12 @@ let private readStageFrom
     let first = List.head reads
     let arrived = first.through $"{name}_arrived" (st.Is Working &&& issuing)
     let arrivedIndex = first.through $"{name}_arrived_index" which.count
-    let words = [ for i in 0 .. count - 1 -> reg $"{name}_word%d{i}" (width first.data) ]
+
+    // Each word at **its own store's** width. Sizing them all from the first
+    // store's was right only while every store happened to be the same width,
+    // and wrong silently: a narrower store's word drove a wider register and the
+    // mismatch surfaced at emission, a long way from here.
+    let words = [ for i, r in List.indexed reads -> reg $"{name}_word%d{i}" (width r.data) ]
 
     If arrived (fun () ->
         ifElse
@@ -3373,21 +3444,15 @@ type private BandState =
       env: Expr
       detected: Expr }
 
-/// A band boosted by its makeup gain.
-type private Boosted =
-    { ear: Expr
-      band: Expr
-      env: Expr
-      detected: Expr
-      boosted: Expr }
-
-/// A band with its detector's peak: the magnitude of last sample's boosted
-/// value, at sample scale.
+/// A band with its detector's peak: the magnitude of last sample's band, at
+/// sample scale. **Last sample's band, not a boosted copy of it** — the table
+/// returns total gain, so there is no makeup multiply for the detector to sit
+/// behind, and `env` is the band's own input level in a fixed calibration.
 type private Detected =
     { ear: Expr
       band: Expr
       env: Expr
-      boosted: Expr
+      value: Expr
       peak: Expr }
 
 /// A band whose envelope has stepped — `env` is still the value before the
@@ -3396,15 +3461,35 @@ type private Stepped =
     { ear: Expr
       band: Expr
       env: Expr
-      boosted: Expr
+      value: Expr
       envNext: Expr }
 
-/// A band with its gain computed.
+/// A band with its curve's word fetched, and how far past that entry its
+/// envelope fell.
+type private Curved =
+    { ear: Expr
+      band: Expr
+      value: Expr
+      word: Expr
+      fraction: Expr
+      envNext: Expr }
+
+/// A band with its gain interpolated, in the log domain.
 type private Gain =
     { ear: Expr
       band: Expr
-      boosted: Expr
-      gain: Expr
+      value: Expr
+      gainLog: Expr
+      envNext: Expr }
+
+/// A band with its gain's mantissa — the exponential done, the shift still to
+/// come, which is what the apply's own multiply is followed by.
+type private Mantissa =
+    { ear: Expr
+      band: Expr
+      value: Expr
+      gainLog: Expr
+      mantissa: Expr
       envNext: Expr }
 
 /// A band compressed, ready to sum.
@@ -3483,7 +3568,7 @@ let private bandLayout: Layout<Band> =
         | _ -> failwith "band: wrong arity" }
 
 let private bandStateLayout: Layout<BandState> =
-    { fields = fieldsOfWidths [ "ear", 1; "band", slotBits; "value", bandWidth; "env", sampleWidth; "detected", gainedWidth ]
+    { fields = fieldsOfWidths [ "ear", 1; "band", slotBits; "value", bandWidth; "env", sampleWidth; "detected", bandWidth ]
       pack = fun b -> [ b.ear; b.band; b.value; b.env; b.detected ]
       unpack =
         function
@@ -3495,57 +3580,86 @@ let private bandStateLayout: Layout<BandState> =
               detected = asSInt detected }
         | _ -> failwith "band state: wrong arity" }
 
-let private boostedLayout: Layout<Boosted> =
-    { fields = fieldsOfWidths [ "ear", 1; "band", slotBits; "env", sampleWidth; "detected", gainedWidth; "boosted", gainedWidth ]
-      pack = fun b -> [ b.ear; b.band; b.env; b.detected; b.boosted ]
-      unpack =
-        function
-        | [ ear; band; env; detected; boosted ] ->
-            { ear = ear
-              band = band
-              env = env
-              detected = asSInt detected
-              boosted = asSInt boosted }
-        | _ -> failwith "boosted: wrong arity" }
-
 let private detectedLayout: Layout<Detected> =
-    { fields = fieldsOfWidths [ "ear", 1; "band", slotBits; "env", sampleWidth; "boosted", gainedWidth; "peak", sampleWidth ]
-      pack = fun b -> [ b.ear; b.band; b.env; b.boosted; b.peak ]
+    { fields = fieldsOfWidths [ "ear", 1; "band", slotBits; "env", sampleWidth; "value", bandWidth; "peak", sampleWidth ]
+      pack = fun b -> [ b.ear; b.band; b.env; b.value; b.peak ]
       unpack =
         function
-        | [ ear; band; env; boosted; peak ] ->
+        | [ ear; band; env; value; peak ] ->
             { ear = ear
               band = band
               env = env
-              boosted = asSInt boosted
+              value = asSInt value
               peak = peak }
         | _ -> failwith "detected: wrong arity" }
 
 let private steppedLayout: Layout<Stepped> =
-    { fields = fieldsOfWidths [ "ear", 1; "band", slotBits; "env", sampleWidth; "boosted", gainedWidth; "env_next", sampleWidth ]
-      pack = fun b -> [ b.ear; b.band; b.env; b.boosted; b.envNext ]
+    { fields = fieldsOfWidths [ "ear", 1; "band", slotBits; "env", sampleWidth; "value", bandWidth; "env_next", sampleWidth ]
+      pack = fun b -> [ b.ear; b.band; b.env; b.value; b.envNext ]
       unpack =
         function
-        | [ ear; band; env; boosted; envNext ] ->
+        | [ ear; band; env; value; envNext ] ->
             { ear = ear
               band = band
               env = env
-              boosted = asSInt boosted
+              value = asSInt value
               envNext = envNext }
         | _ -> failwith "stepped: wrong arity" }
 
-let private gainLayout: Layout<Gain> =
-    { fields = fieldsOfWidths [ "ear", 1; "band", slotBits; "boosted", gainedWidth; "gain", gainWidth + 1; "env_next", sampleWidth ]
-      pack = fun b -> [ b.ear; b.band; b.boosted; b.gain; b.envNext ]
+let private curvedLayout: Layout<Curved> =
+    { fields =
+        fieldsOfWidths
+            [ "ear", 1
+              "band", slotBits
+              "value", bandWidth
+              "word", gainTableWordWidth
+              "fraction", gainTableFracBits
+              "env_next", sampleWidth ]
+      pack = fun b -> [ b.ear; b.band; b.value; b.word; b.fraction; b.envNext ]
       unpack =
         function
-        | [ ear; band; boosted; gain; envNext ] ->
+        | [ ear; band; value; word; fraction; envNext ] ->
             { ear = ear
               band = band
-              boosted = asSInt boosted
-              gain = asSInt gain
+              value = asSInt value
+              word = word
+              fraction = fraction
+              envNext = envNext }
+        | _ -> failwith "curved: wrong arity" }
+
+let private gainLayout: Layout<Gain> =
+    { fields = fieldsOfWidths [ "ear", 1; "band", slotBits; "value", bandWidth; "gain_log", gainLogWidth; "env_next", sampleWidth ]
+      pack = fun b -> [ b.ear; b.band; b.value; b.gainLog; b.envNext ]
+      unpack =
+        function
+        | [ ear; band; value; gainLog; envNext ] ->
+            { ear = ear
+              band = band
+              value = asSInt value
+              gainLog = asSInt gainLog
               envNext = envNext }
         | _ -> failwith "gain: wrong arity" }
+
+let private mantissaLayout: Layout<Mantissa> =
+    { fields =
+        fieldsOfWidths
+            [ "ear", 1
+              "band", slotBits
+              "value", bandWidth
+              "gain_log", gainLogWidth
+              "mantissa", gainExpMantissaBits + 1
+              "env_next", sampleWidth ]
+      pack = fun b -> [ b.ear; b.band; b.value; b.gainLog; b.mantissa; b.envNext ]
+      unpack =
+        function
+        | [ ear; band; value; gainLog; mantissa; envNext ] ->
+            { ear = ear
+              band = band
+              value = asSInt value
+              gainLog = asSInt gainLog
+              mantissa = mantissa
+              envNext = envNext }
+        | _ -> failwith "mantissa: wrong arity" }
 
 let private gainedLayout: Layout<Gained> =
     { fields = fieldsOfWidths [ "ear", 1; "band", slotBits; "gained", gainedWidth; "env_next", sampleWidth ]
@@ -3568,7 +3682,7 @@ let private gainedLayout: Layout<Gained> =
 type private FoldStores =
     { history: Mem
       coefficients: Mem
-      /// A band's envelope and last sample's boosted value, in **separate**
+      /// A band's envelope and last sample's band value, in **separate**
       /// memories rather than two fields of one.
       ///
       /// They are written by two different stages, and two writes to one mem
@@ -3598,7 +3712,7 @@ let private foldStores (t: TreeShape) : FoldStores =
                    yield! sec.coefficients
                    yield! Array.zeroCreate (coeffSlots - biquadIssues) |]
       envelopes = blockMem "band_envelope" (1 + slotBits) gainedWidth
-      detecteds = blockMem "band_detected" (1 + slotBits) gainedWidth
+      detecteds = blockMem "band_detected" (1 + slotBits) bandWidth
       nodes = blockMem "nodes" (1 + t.nodeBits) sampleWidth
       written = [ for ear in 0..1 -> reg $"written_%d{ear}" (1 <<< t.nodeBits) ] }
 
@@ -3955,99 +4069,24 @@ let private readState (stores: FoldStores) =
               env = slice (sampleWidth - 1) 0 words[0]
               detected = asSInt words[1] })
 
-/// The makeup boost: the band's Q8.8 gain fetched from the table — one
-/// request out, held until the table takes it, since a host reading the
-/// table back borrows its port for a cycle — then the band times it on the
-/// shared multiplier. One stage for the two steps, so the beat is held once.
-let private boost (pod: SharedMultiplier) (io: MultibandFoldedPorts) (s: Stream<BandState>) : Stream<Boosted> =
-    let st, out = workerFsm "boost" s boostedLayout
-    let accept = s.valid &&& s.ready
-    let beat = holdBeat "boost" bandStateLayout accept s
-
-    let asked = regBit "boost_asked"
-    let fetched = regBit "boost_fetched"
-
-    If accept (fun () ->
-        lit 0UL 1 ==> asked
-        lit 0UL 1 ==> fetched)
-
-    let index = wire "makeup_index" (1 + slotBits)
-    cat beat.ear beat.band ==> index
-    let taken = wireBit "makeup_request_taken"
-    registerStreamReady taken
-
-    let request: Stream<Expr> =
-        { payload = index
-          valid = st.Is Working &&& bnot asked
-          ready = taken
-          layout = io.makeup.request.layout }
-
-    streamSink io.makeup.request request
-    If (request.valid &&& request.ready) (fun () -> lit 1UL 1 ==> asked)
-
-    let answer = flowSource io.makeup.answer
-    let landing = st.Is Working &&& asked &&& answer.valid
-    let makeup = reg "makeup_gain" makeupWidth
-
-    If landing (fun () ->
-        answer.payload ==> makeup
-        lit 1UL 1 ==> fetched)
-
-    let client = pod.Client "boost"
-    let makeupSigned = wire "makeup_signed" (SInt(makeupWidth + 1))
-    widenUnsigned (makeupWidth + 1) makeup ==> makeupSigned
-    signExtend podAWidth beat.value ==> client.a
-    signExtend podBWidth makeupSigned ==> client.b
-    lit 0UL podTagWidth ==> client.tag
-
-    // The request is a register, as in `podStage`; it is raised on the edge
-    // the gain lands, so the multiply asks the cycle after.
-    let issued = regBit "boost_issued"
-    If accept (fun () -> lit 0UL 1 ==> issued)
-    let wanted = regBit "boost_request"
-    (landing ||| (st.Is Working &&& fetched &&& bnot issued &&& bnot client.grant)) ==> wanted
-    wanted ==> client.issue
-    If (client.issue &&& client.grant) (fun () -> lit 1UL 1 ==> issued)
-
-    let productWidth = bandWidth + makeupWidth + 1
-    let product = reg "boost_product_held" (SInt productWidth)
-
-    If (st.Is Working &&& client.landed) (fun () ->
-        slice (productWidth - 1) 0 client.product ==> product
-        st.Goto Offering)
-
-    let boosted = wire "boosted" (SInt gainedWidth)
-    shr gainFracBits product ==> boosted
-
-    offer
-        boostedLayout
-        out
-        { ear = beat.ear
-          band = beat.band
-          env = beat.env
-          detected = beat.detected
-          boosted = boosted }
-
-    out
-
-/// Keep this sample's boosted value as next sample's detector input.
+/// Keep this sample's band as next sample's detector input.
 let private writeDetected (stores: FoldStores) =
-    writeThrough stores.detecteds (fun (b: Boosted) -> stateAddr b.ear b.band, b.boosted)
+    writeThrough stores.detecteds (fun (b: BandState) -> stateAddr b.ear b.band, b.value)
 
-/// The detector: the magnitude of last sample's boosted value, clipped to
-/// sample scale. Costs no beat; its chain — negate, pick, saturate — lands in
-/// the next stage's registers, a stage boundary ahead of the envelope's own
-/// compare and subtract, which it would otherwise share a cycle with.
-let private detect (s: Stream<Boosted>) : Stream<Detected> =
+/// The detector: the magnitude of last sample's band, clipped to sample scale.
+/// Costs no beat; its chain — negate, pick, saturate — lands in the next stage's
+/// registers, a stage boundary ahead of the envelope's own compare and subtract,
+/// which it would otherwise share a cycle with.
+let private detect (s: Stream<BandState>) : Stream<Detected> =
     let b = s.payload
-    let negated = wire "negated" (SInt gainedWidth)
-    sub (lit 0UL gainedWidth) b.detected ==> negated
-    let absolute = wire "absolute" gainedWidth
-    mux (slice (gainedWidth - 1) (gainedWidth - 1) b.detected) negated b.detected ==> absolute
+    let negated = wire "negated" (SInt bandWidth)
+    sub (lit 0UL bandWidth) b.detected ==> negated
+    let absolute = wire "absolute" bandWidth
+    mux (slice (bandWidth - 1) (bandWidth - 1) b.detected) negated b.detected ==> absolute
     let peak = wire "peak" sampleWidth
     saturate sampleWidth absolute ==> peak
 
-    streamMapTo detectedLayout (fun (b: Boosted) -> { ear = b.ear; band = b.band; env = b.env; boosted = b.boosted; peak = peak }) s
+    streamMapTo detectedLayout (fun (b: BandState) -> { ear = b.ear; band = b.band; env = b.env; value = b.value; peak = peak }) s
 
 /// The envelope step, off the detector's peak — the one law, in its two
 /// halves around the shared multiplier.
@@ -4068,51 +4107,117 @@ let private envelope (pod: SharedMultiplier) (io: MultibandFoldedPorts) =
             { ear = b.ear
               band = b.band
               env = b.env
-              boosted = b.boosted
+              value = b.value
               envNext = envelopeFromStep step envWide })
 
 /// Keep the stepped envelope for the next sample.
 let private writeEnvelope (stores: FoldStores) =
     writeThrough stores.envelopes (fun (b: Stepped) -> stateAddr b.ear b.band, widenUnsigned gainedWidth b.envNext)
 
-/// The gain, from the envelope before this sample's step — `gainComputer`'s
-/// two halves around the shared multiplier.
-let private reduction (pod: SharedMultiplier) (io: MultibandFoldedPorts) =
+/// Fetch this band's curve word, keyed on the envelope before this sample's
+/// step — one request out, held until the table takes it, since a host reading
+/// the table back borrows its port for a cycle. The fraction past the entry is a
+/// slice of the same held envelope, so it rides out with the word rather than
+/// being recomputed a stage later off a value that has moved.
+let private fetchCurve (io: MultibandFoldedPorts) (s: Stream<Stepped>) : Stream<Curved> =
+    let st, out = workerFsm "curve" s curvedLayout
+    let accept = s.valid &&& s.ready
+    let beat = holdBeat "curve" steppedLayout accept s
+
+    let asked = regBit "curve_asked"
+    If accept (fun () -> lit 0UL 1 ==> asked)
+
+    let index = gainTableIndex "curve" beat.env
+
+    let wanted = wire "curve_index" (1 + slotBits + gainTableAddrBits)
+    catAll [ beat.ear; beat.band; index.address ] ==> wanted
+    let taken = wireBit "curve_request_taken"
+    registerStreamReady taken
+
+    let request: Stream<Expr> =
+        { payload = wanted
+          valid = st.Is Working &&& bnot asked
+          ready = taken
+          layout = io.curve.request.layout }
+
+    streamSink io.curve.request request
+    If (request.valid &&& request.ready) (fun () -> lit 1UL 1 ==> asked)
+
+    let answer = flowSource io.curve.answer
+    let landing = st.Is Working &&& asked &&& answer.valid
+    let word = reg "curve_word" gainTableWordWidth
+
+    If landing (fun () ->
+        answer.payload ==> word
+        st.Goto Offering)
+
+    offer
+        curvedLayout
+        out
+        { ear = beat.ear
+          band = beat.band
+          value = beat.value
+          word = word
+          fraction = index.fraction
+          envNext = beat.envNext }
+
+    out
+
+/// The gain the curve's word means at that fraction — the table's two halves
+/// around the shared multiplier, in place of the formula's.
+let private interpolate (pod: SharedMultiplier) =
     podStage
-        "reduction"
+        "interp"
         pod
-        steppedLayout
+        curvedLayout
         gainLayout
-        gainRedWidth
-        (fun b ->
-            let envWide = wire "reduction_env_wide" (SInt wideWidth)
-            widenUnsigned wideWidth b.env ==> envWide
-            let excess = wire "excess_signed" (SInt(sampleWidth + 1))
-            widenUnsigned (sampleWidth + 1) (gainExcess envWide io.threshold) ==> excess
-            let ratioSigned = wire "ratio_signed" (SInt 9)
-            widenUnsigned 9 io.ratio ==> ratioSigned
-            excess, ratioSigned)
-        (fun reductionRaw b ->
+        gainTableProductWidth
+        (fun b -> gainTableOperands "interp" b.word b.fraction)
+        (fun product b ->
             { ear = b.ear
               band = b.band
-              boosted = b.boosted
-              gain = gainFromReduction (asUInt reductionRaw)
+              value = b.value
+              gainLog = gainTableFromProduct "interp" product (gainTableHere "interp" b.word)
               envNext = b.envNext })
 
-/// Apply the gain to the boosted band.
-let private apply (pod: SharedMultiplier) =
-    let applyProductWidth = gainedWidth + gainWidth + 1
+/// The exponential's mantissa, off the gain's fraction — the other half of what
+/// used to be one multiply, because a log gain has to come back before it can
+/// scale anything.
+let private expand (pod: SharedMultiplier) =
+    podStage
+        "expand"
+        pod
+        gainLayout
+        mantissaLayout
+        gainExpProductWidth
+        (fun b -> gainExpOperands "expand" b.gainLog)
+        (fun product b ->
+            { ear = b.ear
+              band = b.band
+              value = b.value
+              gainLog = b.gainLog
+              mantissa = gainExpFromProduct "expand" product (gainExpHere "expand" b.gainLog)
+              envNext = b.envNext })
 
-    podStage "apply" pod gainLayout gainedLayout applyProductWidth (fun b -> b.boosted, b.gain) (fun applyProduct b ->
-        let applyScaled = wire "apply_scaled" (SInt(applyProductWidth - sampleWidth))
-        shr sampleWidth applyProduct ==> applyScaled
-        let applySaturated = wire "apply_saturated" (SInt gainedWidth)
-        saturate gainedWidth applyScaled ==> applySaturated
+/// Apply the gain to the band: its mantissa on the shared multiplier, then the
+/// gain's integer part as the shift. The band goes in at **its own width** and
+/// comes out wide enough for the sum to saturate once at the end — widening it
+/// first would put nine more bits through every barrel stage.
+let private applyLog (pod: SharedMultiplier) =
+    let applyProductWidth = bandWidth + gainExpMantissaBits + 2
 
-        { ear = b.ear
-          band = b.band
-          gained = applySaturated
-          envNext = b.envNext })
+    podStage
+        "apply"
+        pod
+        mantissaLayout
+        gainedLayout
+        applyProductWidth
+        (fun b -> gainApplyOperands "apply" b.value b.mantissa)
+        (fun applyProduct b ->
+            { ear = b.ear
+              band = b.band
+              gained = gainApplyFromProduct "apply" b.gainLog applyProduct gainedWidth
+              envNext = b.envNext })
 
 /// Sum the eight bands of each ear, saturate once, and offer the stereo beat
 /// when the right ear's last band has landed. The meter is the loudest
@@ -4217,11 +4322,9 @@ let multibandCompressor8FoldedDef (name: string) (crossovers: float list) (sampl
         name
         (fun p ->
             { s = stereoPorts p
-              threshold = p.inPort "threshold" sampleWidth
-              ratio = p.inPort "ratio" 8
               attack = p.inPort "attack" 16
               releaseRate = p.inPort "releaseRate" 16
-              makeup = makeupLookupPorts p
+              curve = curveLookupPorts p
               envelope = p.outPort "envelope" sampleWidth })
         (fun io ->
             let stores = foldStores shape
@@ -4240,13 +4343,14 @@ let multibandCompressor8FoldedDef (name: string) (crossovers: float list) (sampl
                 |> bands
                 |> skidBuffer "band_skid" bandLayout
                 |> readState stores
-                |> boost pod io
                 |> writeDetected stores
                 |> detect
                 |> envelope pod io
                 |> writeEnvelope stores
-                |> reduction pod io
-                |> apply pod
+                |> fetchCurve io
+                |> interpolate pod
+                |> expand pod
+                |> applyLog pod
                 |> sumBands
 
             envelope ==> io.envelope
@@ -4260,21 +4364,19 @@ let multibandCompressor8FoldedDef (name: string) (crossovers: float list) (sampl
 /// takes.
 let private multibandFoldedInstance (io: MultibandFoldedPorts) (instName: string) =
     fun (settings: MultibandFoldedSettings) (s: Stream<Expr * Expr>) ->
-        settings.threshold ==> io.threshold
-        settings.ratio ==> io.ratio
         settings.attack ==> io.attack
         settings.releaseRate ==> io.releaseRate
 
-        let port = settings.makeup (List.head io.makeup.request.targets)
-        let accepted = io.makeup.request.valid &&& bnot port.hostTurn
-        bnot port.hostTurn ==> io.makeup.request.ready
-        port.read.through $"{instName}_makeup_landed" accepted ==> io.makeup.answer.valid
+        let port = settings.curve (List.head io.curve.request.targets)
+        let accepted = io.curve.request.valid &&& bnot port.hostTurn
+        bnot port.hostTurn ==> io.curve.request.ready
+        port.read.through $"{instName}_curve_landed" accepted ==> io.curve.answer.valid
 
-        let word = wire $"{instName}_makeup_word" (width port.read.data)
+        let word = wire $"{instName}_curve_read" (width port.read.data)
         port.read.data ==> word
 
-        (if width word > makeupWidth then slice (makeupWidth - 1) 0 word else word)
-        ==> io.makeup.answer.payload
+        (if width word > gainTableWordWidth then slice (gainTableWordWidth - 1) 0 word else word)
+        ==> io.curve.answer.payload
 
         stereoSplice io.s s, io.envelope
 

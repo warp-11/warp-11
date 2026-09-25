@@ -671,67 +671,33 @@ let private pagesTellTheTruth () =
         List.ofSeq spatial = expected && List.ofSeq out = expected && bothServed && oneAtATime
 
     // Multiband, folded: one sample through the whole engine comes back inside
-    // one audio frame as exactly what the spatial engine makes of it — the
-    // property the page rests on — and every one of the five operations was
-    // granted the multiplier along the way.
-    let multibandFoldedReconstructs =
+    // one audio frame, and every one of the five operations was granted the
+    // multiplier along the way — which is what the page is about.
+    //
+    // It used to also assert the sample equalled what the *spatial* engine makes
+    // of it. That comparison is gone: the folded bank's law is now a host-written
+    // curve and the spatial bank's is a threshold and a ratio, so the two no
+    // longer compute the same function. What replaced it lives in
+    // `Warp11.Effects` — the fold held against the curve's own arithmetic, which
+    // checks the law and not just the plumbing. The page's claim is the sharing,
+    // and that is what is checked here.
+    let multibandFoldedSharesOneMultiplier =
         let left, right = 0x123456UL, 0x7EDCBAUL
 
-        let settings (s: Sim) =
-            for n, v in
-                [ "threshold", 200_000UL
-                  "ratio", 4UL
-                  "attack", 1UL <<< 14
-                  "releaseRate", 1UL <<< 12
-                  "in_left", left
-                  "in_right", right
-                  "in_valid", 1UL
-                  "out_ready", 1UL ] do
-                s.Poke(n, v)
-
-        // The spatial bank takes its gains on sixteen inputs; the folded one
-        // boots with its table at unity, which is what this compares at.
-        let spatialGains (s: Sim) =
-            for i in 0..7 do
-                s.Poke($"lg{i}", Warp11.Audio.gainUnity)
-                s.Poke($"rg{i}", Warp11.Audio.gainUnity)
-
-        // The spatial engine on the same sample, at the same rate.
-        let spatial =
-            let stage =
-                defModule
-                    "MultibandSpatialReference"
-                    (fun p ->
-                        (Warp11.Audio.multibandSettingsPorts p,
-                         streamInputPorts p "in" Warp11.Audio.sampleLayout,
-                         streamOutputPorts p "out" Warp11.Audio.sampleLayout))
-                    (fun (settings, inPorts, outPorts) ->
-                        let out, _ =
-                            streamSource inPorts
-                            |> Warp11.Audio.multibandCompressor "MultibandCompressor8" 46_875.0 "mb" settings
-
-                        streamSink outPorts out)
-
-            let sim = Sim stage.def
-            settings sim
-            spatialGains sim
-            let mutable answer = None
-
-            for _ in 1..64 do
-                let accepted = sim.Peek "in_valid" = 1UL && sim.Peek "in_ready" = 1UL
-
-                if answer.IsNone && sim.Peek "out_valid" = 1UL then
-                    answer <- Some(sim.Peek "out_left", sim.Peek "out_right")
-
-                sim.Tick()
-                if accepted then sim.Poke("in_valid", 0UL)
-
-            answer
-
         let sim = Sim multibandFolded.def
-        settings sim
 
-        let clients = [ "biquad"; "boost"; "envelope"; "reduction"; "apply" ]
+        for n, v in
+            [ "attack", 1UL <<< 14
+              "releaseRate", 1UL <<< 12
+              "in_left", left
+              "in_right", right
+              "in_valid", 1UL
+              "out_ready", 1UL ] do
+            sim.Poke(n, v)
+
+        // The curve boots zeroed, which is unity gain — a word of zero is a gain
+        // of zero log2 — so nothing has to be loaded to run the engine.
+        let clients = [ "biquad"; "envelope"; "interp"; "expand"; "apply" ]
         let granted = System.Collections.Generic.HashSet<string>()
         let frame = 512
         let mutable output = None
@@ -748,7 +714,7 @@ let private pagesTellTheTruth () =
             sim.Tick()
             if accepted then sim.Poke("in_valid", 0UL) // one sample only
 
-        output.IsSome && output = spatial && granted.Count = clients.Length
+        output.IsSome && granted.Count = clients.Length
 
     // The arm gate, which is a hardware-safety property before it is a
     // correctness one: with no base address the master must not issue at all.
@@ -782,7 +748,7 @@ let private pagesTellTheTruth () =
     && edgePoliciesDiffer
     && sharedUnitRoutesByTag
     && foldedMatchesSpatial
-    && multibandFoldedReconstructs
+    && multibandFoldedSharesOneMultiplier
     && registerMapAnswers
     && masterStaysDisarmed
     && lfsrIsMaximalLength

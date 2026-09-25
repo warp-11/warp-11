@@ -313,10 +313,32 @@ let private gainExpTests =
               // which would stop saying anything about the loudest.
               let sample = 1 <<< (sampleWidth - 6)
               for gainLog in logs do
-                  let want = float sample * 2.0 ** (float gainLog / float (1 <<< gainLogFracBits))
+                  // The gain the apply will actually deliver: the *exponent* is
+                  // clamped to the octaves it reaches — that clamp is what
+                  // bounds the shifter — and the fraction rides through it.
+                  let exponent =
+                      gainLog >>> gainLogFracBits
+                      |> max -gainApplyOctaves
+                      |> min (gainApplyOctaves - 1)
+                  let fraction = gainLog &&& ((1 <<< gainLogFracBits) - 1)
+                  let delivered = float exponent + float fraction / float (1 <<< gainLogFracBits)
+                  let want = float sample * 2.0 ** delivered
                   if want < float ((1 <<< (sampleWidth - 1)) - 1) then
                       let got = float (gainApplyToSample gainLog sample)
                       Expect.isLessThan (abs (got - want)) (1.0 + want * 0.0003) $"The apply should hit the gain asked at {gainLog}"
+
+          testCase "the gain clamps at the octaves the apply delivers" <| fun _ ->
+              let sample = 1 <<< (sampleWidth - 6)
+              let atOctaves n = gainApplyToSample (n <<< gainLogFracBits) sample
+              // Below the floor every gain is the floor, so a curve asking for
+              // silence gets 1/256 rather than something the shifter cannot say.
+              Expect.equal (atOctaves -gainApplyOctaves) (atOctaves -(gainApplyOctaves + 4)) "Below the floor should clamp"
+              Expect.equal (atOctaves -gainApplyOctaves) (sample >>> gainApplyOctaves) "The floor should be 2^-octaves"
+              // And above the ceiling, likewise — up to where full scale bites.
+              Expect.equal
+                  (gainApplyToSample ((gainApplyOctaves - 1) <<< gainLogFracBits) 1)
+                  (gainApplyToSample ((gainApplyOctaves + 4) <<< gainLogFracBits) 1)
+                  "Above the ceiling should clamp"
 
           testCase "full scale saturates rather than wrapping" <| fun _ ->
               let loudest = (1 <<< (sampleWidth - 1)) - 1

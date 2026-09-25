@@ -2951,7 +2951,7 @@ let gainApplyStage =
             (p.inPortAs "gain" (SInt gainLogWidth),
              p.inPortAs "sample" (SInt sampleWidth),
              p.outPortAs "scaled" (SInt sampleWidth)))
-        (fun (gain, sample, scaled) -> gainApply mul "apply" gain sample ==> scaled)
+        (fun (gain, sample, scaled) -> gainApply mul "apply" sampleWidth gain sample ==> scaled)
 
 /// A whole band compressor whose law is a host-written table — the envelope, the
 /// lookup, the exponential and the apply in one design, which is where the four
@@ -2974,7 +2974,7 @@ let bandTableStage =
             let curve = distributedMem "curve" gainTableAddrBits gainTableWordWidth
             memWrite curve wrAddr wrData wrEnable
 
-            let scaled, env = bandGainTable mul "law" (memRead curve) attack releaseRate advance band
+            let scaled, env = bandGainTable mul "law" bandWidth (memRead curve) attack releaseRate advance band
             scaled ==> gained
             env ==> envelope)
 

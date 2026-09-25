@@ -11,6 +11,19 @@
 //! read    A5 | word    |             | xor     reply  A5 | status | d0 d1 d2 d3 | xor
 //! ```
 //!
+//! A map too wide for the command byte's seven bits spends **one more byte**,
+//! right after the command and carrying the word's high bits — which is what a
+//! design with a table in it needs, and what `Band`'s gain curves are:
+//!
+//! ```text
+//! write   A5 | 80+wlo | whi | d0 d1 d2 d3 | xor
+//! read    A5 | wlo    | whi |             | xor
+//! ```
+//!
+//! How many address bytes a link uses is the *map's* property, not the word's: a
+//! wide map's receiver waits for the second byte whatever word is asked for. So
+//! it is fixed when the window is opened, from the aperture the seam states.
+//!
 //! `word` is the register's byte offset divided by four, so the seam's
 //! `*_OFFSET` constants address the map here exactly as they do over AXI-Lite.
 //! Data is least significant byte first. Status 0 is accepted; 1 means the
@@ -29,8 +42,17 @@ use warp11_runtime::RegisterWindow;
 /// The first byte of every request and every reply.
 pub const SYNC: u8 = 0xA5;
 
-/// The widest map the command byte can address: seven bits of word.
+/// The widest map the command byte can address on its own: seven bits of word.
 pub const MAX_WORDS: usize = 128;
+
+/// The widest map a request can address at all, with the extra byte.
+pub const MAX_WORDS_WIDE: usize = MAX_WORDS << 8;
+
+/// Address bytes a map of `words` words needs. A map is either narrow enough
+/// for the command byte or it is not; there is no third shape.
+pub fn address_bytes_for(words: usize) -> usize {
+    if words <= MAX_WORDS { 1 } else { 2 }
+}
 
 /// The status byte of a frame the fabric sent **unasked**, carrying one
 /// streamed word — a recorder, a trace, a log sharing the wire the register
@@ -100,7 +122,44 @@ fn word_of(offset: usize) -> Result<u8, SerialError> {
     Ok((offset / 4) as u8)
 }
 
-/// The request that writes `value` at `offset`.
+/// The address bytes of a request: the command byte, with the word's high bits
+/// after it when the map needs them.
+fn address_of(address_bytes: usize, top: u8, offset: usize) -> Result<Vec<u8>, SerialError> {
+    let limit = if address_bytes > 1 { MAX_WORDS_WIDE } else { MAX_WORDS };
+
+    if offset % 4 != 0 || offset / 4 >= limit {
+        return Err(SerialError::BadOffset(offset));
+    }
+
+    let word = offset / 4;
+
+    Ok(match address_bytes {
+        1 => vec![top | word as u8],
+        _ => vec![top | (word & 0x7F) as u8, (word >> 7) as u8],
+    })
+}
+
+/// The request that writes `value` at `offset`, on a map of `address_bytes`.
+pub fn write_frame_at(address_bytes: usize, offset: usize, value: u32) -> Result<Vec<u8>, SerialError> {
+    let mut body = address_of(address_bytes, 0x80, offset)?;
+    body.extend_from_slice(&value.to_le_bytes());
+    let mut frame = vec![SYNC];
+    frame.extend_from_slice(&body);
+    frame.push(xor_of(&body));
+    Ok(frame)
+}
+
+/// The request that reads `offset`, on a map of `address_bytes`.
+pub fn read_frame_at(address_bytes: usize, offset: usize) -> Result<Vec<u8>, SerialError> {
+    let body = address_of(address_bytes, 0, offset)?;
+    let mut frame = vec![SYNC];
+    frame.extend_from_slice(&body);
+    frame.push(xor_of(&body));
+    Ok(frame)
+}
+
+/// The request that writes `value` at `offset`, on a map narrow enough for the
+/// command byte to address it.
 pub fn write_frame(offset: usize, value: u32) -> Result<[u8; 7], SerialError> {
     let word = word_of(offset)?;
     let [d0, d1, d2, d3] = value.to_le_bytes();
@@ -108,7 +167,8 @@ pub fn write_frame(offset: usize, value: u32) -> Result<[u8; 7], SerialError> {
     Ok([SYNC, body[0], body[1], body[2], body[3], body[4], xor_of(&body)])
 }
 
-/// The request that reads `offset`.
+/// The request that reads `offset`, on a map narrow enough for the command byte
+/// to address it.
 pub fn read_frame(offset: usize) -> Result<[u8; 3], SerialError> {
     let word = word_of(offset)?;
     Ok([SYNC, word, word])
@@ -261,6 +321,9 @@ pub struct SerialWindow {
     /// `wdrc show` is still the recorder's data, and throwing it away would
     /// put a hole in the recording for every register read.
     streamed: std::collections::VecDeque<u32>,
+    /// Address bytes every request on this link carries — the map's shape, fixed
+    /// when the window was opened.
+    address_bytes: usize,
 }
 
 impl SerialWindow {
@@ -268,6 +331,16 @@ impl SerialWindow {
     /// tenths of a second — the reply to any request is under a millisecond
     /// on the wire, so a timeout means the board is not there.
     pub fn open(path: &Path, baud: u32, timeout_tenths: u8) -> Result<Self, SerialError> {
+        Self::open_for(path, baud, timeout_tenths, 1)
+    }
+
+    /// The same, for a map of `words` words — which is what a design with a
+    /// table in it has, and what decides the frame's shape.
+    pub fn open_words(path: &Path, baud: u32, timeout_tenths: u8, words: usize) -> Result<Self, SerialError> {
+        Self::open_for(path, baud, timeout_tenths, address_bytes_for(words))
+    }
+
+    fn open_for(path: &Path, baud: u32, timeout_tenths: u8, address_bytes: usize) -> Result<Self, SerialError> {
         let speed = speed_code(baud).ok_or_else(|| {
             SerialError::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("no termios code for {baud} baud")))
         })?;
@@ -303,7 +376,7 @@ impl SerialWindow {
             tcflush(fd, TCIOFLUSH);
         }
 
-        Ok(SerialWindow { tty, streamed: std::collections::VecDeque::new() })
+        Ok(SerialWindow { tty, streamed: std::collections::VecDeque::new(), address_bytes })
     }
 
     fn fill(&mut self, buf: &mut [u8]) -> Result<(), SerialError> {
@@ -381,12 +454,12 @@ impl RegisterWindow for SerialWindow {
     type Error = SerialError;
 
     fn read32(&mut self, offset: usize) -> Result<u32, SerialError> {
-        let request = read_frame(offset)?;
+        let request = read_frame_at(self.address_bytes, offset)?;
         Ok(self.exchange(&request, true)?.expect("a read's reply carries a value"))
     }
 
     fn write32(&mut self, offset: usize, value: u32) -> Result<(), SerialError> {
-        let request = write_frame(offset, value)?;
+        let request = write_frame_at(self.address_bytes, offset, value)?;
         self.exchange(&request, false).map(|_| ())
     }
 }
@@ -394,6 +467,43 @@ impl RegisterWindow for SerialWindow {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A map too wide for the command byte spends one more address byte, and a
+    /// narrow one must be byte-for-byte what it always was — which is what lets
+    /// every existing design keep its frames while a design with a table gets
+    /// reachable ones. The fabric's side is `serialAddressBytes` in
+    /// `SerialRegMap.fs`.
+    #[test]
+    fn a_wide_map_spends_one_more_address_byte() {
+        assert_eq!(address_bytes_for(128), 1);
+        assert_eq!(address_bytes_for(129), 2);
+
+        // Narrow: identical to the frames that have no idea this exists.
+        assert_eq!(read_frame_at(1, 0x14).unwrap(), read_frame(0x14).unwrap().to_vec());
+        assert_eq!(write_frame_at(1, 0x14, 0xDEADBEEF).unwrap(), write_frame(0x14, 0xDEADBEEF).unwrap().to_vec());
+
+        // Wide, at a word the command byte could have held on its own: the
+        // second byte goes anyway, because the receiver is waiting for it.
+        let read = read_frame_at(2, 4 * 5).unwrap();
+        assert_eq!(read[..3], [SYNC, 5, 0]);
+        assert_eq!(read[3], 5 ^ 0);
+
+        // Wide, past 127: the low seven bits in the command, the rest above.
+        let word = 0x123;
+        let read = read_frame_at(2, 4 * word).unwrap();
+        assert_eq!(read[..3], [SYNC, (word & 0x7F) as u8, (word >> 7) as u8]);
+
+        let write = write_frame_at(2, 4 * word, 0x0A0B0C0D).unwrap();
+        assert_eq!(write.len(), 8);
+        assert_eq!(write[..3], [SYNC, 0x80 | (word & 0x7F) as u8, (word >> 7) as u8]);
+        assert_eq!(write[3..7], [0x0D, 0x0C, 0x0B, 0x0A]);
+        assert_eq!(write[7], xor_of(&write[1..7]));
+
+        // And the far ends of each shape.
+        assert!(read_frame_at(1, 4 * MAX_WORDS).is_err());
+        assert!(read_frame_at(2, 4 * (MAX_WORDS_WIDE - 1)).is_ok());
+        assert!(read_frame_at(2, 4 * MAX_WORDS_WIDE).is_err());
+    }
 
     // The frames the fabric's own check sends and expects (`SerialFrame` in
     // `SimUart.fs`), byte for byte.

@@ -65,18 +65,17 @@ let catalog =
               [ "mb_section_ear"
                 "mb_section"
                 "mb_biquad_pod_grant"
-                "mb_boost_pod_grant"
                 "mb_envelope_pod_grant"
-                "mb_reduction_pod_grant"
+                "mb_interp_pod_grant"
+                "mb_expand_pod_grant"
                 "mb_apply_pod_grant"
                 "mb_written_0"
                 "mb_ear_sum_0"
                 "mb_ear_sum_1" ]
-          // The makeup table boots at unity; the law is all the page pokes.
+          // The curve boots zeroed, which is unity gain; the detector's two
+          // coefficients are all the law there is left to poke.
           |> poking
-              [ "threshold", 200_000UL
-                "ratio", 4UL
-                "attack", 1UL <<< 14
+              [ "attack", 1UL <<< 14
                 "releaseRate", 1UL <<< 12
                 "in_left", 0x123456UL
                 "in_right", 0x7EDCBAUL

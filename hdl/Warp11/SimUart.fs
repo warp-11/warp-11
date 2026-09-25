@@ -16,21 +16,40 @@ module SerialFrame =
 
     let private xorOf (bytes: byte list) = bytes |> List.fold (^^^) 0uy
 
-    /// The bytes that write `value` to word `word`.
-    let write (word: int) (value: uint64) : byte list =
+    /// The address bytes of a request, for a map needing `addressBytes` of them:
+    /// the command byte, with the index's high bits after it on a wide map.
+    ///
+    /// `addressBytes` is the map's, never the index's — a wide map's receiver
+    /// waits for the second byte whatever word is being asked for.
+    let private addressOf (addressBytes: int) (top: int) (word: int) =
+        match addressBytes with
+        | 1 -> [ byte (top ||| (word &&& 0x7F)) ]
+        | 2 -> [ byte (top ||| (word &&& 0x7F)); byte ((word >>> 7) &&& 0xFF) ]
+        | n -> failwith $"serial frame: %d{n} address bytes is not a shape this protocol has"
+
+    /// The bytes that write `value` to word `word`, on a map of `addressBytes`.
+    let writeWide (addressBytes: int) (word: int) (value: uint64) : byte list =
         let body =
-            [ byte (0x80 ||| word)
-              byte (value &&& 0xFFUL)
-              byte ((value >>> 8) &&& 0xFFUL)
-              byte ((value >>> 16) &&& 0xFFUL)
-              byte ((value >>> 24) &&& 0xFFUL) ]
+            addressOf addressBytes 0x80 word
+            @ [ byte (value &&& 0xFFUL)
+                byte ((value >>> 8) &&& 0xFFUL)
+                byte ((value >>> 16) &&& 0xFFUL)
+                byte ((value >>> 24) &&& 0xFFUL) ]
 
         sync :: body @ [ xorOf body ]
 
-    /// The bytes that read word `word`.
-    let read (word: int) : byte list =
-        let body = [ byte word ]
+    /// The bytes that read word `word`, on a map of `addressBytes`.
+    let readWide (addressBytes: int) (word: int) : byte list =
+        let body = addressOf addressBytes 0 word
         sync :: body @ [ xorOf body ]
+
+    /// The bytes that write `value` to word `word`, on a map narrow enough for
+    /// the command byte to address it on its own.
+    let write (word: int) (value: uint64) : byte list = writeWide 1 word value
+
+    /// The bytes that read word `word`, on a map narrow enough for the command
+    /// byte to address it on its own.
+    let read (word: int) : byte list = readWide 1 word
 
     /// How long the reply to a request is, sync and checksum included.
     let replyLength (isRead: bool) = if isRead then 7 else 3
@@ -132,7 +151,13 @@ type SimUart(sim: Sim, pins: UartSimPins, cyclesPerBit: int) =
 /// as `SimAxi`'s: each sends a request, runs the design until the reply is
 /// in, and hands back the value. `advance` is how one cycle passes, as in
 /// `SimAxi.clientWith`.
-let serialClientWith (sim: Sim) (pins: UartSimPins) (cyclesPerBit: int) (advance: unit -> unit) : AxiLiteClient * SimUart =
+let serialClientOn
+    (addressBytes: int)
+    (sim: Sim)
+    (pins: UartSimPins)
+    (cyclesPerBit: int)
+    (advance: unit -> unit)
+    : AxiLiteClient * SimUart =
     let uart = SimUart(sim, pins, cyclesPerBit)
     let device = uart :> ISimDevice
 
@@ -168,9 +193,21 @@ let serialClientWith (sim: Sim) (pins: UartSimPins) (cyclesPerBit: int) (advance
         | Ok v -> v
         | Error why -> failwith $"serial register map: {why} after %d{cycles} cycles"
 
-    { read32 = fun offset -> exchange true (SerialFrame.read (int (offset >>> 2))) |> Option.get
-      write32 = fun offset value -> exchange false (SerialFrame.write (int (offset >>> 2)) value) |> ignore },
+    { read32 = fun offset -> exchange true (SerialFrame.readWide addressBytes (int (offset >>> 2))) |> Option.get
+      write32 =
+        fun offset value ->
+            exchange false (SerialFrame.writeWide addressBytes (int (offset >>> 2)) value)
+            |> ignore },
     uart
 
 /// The common case: cycles pass by ticking the Sim.
+let serialClientWith (sim: Sim) (pins: UartSimPins) (cyclesPerBit: int) (advance: unit -> unit) =
+    serialClientOn 1 sim pins cyclesPerBit advance
+
 let serialClient (sim: Sim) (pins: UartSimPins) (cyclesPerBit: int) = serialClientWith sim pins cyclesPerBit sim.Tick
+
+/// The client for a particular map, which is what a design with a table in it
+/// needs: the frame shape follows from the map's width rather than being a thing
+/// the caller remembers.
+let serialClientForMap (m: RegMap) (sim: Sim) (pins: UartSimPins) (cyclesPerBit: int) =
+    serialClientOn (serialAddressBytes (m.apertureAddrWidth - 2)) sim pins cyclesPerBit sim.Tick

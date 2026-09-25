@@ -17,6 +17,14 @@
 ///     host → A5 | w | xor                          read word w
 ///     host ← A5 | 00 | d0 d1 d2 d3 | xor
 ///
+/// **A map too wide for seven bits spends one more byte**, right after the
+/// command and carrying the index's high bits — so a design with a table in it
+/// is reachable, and every design that fits in seven bits emits exactly what it
+/// emitted before, down to the state encoding:
+///
+///     host → A5 | 80+wlo | whi | d0 d1 d2 d3 | xor   write word w, wide map
+///     host → A5 | wlo | whi | xor                    read word w, wide map
+///
 /// **And one frame the fabric sends unasked**, so a design can stream data
 /// out of the same wire its registers are on — a recorder, a trace, a log:
 ///
@@ -43,8 +51,22 @@ let serialStreamStatus = 0x02UL
 type SerialRequestState =
     | AwaitSync
     | AwaitCommand
+    /// Only on a map too wide for the command byte's own seven bits.
+    | AwaitAddress
     | AwaitData
     | AwaitChecksum
+
+/// Address bits a command byte carries on its own.
+let serialCommandAddrBits = 7
+
+/// Bytes of a request that carry its word index: the command byte alone, or the
+/// command byte and one more. A caller sending frames needs this, and it is a
+/// function of the map rather than a choice.
+let serialAddressBytes (wordWidth: int) =
+    if wordWidth <= serialCommandAddrBits then 1 else 2
+
+/// The widest map a request can address.
+let serialMaxAddrBits = serialCommandAddrBits + 8
 
 /// Parse requests from a byte flow into the write and read fires a
 /// `RegMap` slave wants, and reply on a byte stream. Returns the channel
@@ -55,14 +77,23 @@ let serialRegMapChannelWith
     (stream: Stream<Expr> option)
     (bytes: Flow<Expr>)
     : AxiLiteChannel * Stream<Expr> =
-    if wordWidth > 7 then
-        failwith $"serial register map: a command byte addresses 128 words; the map wants %d{1 <<< wordWidth}"
+    if wordWidth > serialMaxAddrBits then
+        failwith
+            $"serial register map: a request addresses %d{1 <<< serialMaxAddrBits} words; the map wants %d{1 <<< wordWidth}"
 
+    let wide = serialAddressBytes wordWidth > 1
     let byte = bytes.payload
     let arrived = bytes.valid
-    let st = machine $"{name}_request" [ AwaitSync; AwaitCommand; AwaitData; AwaitChecksum ]
+    // The wide map's extra state goes after `AwaitCommand`, so the narrow
+    // encoding — and therefore the emitted Verilog of every design that had one
+    // — is untouched.
+    let st =
+        machine
+            $"{name}_request"
+            ([ AwaitSync; AwaitCommand ] @ (if wide then [ AwaitAddress ] else []) @ [ AwaitData; AwaitChecksum ])
 
     let command = reg $"{name}_command" 8
+    let addrHigh = if wide then Some(reg $"{name}_addr_high" 8) else None
     let dataBytes = [ for i in 0..3 -> reg $"{name}_data%d{i}" 8 ]
     let data = wire $"{name}_data" 32
     cat dataBytes[3] (cat dataBytes[2] (cat dataBytes[1] dataBytes[0])) ==> data
@@ -80,39 +111,60 @@ let serialRegMapChannelWith
     lit 0UL 1 ==> refused
 
     st.Switch
-        [ (AwaitSync,
-           fun () ->
-               If (arrived &&& eq byte (lit serialSync 8)) (fun () ->
-                   lit 0UL 8 ==> running
-                   st.Goto AwaitCommand))
-          (AwaitCommand,
-           fun () ->
-               If arrived (fun () ->
-                   byte ==> command
-                   byte ==> running
+        [ yield
+              (AwaitSync,
+               fun () ->
+                   If (arrived &&& eq byte (lit serialSync 8)) (fun () ->
+                       lit 0UL 8 ==> running
+                       st.Goto AwaitCommand))
+          yield
+              (AwaitCommand,
+               fun () ->
+                   If arrived (fun () ->
+                       byte ==> command
+                       byte ==> running
 
-                   ifElse
-                       [ (slice 7 7 byte, fun () -> st.Goto AwaitData)
-                         (otherwise, fun () -> st.Goto AwaitChecksum) ]))
-          (AwaitData,
-           fun () ->
-               If arrived (fun () ->
-                   // Least significant byte first.
-                   ifElse [ for i, d in List.indexed dataBytes -> (eq index.count (lit (uint64 i) 2), fun () -> byte ==> d) ]
+                       match addrHigh with
+                       | Some _ -> st.Goto AwaitAddress
+                       | None ->
+                           ifElse
+                               [ (slice 7 7 byte, fun () -> st.Goto AwaitData)
+                                 (otherwise, fun () -> st.Goto AwaitChecksum) ]))
+          yield!
+              (match addrHigh with
+               | None -> []
+               | Some high ->
+                   [ (AwaitAddress,
+                      fun () ->
+                          If arrived (fun () ->
+                              byte ==> high
+                              (running ^^^ byte) ==> running
 
-                   (running ^^^ byte) ==> running
-                   If index.wrap (fun () -> st.Goto AwaitChecksum)))
-          (AwaitChecksum,
-           fun () ->
-               If arrived (fun () ->
-                   ifElse
-                       [ (eq byte running,
-                          fun () ->
-                              isWrite ==> writeFire
-                              bnot isWrite ==> readFire)
-                         (otherwise, fun () -> lit 1UL 1 ==> refused) ]
+                              ifElse
+                                  [ (isWrite, fun () -> st.Goto AwaitData)
+                                    (otherwise, fun () -> st.Goto AwaitChecksum) ])) ])
+          yield
+              (AwaitData,
+               fun () ->
+                   If arrived (fun () ->
+                       // Least significant byte first.
+                       ifElse
+                           [ for i, d in List.indexed dataBytes -> (eq index.count (lit (uint64 i) 2), fun () -> byte ==> d) ]
 
-                   st.Goto AwaitSync)) ]
+                       (running ^^^ byte) ==> running
+                       If index.wrap (fun () -> st.Goto AwaitChecksum)))
+          yield
+              (AwaitChecksum,
+               fun () ->
+                   If arrived (fun () ->
+                       ifElse
+                           [ (eq byte running,
+                              fun () ->
+                                  isWrite ==> writeFire
+                                  bnot isWrite ==> readFire)
+                             (otherwise, fun () -> lit 1UL 1 ==> refused) ]
+
+                       st.Goto AwaitSync)) ]
 
     // The read: the slave answers `answersAfter` cycles on, and the word is
     // held for it from the fire until the reply has gone out.
@@ -123,9 +175,19 @@ let serialRegMapChannelWith
     let replyData = reg $"{name}_reply_data" 32
     If answerDue (fun () -> readData ==> replyData)
 
+    // The index a request named: the command byte's low bits, with the extra
+    // byte above them on a wide map.
+    let requestAddr =
+        match addrHigh with
+        | None -> command
+        | Some high ->
+            let combined = wire $"{name}_addr" (8 + serialCommandAddrBits)
+            cat high (slice (serialCommandAddrBits - 1) 0 command) ==> combined
+            combined
+
     let beginRead () =
         let word = wire $"{name}_read_word" wordWidth
-        slice (wordWidth - 1) 0 command ==> word
+        slice (wordWidth - 1) 0 requestAddr ==> word
 
         { word = word
           inFlight = readFire ||| answered }
@@ -233,7 +295,7 @@ let serialRegMapChannelWith
           layout = byteLayout }
 
     let awWord = wire $"{name}_write_word" wordWidth
-    slice (wordWidth - 1) 0 command ==> awWord
+    slice (wordWidth - 1) 0 requestAddr ==> awWord
 
     { wordWidth = wordWidth
       wdata = data

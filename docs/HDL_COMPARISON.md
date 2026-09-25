@@ -999,11 +999,13 @@ Sixteen points with one multiply-add is more accurate than 256 points without
 synthesiser would build from a small ROM anyway while staying FIRRTL-exportable,
 which a preloaded memory is not.
 
-The **variable shifter** is what a gain spanning octaves costs, and it is the
-only one in the audio path: 362 LUT4 on an iCE40 UP5K for the exponential, the
-shift and the saturate together. A folded engine has one of them however many
-bands it serves, which is the shape that makes it affordable on a part that
-size.
+The **variable shifter** is what a gain spanning octaves costs, and on a small
+part it is worth more attention than the arithmetic around it: measured on an
+iCE40 UP5K, the exponential is 42 LUT4 and the shifter was 346. Bounding the
+octaves the apply delivers makes the low part of the shift constant and drops a
+barrel stage, and not sign-extending the value before the multiply narrows every
+stage — together 346 to 180. A folded engine has one shifter however many bands
+it serves, which is the shape that makes it affordable at that size.
 
 ### Clock frequency, and rates derived from it
 

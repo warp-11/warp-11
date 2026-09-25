@@ -1102,9 +1102,10 @@ let folded =
 /// The real thing the page before this one is a miniature of: the audio
 /// stdlib's 8-band stereo compressor on one multiplier. The body is one word
 /// — `multibandCompressorFolded` for `multibandCompressor` — over the same
-/// stream and the same law; what differs is where the makeup gains live: a
-/// table the bank reads a word at a time (unity from boot, loadable through
-/// three ports) rather than sixteen inputs. What the word buys is in
+/// stream and a law that is now a table: the bank reads one curve word at a
+/// time (zeroed from boot, which is unity gain, and loadable through three
+/// ports) rather than taking a threshold, a ratio and sixteen gain inputs. What
+/// the word buys is in
 /// `Audio.fs`: the spatial engine's own operations chained one after another,
 /// each holding a beat, sharing one multiplier behind them through `warpFu`.
 let multibandFolded =

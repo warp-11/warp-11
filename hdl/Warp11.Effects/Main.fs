@@ -328,14 +328,23 @@ let private pokeGains (sim: Sim) (left: uint64 list) (right: uint64 list) =
 
 /// The folded bank reads its gains from a table, loaded a word a cycle
 /// through its three load ports — as a host loads the window.
-let private loadGains (sim: Sim) (left: uint64 list) (right: uint64 list) =
-    for i, g in List.indexed (left @ right) do
-        sim.Poke("makeup_index", uint64 i)
-        sim.Poke("makeup_gain", g)
-        sim.Poke("makeup_write", 1UL)
-        sim.Tick()
+let private loadCurve (sim: Sim) (curveOf: int -> int -> uint64[]) =
+    for ear in 0..1 do
+        for band in 0 .. multibandBands - 1 do
+            let words = curveOf ear band
 
-    sim.Poke("makeup_write", 0UL)
+            for entry in 0 .. words.Length - 1 do
+                sim.Poke("curve_index", uint64 (((ear * multibandBands) + band) * words.Length + entry))
+                sim.Poke("curve_word", words[entry])
+                sim.Poke("curve_write", 1UL)
+                sim.Tick()
+
+    sim.Poke("curve_write", 0UL)
+
+/// Every band's curve the same, at a constant gain in decibels — which makes the
+/// law level-independent, so what the bank does to a signal is one number and
+/// the check can be an equality rather than a tolerance.
+let private flatCurve (db: float) = fun _ _ -> gainTableWords (fun _ -> db)
 
 let private unityGains = List.replicate multibandBands gainUnity
 
@@ -345,70 +354,86 @@ let private multibandLaw (sim: Sim) =
     sim.Poke("attack", 1UL <<< 14)
     sim.Poke("releaseRate", 1UL <<< 12)
 
+/// The folded bank's law is two coefficients and a curve — no threshold and no
+/// ratio, because the curve says what the gain is at every level.
+let private foldedLaw (sim: Sim) =
+    sim.Poke("attack", 1UL <<< 14)
+    sim.Poke("releaseRate", 1UL <<< 12)
+
 let private multibandSetup (sim: Sim) =
     multibandLaw sim
     pokeGains sim unityGains unityGains
 
 let private multibandFoldedSetup (sim: Sim) =
-    multibandLaw sim
-    loadGains sim unityGains unityGains
+    foldedLaw sim
+    loadCurve sim (flatCurve 0.0)
 
 let private multibandIsStallIndependent () =
     stageIsStallIndependent Batch.multibandStageRef.def multibandSetup
 
-/// **The folded engine's defining property**: the same samples out as the
-/// spatial engine, frame for frame, on the same stimulus — at the demo's
-/// settings, where every band compresses, and at unity, where the bank must
-/// reconstruct. A golden vector would pass a fold with the wrong schedule;
-/// only the spatial engine says what the bits should be.
-let private foldedMatchesTheSpatial () =
+/// **The folded engine's defining property, now that its law is a table**: what
+/// the curve says, the bank does.
+///
+/// This used to be an equality against the spatial engine. That comparison is
+/// gone on purpose — the two engines shared the law's code, so it only ever
+/// checked the fold's *plumbing*, and it cannot survive the two having different
+/// laws anyway. Held against the arithmetic instead, it checks the law too.
+///
+/// Two of the three cases are exact, which is the point of choosing them:
+///
+/// - **A zeroed curve is unity**, because a word of zero is a gain of zero log2.
+///   The bank must then reconstruct its input, which is the filterbank's own
+///   defining property and has nothing to do with the gain path.
+/// - **A curve of exactly one octave doubles.** The mantissa is 32768 and the
+///   shift is fourteen, so the apply is `value * 32768 >> 14` — a doubling with
+///   nothing truncated. Every frame must be exactly twice the unity frame.
+/// - **A curve of minus one octave halves**, and this one is not exact: the
+///   shift truncates per band before the bands are summed, so eight bands can
+///   each lose a count. The bound is the eight counts, not a fraction.
+let private foldedFollowsItsCurve () =
     let samples = stereoSamples 96 11
 
-    // `changed` is how many output frames differ from the input: the guard
-    // that a comparison of two passthroughs is not passing for nothing.
-    let compare label law (left: uint64 list) (right: uint64 list) (changed: int -> bool) =
-        let spatial =
-            runStageStalled Batch.multibandStageRef.def (fun s -> law s; pokeGains s left right) samples (Some 2)
+    let run curve =
+        runStageStalled Batch.multibandStageFoldedRef.def (fun s -> foldedLaw s; loadCurve s curve) samples (Some 2)
 
-        let folded =
-            runStageStalled Batch.multibandStageFoldedRef.def (fun s -> law s; loadGains s left right) samples (Some 2)
+    let unity = run (flatCurve 0.0)
+    let octaveUp = run (flatCurve (gainDbOfLog 1.0))
+    let octaveDown = run (flatCurve (gainDbOfLog -1.0))
 
-        let differing =
-            Seq.zip spatial folded |> Seq.filter (fun (a, b) -> a <> b) |> Seq.length
+    let ceiling = (1UL <<< (sampleWidth - 1)) - 1UL
+    let signedOf (v: uint64) = if v >= (1UL <<< (sampleWidth - 1)) then int64 v - (1L <<< sampleWidth) else int64 v
 
-        let fromInput =
-            Seq.zip spatial samples |> Seq.filter (fun (a, b) -> a <> b) |> Seq.length
+    // Frames the bank left alone would make any of this vacuous.
+    let movedFromInput = Seq.zip unity samples |> Seq.filter (fun (a, b) -> a <> b) |> Seq.length
 
-        printfn
-            $"      {label}: spatial %d{spatial.Length} frames, folded %d{folded.Length}, %d{differing} differ; %d{fromInput} changed from the input"
+    let reconstructs = unity.Length = samples.Length && movedFromInput > samples.Length / 2
 
-        spatial.Length = samples.Length
-        && folded.Length = samples.Length
-        && differing = 0
-        && changed fromInput
+    let doubles =
+        Seq.zip unity octaveUp
+        |> Seq.forall (fun ((ul, ur), (dl, dr)) ->
+            let twice one =
+                let v = signedOf one * 2L
+                // Only where the doubling stays inside full scale; above it the
+                // sum's own saturate is the answer and says nothing about gain.
+                if abs v > int64 ceiling then None else Some v
 
-    let unityLaw (s: Sim) =
-        s.Poke("threshold", (1UL <<< sampleWidth) - 1UL)
-        s.Poke("ratio", 0UL)
-        s.Poke("attack", 0UL)
-        s.Poke("releaseRate", 0UL)
+            let agrees one two =
+                match twice one with
+                | None -> true
+                | Some want -> signedOf two = want
 
-    // A gentle setting — every band's gain moving without any band muted —
-    // beside the demo's, where the slope law drives bands to silence.
-    let gentleLaw (s: Sim) =
-        multibandLaw s
-        s.Poke("threshold", 1_000_000UL)
-        s.Poke("ratio", 1UL)
+            agrees ul dl && agrees ur dr)
 
-    let gentleLeft = [ for i in 0 .. multibandBands - 1 -> gainUnity + (uint64 i <<< 4) ]
-    let gentleRight = [ for i in 0 .. multibandBands - 1 -> gainUnity - (uint64 i <<< 3) ]
+    let halves =
+        Seq.zip unity octaveDown
+        |> Seq.forall (fun ((ul, ur), (hl, hr)) ->
+            let near one two = abs (signedOf two - signedOf one / 2L) <= int64 multibandBands
+            near ul hl && near ur hr)
 
-    // Unity changes the frames too, now that the crossover is an all-pass;
-    // what the guard still rules out is a run where nothing happened at all.
-    let compressing = compare "compressing" multibandLaw unityGains unityGains (fun n -> n > samples.Length / 2)
-    let shaped = compare "gentle" gentleLaw gentleLeft gentleRight (fun n -> n > samples.Length / 2)
-    let passthrough = compare "unity" unityLaw unityGains unityGains (fun n -> n > samples.Length / 2)
-    compressing && shaped && passthrough
+    printfn
+        $"      curve law: reconstructs {reconstructs} ({movedFromInput} frames moved), doubles {doubles}, halves {halves}"
+
+    reconstructs && doubles && halves
 
 /// The folded engine spends cycles where the spatial one spends multipliers, so
 /// the question it raises is whether a pass fits inside one audio frame on the
@@ -636,7 +661,7 @@ let private checks =
       "batch: flat copy survives jitter", pacedFlatStillCopies
       "audio: every stage is stall-independent", stageStallReport
       "audio: unity settings are an all-pass", unitySettingsPassAudioThrough
-      "audio: folded engine matches the spatial one", foldedMatchesTheSpatial
+      "audio: folded engine follows its curve", foldedFollowsItsCurve
       "audio: folded pass fits an iCE40 frame", foldedPassFitsTheFrame
       "ice: clock ratios are the converter's", iceClocksAreWhatTheConverterNeeds
       "ice: passthru passes audio exactly", icePassthruPassesAudio
