@@ -54,19 +54,55 @@ type Handle = { Slot: int; Width: int }
 /// masks already folded in. It is still a plain cycle-based interpreter — the
 /// reference half of the differential oracle — but a fast enough one to sit
 /// under an interactive debugger.
-type Sim(design: ModuleDef, ?checkAsserts: bool) =
+/// A multi-domain Sim's recorded waves, for `Vcd.renderTimed`: the clocks by
+/// their pin names and periods, the captured signals, and every sample the
+/// edge scheduler took, timestamped in time units.
+type WaveCapture =
+    { clocks: (string * int) list
+      signals: (string * int) list
+      samples: (int64 * BigInteger[]) list
+      endTime: int64 }
+
+type Sim(design: ModuleDef, ?checkAsserts: bool, ?domainPeriods: (string * int) list) =
     let m = flatten design
 
-    // The Sim advances everything on one clock; running a second domain's
-    // registers on it would be quietly wrong rather than unsupported.
-    do
-        match m.foreignDomains with
-        | [] -> ()
-        | fds ->
-            let names = fds |> List.map (fun fd -> $"'{fd.domainName}'") |> String.concat ", "
+    // Domain scheduling. A domain carries no frequency — hertz belong to the
+    // binding — so a multi-domain Sim is *told* each clock's period, in even
+    // counts of abstract time units (both phases whole), and refuses to guess.
+    // `Tick()` keeps its meaning either way: one default-domain cycle.
+    let ownDomainName = m.domain.domainName
+    let givenPeriods = defaultArg domainPeriods []
 
-            failwith
-                $"'{design.name}' uses clock domain(s) {names}, and the Sim runs one clock today — the time-based scheduler is notes/CLOCK_DOMAINS.md increment 4"
+    do
+        for n, p in givenPeriods do
+            if p <= 0 || p % 2 <> 0 then
+                failwith $"domain '{n}': period %d{p} — a period is a positive even count of time units"
+
+            if n <> ownDomainName
+               && not (m.foreignDomains |> List.exists (fun fd -> fd.domainName = n)) then
+                failwith $"'{design.name}' has no clock domain '{n}'"
+
+    let periodOf n =
+        givenPeriods |> List.tryPick (fun (dn, p) -> if dn = n then Some p else None)
+
+    let defaultPeriod = periodOf ownDomainName |> Option.defaultValue 10
+
+    let foreignPeriods =
+        [ for fd in m.foreignDomains ->
+              match periodOf fd.domainName with
+              | Some p -> fd, p
+              | None ->
+                  failwith
+                      $"'{design.name}' uses clock domain '{fd.domainName}' — give the Sim its period: Sim(design, domainPeriods = [(\"{fd.domainName}\", <even time units>)])" ]
+
+    let multiDomain = not (List.isEmpty foreignPeriods)
+
+    // The flat design has full visibility, so the crossing check runs again
+    // here as the backstop for what the per-module walk cannot see through a
+    // purely combinational pass-through child.
+    do
+        if multiDomain then
+            Crossings.analyze m |> ignore
 
     // Off unless asked. An assertion costs what its expression costs, on every
     // tick — small against a real design's settle and dominant against a toy —
@@ -90,7 +126,22 @@ type Sim(design: ModuleDef, ?checkAsserts: bool) =
                   | Memory(n, aw, w, _, _) -> yield n, (aw, w)
                   | _ -> () ]
 
-    let isReg n = regInits.ContainsKey n
+    // Every declared register, no-reset ones included. Classifying by
+    // `regInits` — as this did until 2026-09-25 — silently compiled a
+    // `regNoReset` as a *combinational* assign: zero-cycle propagation in the
+    // Sim where the emitted Verilog has a real flop. Nothing in the library
+    // uses `regNoReset` and the one toy reads it straight from an input, which
+    // is the one shape where the difference is invisible — which is how it
+    // survived.
+    let regNames =
+        System.Collections.Generic.HashSet<string>(
+            [ for d in m.decls do
+                  match d with
+                  | Reg (n, _, _) -> yield n
+                  | _ -> () ]
+        )
+
+    let isReg (n: string) = regNames.Contains n
 
     let combAssigns =
         [ for stmt in m.stmts do
@@ -803,6 +854,181 @@ type Sim(design: ModuleDef, ?checkAsserts: bool) =
             settle ()
             stale <- false
 
+    // One write landing in its array, mask honoured — the same landing the
+    // single-domain tick always did, factored so an edge can land only its
+    // own domain's writes.
+    let landWrite k =
+        if writeEnabled[k] then
+            if isNull (box writeTargetsWide[k]) then
+                let keep = writeKeep[k]
+
+                if keep = System.UInt64.MaxValue then
+                    writeTargets[k][writeAddr[k]] <- writeData[k]
+                else
+                    let old = writeTargets[k][writeAddr[k]]
+                    writeTargets[k][writeAddr[k]] <- (writeData[k] &&& keep) ||| (old &&& ~~~keep)
+            else
+                let arr = writeTargetsWide[k]
+                let keep = writeKeepWide[k]
+
+                if keep = BigInteger.MinusOne then
+                    arr[writeAddr[k]] <- writeDataWide[k]
+                else
+                    let old = arr[writeAddr[k]]
+                    arr[writeAddr[k]] <- (writeDataWide[k] &&& keep) ||| (old &&& (BigInteger.MinusOne ^^^ keep))
+
+    // ---- the edge scheduler (multi-domain only) ----------------------------
+    // Domain 0 is the module's own; the rest in `foreignDomains` order. Each
+    // compiled array gets a per-domain index view, so an edge evaluates,
+    // commits and lands exactly its own domain's registers and writes — the
+    // single-domain path never touches any of this.
+    let domainNames = [| yield ownDomainName; for fd, _ in foreignPeriods -> fd.domainName |]
+    let declDomainOfName = dict m.declDomains
+
+    let domainIndexOf n =
+        match declDomainOfName.TryGetValue n with
+        | true, d -> System.Array.IndexOf(domainNames, d)
+        | _ -> 0
+
+    let byDomain (names: string[]) =
+        [| for di in 0 .. domainNames.Length - 1 ->
+               [| for k in 0 .. names.Length - 1 do
+                      if domainIndexOf names[k] = di then yield k |] |]
+
+    let regNarrowByDomain = byDomain (Array.map fst regNarrow)
+    let regWideByDomain = byDomain (Array.map fst regWide)
+    let memWriteByDomain = byDomain [| for mem, _, _, _, _, _ in memWrites -> mem |]
+
+    // An assertion is checked on the edge of the one domain its cone lives in
+    // (mixed or unclocked cones fall to the default) — sampling an audio-side
+    // claim on the fabric edge would read coherent but wrongly-timed state.
+    let assertByDomain =
+        if checking && multiDomain then
+            let domains = Crossings.assertDomainsOf m |> Array.ofList
+
+            [| for di in 0 .. domainNames.Length - 1 ->
+                   [| for k in 0 .. domains.Length - 1 do
+                          if System.Array.IndexOf(domainNames, domains[k]) = di then yield k |] |]
+        else
+            [||]
+
+    let periods = [| yield defaultPeriod; for _, p in foreignPeriods -> p |]
+    let mutable time = 0L
+    let nextEdge = [| for p in periods -> int64 p |]
+    let edgeGroup = ResizeArray<int>()
+
+    // Wave capture, sampled once per edge instant after settling.
+    let mutable waveSignals: (string * int * int)[] = [||]
+    let waveSamples = ResizeArray<int64 * BigInteger[]>()
+    let mutable capturing = false
+
+    let sampleWaves () =
+        waveSamples.Add(
+            time,
+            [| for _, i, w in waveSignals -> if w > 64 then wideVals[i] else BigInteger narrow[i] |]
+        )
+
+    // Every domain whose edge falls at this instant, together: next-values and
+    // write operands all evaluate against the same settled pre-edge state,
+    // then those domains' registers commit and writes land — coincident edges
+    // behave as one merged edge, which is the only defensible reading of two
+    // clocks a testbench aligned.
+    let processEdges (group: ResizeArray<int>) =
+        ensureSettled ()
+
+        for di in group do
+            for k in regNarrowByDomain[di] do
+                regNarrowOps[k] ()
+
+            for k in regWideByDomain[di] do
+                regWideOps[k] ()
+
+            for k in memWriteByDomain[di] do
+                memWriteOps[k] ()
+
+        for di in group do
+            for k in regNarrowByDomain[di] do
+                narrow[regNarrowSlots[k]] <- regNarrowNext[k]
+
+            for k in regWideByDomain[di] do
+                regWideCommit[k] ()
+
+            for k in memWriteByDomain[di] do
+                landWrite k
+
+        settle ()
+
+        for di in group do
+            if di = 0 then ticks <- ticks + 1
+
+            if assertOps.Length > 0 then
+                for k in assertByDomain[di] do
+                    let holds, message = assertOps[k]
+                    if not (holds ()) then violations.Add(message, ticks)
+
+        if capturing then sampleWaves ()
+
+    // Advance to the next edge instant (coincident edges grouped), process it,
+    // and say whether the default domain's edge was among them.
+    let stepEdge () =
+        let mutable tNext = nextEdge[0]
+
+        for di in 1 .. nextEdge.Length - 1 do
+            if nextEdge[di] < tNext then tNext <- nextEdge[di]
+
+        edgeGroup.Clear()
+
+        for di in 0 .. nextEdge.Length - 1 do
+            if nextEdge[di] = tNext then edgeGroup.Add di
+
+        time <- tNext
+        processEdges edgeGroup
+
+        let mutable defaultEdge = false
+
+        for di in edgeGroup do
+            nextEdge[di] <- nextEdge[di] + int64 periods[di]
+            if di = 0 then defaultEdge <- true
+
+        defaultEdge
+
+    // One default-domain cycle: every edge up to and including the default
+    // domain's next, in time order.
+    let tickMulti () =
+        while not (stepEdge ()) do
+            ()
+
+    // The single-domain edge, exactly as it always ran: reg next-values and
+    // write operands both evaluate against the pre-edge state, then regs
+    // commit, then writes land — so a sync read of an address written this
+    // cycle captures the OLD value: read-first, matching the emitted always
+    // block.
+    let tickSingle () =
+        ensureSettled ()
+
+        for k in 0 .. regNarrowOps.Length - 1 do
+            regNarrowOps[k] ()
+
+        for k in 0 .. regWideOps.Length - 1 do
+            regWideOps[k] ()
+
+        for k in 0 .. memWriteOps.Length - 1 do
+            memWriteOps[k] ()
+
+        for k in 0 .. regNarrowSlots.Length - 1 do
+            narrow[regNarrowSlots[k]] <- regNarrowNext[k]
+
+        for k in 0 .. regWideCommit.Length - 1 do
+            regWideCommit[k] ()
+
+        for k in 0 .. writeEnabled.Length - 1 do
+            landWrite k
+
+        settle ()
+        ticks <- ticks + 1
+
+        if assertOps.Length > 0 then checkClaims ()
+
     do
         for d in m.decls do
             match d with
@@ -954,51 +1180,50 @@ type Sim(design: ModuleDef, ?checkAsserts: bool) =
     /// an address written on the same cycle sees the *old* word — read-first,
     /// matching the emitted always block.
     member _.Tick() =
-        // Reg next-values and write operands both evaluate against the pre-edge
-        // state, then regs commit, then writes land — so a sync read of an
-        // address written this cycle captures the OLD value: read-first, matching
-        // the emitted always block.
+        if multiDomain then tickMulti () else tickSingle ()
+
+    /// Run every edge — foreign and default alike — up to and including `t`
+    /// time units, in time order, and leave the clock there. `Tick()` remains
+    /// "one default-domain cycle"; this is the finer-grained handle.
+    member _.AdvanceTo(t: int64) =
+        if not multiDomain then
+            failwith "AdvanceTo is the multi-domain Sim's — a single-clock design advances with Tick()"
+
+        let mutable nearest = Array.min nextEdge
+
+        while nearest <= t do
+            stepEdge () |> ignore
+            nearest <- Array.min nextEdge
+
+        time <- max time t
+
+    /// The scheduler's clock, in time units. A single-domain Sim reports its
+    /// ticks at the default period, so the number means the same thing on
+    /// both paths.
+    member _.TimeUnits =
+        if multiDomain then time else int64 ticks * int64 defaultPeriod
+
+    /// Record `names` (flattened signal names) at every edge instant from now
+    /// on, for `Vcd.renderTimed`. Multi-domain only — a single-clock design
+    /// records through the debugger's trace ring.
+    member _.CaptureWaves(names: string list) =
+        if not multiDomain then
+            failwith "CaptureWaves is the multi-domain Sim's — a single-clock design records through the debugger's trace"
+
+        waveSignals <- [| for n in names -> let i = slotFor n in n, i, slotWidths[i] |]
+        capturing <- true
         ensureSettled ()
+        sampleWaves ()
 
-        for k in 0 .. regNarrowOps.Length - 1 do
-            regNarrowOps[k] ()
-
-        for k in 0 .. regWideOps.Length - 1 do
-            regWideOps[k] ()
-
-        for k in 0 .. memWriteOps.Length - 1 do
-            memWriteOps[k] ()
-
-        for k in 0 .. regNarrowSlots.Length - 1 do
-            narrow[regNarrowSlots[k]] <- regNarrowNext[k]
-
-        for k in 0 .. regWideCommit.Length - 1 do
-            regWideCommit[k] ()
-
-        for k in 0 .. writeEnabled.Length - 1 do
-            if writeEnabled[k] then
-                if isNull (box writeTargetsWide[k]) then
-                    let keep = writeKeep[k]
-
-                    if keep = System.UInt64.MaxValue then
-                        writeTargets[k][writeAddr[k]] <- writeData[k]
-                    else
-                        let old = writeTargets[k][writeAddr[k]]
-                        writeTargets[k][writeAddr[k]] <- (writeData[k] &&& keep) ||| (old &&& ~~~keep)
-                else
-                    let arr = writeTargetsWide[k]
-                    let keep = writeKeepWide[k]
-
-                    if keep = BigInteger.MinusOne then
-                        arr[writeAddr[k]] <- writeDataWide[k]
-                    else
-                        let old = arr[writeAddr[k]]
-                        arr[writeAddr[k]] <- (writeDataWide[k] &&& keep) ||| (old &&& (BigInteger.MinusOne ^^^ keep))
-
-        settle ()
-        ticks <- ticks + 1
-
-        if assertOps.Length > 0 then checkClaims ()
+    /// Everything `CaptureWaves` has recorded, with the clocks by their pin
+    /// names and periods.
+    member _.Waves: WaveCapture =
+        { clocks =
+            [ yield m.domain.clock.clockPort, defaultPeriod
+              for fd, p in foreignPeriods -> fd.clock.clockPort, p ]
+          signals = [ for n, _, w in waveSignals -> n, w ]
+          samples = List.ofSeq waveSamples
+          endTime = time }
 
     /// Every assertion failure so far, as (message, cycle). Empty is the design
     /// keeping its promises — or a Sim built without `checkAsserts`.

@@ -75,3 +75,71 @@ let render (topName: string) (trace: Trace) : string =
                 out.AppendLine change |> ignore
 
     out.ToString()
+
+/// Render a multi-domain Sim's `WaveCapture` as VCD: the clocks toggling at
+/// their real periods, and every captured signal sampled at the edge instants
+/// the scheduler processed. Time is the scheduler's own unit.
+///
+/// A clock's rising edges sit at multiples of its period, so its level at `t`
+/// is high for the first half of each cycle from the first edge on — low
+/// before its first edge, which is also what the testbench convention drives.
+let renderTimed (topName: string) (capture: Warp11.Sim.WaveCapture) : string =
+    let out = StringBuilder()
+    let clocks = List.toArray capture.clocks
+    let signals = List.toArray capture.signals
+    let samples = List.toArray capture.samples
+    let ids = Array.init (clocks.Length + signals.Length) identifier
+    let clockId i = ids[i]
+    let signalId i = ids[clocks.Length + i]
+
+    out
+        .AppendLine("$version warp11 $end")
+        .AppendLine("$timescale 1ns $end")
+        .AppendLine($"$scope module {topName} $end")
+    |> ignore
+
+    for i in 0 .. clocks.Length - 1 do
+        out.AppendLine($"$var wire 1 {clockId i} {fst clocks[i]} $end") |> ignore
+
+    for i in 0 .. signals.Length - 1 do
+        out.AppendLine($"$var wire %d{snd signals[i]} {signalId i} {fst signals[i]} $end") |> ignore
+
+    out.AppendLine("$upscope $end").AppendLine("$enddefinitions $end") |> ignore
+
+    // Events by instant: clock toggles every half period from the first
+    // rising edge, and signal changes at the sampled instants.
+    let events = System.Collections.Generic.SortedDictionary<int64, ResizeArray<string>>()
+
+    let at t =
+        match events.TryGetValue t with
+        | true, lines -> lines
+        | _ ->
+            let lines = ResizeArray()
+            events[t] <- lines
+            lines
+
+    for i in 0 .. clocks.Length - 1 do
+        let period = int64 (snd clocks[i])
+        (at 0L).Add("0" + clockId i)
+        let mutable t = period
+        let mutable level = 1
+
+        while t <= capture.endTime do
+            (at t).Add(string level + clockId i)
+            level <- 1 - level
+            t <- t + period / 2L
+
+    for s in 0 .. samples.Length - 1 do
+        let t, values = samples[s]
+
+        for i in 0 .. signals.Length - 1 do
+            if s = 0 || values[i] <> (snd samples[s - 1])[i] then
+                (at t).Add(valueText (snd signals[i]) values[i] + signalId i)
+
+    for KeyValue (t, lines) in events do
+        out.AppendLine($"#%d{t}") |> ignore
+
+        for line in lines do
+            out.AppendLine line |> ignore
+
+    out.ToString()

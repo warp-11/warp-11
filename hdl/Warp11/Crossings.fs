@@ -49,6 +49,99 @@ let private refsFolder : ExprFolder<string list> =
 
 let private refsOf (e: Expr) = foldExpr refsFolder e |> List.distinct
 
+/// The domains a named signal carries. Regs and mems are their declared
+/// domain; a module input is universal (the parent enforces what it feeds);
+/// a child-output staging net is what the child recorded; a wire resolves
+/// through its one assign, memoized. An in-progress name is a combinational
+/// cycle, which `checkCombinationalLoops` owns — it contributes nothing here.
+let private domainResolver
+    (regsAndMems: Set<string>)
+    (inputs: Set<string>)
+    (domainOfDecl: string -> string)
+    (stagingOut: System.Collections.Generic.Dictionary<string, string list>)
+    (assigns: System.Collections.Generic.IDictionary<string, Expr>)
+    : string -> Set<string> =
+    let memo = System.Collections.Generic.Dictionary<string, Set<string>>()
+    let visiting = System.Collections.Generic.HashSet<string>()
+
+    let rec domainsOf (n: string) : Set<string> =
+        match memo.TryGetValue n with
+        | true, ds -> ds
+        | _ ->
+            let ds =
+                if regsAndMems.Contains n then
+                    Set.singleton (domainOfDecl n)
+                elif inputs.Contains n then
+                    Set.empty
+                else
+                    match stagingOut.TryGetValue n with
+                    | true, ds -> Set.ofList ds
+                    | _ ->
+                        if not (visiting.Add n) then
+                            Set.empty
+                        else
+                            let ds =
+                                match assigns.TryGetValue n with
+                                | true, e -> refsOf e |> List.map domainsOf |> Set.unionMany
+                                | _ -> Set.empty
+
+                            visiting.Remove n |> ignore
+                            ds
+
+            memo[n] <- ds
+            ds
+
+    domainsOf
+
+/// The domain each assertion is checked in — the one domain its cone lives
+/// in, or the module's own where the cone is mixed or reaches nothing
+/// clocked. One entry per `Assert`, in statement order; meant for the
+/// flattened design, so instances are not consulted.
+let internal assertDomainsOf (m: ModuleDef) : string list =
+    let own = m.domain.domainName
+    let declDomain = dict m.declDomains
+
+    let domainOfDecl n =
+        match declDomain.TryGetValue n with
+        | true, d -> d
+        | _ -> own
+
+    let regsAndMems =
+        m.decls
+        |> List.choose (function
+            | Reg (n, _, _)
+            | Memory (n, _, _, _, _) -> Some n
+            | _ -> None)
+        |> Set.ofList
+
+    let inputs =
+        m.decls
+        |> List.choose (function
+            | Input (n, _) -> Some n
+            | _ -> None)
+        |> Set.ofList
+
+    let assigns =
+        m.stmts
+        |> List.choose (function
+            | Assign (t, v) -> Some(t, v)
+            | _ -> None)
+        |> dict
+
+    let domainsOf =
+        domainResolver regsAndMems inputs domainOfDecl (System.Collections.Generic.Dictionary()) assigns
+
+    [ for stmt in m.stmts do
+          match stmt with
+          | Assert (cond, _) ->
+              let ds = refsOf cond |> List.map domainsOf |> Set.unionMany
+
+              yield
+                  (match Set.toList ds with
+                   | [ d ] -> d
+                   | _ -> own)
+          | _ -> () ]
+
 /// Analyze one multi-domain module: refuse unsynchronised crossings, and
 /// record its port domains for the parent's judgement. Called by
 /// `Builder.Def` only when the module carries a foreign domain — a
@@ -125,40 +218,7 @@ let internal analyze (m: ModuleDef) : (string * string list) list =
                 stagingIn[$"{inst.instName}_{n}"] <- (inst, n, sampledIn)
             | _ -> ()
 
-    // The domains a named signal carries. Wires resolve through their one
-    // assign (memoized); an in-progress name is a combinational cycle, which
-    // `checkCombinationalLoops` owns — contribute nothing here.
-    let memo = System.Collections.Generic.Dictionary<string, Set<string>>()
-    let visiting = System.Collections.Generic.HashSet<string>()
-
-    let rec domainsOf (n: string) : Set<string> =
-        match memo.TryGetValue n with
-        | true, ds -> ds
-        | _ ->
-            let ds =
-                if regsAndMems.Contains n then
-                    Set.singleton (domainOfDecl n)
-                elif inputs.Contains n then
-                    // Universal here: the parent enforces what it feeds, via
-                    // this module's recorded portDomains.
-                    Set.empty
-                else
-                    match stagingOut.TryGetValue n with
-                    | true, ds -> Set.ofList ds
-                    | _ ->
-                        if not (visiting.Add n) then
-                            Set.empty
-                        else
-                            let ds =
-                                match assigns.TryGetValue n with
-                                | true, e -> refsOf e |> List.map domainsOf |> Set.unionMany
-                                | _ -> Set.empty
-
-                            visiting.Remove n |> ignore
-                            ds
-
-            memo[n] <- ds
-            ds
+    let domainsOf = domainResolver regsAndMems inputs domainOfDecl stagingOut assigns
 
     // Inputs found inside a sampling cone, with the domain that samples them.
     let sampledInputs = System.Collections.Generic.Dictionary<string, Set<string>>()

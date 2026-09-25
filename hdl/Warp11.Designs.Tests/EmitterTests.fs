@@ -250,10 +250,10 @@ let private ambientInstanceTest =
             "A default-domain child created inside the block should be clocked by it — same as inline logic"
 
 let private domainRefusalsTest =
-    testCase "the Sim, the FIRRTL export and the default name refuse domains by name" <| fun _ ->
+    testCase "the periodless Sim, the FIRRTL export and the default name refuse domains by name" <| fun _ ->
         Expect.throwsC
             (fun () -> Sim((twoDomainToy ()).def) |> ignore)
-            (fun ex -> Expect.stringContains ex.Message "one clock today" "The Sim should refuse a two-domain design until increment 4")
+            (fun ex -> Expect.stringContains ex.Message "give the Sim its period" "A multi-domain Sim needs every foreign domain's period")
 
         Expect.throwsC
             (fun () -> Firrtl.emitFirrtl (twoDomainToy ()).def |> ignore)
@@ -335,6 +335,83 @@ let private synchronizeWidthTest =
                         t ==> o))
                 |> ignore)
             (fun ex -> Expect.stringContains ex.Message "Gray counter" "The refusal should point at the multi-bit entries")
+
+let private schedulerTest =
+    testCase "the Sim runs each domain's edges at its period behind the same Tick" <| fun _ ->
+        let toy =
+            defModule "SchedToy" (fun p -> p.outPort "count" 8, p.outPort "acount" 8) (fun (count, acount) ->
+                let c = declareReg "c" (UInt 8) 0UL
+                c + lit 1UL 8 ==> c
+                c ==> count
+
+                withDomain audio (fun () ->
+                    let a = declareReg "a" (UInt 8) 0UL
+                    a + lit 1UL 8 ==> a
+                    a ==> acount))
+
+        // Default period 10, audio 4: after two Ticks t=20 — default edges at
+        // 10 and 20, audio edges at 4, 8, 12, 16, 20.
+        let sim = Sim(toy.def, domainPeriods = [ "audio", 4 ])
+        sim.CaptureWaves [ "c"; "a" ]
+        sim.Tick()
+        sim.Tick()
+        Expect.equal sim.TimeUnits 20L "Two Ticks are two default periods"
+        Expect.equal (sim.Peek "count") 2UL "The default counter should see two edges"
+        Expect.equal (sim.Peek "acount") 5UL "The audio counter should see five edges"
+
+        sim.AdvanceTo 26L
+        Expect.equal (sim.Peek "acount") 6UL "AdvanceTo should run the audio edge at 24"
+
+        let vcd = Vcd.renderTimed "SchedToy" sim.Waves
+        Expect.stringContains vcd "audio_clk" "The VCD should carry the audio clock"
+        Expect.stringContains vcd "#4\n" "The audio clock should rise at its own period"
+        Expect.stringContains vcd "#15\n" "The default clock should fall at half its period"
+
+let private regNoResetDelayTest =
+    testCase "a no-reset register still costs a cycle in the Sim" <| fun _ ->
+        // `isReg` classified by reset value until 2026-09-25, compiling a
+        // regNoReset as a combinational assign: zero-cycle propagation in the
+        // Sim where the emitted Verilog has a real flop.
+        let probe =
+            defModule "NoResetProbe" (fun p -> p.inPort "i" 8, p.outPort "o" 8) (fun (i, o) ->
+                let r = declareRegNoReset "r" (UInt 8)
+                i ==> r
+                r ==> o)
+
+        let sim = Sim probe.def
+        sim.Poke("i", 7UL)
+        Expect.equal (sim.Peek "o") 0UL "The value should not appear before the edge"
+        sim.Tick()
+        Expect.equal (sim.Peek "o") 7UL "The value should appear after the edge"
+
+let private flatBackstopTest =
+    testCase "the Sim's flat crossing check catches what a pass-through child hides" <| fun _ ->
+        let pass =
+            defModule "PassThrough" (fun p -> p.inPort "i" 1, p.outPort "o" 1) (fun (i, o) ->
+                withDomain audio (fun () ->
+                    let unused = declareReg "unused" (UInt 1) 0UL
+                    unused ==> unused)
+
+                i ==> o)
+
+        // Per-module, the pass-through output records no domain, so the parent
+        // elaborates clean; the flattened design has full visibility.
+        let hidden =
+            defModule "HiddenCross" (fun p -> p.outPort "o" 1) (fun o ->
+                let flag = declareReg "flag" (UInt 1) 0UL
+                Not flag ==> flag
+                let pi, po = instanceNamed "pt" pass
+                flag ==> pi
+
+                withDomain audio (fun () ->
+                    let t = declareReg "t" (UInt 1) 0UL
+                    po ==> t
+                    t ==> o))
+
+        Expect.throwsC
+            (fun () -> Sim(hidden.def, domainPeriods = [ "audio", 4 ]) |> ignore)
+            (fun ex ->
+                Expect.stringContains ex.Message "'pt_o'" "The backstop should name the flattened crossing signal")
 
 let tests =
     testList
@@ -426,4 +503,7 @@ let tests =
           crossingRefusedTest
           synchronizeTest
           crossingFeedTest
-          synchronizeWidthTest ]
+          synchronizeWidthTest
+          schedulerTest
+          regNoResetDelayTest
+          flatBackstopTest ]
