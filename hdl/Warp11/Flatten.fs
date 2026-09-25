@@ -22,6 +22,24 @@ let rec private flattenUnchecked (m: ModuleDef) : ModuleDef =
               let child = flattenUnchecked inst.child
               let prefix = inst.instName
 
+              // What clocks a child declaration once the hierarchy is gone:
+              // its own tag, or the domain the instance was created in.
+              let effectiveDomain n =
+                  match child.declDomains |> List.tryFind (fun (dn, _) -> dn = n) with
+                  | Some (_, d) -> d
+                  | None -> inst.domain
+
+              let declDomains =
+                  [ for d in child.decls do
+                        match d with
+                        | Reg (n, _, _)
+                        | Memory (n, _, _, _, _) ->
+                            let dom = effectiveDomain n
+
+                            if dom <> m.domain.domainName then
+                                yield $"{prefix}_{n}", dom
+                        | _ -> () ]
+
               let decls =
                   [ for d in child.decls do
                         match d with
@@ -48,12 +66,15 @@ let rec private flattenUnchecked (m: ModuleDef) : ModuleDef =
                             // which.
                             Assert(renameRefs prefix cond, $"{prefix}: {message}") ]
 
-              yield decls, stmts ]
+              yield decls, stmts, declDomains ]
 
     { m with
-        decls = m.decls @ List.collect fst inlined
-        stmts = m.stmts @ List.collect snd inlined
-        instances = [] }
+        decls = m.decls @ List.collect (fun (d, _, _) -> d) inlined
+        stmts = m.stmts @ List.collect (fun (_, s, _) -> s) inlined
+        instances = []
+        // `foreignDomains` is already transitive — an instance registers every
+        // domain its child carries — so only the per-decl tags need merging.
+        declDomains = m.declDomains @ List.collect (fun (_, _, dd) -> dd) inlined }
 
 let private declaredName =
     function

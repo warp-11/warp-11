@@ -602,7 +602,10 @@ let private readModule (known: Map<string, ModuleDef>) (header: string) (body: L
             match Map.tryFind childName known with
             | None -> fail $"instance '{i}' is of '{childName}', which this circuit has not defined yet"
             | Some child ->
-                instances.Add { instName = i; child = child }
+                instances.Add
+                    { instName = i
+                      child = child
+                      domain = defaultDomain.domainName }
 
                 // Our IR connects an instance by name: the parent declares a
                 // wire `{inst}_{port}`, and that *is* the port. A file we wrote
@@ -855,10 +858,16 @@ let private readModule (known: Map<string, ModuleDef>) (header: string) (body: L
       // matter to the emitter, and reading them at the top is kinder.
       stmts = hoistStatements @ bodyStatements
       instances = List.ofSeq instances
-      clock =
-        { clockPort = Option.defaultValue "clk" clockPort
-          resetPort = Option.defaultValue "rst" resetPort
-          resetActiveLow = activeLow }
+      domain =
+        { defaultDomain with
+            clock =
+              { clockPort = Option.defaultValue "clk" clockPort
+                resetPort = Option.defaultValue "rst" resetPort
+                resetActiveLow = activeLow } }
+      // FIRRTL import is single-clock until the differential's FIRRTL leg
+      // learns domains (notes/CLOCK_DOMAINS.md increment 5).
+      foreignDomains = []
+      declDomains = []
       streamReadies = []
       probes = []
       stateMachines = [] }

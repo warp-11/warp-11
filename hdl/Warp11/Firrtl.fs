@@ -508,6 +508,13 @@ let internal emitModule (isPublic: bool) (m: ModuleDef) =
 /// The version line matters — the textual format changed `x <= y` to
 /// `connect x, y` at 3.0, and a reader picks its parser from this line.
 let emitFirrtl (m: ModuleDef) =
+    // FIRRTL has explicit clocks, so this is expressible — it lands with the
+    // differential's multi-clock leg (notes/CLOCK_DOMAINS.md increment 5).
+    for c in allModules m |> List.distinctBy (fun c -> c.name) do
+        match c.foreignDomains with
+        | [] -> ()
+        | fd :: _ -> fail $"'{c.name}' uses clock domain '{fd.domainName}' — multi-domain FIRRTL export is not built yet"
+
     let modules =
         allModules m
         |> List.distinctBy (fun c -> c.name)

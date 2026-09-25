@@ -51,7 +51,9 @@ let private bare name =
       decls = []
       stmts = []
       instances = []
-      clock = defaultClock
+      domain = defaultDomain
+      foreignDomains = []
+      declDomains = []
       streamReadies = []
       probes = []
       stateMachines = [] }
@@ -75,7 +77,10 @@ let private collisionParent instanceName =
             [ Assign ("gc_sig", Add (Ref ("i", UInt 8), Lit (100UL, UInt 8)))
               Assign ($"{instanceName}_i", Ref ("i", UInt 8))
               Assign ("o", Add (Ref ($"{instanceName}_o", UInt 8), Ref ("gc_sig", UInt 8))) ]
-        instances = [ { instName = instanceName; child = grandchild } ] }
+        instances =
+            [ { instName = instanceName
+                child = grandchild
+                domain = defaultDomain.domainName } ] }
 
 let private structuralLines (verilog: string) =
     verilog.Split '\n'
@@ -155,6 +160,106 @@ circuit T :
 
         [ dynamicShift; reduction; variableDivision ]
         |> List.iter (fun text -> FirrtlImport.importFirrtl text |> emitDesign |> ignore)
+
+// --- Clock domains (notes/CLOCK_DOMAINS.md increment 2) -------------------
+
+let private audio = clockDomain "audio"
+
+let private twoDomainToy () =
+    defModule
+        "TwoDomainToy"
+        (fun p -> p.inPort "step" 8, p.outPort "count" 8, p.outPort "acount" 8)
+        (fun (step, count, acount) ->
+            let c = declareReg "c" (UInt 8) 0UL
+            c + lit 1UL 8 ==> c
+            c ==> count
+
+            withDomain audio (fun () ->
+                let a = declareReg "a" (UInt 8) 0UL
+                a + step ==> a
+                a ==> acount))
+
+let private withDomainTest =
+    testCase "withDomain emits a hand-written two-clock module" <| fun _ ->
+        let expected =
+            String.concat
+                "\n"
+                [ "module TwoDomainToy (input clk, input rst, input audio_clk, input audio_rst, input [7:0] step, output [7:0] count, output [7:0] acount);"
+                  "    reg [7:0] c;"
+                  "    reg [7:0] a;"
+                  "    assign count = c;"
+                  "    assign acount = a;"
+                  "    always @(posedge clk) begin"
+                  "        if (rst) begin"
+                  "            c <= 8'd0;"
+                  "        end else begin"
+                  "            c <= (c + 8'd1);"
+                  "        end"
+                  "    end"
+                  "    always @(posedge audio_clk) begin"
+                  "        if (audio_rst) begin"
+                  "            a <= 8'd0;"
+                  "        end else begin"
+                  "            a <= (a + step);"
+                  "        end"
+                  "    end"
+                  "endmodule" ]
+
+        Expect.equal (emitDesign (twoDomainToy ()).def) expected "The audio register should live in its own always block"
+
+let private pinnedModuleTest =
+    testCase "a module declared in a domain keeps its clock wherever instantiated" <| fun _ ->
+        let audioTick =
+            defModuleIn audio "AudioTick" (fun p -> p.outPort "tick" 8) (fun tick ->
+                let t = declareReg "t" (UInt 8) 0UL
+                t + lit 1UL 8 ==> t
+                t ==> tick)
+
+        let parent =
+            defModule "PinnedParent" (fun p -> p.outPort "o" 8) (fun o ->
+                let tick = instanceNamed "atick" audioTick
+                tick ==> o)
+
+        let verilog = emitDesign parent.def
+        Expect.stringContains verilog "module AudioTick (input audio_clk, input audio_rst," "The pinned module's own pair should be its domain's spelling"
+
+        Expect.stringContains
+            verilog
+            "AudioTick atick (.audio_clk(audio_clk), .audio_rst(audio_rst)"
+            "The parent should wire the pinned instance from its conjured audio pair"
+
+let private ambientInstanceTest =
+    testCase "the ambient domain clocks an instance created inside withDomain" <| fun _ ->
+        let plainTick =
+            defModule "PlainTick" (fun p -> p.outPort "tick" 8) (fun tick ->
+                let t = declareReg "t" (UInt 8) 0UL
+                t + lit 1UL 8 ==> t
+                t ==> tick)
+
+        let parent =
+            defModule "AmbientParent" (fun p -> p.outPort "o" 8) (fun o ->
+                withDomain audio (fun () ->
+                    let tick = instanceNamed "atick" plainTick
+                    tick ==> o))
+
+        Expect.stringContains
+            (emitDesign parent.def)
+            "PlainTick atick (.clk(audio_clk), .rst(audio_rst)"
+            "A default-domain child created inside the block should be clocked by it — same as inline logic"
+
+let private domainRefusalsTest =
+    testCase "the Sim, the FIRRTL export and the default name refuse domains by name" <| fun _ ->
+        Expect.throwsC
+            (fun () -> Sim((twoDomainToy ()).def) |> ignore)
+            (fun ex -> Expect.stringContains ex.Message "one clock today" "The Sim should refuse a two-domain design until increment 4")
+
+        Expect.throwsC
+            (fun () -> Firrtl.emitFirrtl (twoDomainToy ()).def |> ignore)
+            (fun ex -> Expect.stringContains ex.Message "audio" "The FIRRTL export should name the domain it cannot express yet")
+
+        Expect.throwsC
+            (fun () -> clockDomain "default" |> ignore)
+            (fun ex -> Expect.stringContains ex.Message "already in" "The default domain is not declarable")
 
 let tests =
     testList
@@ -238,4 +343,8 @@ let tests =
           supportedFirrtlTest
           flattenCollisionTest
           fixedLayerTest
-          multiplierMemoizationTest ]
+          multiplierMemoizationTest
+          withDomainTest
+          pinnedModuleTest
+          ambientInstanceTest
+          domainRefusalsTest ]

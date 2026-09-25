@@ -57,6 +57,17 @@ type Handle = { Slot: int; Width: int }
 type Sim(design: ModuleDef, ?checkAsserts: bool) =
     let m = flatten design
 
+    // The Sim advances everything on one clock; running a second domain's
+    // registers on it would be quietly wrong rather than unsupported.
+    do
+        match m.foreignDomains with
+        | [] -> ()
+        | fds ->
+            let names = fds |> List.map (fun fd -> $"'{fd.domainName}'") |> String.concat ", "
+
+            failwith
+                $"'{design.name}' uses clock domain(s) {names}, and the Sim runs one clock today — the time-based scheduler is notes/CLOCK_DOMAINS.md increment 4"
+
     // Off unless asked. An assertion costs what its expression costs, on every
     // tick — small against a real design's settle and dominant against a toy —
     // so the choice is made at construction and "off" means the claims are

@@ -380,10 +380,37 @@ let internal emitVerilogFor (target: Target) m =
     let rstInternal =
         if m.clock.resetActiveLow then m.clock.resetPort + "_pos" else m.clock.resetPort
 
+    // A foreign domain's active-high reset net — the same `_pos` arrangement
+    // as the module's own.
+    let foreignRst (fd: ClockDomain) =
+        if fd.clock.resetActiveLow then fd.clock.resetPort + "_pos" else fd.clock.resetPort
+
+    // The clock and active-high reset nets a domain's logic runs on inside
+    // this module: the module's own pair, or a foreign domain's conjured pins.
+    let netsFor (domainName: string) =
+        if domainName = m.domain.domainName then
+            clk, rstInternal
+        else
+            match m.foreignDomains |> List.tryFind (fun fd -> fd.domainName = domainName) with
+            | Some fd -> fd.clock.clockPort, foreignRst fd
+            | None -> failwith $"'{m.name}': logic clocked in '{domainName}', which the module does not carry"
+
+    let declDomain = dict m.declDomains
+
+    let domainOf n =
+        match declDomain.TryGetValue n with
+        | true, d -> d
+        | _ -> m.domain.domainName
+
     let ports =
         [ if needsClk m then
               yield $"input {clk}"
               yield $"input {m.clock.resetPort}"
+          // The foreign pairs are conjured exactly as `clk`/`rst` are, right
+          // after them — the boundary a hand-written two-clock module has.
+          for fd in m.foreignDomains do
+              yield $"input {fd.clock.clockPort}"
+              yield $"input {fd.clock.resetPort}"
           for d in m.decls do
               match d with
               | Input (n, t) -> yield $"input {range t.Width}{n}"
@@ -442,6 +469,9 @@ let internal emitVerilogFor (target: Target) m =
     let bodyDecls =
         [ if needsClk m && m.clock.resetActiveLow then
               yield $"    wire {rstInternal} = ~{m.clock.resetPort};"
+          for fd in m.foreignDomains do
+              if fd.clock.resetActiveLow then
+                  yield $"    wire {foreignRst fd} = ~{fd.clock.resetPort};"
           for d in m.decls do
               match d with
               | Wire (n, t) -> yield $"    wire {range t.Width}{n};"
@@ -507,22 +537,27 @@ let internal emitVerilogFor (target: Target) m =
               | MemWrite _
               | Assert _ -> () ]
 
-    let resets =
+    // One always block per domain with sequential logic here: the module's own
+    // first — byte-for-byte what a single-domain module always emitted — then
+    // each foreign domain in first-use order.
+    let resetsFor g =
         [ for d in m.decls do
               match d with
               // A register with no reset contributes no line here, which is
               // exactly how it comes to hold its value through reset — and how
               // synthesis sees a flop with no reset at all.
-              | Reg (n, t, Some init) -> yield $"            {n} <= %d{t.Width}'d%d{init};"
+              | Reg (n, t, Some init) when domainOf n = g -> yield $"            {n} <= %d{t.Width}'d%d{init};"
               | _ -> () ]
 
     // The mem array carries no reset, mirroring BRAM; read-port regs are ordinary
-    // regs and do reset.
-    let sequential =
+    // regs and do reset. A write executes on its mem's clock, so it lands in
+    // the mem's domain's block.
+    let sequentialFor g =
         [ for stmt in stmts do
               match stmt with
-              | Assign (t, v) when isReg t -> yield $"            {t} <= {emit v};"
+              | Assign (t, v) when isReg t && domainOf t = g -> yield $"            {t} <= {emit v};"
               | Assign _ -> ()
+              | MemWrite (mem, _, _, _, _) when domainOf mem <> g -> ()
               | MemWrite (mem, addr, data, enable, None) ->
                   yield $"            if ({emit enable}) {mem}[{emit addr}] <= {emit data};"
               // A masked write is the byte-enable template: one guarded
@@ -547,27 +582,40 @@ let internal emitVerilogFor (target: Target) m =
               // translate_off block below, not in the design's always block.
               | Assert _ -> () ]
 
-    let always =
+    let alwaysFor (g, gclk, grst) =
+        let resets = resetsFor g
+        let sequential = sequentialFor g
+
+        let hasMemWrite =
+            stmts
+            |> List.exists (function
+                | MemWrite (mem, _, _, _, _) -> domainOf mem = g
+                | _ -> false)
+
         if List.isEmpty sequential && List.isEmpty resets then
             []
-        elif List.isEmpty resets
-             && not (stmts |> List.exists (function MemWrite _ -> true | _ -> false)) then
+        elif List.isEmpty resets && not hasMemWrite then
             // Nothing to reset, so no reset branch — and then the module's flops
             // genuinely have no reset, which is the point of asking for one.
             // Only reachable when every register here is `regNoReset` and there
             // are no memory writes, since a write is gated on reset by living
             // in the else branch.
-            [ yield $"    always @(posedge {clk}) begin"
+            [ yield $"    always @(posedge {gclk}) begin"
               yield! (sequential |> List.map (fun l -> l.Substring 4))
               yield "    end" ]
         else
-            [ yield $"    always @(posedge {clk}) begin"
-              yield $"        if ({rstInternal}) begin"
+            [ yield $"    always @(posedge {gclk}) begin"
+              yield $"        if ({grst}) begin"
               yield! resets
               yield "        end else begin"
               yield! sequential
               yield "        end"
               yield "    end" ]
+
+    let always =
+        [ yield! alwaysFor (m.domain.domainName, clk, rstInternal)
+          for fd in m.foreignDomains do
+              yield! alwaysFor (fd.domainName, fd.clock.clockPort, foreignRst fd) ]
 
     // Assertions live in their own always block inside a translate_off region:
     // synthesis skips the region, simulation does not. Held off during reset,
@@ -597,13 +645,28 @@ let internal emitVerilogFor (target: Target) m =
         [ for inst in m.instances do
               let conns =
                   [ if needsClk inst.child then
-                        yield $".{inst.child.clock.clockPort}({clk})"
+                        // The instance's main pair comes from the domain it was
+                        // created in — the ambient one, or the child's own where
+                        // the child is pinned.
+                        let instClk, instRst = netsFor inst.domain
+                        yield $".{inst.child.clock.clockPort}({instClk})"
                         // The parent's internal reset is active-high; invert it
                         // when the child's port is itself active-low.
                         let childRst =
-                            if inst.child.clock.resetActiveLow then $"~{rstInternal}" else rstInternal
+                            if inst.child.clock.resetActiveLow then $"~{instRst}" else instRst
 
                         yield $".{inst.child.clock.resetPort}({childRst})"
+
+                        // Whatever other domains the child carries are wired
+                        // through by name — the parent conjured the same pins.
+                        for fd in inst.child.foreignDomains do
+                            let fdClk, fdRst = netsFor fd.domainName
+                            yield $".{fd.clock.clockPort}({fdClk})"
+
+                            let fdRstConn =
+                                if fd.clock.resetActiveLow then $"~{fdRst}" else fdRst
+
+                            yield $".{fd.clock.resetPort}({fdRstConn})"
                     for d in inst.child.decls do
                         match d with
                         | Input (n, _)

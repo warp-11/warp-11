@@ -766,6 +766,22 @@ let axiClock =
       resetPort = "s_axi_aresetn"
       resetActiveLow = true }
 
+/// A clock domain: which clock a module's logic runs on. **The name is the
+/// whole identity** — a module spelling its pins `s_axi_aclk` (`axiClock`) and
+/// one spelling them `clk` are in the same domain when they name the same one,
+/// so anything judging "same domain" compares `domainName` and never the spec.
+/// The `ClockSpec` here is only how the carrying module names that domain's
+/// pins. No frequency: a domain is a declared need, and the mapping that binds
+/// a clock source to it is where hertz live (notes/CLOCK_DOMAINS.md).
+type ClockDomain =
+    { domainName: string
+      clock: ClockSpec }
+
+/// The domain every module is in unless it declares otherwise.
+let defaultDomain =
+    { domainName = "default"
+      clock = defaultClock }
+
 /// One elaborated module — the output of the builder and the input to
 /// everything else. The emitter, the simulator, the FIRRTL export and the
 /// debugger all read this and only this.
@@ -778,7 +794,18 @@ type ModuleDef =
       decls: Decl list
       stmts: Stmt list
       instances: Instance list
-      clock: ClockSpec
+      domain: ClockDomain
+      /// Non-default domains this module's boundary carries: those its own
+      /// registers or memories are clocked in via `withDomain`, and every
+      /// domain an instance (transitively) needs wired through. The emitter
+      /// conjures a clock/reset input pair per entry, in this order — spelled
+      /// by each entry's own `ClockSpec`, exactly as `clk`/`rst` are conjured
+      /// from `domain` today.
+      foreignDomains: ClockDomain list
+      /// Which domain each register or memory is clocked in, for those NOT in
+      /// the module's own domain: (declaration name, domain name), recorded at
+      /// declaration inside `withDomain`. Absence means the module's own.
+      declDomains: (string * string) list
       /// Ready nets of streams created in this module, with how many times each
       /// was driven — a stream has exactly one consumer, and after If-folding the
       /// final stmts hold one assign per target, so the raw drive count is
@@ -795,10 +822,24 @@ type ModuleDef =
       /// signal table would otherwise show 1.
       stateMachines: (string * (uint64 * string) list) list }
 
+    /// How this module spells its domain's clock pair — the emitters and the
+    /// testbench read the spelling far more often than the identity, so the
+    /// spec keeps its old address.
+    member m.clock = m.domain.clock
+
 /// A child module and the name it stands under. Its ports become
 /// `{instName}_{port}` in the *parent's* namespace, which is why an instance
 /// name collides with an ordinary declaration.
-and Instance = { instName: string; child: ModuleDef }
+///
+/// `domain` is which domain this instance's clock pair is wired from — the
+/// ambient domain where the instance was created, or the child's own where the
+/// child declared one (a pinned module keeps its clock wherever it is
+/// instantiated). Recorded here because the ambient domain is creation-time
+/// knowledge the instance list cannot otherwise recover.
+and Instance =
+    { instName: string
+      child: ModuleDef
+      domain: string }
 
 /// How a module names its ports. Four fields where two would do, because the
 /// width-only spelling is what almost every port wants and `UInt` at 170 sites

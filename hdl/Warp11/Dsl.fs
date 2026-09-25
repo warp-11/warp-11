@@ -143,9 +143,26 @@ type internal StreamTracker() =
 /// makes a module body ordinary F# code: `mul8 a b` is a call, not a call
 /// with a context argument. Designs rarely name this type; they get it from
 /// `design`, `moduleDef` or `defModule` and never see it again.
-type Builder(name: string, ?clockSpec: ClockSpec) =
+type Builder(name: string, ?clockSpec: ClockSpec, ?domain: ClockDomain) =
     do requireNotVerilogKeyword name "a module"
     let clock = defaultArg clockSpec defaultClock
+    // The module's own domain: the default unless `defModuleIn` declared one,
+    // in which case the domain's spelling is the module's clock pair.
+    let ownDomain =
+        match domain with
+        | Some d -> d
+        | None -> { defaultDomain with clock = clock }
+    // The current domain while a `withDomain` block runs — None means the
+    // module's own. This is the ambient state decision 4 accepted; it lives on
+    // the builder, which is already the one thread-local ambient, so no second
+    // carrier appears.
+    let mutable currentDomain: ClockDomain option = None
+    // Non-default domains this module touches, in first-use order — its own
+    // `withDomain` registers and every domain an instance needs wired through.
+    let foreignDomains = ResizeArray<ClockDomain>()
+    // (decl name, domain name) for registers and memories clocked outside the
+    // module's own domain.
+    let declDomains = ResizeArray<string * string>()
     let names = NameCounter()
     let declColl = DeclCollector(name)
     let streams = StreamTracker()
@@ -199,6 +216,38 @@ type Builder(name: string, ?clockSpec: ClockSpec) =
         if boundarySealed then
             failwith $"'{name}': {kind} declared in the body — ports are declared in the io factory"
 
+    // A non-default domain this module must carry: record it once, and refuse
+    // one name arriving with two spellings — everything downstream wires pins
+    // by the spelling, so a disagreement would silently split the domain.
+    member private _.RegisterForeign(d: ClockDomain) =
+        if d.domainName <> ownDomain.domainName then
+            match foreignDomains |> Seq.tryFind (fun x -> x.domainName = d.domainName) with
+            | Some existing ->
+                if existing.clock <> d.clock then
+                    failwith
+                        $"'{name}': domain '{d.domainName}' arrived with two different clock spellings — one `clockDomain` value per domain"
+            | None -> foreignDomains.Add d
+
+    // Called at every register and memory declaration: while a `withDomain`
+    // block runs, the declaration is clocked by the current domain.
+    member private _.TagDomain(n: string) =
+        match currentDomain with
+        | Some d when d.domainName <> ownDomain.domainName -> declDomains.Add(n, d.domainName)
+        | _ -> ()
+
+    /// Run the body with `d` as the current domain — see `withDomain`.
+    member this.WithDomain(d: ClockDomain, body: unit -> unit) =
+        this.RegisterForeign d
+        let saved = currentDomain
+
+        currentDomain <-
+            if d.domainName = ownDomain.domainName then None else Some d
+
+        try
+            body ()
+        finally
+            currentDomain <- saved
+
     /// Declare an input port.
     member this.Input(n, t: GroundType) =
         this.RequirePortsOpen "an input port"
@@ -210,14 +259,19 @@ type Builder(name: string, ?clockSpec: ClockSpec) =
         declColl.Output(n, t)
     /// Declare a wire.
     member this.Wire(n, t: GroundType) = declColl.Wire(n, t)
+
     /// Declare a register and the value it takes under reset.
-    member this.Reg(n, t: GroundType, init: uint64) = declColl.Reg(n, t, init)
+    member this.Reg(n, t: GroundType, init: uint64) =
+        this.TagDomain n
+        declColl.Reg(n, t, init)
 
     /// A register with no reset: it holds its value while reset is asserted.
     /// Not the default, and should not be — a state machine that survives reset
     /// is a bug. This is for the data path, where the reset net buys nothing and
     /// costs fanout, routing and SRL inference.
-    member this.RegNoReset(n, t: GroundType) = declColl.RegNoReset(n, t)
+    member this.RegNoReset(n, t: GroundType) =
+        this.TagDomain n
+        declColl.RegNoReset(n, t)
 
     // A bare width still means unsigned, so every existing declaration — and the
     // `moduleDef` API's `m.Input("a", 8)` — reads exactly as it did.
@@ -228,7 +282,9 @@ type Builder(name: string, ?clockSpec: ClockSpec) =
     /// A wire at a bare width.
     member this.Wire(n, w: int) = declColl.Wire(n, w)
     /// A register at a bare width.
-    member this.Reg(n, w: int, init) = declColl.Reg(n, w, init)
+    member this.Reg(n, w: int, init) =
+        this.TagDomain n
+        declColl.Reg(n, w, init)
 
     /// The value `t` would currently read as: innermost If scope first, then base.
     member private _.CurrentValue t =
@@ -394,6 +450,7 @@ type Builder(name: string, ?clockSpec: ClockSpec) =
     /// silicon, and with it which reads are legal — the combinational read is only
     /// allowed on distributed storage.
     member this.Memory(n, addrWidth, memWidth, init, style, readOnly) : Mem =
+        this.TagDomain n
         this.Declare(Memory(n, addrWidth, memWidth, init, style), n, UInt memWidth) |> ignore
 
         { memName = n
@@ -454,7 +511,26 @@ type Builder(name: string, ?clockSpec: ClockSpec) =
     /// module does.
     member this.Instance<'io>(instName: string, tm: TypedModule<'io>) : 'io =
         requireNotVerilogKeyword instName "an instance"
-        instances.Add { instName = instName; child = tm.def }
+
+        // A child that declared its own domain is pinned — it keeps its clock
+        // wherever it is instantiated. Anything else is clocked by the ambient
+        // domain, exactly as inline logic is, so a stdlib entry means the same
+        // thing whichever it happens to be.
+        let instDomain =
+            if tm.def.domain.domainName <> defaultDomain.domainName then
+                tm.def.domain
+            else
+                defaultArg currentDomain ownDomain
+
+        this.RegisterForeign instDomain
+
+        for fd in tm.def.foreignDomains do
+            this.RegisterForeign fd
+
+        instances.Add
+            { instName = instName
+              child = tm.def
+              domain = instDomain.domainName }
 
         let staging = $"a staging wire for instance '{instName}'"
 
@@ -622,7 +698,18 @@ type Builder(name: string, ?clockSpec: ClockSpec) =
             @ [ for cond, message in asserts -> Assert(cond, message) ]
             @ writeExclusion
           instances = List.ofSeq instances
-          clock = clock
+          domain = ownDomain
+          foreignDomains =
+            // A conjured pin landing on a declared name would emit a port and
+            // a wire under one name — invalid Verilog nothing else gates.
+            [ for fd in foreignDomains do
+                  for pin in [ fd.clock.clockPort; fd.clock.resetPort ] do
+                      if declColl.DeclTypes.ContainsKey pin then
+                          failwith
+                              $"'{name}': '{pin}' is declared in the module and is also domain '{fd.domainName}''s conjured pin — rename one"
+
+                  yield fd ]
+          declDomains = List.ofSeq declDomains
           streamReadies =
             [ for n in streams.Readies ->
                   n,
@@ -744,6 +831,38 @@ let defModule name (io: Ports -> 'io) (body: 'io -> unit) : TypedModule<'io> = d
 /// emitter and testbench call the pins; the Sim never models them.
 let defModuleClocked (spec: ClockSpec) name (io: Ports -> 'io) (body: 'io -> unit) : TypedModule<'io> =
     defModuleWith (Builder(name, spec)) io body
+
+/// A clock domain a design may put logic in. The name is the whole identity;
+/// the pins it conjures are `{name}_clk` / `{name}_rst`, active-high. No
+/// frequency lives here — a domain is a declared need, and the mapping that
+/// binds a clock source to it is where hertz come from
+/// (notes/CLOCK_DOMAINS.md).
+let clockDomain (name: string) : ClockDomain =
+    if name = defaultDomain.domainName then
+        failwith $"'{name}' is the domain every module is already in — declare a domain only for another clock"
+
+    if name = "" || not (System.Char.IsAsciiLetter name[0]) || name |> Seq.exists (fun c -> not (System.Char.IsAsciiLetterOrDigit c || c = '_')) then
+        failwith $"'{name}' cannot name a clock domain — its pins become `{name}_clk`/`{name}_rst`, so it must be a plain identifier"
+
+    { domainName = name
+      clock =
+        { clockPort = name + "_clk"
+          resetPort = name + "_rst"
+          resetActiveLow = false } }
+
+/// Everything created while the body runs — registers, memories, instances,
+/// whatever a library call makes of them — is clocked by `d` instead of the
+/// module's own domain. The module's boundary grows `d`'s clock/reset input
+/// pair, conjured at emission exactly as `clk`/`rst` are; whoever instantiates
+/// the module wires them through, and the top that binds the domain to a clock
+/// source drives them.
+let withDomain (d: ClockDomain) (body: unit -> unit) = (current ()).WithDomain(d, body)
+
+/// `defModule`, with the module itself declared in `d`: its own clock pair is
+/// `d`'s spelling, and every instance of it is clocked by `d` wherever it is
+/// created — a pinned module, decision 3 of notes/CLOCK_DOMAINS.md.
+let defModuleIn (d: ClockDomain) name (io: Ports -> 'io) (body: 'io -> unit) : TypedModule<'io> =
+    defModuleWith (Builder(name, domain = d)) io body
 
 // The public seams, taking a type. Public because the declaration functions
 // below are `inline` — an inline body has to reach what it calls — while the
