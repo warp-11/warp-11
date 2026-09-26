@@ -11,7 +11,7 @@ let tests =
               for entry in Registry.designs do
                   Expect.isNotEmpty (entry.label.Trim()) "Catalog labels must not be blank"
                   let design = entry.build ()
-                  let sim = Sim design
+                  let sim = Sim(design, domainPeriods = entry.domainPeriods)
                   sim.Tick()
                   let inventory = Inventory.ofDesign design
                   Expect.equal inventory.topName design.name $"Catalog entry '{entry.label}' has the wrong top name"

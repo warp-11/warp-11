@@ -243,6 +243,13 @@ type Builder(name: string, ?clockSpec: ClockSpec, ?domain: ClockDomain) =
     /// purpose — the CDC stdlib entries are the only constructs that cross.
     member internal _.MarkCrossing(regName: string) = crossings.Add regName
 
+    /// The domain code is elaborating in right now — the `withDomain` block's,
+    /// or the module's own. What a CDC entry that must synchronise *into the
+    /// caller's side* (an async FIFO's write-side pointer sync) names as its
+    /// target, since the caller has no handle for its own ambient.
+    member internal _.AmbientDomain =
+        defaultArg currentDomain ownDomain
+
     /// Run the body with `d` as the current domain — see `withDomain`.
     member this.WithDomain(d: ClockDomain, body: unit -> unit) =
         this.RegisterForeign d
@@ -694,7 +701,10 @@ type Builder(name: string, ?clockSpec: ClockSpec, ?domain: ClockDomain) =
                       yield
                           Assert(
                               List.reduce (fun a b -> And(a, b)) pairs,
-                              $"two writes to '{memName}' fired in the same cycle — they fold to one priority-muxed write site, so one of them did not land"
+                              // Plain ASCII on purpose: this string reaches the
+                              // emitted Verilog and the FIRRTL export, and
+                              // FIRRTL strings are 7-bit ASCII.
+                              $"two writes to '{memName}' fired in the same cycle - they fold to one priority-muxed write site, so one of them did not land"
                           ) ]
 
         { name = name

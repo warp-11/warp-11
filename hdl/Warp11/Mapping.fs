@@ -38,6 +38,7 @@ let private roleText (r: DeviceRole) =
     | I2sSharedBus -> "I2sSharedBus"
     | HostUart -> "HostUart"
     | ClockIn -> "ClockIn"
+    | AudioClockIn -> "AudioClockIn"
     | Leds -> "Leds"
 
 let private readRole (text: string) : Result<DeviceRole, string> =
@@ -46,6 +47,7 @@ let private readRole (text: string) : Result<DeviceRole, string> =
     | "I2sSharedBus" -> Ok I2sSharedBus
     | "HostUart" -> Ok HostUart
     | "ClockIn" -> Ok ClockIn
+    | "AudioClockIn" -> Ok AudioClockIn
     | "Leds" -> Ok Leds
     | other -> Error $"'role': no device role called '{other}'"
 
@@ -86,6 +88,7 @@ let private boardNode (b: Board) : JsonObject =
 
     o["clock"] <- clock
     o["fabricHz"] <- num b.fabricHz
+    b.audioClockHz |> Option.iter (fun hz -> o["audioClockHz"] <- num hz)
 
     b.hostMemory
     |> Option.iter (fun m ->
@@ -280,6 +283,11 @@ let private readBoard (o: JsonNode) : Result<Board, string> =
                                                 >>= fun clock ->
                                                     getInt o "fabricHz"
                                                     >>= fun fabricHz ->
+                                                        // Optional: board files written before the audio clock existed still load.
+                                                        let audioClockHz =
+                                                            optional o "audioClockHz"
+                                                            |> Option.bind (fun v -> asInt "audioClockHz" v |> Result.toOption)
+
                                                         (match optional o "hostMemory" with
                                                          | None -> Ok None
                                                          | Some hm ->
@@ -362,6 +370,7 @@ let private readBoard (o: JsonNode) : Result<Board, string> =
                                                                                           tool = tool
                                                                                           clock = clock
                                                                                           fabricHz = fabricHz
+                                                                                          audioClockHz = audioClockHz
                                                                                           hostMemory = hostMemory
                                                                                           host = host
                                                                                           loading = loading
@@ -664,6 +673,7 @@ let showBoard (b: Board) : string =
         | I2sSharedBus -> "I2sSharedBus"
         | HostUart -> "HostUart"
         | ClockIn -> "ClockIn"
+        | AudioClockIn -> "AudioClockIn"
         | Leds -> "Leds"
 
     let pinValue (p: Pin) =
@@ -695,6 +705,7 @@ let showBoard (b: Board) : string =
           $"      tool = {tool}"
           $"      clock = {clock}"
           $"      fabricHz = %d{b.fabricHz}"
+          (let audio = showOption string b.audioClockHz in $"      audioClockHz = {audio}")
           $"      hostMemory = {memory}"
           $"      host = {host}"
           $"      loading = {loading}"

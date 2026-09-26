@@ -210,7 +210,7 @@ let private publishMilliseconds = 30.0
 /// `ownThread = false` leaves the run loop unstarted, and the host drives
 /// `Pump` itself. That is not a preference — WebAssembly has one thread and
 /// `Thread.Start` throws there, so a browser host has nothing else to offer.
-type DebugSession(design: ModuleDef, ?ownThread: bool, ?devices: (Sim -> ISimDevice) list) =
+type DebugSession(design: ModuleDef, ?ownThread: bool, ?devices: (Sim -> ISimDevice) list, ?domainPeriods: (string * int) list) =
     let ownThread = defaultArg ownThread true
 
 
@@ -218,7 +218,7 @@ type DebugSession(design: ModuleDef, ?ownThread: bool, ?devices: (Sim -> ISimDev
     // are checked here even though the Sim's own default is off. A violation
     // stops the run exactly like a breakpoint, because that is what it is —
     // one the design carries with it.
-    let sim = Sim(design, checkAsserts = true)
+    let sim = Sim(design, checkAsserts = true, domainPeriods = defaultArg domainPeriods [])
 
     /// Anything attached to the design's pins, driven around every cycle this
     /// session runs. A file feeding an I2S link, a model answering a bus — the

@@ -3073,3 +3073,91 @@ let holdChain =
             held ==> chained
             held ==> first
             chained ==> second)
+
+/// A one-cycle pulse crossing into the audio domain — `synchronizePulse`'s
+/// toy. Every pulse far enough apart arrives exactly once; the living check
+/// walks that property, and the differential holds the toggle-and-detect
+/// machinery to the emitted Verilog per edge.
+let pulseCrossing =
+    defModule
+        "PulseCrossing"
+        (fun p -> (p.inPort "pulse" 1, p.outPort "pulses_seen" 8))
+        (fun (pulse, seen) ->
+            let crossed = synchronizePulse audioDomain pulse
+
+            withDomain audioDomain (fun () ->
+                let count = reg "pulseCount" 8
+                If crossed (fun () -> count + lit 1UL 8 ==> count)
+                count ==> seen))
+
+/// A Gray counter crossed whole — `grayCounter` + `synchronizeGray`'s toy.
+/// The audio side registers the synchronised Gray value; the defining
+/// property (one bit per step) is what makes that register's value always a
+/// count the writer actually passed through.
+let grayCrossing =
+    defModule
+        "GrayCrossing"
+        (fun p -> (p.inPort "advance" 1, p.outPort "gray_seen" 5))
+        (fun (advance, seen) ->
+            let walker = grayCounter "walker" 5 advance
+            let crossed = synchronizeGray audioDomain walker.gray
+
+            withDomain audioDomain (fun () ->
+                let held = reg "gray_held" 5
+                crossed ==> held
+                held ==> seen))
+
+/// A soft reset level carried into the audio domain — `synchronizeReset`'s
+/// toy. The audio counter clears while the synchronised level is high and
+/// counts otherwise, so the two-edge release alignment is visible in the
+/// count.
+let resetCrossing =
+    defModule
+        "ResetCrossing"
+        (fun p -> (p.inPort "soft_reset" 1, p.outPort "running_count" 8))
+        (fun (softReset, count) ->
+            let synced = synchronizeReset audioDomain softReset
+
+            withDomain audioDomain (fun () ->
+                let c = reg "cleared" 8
+
+                ifElse
+                    [ synced, (fun () -> lit 0UL 8 ==> c)
+                      otherwise, (fun () -> c + lit 1UL 8 ==> c) ]
+
+                c ==> count))
+
+/// A memory written on one clock and read on the other —
+/// `memReadPortAcross`'s toy, the dual-clock storage shape by itself. The
+/// read is only trustworthy for addresses the writer has finished with,
+/// which the stimulus respects and `asyncFifo` proves by construction.
+let crossDomainTable =
+    defModule
+        "CrossDomainTable"
+        (fun p -> (p.inPort "write_enable" 1, p.inPort "read_addr" 3, p.outPort "word" 8))
+        (fun (writeEnable, readAddr, word) ->
+            let lookup = distributedMem "lookup" 3 8
+            let writeAddr = reg "writeAddr" 3
+            let writeData = reg "writeData" 8
+
+            If writeEnable (fun () ->
+                writeAddr + lit 1UL 3 ==> writeAddr
+                writeData + lit 3UL 8 ==> writeData)
+
+            memWrite lookup writeAddr writeData writeEnable
+
+            withDomain audioDomain (fun () -> memReadPortAcross lookup readAddr ==> word))
+
+/// A stream crossing domains through `asyncFifo` — the CDC family assembled:
+/// Gray-pointer exchange, the marked dual-clock read, and the stream
+/// contract kept on both sides.
+let asyncFifoCrossing =
+    defModule
+        "AsyncFifoCrossing"
+        (fun p ->
+            (streamInputPorts p "in" (layout1 ("data", 8)),
+             streamOutputPorts p "out" (layout1 ("data", 8))))
+        (fun (inPorts, outPorts) ->
+            streamSource inPorts
+            |> asyncFifo audioDomain "cross" 8
+            |> streamSink outPorts)

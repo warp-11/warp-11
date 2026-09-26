@@ -16,6 +16,11 @@ let private exportableDesigns () =
     |> List.map (fun entry -> entry.build ())
     |> List.filter (fun design ->
         not (laneMasked design)
+        // Multi-domain designs export (the differential's third leg proves
+        // it) but do not import back: the reader is single-clock until
+        // something needs otherwise, so they sit outside the round-trip by
+        // name, like the lane-masked vector mems.
+        && List.isEmpty design.foreignDomains
         && allModules design
            |> List.forall (fun child ->
                child.decls
@@ -417,6 +422,60 @@ let private flatBackstopTest =
             (fun ex ->
                 Expect.stringContains ex.Message "'pt_o'" "The backstop should name the flattened crossing signal")
 
+let private audioDomainTopTest =
+    testCase "a design that never names a clock gets the audio domain from the board alone" <| fun _ ->
+        let gain =
+            BoardTop.design "AudioDomainProbe" (fun n ->
+                let input = n.streamIn ("in", pins2 ("left", signedInt 24) ("right", signedInt 24))
+                let out = n.streamOut ("out", pins2 ("left", signedInt 24) ("right", signedInt 24))
+                input, out)
+                (fun (input, out) -> input.stream |> out)
+
+        let osc = { pin = "F12"; standard = Some "LVCMOS33"; activeLow = false }
+        let plain = kv260At 100_000_000
+        let board = plain |> withAudioClock 12_288_000 osc
+
+        Expect.equal (BoardTop.boardRate plain BoardTop.nominalRate) 48828.125 "The fabric-derived rate stays what it was"
+        Expect.equal (BoardTop.boardRate board BoardTop.nominalRate) 48_000.0 "The oscillator makes the rate exact"
+
+        let t = BoardTop.boardTop board viaPins gain
+        let verilog = emitDesignFor t.target t.top
+
+        Expect.stringContains verilog "input audio_clk, input audio_rst" "The top should conjure the audio pair"
+        Expect.stringContains verilog "always @(posedge audio_clk)" "The link should run in the audio domain"
+        Expect.stringContains verilog "i2s_in_cross" "The input stream should cross through an asyncFifo"
+        Expect.stringContains verilog "i2s_out_cross" "The output stream should cross through an asyncFifo"
+
+        // The oscillator is the converters' master clock — 256×Fs by wire —
+        // so the top's boundary carries no fabric MCLK and the freed pin
+        // takes the oscillator in. The I2sMaster child keeps its own mclk
+        // port; it is simply unread.
+        let topHeader =
+            let fromTop = verilog.Substring(verilog.IndexOf $"module {t.top.name} ")
+            fromTop.Substring(0, fromTop.IndexOf ");")
+
+        Expect.isFalse (topHeader.Contains "mclk") "An audio-clocked top's boundary should carry no fabric MCLK"
+
+        Expect.isFalse
+            (board.connectors |> List.exists (fun c -> c.pins |> List.exists (fun (p, _) -> p = "mclk")))
+            "withAudioClock should retire the fabric MCLK pins from the connector"
+
+        // The crossing check passed at elaboration — the FIFOs are the only
+        // crossings — and the Sim runs the two clocks at their real ratio.
+        let sim = Sim(t.top, domainPeriods = [ "audio", 82 ])
+        for _ in 1 .. 20 do sim.Tick()
+        Expect.equal sim.TimeUnits 200L "The multi-domain top should tick"
+
+        // Same board, same design, no oscillator: byte-wise the old top.
+        let plainTop = BoardTop.boardTop plain viaPins gain
+        let plainVerilog = emitDesignFor plainTop.target plainTop.top
+        Expect.isFalse (plainVerilog.Contains "audio_clk") "Without the oscillator nothing changes"
+
+        // The board file carries the oscillator through JSON.
+        match Mapping.parseBoard (Mapping.writeBoard board) with
+        | Ok round -> Expect.equal round board "The board should round-trip through its JSON"
+        | Error e -> failtest $"board JSON round-trip failed: {e}"
+
 let tests =
     testList
         "FIRRTL and emitter"
@@ -510,4 +569,5 @@ let tests =
           synchronizeWidthTest
           schedulerTest
           regNoResetDelayTest
-          flatBackstopTest ]
+          flatBackstopTest
+          audioDomainTopTest ]

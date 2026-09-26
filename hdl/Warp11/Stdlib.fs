@@ -2016,3 +2016,208 @@ let synchronize (d: ClockDomain) (signal: Expr) : Expr =
 
     b.MarkCrossing metaName
     result
+
+/// A reset level made safe for domain `d`: the two-flop synchroniser applied
+/// to a reset, which under this IR's synchronous resets is the whole of a
+/// reset synchroniser — assertion and release both arrive aligned to `d`'s
+/// own edges, two of them late, so every register in the domain leaves reset
+/// on the same edge. This is what the generated top drives a non-default
+/// domain's conjured reset pin with.
+let synchronizeReset (d: ClockDomain) (reset: Expr) : Expr = synchronize d reset
+
+/// A Gray-coded multi-bit value from another domain: a two-flop synchroniser
+/// per bit, legal as one crossing because successive Gray values differ in
+/// exactly one bit — whichever edge the sample lands on, the result is the
+/// old value or the new one, never a blend. **Gray-coded (or quasi-static)
+/// values only**: on anything else the bits race independently and the
+/// blend is silent. `synchronize` holds ordinary signals to one bit for
+/// exactly that reason.
+let synchronizeGray (d: ClockDomain) (signal: Expr) : Expr =
+    let b = current ()
+    let w = width signal
+    let metaName = b.FreshName "gray_meta"
+    let outName = b.FreshName "gray_out"
+    let mutable result = signal
+
+    b.WithDomain(
+        d,
+        fun () ->
+            let meta = declareReg metaName (UInt w) 0UL
+            let out = declareReg outName (UInt w) 0UL
+            signal ==> meta
+            meta ==> out
+            result <- out
+    )
+
+    b.MarkCrossing metaName
+    result
+
+/// A one-cycle pulse carried into domain `d` as a one-cycle pulse there: the
+/// pulse flips a toggle in the sender's domain, the toggle level crosses
+/// through `synchronize`, and an edge detector in `d` turns each flip back
+/// into one pulse. Pulses must be at least two `d`-cycles apart to arrive
+/// distinct — closer than that is a rate mismatch, and the answer to one is
+/// an `asyncFifo`, not a faster pulse.
+let synchronizePulse (d: ClockDomain) (pulse: Expr) : Expr =
+    if width pulse <> 1 then
+        failwith $"synchronizePulse crosses a one-bit pulse, and this signal is %d{width pulse} wide"
+
+    let b = current ()
+    let toggle = declareReg (b.FreshName "pulse_toggle") (UInt 1) 0UL
+    If pulse (fun () -> bnot toggle ==> toggle)
+    let synced = synchronize d toggle
+    let mutable result = pulse
+
+    b.WithDomain(
+        d,
+        fun () ->
+            let prev = declareReg (b.FreshName "pulse_prev") (UInt 1) 0UL
+            synced ==> prev
+            result <- synced ^^^ prev
+    )
+
+    result
+
+/// What `grayCounter` hands back: the binary count for addressing, and the
+/// registered Gray form of the same count for crossing. The Gray output is a
+/// register on purpose — a combinational encode of the binary would glitch
+/// between its input's bit changes, and a glitch is exactly what a crossing
+/// samples.
+type GrayCounter =
+    { binary: Expr
+      gray: Expr }
+
+/// A counter whose `gray` output changes one bit per step — the value a
+/// multi-bit count crosses domains as, and the footing under `asyncFifo`'s
+/// pointers. `advance` steps it; both outputs are registers in the ambient
+/// domain.
+let grayCounter (name: string) (counterWidth: int) (advance: Expr) : GrayCounter =
+    let bin = reg $"{name}_bin" counterWidth
+    let grayReg = reg $"{name}_gray" counterWidth
+    let binNext = wire $"{name}_bin_next" counterWidth
+    bin + lit 1UL counterWidth ==> binNext
+    let grayNext = wire $"{name}_gray_next" counterWidth
+    binNext ^^^ pad counterWidth (shr 1 binNext) ==> grayNext
+
+    If advance (fun () ->
+        binNext ==> bin
+        grayNext ==> grayReg)
+
+    { binary = bin; gray = grayReg }
+
+/// A synchronous read of a memory whose array lives in **another** domain:
+/// the read register is the ambient domain's, marked as a deliberate
+/// crossing. The bits are only trustworthy under a protocol that proves the
+/// word stable when read — an address the write side finished with, as
+/// `asyncFifo`'s Gray-pointer exchange proves. Reach for the FIFO; this is
+/// the FIFO's own footing, public because a dual-clock memory is a real
+/// thing a design may need to build differently.
+let memReadPortAcross (m: Mem) (addr: Expr) : Expr =
+    let b = current ()
+    let name = b.FreshName $"{m.memName}_cross_rd"
+    let r = declareReg name (UInt m.memWidth) 0UL
+    MemRead(m.memName, addr, m.memWidth) ==> r
+    b.MarkCrossing name
+    r
+
+/// A stream crossing clock domains: written in the caller's domain, read in
+/// `readDomain`, correct by the Gray-pointer construction — each pointer
+/// crosses through `synchronizeGray`, so full and empty are computed from a
+/// view that is at worst two edges stale, which errs full-when-not and
+/// empty-when-not and never the reverse. The storage is LUTRAM written by
+/// the write clock; the read side lifts each word into a marked read
+/// register — `memReadPortAcross` with a load enable — only once its
+/// pointer proves the write complete.
+///
+/// Consume the result in `readDomain` — its registers live there, and the
+/// crossing check holds a consumer anywhere else to it by name.
+let asyncFifo (readDomain: ClockDomain) (name: string) (depth: int) (s: Stream<'p>) : Stream<'p> =
+    if depth < 4 || not (isPowerOfTwo depth) then
+        failwith
+            $"asyncFifo '{name}' needs a power-of-two depth of at least 4, got %d{depth} — two slots are consumed by the pointer synchronisers' lag"
+
+    let b = current ()
+    let writeDomain = b.AmbientDomain
+
+    if writeDomain.domainName = readDomain.domainName then
+        failwith
+            $"asyncFifo '{name}' crosses into domain '{readDomain.domainName}', which the caller is already in — streamFifo is the one-domain FIFO"
+
+    let addrWidth = ceilLog2 depth
+    let payloadWidth = s.layout.fields |> List.sumBy fieldWidth
+
+    let packFields (fields: Expr list) =
+        match fields with
+        | [] -> failwith $"asyncFifo '{name}': a payload with no fields"
+        | first :: rest -> List.fold cat first rest
+
+    let unpackFields (packed: Expr) =
+        let widths = List.map fieldWidth s.layout.fields
+        let mutable offset = List.sum widths
+
+        [ for w in widths ->
+              offset <- offset - w
+              slice (offset + w - 1) offset packed ]
+
+    let store = distributedMem $"{name}_mem" addrWidth payloadWidth
+
+    // ---- the write side, in the caller's domain --------------------------
+    let full = wireBit $"{name}_full"
+    let doWrite = wireBit $"{name}_do_write"
+    (s.valid &&& bnot full) ==> doWrite
+    let w = grayCounter $"{name}_w" (addrWidth + 1) doWrite
+    let wIndex = wire $"{name}_w_index" addrWidth
+    slice (addrWidth - 1) 0 w.binary ==> wIndex
+    memWrite store wIndex (packFields (s.layout.pack s.payload)) doWrite
+    bnot full ==> s.ready
+
+    // ---- the read side ---------------------------------------------------
+    let mutable readGray = w.gray
+    let mutable result = s
+
+    b.WithDomain(
+        readDomain,
+        fun () ->
+            let doRead = wireBit $"{name}_do_read"
+            let r = grayCounter $"{name}_r" (addrWidth + 1) doRead
+            readGray <- r.gray
+            let syncedW = synchronizeGray readDomain w.gray
+            let empty = wireBit $"{name}_empty"
+            eq r.gray syncedW ==> empty
+            let rIndex = wire $"{name}_r_index" addrWidth
+            slice (addrWidth - 1) 0 r.binary ==> rIndex
+
+            let outValid = regBit $"{name}_out_valid"
+            let outReady = wireBit $"{name}_out_ready"
+            (bnot empty &&& (outReady ||| bnot outValid)) ==> doRead
+
+            let headName = b.FreshName $"{name}_head"
+            let head = declareReg headName (UInt payloadWidth) 0UL
+            If doRead (fun () -> MemRead(store.memName, rIndex, payloadWidth) ==> head)
+            b.MarkCrossing headName
+
+            ifElse
+                [ doRead, (fun () -> lit 1UL 1 ==> outValid)
+                  outReady, (fun () -> lit 0UL 1 ==> outValid) ]
+
+            registerStreamReady outReady
+
+            result <-
+                { payload = s.layout.unpack (unpackFields head)
+                  valid = outValid
+                  ready = outReady
+                  layout = s.layout }
+    )
+
+    // The read pointer's view back into the write domain: full when the write
+    // Gray equals the (synchronised) read Gray with its top two bits flipped —
+    // the classic identity for "exactly depth apart".
+    let syncedR = synchronizeGray writeDomain readGray
+    let flipped = wire $"{name}_r_gray_flipped" (addrWidth + 1)
+
+    cat (bnot (slice addrWidth (addrWidth - 1) syncedR)) (slice (addrWidth - 2) 0 syncedR)
+    ==> flipped
+
+    eq w.gray flipped ==> full
+
+    result

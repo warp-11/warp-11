@@ -236,6 +236,12 @@ type DeviceRole =
     | HostUart
     /// The board's own clock input, for a wrapper that takes a crystal.
     | ClockIn
+    /// An audio-rate oscillator on the harness driving one pin — the clock
+    /// source a mapping binds the converter's domain to. Its rate is the
+    /// board's `audioClockHz`; neither board makes 12.288 MHz from its own
+    /// clock (measured — notes/CLOCK_DOMAINS.md), which is why this arrives
+    /// on a pin rather than through a PLL.
+    | AudioClockIn
     /// The board's LEDs, active low where the wrapper says so.
     | Leds
 
@@ -281,6 +287,12 @@ type Board =
       clock: Clock
       /// The fabric clock, in hertz. Every derived rate divides this.
       fabricHz: int
+      /// The audio oscillator's rate, when the `AudioClockIn` connector
+      /// carries one — the clock the converter's domain runs at, so an I2S
+      /// link on it frames at exact standard rates whatever the fabric clock
+      /// is. `None` on a bare board; `withAudioClock` is how a harness adds
+      /// one.
+      audioClockHz: int option
       /// The bulk path to the host, where the part has one.
       hostMemory: HostMemoryFacts option
       host: HostDriver
@@ -308,6 +320,27 @@ let hasLutRam (part: Part) =
 let connectorFor (role: DeviceRole) (board: Board) =
     board.connectors |> List.tryFind (fun c -> c.role = role) |> Option.map (fun c -> c.pins)
 
+/// The board with an audio oscillator on `pin` at `hz` — the harness fact
+/// that gives a mapping an audio clock source to bind the converter's domain
+/// to. 12 288 000 or 24 576 000 are the rates a 48 kHz frame divides from
+/// exactly; anything divisible works, and the rate check at the link says so
+/// when it does not.
+///
+/// The oscillator is the converters' master clock as well — 256×Fs, wired to
+/// their MCLK pins directly — so the fabric-driven `mclk`/`mclk2` leave the
+/// converter connector here: this harness variant does not wire them, and on
+/// the KV260 the freed H12 is where the oscillator lands.
+let withAudioClock (hz: int) (pin: Pin) (board: Board) =
+    { board with
+        audioClockHz = Some hz
+        connectors =
+            [ for c in board.connectors ->
+                  if c.role = I2sSeparateCodecs then
+                      { c with pins = c.pins |> List.filter (fun (port, _) -> port <> "mclk" && port <> "mclk2") }
+                  else
+                      c ]
+            @ [ { role = AudioClockIn; pins = [ "audio_clk_in", pin ] } ] }
+
 /// What the axes cannot combine into, refused by name.
 let checkBoard (board: Board) =
     let refuse (why: string) = failwith $"{board.name}: {why}"
@@ -327,6 +360,12 @@ let checkBoard (board: Board) =
 
     match board.host with
     | AxiLiteAt _ when not (hasPs board.part) -> refuse "AXI-Lite on a part with no processing system"
+    | _ -> ()
+
+    match board.audioClockHz, connectorFor AudioClockIn board with
+    | Some hz, _ when hz < 1 -> refuse "an audio clock needs a rate"
+    | Some _, None -> refuse "an audio clock rate with no AudioClockIn connector — say which pin the oscillator drives"
+    | None, Some _ -> refuse "an AudioClockIn connector with no rate — say what the oscillator runs at"
     | _ -> ()
 
     match board.hostMemory with
@@ -371,6 +410,7 @@ let kv260At (fabricHz: int) =
       tool = Vivado
       clock = PsClock 71
       fabricHz = fabricHz
+      audioClockHz = None
       hostMemory =
         Some
             { port = "S_AXI_HPC0_FPD"
@@ -451,6 +491,7 @@ let iceBreakerAt (fabricHz: int) =
       tool = OpenFlow
       clock = Crystal 12_000_000
       fabricHz = fabricHz
+      audioClockHz = None
       hostMemory = None
       host = UartAt iceBreakerBaud
       loading = Sram
@@ -513,6 +554,7 @@ let icepiAt (fabricHz: int) =
       // what reaches the fabric goes through the wrapper's PLL.
       clock = Crystal 50_000_000
       fabricHz = fabricHz
+      audioClockHz = None
       hostMemory = None
       host = UartAt 1_000_000
       loading = Sram

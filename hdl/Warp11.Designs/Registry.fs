@@ -46,6 +46,26 @@ let catalog =
           entry "Gated counter" (nameof gatedCounter) (fun () -> gatedCounter.def)
           entry "Hold through reset" (nameof holdThroughReset) (fun () -> holdThroughReset.def)
           entry "Hold chain" (nameof holdChain) (fun () -> holdChain.def)
+          // The multi-domain designs open with their clock periods stated —
+          // a domain carries no frequency, so the entry is where a debug
+          // session learns how fast each clock runs.
+          entry "Two-domain counters" (nameof twoDomainCounters) (fun () -> twoDomainCounters.def)
+          |> clockedAt [ "audio", 4 ]
+          entry "Synchronized flag" (nameof synchronizedFlag) (fun () -> synchronizedFlag.def)
+          |> clockedAt [ "audio", 4 ]
+          |> poking [ "flag_in", 1UL ]
+          entry "Pulse crossing" (nameof pulseCrossing) (fun () -> pulseCrossing.def)
+          |> clockedAt [ "audio", 4 ]
+          entry "Gray crossing" (nameof grayCrossing) (fun () -> grayCrossing.def)
+          |> clockedAt [ "audio", 4 ]
+          |> poking [ "advance", 1UL ]
+          entry "Reset crossing" (nameof resetCrossing) (fun () -> resetCrossing.def)
+          |> clockedAt [ "audio", 4 ]
+          entry "Cross-domain table" (nameof crossDomainTable) (fun () -> crossDomainTable.def)
+          |> clockedAt [ "audio", 4 ]
+          entry "Async FIFO crossing" (nameof asyncFifoCrossing) (fun () -> asyncFifoCrossing.def)
+          |> clockedAt [ "audio", 4 ]
+          |> poking [ "in_valid", 1UL; "out_ready", 1UL ]
           entry "Dynamic shifts" (nameof dynamicShifts) (fun () -> dynamicShifts.def)
           entry "Bit reductions" (nameof bitReductions) (fun () -> bitReductions.def)
           entry "Constant division" (nameof constantDivision) (fun () -> constantDivision.def)

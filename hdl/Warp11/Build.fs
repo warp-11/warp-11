@@ -131,6 +131,17 @@ let private megahertz (hz: int) = (float hz / 1e6).ToString("0.######", System.G
 // ---------------------------------------------------------------------------
 // The Vivado flow: a block design around the top, constraints, the build.
 
+/// The audio oscillator as the flow needs it — rate and pin — present only
+/// when the top actually carries the audio domain: a board may offer the
+/// oscillator to a design whose mapping never put anything on it.
+let private audioClockOf (t: BoardTop) : (int * Pin) option =
+    match t.board.audioClockHz with
+    | Some hz when t.top.foreignDomains |> List.exists (fun fd -> fd.domainName = "audio") ->
+        match connectorFor AudioClockIn t.board with
+        | Some [ (_, pin) ] -> Some(hz, pin)
+        | _ -> failwith $"{t.board.name}: an audio clock rate with no AudioClockIn pin"
+    | _ -> None
+
 let private blockDesignTcl (t: BoardTop) (pinned: Pinned list) (psClock: int) =
     let cell = $"{t.name}_0"
     let bd = $"{snakeOf t.name}_bd"
@@ -160,6 +171,21 @@ let private blockDesignTcl (t: BoardTop) (pinned: Pinned list) (psClock: int) =
            | None -> [])
 
     let configLines = psConfig |> List.map (fun l -> $"    {l} \\") |> String.concat "\n"
+
+    // The audio oscillator arrives as an external clock port, and its domain
+    // gets its own proc_sys_reset — the one reset synchroniser the top owns,
+    // async-asserted with the PS reset and released synchronously to the
+    // audio clock. `peripheral_reset` is the active-high form, which is what
+    // the conjured `audio_rst` pin is.
+    let audioCells, audioNets, audioReset =
+        match audioClockOf t with
+        | Some (hz, _) ->
+            $"set rst_audio [ create_bd_cell -type ip -vlnv xilinx.com:ip:proc_sys_reset:5.0 rst_audio ]\ncreate_bd_port -dir I -type clk -freq_hz %d{hz} audio_clk_in",
+
+            $"connect_bd_net -net audio_clk_in [get_bd_ports audio_clk_in] \\\n  [get_bd_pins {cell}/audio_clk] \\\n  [get_bd_pins rst_audio/slowest_sync_clk]\nconnect_bd_net -net rst_audio_peripheral_reset [get_bd_pins rst_audio/peripheral_reset] [get_bd_pins {cell}/audio_rst]",
+
+            " \\\n  [get_bd_pins rst_audio/ext_reset_in]"
+        | None -> "", "", ""
 
     let ports =
         [ for p in pinned ->
@@ -199,6 +225,7 @@ set_property CONFIG.NUM_SI {{1}} $axi_smc
 {masterCells}
 
 set rst_ps8_0 [ create_bd_cell -type ip -vlnv xilinx.com:ip:proc_sys_reset:5.0 rst_ps8_0 ]
+{audioCells}
 
 # pl_ps_irq0 stays driven even where nothing raises it.
 set irq_concat [ create_bd_cell -type ip -vlnv xilinx.com:ip:xlconcat:2.1 irq_concat ]
@@ -218,8 +245,9 @@ connect_bd_net -net zynq_ultra_ps_e_0_pl_clk0 [get_bd_pins zynq_ultra_ps_e_0/pl_
   [get_bd_pins {cell}/s_axi_aclk] \
   [get_bd_pins rst_ps8_0/slowest_sync_clk]{masterClocks}
 connect_bd_net -net zynq_ultra_ps_e_0_pl_resetn0 [get_bd_pins zynq_ultra_ps_e_0/pl_resetn0] \
-  [get_bd_pins rst_ps8_0/ext_reset_in]
+  [get_bd_pins rst_ps8_0/ext_reset_in]{audioReset}
 connect_bd_net -net irq_concat_dout [get_bd_pins irq_concat/dout] [get_bd_pins zynq_ultra_ps_e_0/pl_ps_irq0]
+{audioNets}
 
 {ports}
 
@@ -230,10 +258,24 @@ validate_bd_design
 save_bd_design
 """
 
-let private xdc (pinned: Pinned list) =
+let private xdc (pinned: Pinned list) (audio: (int * Pin) option) =
     [ for p in pinned ->
           let standard = p.pin.standard |> Option.map (fun s -> $" IOSTANDARD {s}") |> Option.defaultValue ""
-          $"set_property -dict {{PACKAGE_PIN {p.pin.pin}{standard}}} [get_ports {p.port}]" ]
+          $"set_property -dict {{PACKAGE_PIN {p.pin.pin}{standard}}} [get_ports {p.port}]"
+      match audio with
+      | Some (hz, pin) ->
+          let standard = pin.standard |> Option.map (fun s -> $" IOSTANDARD {s}") |> Option.defaultValue ""
+
+          let period =
+              (1e9 / float hz).ToString("0.###", System.Globalization.CultureInfo.InvariantCulture)
+
+          yield $"set_property -dict {{PACKAGE_PIN {pin.pin}{standard}}} [get_ports audio_clk_in]"
+          yield $"create_clock -name audio_clk -period {period} [get_ports audio_clk_in]"
+          // Genuinely asynchronous to the fabric clock, and every crossing is
+          // a synchroniser or an async FIFO — checked at elaboration — so the
+          // paths between the two are false by construction.
+          yield "set_clock_groups -asynchronous -group [get_clocks audio_clk]"
+      | None -> () ]
     |> String.concat "\n"
 
 /// The post-implementation timing gate, verbatim from `hardware/vivado/`:
@@ -444,6 +486,7 @@ let private writeVivado (dir: string) (t: BoardTop) : BuildOutput =
     let snake = snakeOf t.name
     let app = snake.Replace('_', '-')
     let pinned = pinGate t
+    let audio = audioClockOf t
 
     let psClock =
         match t.board.clock with
@@ -463,13 +506,16 @@ let private writeVivado (dir: string) (t: BoardTop) : BuildOutput =
         [ $"{t.name}.v", verilog
           $"{snake}_layout.rs", String.concat "\n" (seamLines t) + "\n"
           $"{snake}_bd.tcl", blockDesignTcl t pinned psClock
-          "build.tcl", buildTcl t (not pinned.IsEmpty)
+          "build.tcl", buildTcl t (not pinned.IsEmpty || audio.IsSome)
           "check_timing.tcl", checkTimingTcl
           $"{snake}.dts", overlayDts t app psClock
           $"{snake}.bif", $"all:\n{{\n  [destination_device = pl] {snake}_bd_wrapper.bit\n}}\n"
           "shell.json", "{\n  \"shell_type\": \"XRT_FLAT\",\n  \"num_slots\": \"1\"\n}\n"
           "build.sh", packageSh t app firmwareDir ]
-        @ (if pinned.IsEmpty then [] else [ $"{snake}_pins.xdc", xdc pinned + "\n" ])
+        @ (if pinned.IsEmpty && audio.IsNone then
+               []
+           else
+               [ $"{snake}_pins.xdc", xdc pinned audio + "\n" ])
 
     System.IO.Directory.CreateDirectory dir |> ignore
 
@@ -1082,6 +1128,15 @@ esac
 
 /// Every file the open flow needs for this top, into `dir`.
 let private writeOpenFlow (dir: string) (t: BoardTop) : BuildOutput =
+    // The generated wrapper drives clk and rst and nothing else, so a top
+    // with a second domain would leave its conjured pair floating — refused
+    // here rather than discovered as a silent bitstream.
+    match t.top.foreignDomains with
+    | fd :: _ ->
+        failwith
+            $"{t.board.name}: '{t.name}' uses clock domain '{fd.domainName}', and the open flow's wrapper is not built for a second clock yet — the KV260 flow carries the first audio domain (notes/CLOCK_DOMAINS.md increment 7)"
+    | [] -> ()
+
     let snake = snakeOf t.name
     let top = $"{snake}_top"
 

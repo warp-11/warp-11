@@ -11,12 +11,27 @@
 module Warp11.BoardTop
 
 
+/// The clock a board's converter divides from: the audio oscillator where
+/// the harness carries one, the fabric clock otherwise. This one line is why
+/// an oscillator makes every rate exact — 12.288 MHz divides to 48 000 Hz
+/// where 100 MHz lands on 48 828.125.
+let converterClockHz (board: Board) =
+    defaultArg board.audioClockHz board.fabricHz
+
 /// The rate a board's I2S master frames at for a design's rate: the same
 /// divisor arithmetic `i2sMasterHz` performs, so the number a design is
 /// checked against is the number the clock generator will produce.
 let boardRate (board: Board) (targetHz: float) : float =
-    let sclkHalfDiv = max 1 (int (round (float board.fabricHz / (4.0 * targetHz * float stockBitsPerSlot))))
-    sampleRateOf board.fabricHz sclkHalfDiv stockBitsPerSlot
+    let clockHz = converterClockHz board
+    let sclkHalfDiv = max 1 (int (round (float clockHz / (4.0 * targetHz * float stockBitsPerSlot))))
+    sampleRateOf clockHz sclkHalfDiv stockBitsPerSlot
+
+/// The converter's clock domain, where a board carries an audio oscillator:
+/// the one domain the generated tops put logic in. Its conjured pins are
+/// `audio_clk`/`audio_rst`, which is what the generated block design drives —
+/// the oscillator straight in, and a `proc_sys_reset` on it as the one reset
+/// synchroniser the top owns.
+let audioClockDomain = clockDomain "audio"
 
 /// The stereo boundary a board's converter needs.
 let private stereo = [ "left", signedInt sampleWidth; "right", signedInt sampleWidth ]
@@ -337,7 +352,10 @@ let pinoutOf (board: Board) : I2sPinout =
     match connectorFor I2sSharedBus board, connectorFor I2sSeparateCodecs board with
     | Some _, Some _ -> failwith $"{board.name}: both I2S connectors are given — a board has a shared bus or separate codecs on its header, not both"
     | Some _, None -> SharedBus
-    | None, _ -> SeparateCodecs
+    | None, _ ->
+        // With the oscillator on the harness, it is the converters' master
+        // clock too, and the fabric-driven MCLK pins leave the boundary.
+        if board.audioClockHz.IsSome then SeparateCodecsExternalMclk else SeparateCodecs
 
 /// What a board asks of a design before it will carry it on its converter:
 /// one stream, the stereo boundary on whichever stream needs the converter
@@ -906,6 +924,31 @@ let private recordFrames
       ready = outReady
       layout = layout1 ("word", 32) }
 
+/// The I2S link on the clock the board's converter actually runs at. With no
+/// oscillator this is `mk board.fabricHz`, exactly as before. With one, the
+/// whole link — clock generator, framers — elaborates inside the audio
+/// domain at the oscillator's rate, and the streams cross at the boundary:
+/// an `asyncFifo` each way, so the design's own logic stays wholly on the
+/// fabric clock and never learns a second clock exists. Depth 8 is plenty —
+/// the crossing's rate mismatch is bounded by the converter's own frame
+/// pace, so the FIFOs idle near empty and never drop.
+let private linkOnConverterClock (board: Board) (mk: int -> I2sLink) : I2sLink =
+    match board.audioClockHz with
+    | None -> mk board.fabricHz
+    | Some audioHz ->
+        let mutable raw = Unchecked.defaultof<I2sLink>
+        let mutable crossedIn = Unchecked.defaultof<Stream<Expr * Expr>>
+
+        withDomain audioClockDomain (fun () ->
+            raw <- mk audioHz
+            crossedIn <- asyncFifo defaultDomain "i2s_in_cross" 8 raw.input)
+
+        { input = crossedIn
+          send =
+            fun s ->
+                let toConverter = asyncFifo audioClockDomain "i2s_out_cross" 8 s
+                withDomain audioClockDomain (fun () -> raw.send toConverter) }
+
 let private pinsTop (board: Board) (path: DataPath) (d: Design) : BoardTop =
     check board path d
     // No binding here wants a contract, so the map is exactly the design's
@@ -1031,7 +1074,7 @@ let private pinsTop (board: Board) (path: DataPath) (d: Design) : BoardTop =
                         pinOuts p)
                     (fun (slavePorts, pins, writeBusPorts, outs) ->
                         let regs = regMapSlave slavePorts map
-                        let i2s = i2sLink "audio" pins board.fabricHz rate stockBitsPerSlot
+                        let i2s = linkOnConverterClock board (fun hz -> i2sLink "audio" pins hz rate stockBitsPerSlot)
 
                         let sink =
                             match recorder, writeBusPorts, memory with
@@ -1050,7 +1093,7 @@ let private pinsTop (board: Board) (path: DataPath) (d: Design) : BoardTop =
                     name
                     (fun p -> uartPins p "host", i2sPins p (pinoutOf board), pinOuts p)
                     (fun (uart, pins, outs) ->
-                        let i2s = i2sLink "audio" pins board.fabricHz rate stockBitsPerSlot
+                        let i2s = linkOnConverterClock board (fun hz -> i2sLink "audio" pins hz rate stockBitsPerSlot)
 
                         match recorder with
                         | Some(RecordToFrames(arm, sent, dropped)) ->
@@ -1091,7 +1134,7 @@ let private pinsTop (board: Board) (path: DataPath) (d: Design) : BoardTop =
                     name
                     (fun p -> i2sPins p (pinoutOf board), pinOuts p)
                     (fun (pins, outs) ->
-                        let i2s = i2sLink "audio" pins board.fabricHz rate stockBitsPerSlot
+                        let i2s = linkOnConverterClock board (fun hz -> i2sLink "audio" pins hz rate stockBitsPerSlot)
                         d.body (onPins d path baked (reporter None outs) unwritable None i2s))
 
             name, top.def, []

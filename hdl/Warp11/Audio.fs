@@ -2086,6 +2086,14 @@ type I2sPinout =
     /// trio — the Pmod I2S2 shape: `mclk`/`sclk`/`lrclk` and `sdin` for the
     /// DAC, `mclk2`/`sclk2`/`lrclk2` and `sdout` for the ADC.
     | SeparateCodecs
+    /// The separate-converter rows with their master clocks fed straight by
+    /// the harness oscillator rather than by the fabric — the shape a board
+    /// takes when an audio clock arrives on a pin. The oscillator *is* the
+    /// 256×Fs master clock the converters want; a fabric-made one inside the
+    /// audio domain could only reach 128×Fs (the divider floors at 1), which
+    /// the Pmod I2S2's converters refuse. So the fabric drives bit and word
+    /// clocks only, and the two MCLK pins leave the boundary.
+    | SeparateCodecsExternalMclk
 
 /// The clock pins a pinout presents, as lists because *how many* is the thing
 /// that varies: a shared bus has one of each and no MCLK at all, separate
@@ -2151,6 +2159,22 @@ let i2sPins (p: Ports) (pinout: I2sPinout) : I2sPins =
               lrclkPins = [ lrclk; lrclk2 ] }
           txDataOut = sdin
           dataIn = sdout }
+    | SeparateCodecsExternalMclk ->
+        // The SeparateCodecs order with the two MCLK declarations removed —
+        // the oscillator delivers that clock by wire.
+        let sdout = p.inPort "sdout" 1
+        let sclk = p.outPort "sclk" 1
+        let lrclk = p.outPort "lrclk" 1
+        let sdin = p.outPort "sdin" 1
+        let sclk2 = p.outPort "sclk2" 1
+        let lrclk2 = p.outPort "lrclk2" 1
+
+        { clocks =
+            { mclkPins = []
+              sclkPins = [ sclk; sclk2 ]
+              lrclkPins = [ lrclk; lrclk2 ] }
+          txDataOut = sdin
+          dataIn = sdout }
 
 /// Declare a transmit-only link's pins. Call from a module's io factory.
 /// A transmit-only link's pins **under a prefix**, so a design can declare
@@ -2185,6 +2209,16 @@ let i2sTxPinsNamed (p: Ports) (prefix: string) (pinout: I2sPinout) : I2sTxPins =
               sclkPins = [ sclk ]
               lrclkPins = [ lrclk ] }
           dataOut = sdin }
+    | SeparateCodecsExternalMclk ->
+        let sclk = p.outPort (named "sclk") 1
+        let lrclk = p.outPort (named "lrclk") 1
+        let sdin = p.outPort (named "sdin") 1
+
+        { txClocks =
+            { mclkPins = []
+              sclkPins = [ sclk ]
+              lrclkPins = [ lrclk ] }
+          dataOut = sdin }
 
 let i2sTxPins (p: Ports) (pinout: I2sPinout) : I2sTxPins =
     match pinout with
@@ -2206,6 +2240,16 @@ let i2sTxPins (p: Ports) (pinout: I2sPinout) : I2sTxPins =
 
         { txClocks =
             { mclkPins = [ mclk ]
+              sclkPins = [ sclk ]
+              lrclkPins = [ lrclk ] }
+          dataOut = sdin }
+    | SeparateCodecsExternalMclk ->
+        let sclk = p.outPort "sclk" 1
+        let lrclk = p.outPort "lrclk" 1
+        let sdin = p.outPort "sdin" 1
+
+        { txClocks =
+            { mclkPins = []
               sclkPins = [ sclk ]
               lrclkPins = [ lrclk ] }
           dataOut = sdin }

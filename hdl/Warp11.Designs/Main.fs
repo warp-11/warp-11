@@ -124,7 +124,13 @@ let private diffDesignsAtDefault () =
       // period and assert per edge (notes/CLOCK_DOMAINS.md increment 5).
       twoDomainCounters.def
       synchronizedFlag.def
-      pinnedAudioCounter.def ]
+      pinnedAudioCounter.def
+      // The CDC stdlib's toys (increment 6).
+      pulseCrossing.def
+      grayCrossing.def
+      resetCrossing.def
+      crossDomainTable.def
+      asyncFifoCrossing.def ]
 
 /// Each design with the length of testbench it needs — the default for all but
 /// the one whose unit of work is a pass rather than a beat.
@@ -857,7 +863,7 @@ let private registryLoads () =
     let loads (e: Warp11.Catalog.Entry) =
         try
             let d = e.build ()
-            let sim = Sim(d)
+            let sim = Sim(d, domainPeriods = e.domainPeriods)
             sim.Tick()
             let inv = Inventory.ofDesign d
             not (e.label.Trim() = "") && inv.topName = d.name && not (List.isEmpty inv.signals)
@@ -911,9 +917,137 @@ let private holdsThroughReset () =
 
     bothTook && heldSurvived && clearedWentBack && saysSo
 
-/// A dynamic shift's defining property: the amount is a *signal*, so one piece
-/// of hardware does every shift, and the arithmetic one fills with the sign
-/// where the logical one fills with zeros.
+/// The two-flop synchroniser's defining property: exactly two edges of
+/// latency, and after them, every target-domain edge sees the level. With the
+/// audio clock at period 4 under a default of 10, n Ticks hold 10n/4 audio
+/// edges; the counter must read exactly two fewer — one per flop, no more,
+/// none lost.
+let private synchronizeDelaysTwoEdges () =
+    let sim = Sim(synchronizedFlag.def, domainPeriods = [ "audio", 4 ])
+    sim.Poke("flag_in", 1UL)
+
+    for _ in 1..4 do
+        sim.Tick()
+
+    // t = 40: audio edges at 4, 8, …, 40 — ten of them, the first two spent
+    // in the flops.
+    sim.Peek "seen" = 8UL
+
+/// The pulse synchroniser's defining property: every pulse arrives exactly
+/// once — none lost, none doubled — for pulses at least two target-domain
+/// cycles apart, which one poked cycle per Tick satisfies at these periods.
+let private pulsesArriveExactlyOnce () =
+    let sim = Sim(pulseCrossing.def, domainPeriods = [ "audio", 4 ])
+    let pulses = 5
+
+    for _ in 1..pulses do
+        sim.Poke("pulse", 1UL)
+        sim.Tick()
+        sim.Poke("pulse", 0UL)
+        sim.Tick()
+
+    // Drain: the toggle's last flip is still two audio edges from the counter.
+    for _ in 1..3 do
+        sim.Tick()
+
+    sim.Peek "pulses_seen" = uint64 pulses
+
+/// The Gray counter's defining property, walked over the full period rather
+/// than spot-checked: 2^w distinct values, each differing from the last in
+/// exactly one bit — a counter with a wrong term still produces plausible
+/// numbers, and only the walk says otherwise.
+let private grayWalksOneBitAtATime () =
+    let probe =
+        defModule "GrayProbe" (fun p -> p.outPort "g" 5) (fun g ->
+            let counter = grayCounter "probe" 5 (lit 1UL 1)
+            counter.gray ==> g)
+
+    let sim = Sim probe.def
+    let seen = System.Collections.Generic.List<uint64>()
+
+    for _ in 1..32 do
+        sim.Tick()
+        seen.Add(sim.Peek "g")
+
+    let oneBitSteps =
+        Seq.pairwise seen
+        |> Seq.forall (fun (a, b) -> System.Numerics.BitOperations.PopCount(a ^^^ b) = 1)
+
+    oneBitSteps && (Seq.distinct seen |> Seq.length) = 32
+
+/// The reset synchroniser's defining property: while the source level is
+/// held, the domain sits in reset; the release arrives aligned to the
+/// domain's own edges, two of them late, and counting resumes from zero.
+let private resetReleaseAligns () =
+    let sim = Sim(resetCrossing.def, domainPeriods = [ "audio", 4 ])
+    sim.Poke("soft_reset", 1UL)
+
+    for _ in 1..3 do
+        sim.Tick()
+
+    let heldAtZero = sim.Peek "running_count" = 0UL
+
+    sim.Poke("soft_reset", 0UL)
+
+    for _ in 1..4 do
+        sim.Tick()
+
+    // Release poked at t = 30: the audio edges at 32 and 36 move it through
+    // the flops, the counter sees it low from the edge at 40 on — 8 counting
+    // edges of the 10 in these four Ticks.
+    heldAtZero && sim.Peek "running_count" = 8UL
+
+/// The async FIFO's defining property: everything pushed comes out, in order,
+/// exactly once — with the reader faster than the writer and slower than it,
+/// since the two directions stress opposite pointer syncs. The reader is
+/// paced by hand so every beat is observed: ready rises only while the check
+/// watches, one target edge at a time.
+let private asyncFifoDelivers () =
+    let deliversAt readPeriod =
+        let sim = Sim(asyncFifoCrossing.def, domainPeriods = [ "audio", readPeriod ])
+        let sent = [ 17UL; 3UL; 250UL; 42UL; 0UL; 99UL; 1UL; 128UL; 77UL; 5UL ]
+        let received = System.Collections.Generic.List<uint64>()
+        let mutable time = 0L
+
+        let drainOne () =
+            // One watched beat: raise ready, run exactly one audio edge, drop
+            // it. The writer is held meanwhile — this advance can cross a
+            // default edge too, and a still-offered beat would land twice.
+            if sim.Peek "out_valid" = 1UL then
+                received.Add(sim.Peek "out_data")
+                sim.Poke("in_valid", 0UL)
+                sim.Poke("out_ready", 1UL)
+                let nextEdge = (time / int64 readPeriod + 1L) * int64 readPeriod
+                sim.AdvanceTo nextEdge
+                time <- nextEdge
+                sim.Poke("out_ready", 0UL)
+
+        let mutable pending = sent
+        // Bounded so a FIFO that loses a beat fails the check instead of
+        // hanging it: ~50 windows is generous for ten beats at these rates.
+        let mutable budget = 50
+
+        while received.Count < List.length sent && budget > 0 do
+            budget <- budget - 1
+
+            match pending with
+            | next :: rest ->
+                sim.Poke("in_data", next)
+                sim.Poke("in_valid", 1UL)
+                let accepted = sim.Peek "in_ready" = 1UL
+                time <- time + 10L
+                sim.AdvanceTo time
+                if accepted then pending <- rest
+            | [] ->
+                sim.Poke("in_valid", 0UL)
+                time <- time + 10L
+                sim.AdvanceTo time
+
+            drainOne ()
+
+        List.ofSeq received = sent
+
+    deliversAt 4 && deliversAt 26
 ///
 /// Walked over every amount the input can take rather than spot-checked, and
 /// against shifts computed here rather than against a recorded vector — a
@@ -2218,6 +2352,11 @@ let private mainDemo () =
     printfn $"design-written window reads:  %b{designWindowOk}"
     printfn $"registry entries all load:    %b{registryLoads ()}"
     printfn $"reg holds through reset:      %b{holdsThroughReset ()}"
+    printfn $"two-flop delays two edges:    %b{synchronizeDelaysTwoEdges ()}"
+    printfn $"pulses arrive exactly once:   %b{pulsesArriveExactlyOnce ()}"
+    printfn $"gray walks one bit at a time: %b{grayWalksOneBitAtATime ()}"
+    printfn $"reset release aligns:         %b{resetReleaseAligns ()}"
+    printfn $"async fifo delivers in order: %b{asyncFifoDelivers ()}"
     printfn $"dynamic shifts shift:         %b{dynamicShiftsShift ()}"
     printfn $"bit reductions reduce:        %b{reductionsReduce ()}"
     printfn $"constant division divides:    %b{divisionDivides ()}"

@@ -289,7 +289,28 @@ let diffCycles = 50
 /// sample — would otherwise be asserted over a window that never reaches the
 /// half of it the emitter has not been checked on. The default is
 /// `diffCycles`; `writeDiff` is this with every design at the default.
+/// The design with its own assertions removed, hierarchy-deep. The oracle
+/// verifies the *toolchain*, and a design's claim about itself is not part of
+/// that: the Sim side never checks them here (`checkAsserts` is off), while
+/// Verilator turns a translate_off `$fatal` into an abort — so the priority
+/// toys, whose whole point is two write sites firing together, killed the
+/// run the first time random stimulus made them coincide. Stripping keeps
+/// the three legs symmetric; the claims themselves are the living checks'
+/// and the debugger's to enforce, where a design runs as itself.
+let private stripAsserts (d: ModuleDef) =
+    let rec strip (m: ModuleDef) =
+        { m with
+            stmts =
+                m.stmts
+                |> List.filter (function
+                    | Assert _ -> false
+                    | _ -> true)
+            instances = [ for i in m.instances -> { i with child = strip i.child } ] }
+
+    strip d
+
 let writeDiffWith (designs: (ModuleDef * int) list) (outDir: string) =
+    let designs = [ for d, cycles in designs -> stripAsserts d, cycles ]
     let designs, cycles = List.unzip designs |> fun (ds, cs) -> ds, Map.ofList (List.zip (List.map (fun (d: ModuleDef) -> d.name) ds) cs)
     System.IO.Directory.CreateDirectory outDir |> ignore
 

@@ -532,7 +532,12 @@ let internal emitModule (isPublic: bool) (m: ModuleDef) =
 
                           yield $"{body}connect {mem}.w.mask[%d{i}], {atPortType (UInt 1) (Slice(k, i, i))}"
               | Assert (c, message) ->
-                  let escaped = message.Replace("\\", "\\\\").Replace("\"", "\\\"")
+                  // FIRRTL strings are 7-bit ASCII — firtool refuses anything
+                  // else — so a message's typography flattens here. The em
+                  // dash in the mem-fold assert is what found this.
+                  let escaped =
+                      message.Replace("\\", "\\\\").Replace("\"", "\\\"")
+                      |> String.map (fun ch -> if int ch > 127 then '-' else ch)
                   // Checked on the edge of the domain its cone lives in, with
                   // that domain's reset as the disable — the Sim's rule.
                   let aClk, aRst = netsFor assertDomains[assertIndex]

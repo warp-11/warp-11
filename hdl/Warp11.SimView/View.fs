@@ -348,7 +348,11 @@ let debugger (source: Source) (panels: Panel list) =
                 let build = chosen.build
 
                 let live =
-                    new DebugSession(build (), ownThread = not (System.OperatingSystem.IsBrowser()))
+                    new DebugSession(
+                        build (),
+                        ownThread = not (System.OperatingSystem.IsBrowser()),
+                        domainPeriods = chosen.domainPeriods
+                    )
                     :> IDebugSession
                 held.Set(Some(live, live.Inventory))
                 snapshot.Set live.Latest

@@ -31,7 +31,12 @@ type Entry =
       /// first instruction is *watch `r` and `count`* — `r` being a register,
       /// one of an unbounded number a design might have. The catalog knows,
       /// because the catalog is the thing that owns the prose.
-      watch: string list }
+      watch: string list
+      /// Each non-default clock domain's period in the Sim's time units — what
+      /// a session must be told before it can open a multi-domain design,
+      /// since a domain carries no frequency of its own. Empty for the
+      /// single-clock designs, which is almost all of them.
+      domainPeriods: (string * int) list }
 
 /// A set of designs plus the two lookups a debugger wants beside them: the
 /// prose for a binding and the source that defines it. Supplied by whoever owns
@@ -52,7 +57,8 @@ let entry label binding build =
       binding = binding
       build = build
       pokes = []
-      watch = [] }
+      watch = []
+      domainPeriods = [] }
 
 /// The signals this entry's page discusses, on screen when it opens.
 ///
@@ -66,6 +72,11 @@ let watching signals entry = { entry with watch = signals }
 /// the tutorial's checks hold both to a higher bar: the name must exist and
 /// must be an input.
 let poking pokes entry = { entry with pokes = pokes }
+
+/// The clock periods a multi-domain entry's session runs at, per domain name —
+/// what the Sim is told at construction. An entry for a design with a second
+/// domain must say this, or opening it refuses with the Sim's own error.
+let clockedAt periods entry = { entry with domainPeriods = periods }
 
 /// A catalog of designs, and nothing else behind them.
 ///
