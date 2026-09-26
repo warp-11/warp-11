@@ -1030,6 +1030,35 @@ The second line fails because 100 MHz does not divide into 48 kHz — the neares
 
 The honest limit is that the frequency is passed rather than implied, so nothing stops two modules in one design from being handed different ones — which the ambient and type-level answers above both rule out by construction. That is a deliberate trade twice over. An ambient clock domain would be a second piece of hidden elaboration state beside the builder's; and threading a `Board` record through instead would put a fact about *targets* into the signature of everything that divides a clock, which is a different kind of leak rather than a fix. A stage that needs a number asks for the number. The `Board` record still exists — it carries the frequency and the host bus binding (`AxiLiteAt 0xB0000000`, or `SpiBus` on a part with no bus) for a per-board build-script generator to read — but it is the application's to hold, and call sites that have one write `kv260.fabricHz`. It is held **per app rather than per part**: `kv260At <hz>` is the constructor, because each app's device-tree overlay pins its own PL clock and this repository runs one KV260 at three different frequencies. The generated register-map seam carries that frequency to the host as `FABRIC_HZ`, so a driver's milliseconds and the fabric's cycles cannot disagree.
 
+### Clock domains, and crossing them
+
+Multi-clock is where a cycle-accurate simulator is most dangerous: an
+unsynchronised crossing latches unsettled values on silicon while every
+simulation passes, because the hazard is a setup/hold question and there is no
+timing model. The field splits on where the safety lives.
+
+| HDL | Domains | Unsafe crossing is… | CDC library |
+|---|---|---|---|
+| Chisel | `withClock(...)` blocks; clock/reset are values | Legal — nothing checks; discipline and lint | `AsyncQueue` in chisel-lib, `SynchronizerShiftReg` |
+| SpinalHDL | `ClockDomain` values, `ClockingArea` blocks | **Checked** — a cross-domain read outside a crossing area is an elaboration error | `BufferCC`, `StreamFifoCC`, `PulseCCByToggle` — the most complete set |
+| HardCaml | Clocks are ordinary signals on `reg` specs | Legal — nothing checks | Project-local |
+| Amaranth | First-class named domains, `m.domains +=` | Legal at elaboration; Yosys-level lint external | `lib.cdc`: `FFSynchronizer`, `PulseSynchronizer`, `AsyncFIFO` |
+| Clash | Domains in the *types* — `Signal dom a` | **A type error** — the strongest static answer | `asyncFIFOSynchronizer`, `dualFlipFlopSynchronizer` |
+| Bluespec | Clocks are first-class, methods carry clock family | **Checked** — the compiler rejects cross-clock method calls | `SyncFIFO`, `SyncReg`, the oldest complete set |
+| Veryl | `clock`/`reset` types, one domain per module boundary | Checked at module boundaries | Defer to SV |
+| Warp 11 | A default domain every module is in; `withDomain` blocks; `defModuleIn` pins a module; a domain is a **declared need** the board mapping satisfies with a clock source — no frequency on the domain | **An elaboration error naming the module, the register and the signal** — the check walks register input cones per module and again on the flattened design, and the CDC entries' marked flops are the only legal crossings | `synchronize` (one bit, two flops), `synchronizeReset`, `synchronizePulse`, `grayCounter` + `synchronizeGray`, `memReadPortAcross` (the dual-clock storage shape), `asyncFifo` (Gray-pointer stream crossing) |
+
+Two things distinguish the Warp 11 row. The crossing check is **closed over
+the primitives**: `synchronize`'s one-bit restriction is enforced (a wider
+signal is refused by name toward the Gray counter and the FIFO), so the safe
+subset is the only expressible subset, where SpinalHDL's `crossClockDomain`
+tag and Chisel's discipline both let a design bless anything. And the
+differential's third leg holds the whole family to firtool: each CDC toy's
+testbench drives every clock at its own period and asserts every output on
+every edge instant, so the two-flop delay, the pulse toggle-and-detect and
+the FIFO's pointer exchange are measured against a stranger's compiler, not
+just against our own emitter.
+
 ### Peripheral links as one call
 
 An I2S front end is a clock generator, two framers, a set of pins and a rule about which clock edge each framer uses. Every HDL here can express that; the question is whether a design has to.
