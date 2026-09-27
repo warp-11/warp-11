@@ -869,11 +869,13 @@ let ecp5Pll (inputHz: int) (targetHz: int) : Ecp5Pll =
     candidates
     |> List.minBy (fun c -> abs (c.achievedHz - target), abs (c.achievedHz * float c.outputDiv - 600e6))
 
-let private ecp5Wrapper (t: BoardTop) (clockPort: string) (clockHz: int) (passthrough: Pinned list) =
+let private ecp5Wrapper (t: BoardTop) (clockPort: string) (clockHz: int) (passthrough: Pinned list) (audio: (int * Pin) option) =
     let top = $"{snakeOf t.name}_top"
 
     let portDecls =
         [ yield $"    input  wire {clockPort},"
+          if audio.IsSome then
+              yield "    input  wire audio_clk_in,"
           for p in passthrough ->
               let dir = if p.input then "input " else "output"
               let range = if p.width = 1 then "" else $"[%d{p.width - 1}:0] "
@@ -885,10 +887,33 @@ let private ecp5Wrapper (t: BoardTop) (clockPort: string) (clockHz: int) (passth
     let connections =
         [ yield "        .clk(clk),"
           yield "        .rst(rst),"
+          if audio.IsSome then
+              yield "        .audio_clk(audio_clk_in),"
+              yield "        .audio_rst(audio_rst_sync),"
           for p in passthrough -> $"        .{p.port}({p.port})," ]
         |> String.concat "\n"
 
     let connections = connections.TrimEnd(',')
+
+    // The audio domain's reset — the one synchroniser the top owns, made
+    // here because the wrapper is where that domain's reset originates (the
+    // Vivado flow's `rst_audio` proc_sys_reset, in two flip-flops). It
+    // carries the fabric reset's level, so assert and release both reach the
+    // domain aligned to its own edges; the flops power up asserted because
+    // ECP5 flip-flops take their initial value from the bitstream.
+    let audioReset =
+        match audio with
+        | None -> ""
+        | Some _ ->
+            """
+    reg audio_rst_meta = 1'b1;
+    reg audio_rst_sync = 1'b1;
+
+    always @(posedge audio_clk_in) begin
+        audio_rst_meta <= rst;
+        audio_rst_sync <= audio_rst_meta;
+    end
+"""
 
     let clock =
         if clockHz = t.board.fabricHz then
@@ -974,7 +999,7 @@ module {top} (
     end
 
     wire rst = (por != 4'd15);
-
+{audioReset}
     {t.name} design (
 {connections}
     );
@@ -986,7 +1011,7 @@ endmodule
 
 /// The pin map in the ECP5's own format: a site and an IO type a port, and
 /// the oscillator's frequency so nextpnr constrains what the PLL is fed.
-let private lpf (clockPort: string) (clockHz: int) (pinned: Pinned list) =
+let private lpf (clockPort: string) (clockHz: int) (pinned: Pinned list) (audio: (int * Pin) option) =
     [ yield "BLOCK RESETPATHS;"
       yield "BLOCK ASYNCPATHS;"
       for p in pinned do
@@ -995,7 +1020,13 @@ let private lpf (clockPort: string) (clockHz: int) (pinned: Pinned list) =
           match p.pin.standard with
           | Some standard -> yield $"IOBUF PORT \"{p.port}\" IO_TYPE={standard};"
           | None -> ()
-      yield $"FREQUENCY PORT \"{clockPort}\" {megahertz clockHz} MHZ;" ]
+      yield $"FREQUENCY PORT \"{clockPort}\" {megahertz clockHz} MHZ;"
+      // The audio clock as its own timed domain: nextpnr times each clock
+      // separately and leaves the crossings alone, which is right — every
+      // one is a synchroniser or an async FIFO, checked at elaboration.
+      match audio with
+      | Some (hz, _) -> yield $"FREQUENCY PORT \"audio_clk_in\" {megahertz hz} MHZ;"
+      | None -> () ]
     |> String.concat "\n"
 
 let private ecp5FlowSh (t: BoardTop) (top: string) (sources: string list) =
@@ -1128,14 +1159,18 @@ esac
 
 /// Every file the open flow needs for this top, into `dir`.
 let private writeOpenFlow (dir: string) (t: BoardTop) : BuildOutput =
-    // The generated wrapper drives clk and rst and nothing else, so a top
-    // with a second domain would leave its conjured pair floating — refused
-    // here rather than discovered as a silent bitstream.
+    let audio = audioClockOf t
+
+    // The wrapper drives what it knows how to make: the fabric pair, and —
+    // on ECP5, when the board carries the oscillator — the audio pair. Any
+    // other domain would leave its conjured pins floating, refused here
+    // rather than discovered as a silent bitstream.
     match t.top.foreignDomains with
+    | [] -> ()
+    | [ fd ] when fd.domainName = "audio" && audio.IsSome -> ()
     | fd :: _ ->
         failwith
-            $"{t.board.name}: '{t.name}' uses clock domain '{fd.domainName}', and the open flow's wrapper is not built for a second clock yet — the KV260 flow carries the first audio domain (notes/CLOCK_DOMAINS.md increment 7)"
-    | [] -> ()
+            $"{t.board.name}: '{t.name}' uses clock domain '{fd.domainName}', which the open flow's wrapper has nothing to drive — the audio domain needs the board's oscillator (`withAudioClock`), and any other domain is not built yet"
 
     let snake = snakeOf t.name
     let top = $"{snake}_top"
@@ -1156,6 +1191,8 @@ let private writeOpenFlow (dir: string) (t: BoardTop) : BuildOutput =
         { t.top with
             decls =
                 [ yield Input(crystalPort, UInt 1)
+                  if audio.IsSome then
+                      yield Input("audio_clk_in", UInt 1)
                   for n, input, width in designPorts do
                       if input then
                           yield Input(n, UInt width)
@@ -1163,19 +1200,26 @@ let private writeOpenFlow (dir: string) (t: BoardTop) : BuildOutput =
                           yield Output(n, UInt width) ] }
 
     let pinned = pinGate { t with top = wrapperTop }
-    let passthrough = pinned |> List.filter (fun p -> p.port <> crystalPort)
+
+    let passthrough =
+        pinned
+        |> List.filter (fun p -> p.port <> crystalPort && p.port <> "audio_clk_in")
 
     let familyFiles =
         match t.board.part.family with
         | Ice40UltraPlus ->
+            if audio.IsSome then
+                failwith
+                    $"{t.board.name}: the iCE40 wrapper is not built for the audio clock — and its parts refuse the asyncFifo's LUT-RAM anyway; the ECP5 and Vivado flows carry the audio domain"
+
             [ $"{t.name}.v", emitDesignFor t.target t.top + "\n"
               $"{top}.v", iceWrapper t crystalPort crystalHz passthrough
               $"{top}.pcf", pcf pinned + "\n"
               "build.sh", openFlowSh t top [ $"{t.name}.v"; $"{top}.v" ] ]
         | Family.Ecp5 ->
             [ $"{t.name}.v", emitDesignFor t.target t.top + "\n"
-              $"{top}.v", ecp5Wrapper t crystalPort crystalHz passthrough
-              $"{top}.lpf", lpf crystalPort crystalHz pinned + "\n"
+              $"{top}.v", ecp5Wrapper t crystalPort crystalHz passthrough audio
+              $"{top}.lpf", lpf crystalPort crystalHz pinned audio + "\n"
               "build.sh", ecp5FlowSh t top [ $"{t.name}.v"; $"{top}.v" ] ]
         | UltraScalePlus -> failwith $"{t.board.name}: the open flow does not build an UltraScale+ part"
 

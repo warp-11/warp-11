@@ -476,6 +476,40 @@ let private audioDomainTopTest =
         | Ok round -> Expect.equal round board "The board should round-trip through its JSON"
         | Error e -> failtest $"board JSON round-trip failed: {e}"
 
+        // The open flow: the ECP5 wrapper drives the audio pair itself — the
+        // oscillator straight in, and the two-flop reset synchroniser the top
+        // owns — and the LPF times both clocks.
+        let icepi =
+            let plainIcepi = icepiAt 25_000_000
+
+            { plainIcepi with
+                connectors =
+                    plainIcepi.connectors
+                    @ [ { role = I2sSharedBus
+                          pins = [ "bclk", { osc with pin = "A2" }; "ws", { osc with pin = "A3" }; "sd_in", { osc with pin = "A4" }; "sd_out", { osc with pin = "A5" } ] } ] }
+            |> withAudioClock 12_288_000 { osc with pin = "A6" }
+
+        let dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"warp11-icepi-audio-{System.Guid.NewGuid():N}")
+
+        try
+            Build.write dir (BoardTop.boardTop icepi viaPins gain) |> ignore
+            let wrapper = System.IO.File.ReadAllText(System.IO.Path.Combine(dir, "audio_domain_probe_uart_top.v"))
+            Expect.stringContains wrapper "input  wire audio_clk_in," "The wrapper should take the oscillator pin"
+            Expect.stringContains wrapper "audio_rst_meta <= rst;" "The wrapper should own the audio reset synchroniser"
+            Expect.stringContains wrapper ".audio_rst(audio_rst_sync)" "The design's audio reset should come from the synchroniser"
+
+            let lpf = System.IO.File.ReadAllText(System.IO.Path.Combine(dir, "audio_domain_probe_uart_top.lpf"))
+            Expect.stringContains lpf "FREQUENCY PORT \"audio_clk_in\" 12.288 MHZ;" "The LPF should time the audio clock"
+        finally
+            System.IO.Directory.Delete(dir, true)
+
+        // The iCE40 wrapper stays honest about not carrying it.
+        let iceBreaker = iceBreakerAt 24_000_000 |> withAudioClock 12_288_000 { osc with pin = "P1" }
+
+        Expect.throwsC
+            (fun () -> Build.write "/tmp/warp11-never-written" (BoardTop.boardTop iceBreaker viaPins gain) |> ignore)
+            (fun ex -> Expect.stringContains ex.Message "iCE40 wrapper is not built" "The iCE40 flow should refuse the audio clock by name")
+
 let tests =
     testList
         "FIRRTL and emitter"
