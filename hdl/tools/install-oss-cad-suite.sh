@@ -30,7 +30,7 @@ suite="$root/oss-cad-suite"
 # which ones warp11 actually reaches for. The rest stay reachable inside the
 # suite, and the wrappers put the suite's own bin first so sub-tools that these
 # shell out to — abc, most of all — resolve to their matched versions.
-tools=(yosys nextpnr-ice40 nextpnr-ecp5 icepack icetime icebram iceprog ecppack)
+tools=(yosys nextpnr-ice40 nextpnr-ecp5 icepack icetime icebram iceprog ecppack openFPGALoader)
 
 # The installed release is recorded in a stamp file rather than read back out
 # of `yosys -V`: the suite is dated but the tools inside carry their own
