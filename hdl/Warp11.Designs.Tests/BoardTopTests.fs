@@ -254,7 +254,53 @@ let tests =
                   (fun () -> plug { frontEnd with positions = frontEnd.positions @ [ 5, (Leds, "led") ] } "J2" kv260 |> ignore)
                   (fun e -> Expect.stringContains e.Message "position 5 is not wired" "a Pmod's power pins carry nothing")
 
-          testCase "a mapping says its bindings and its harnesses, and reads back as written" <| fun _ ->
+          testCase "a harness with PDM microphones puts the design's input on the decimator" <| fun _ ->
+              // The Pi header's PCM pins for the bus out, two free positions for
+              // the microphones, and no line in: the ICS-43434s are unplugged.
+              let pdmFront: Harness =
+                  { name = "front-end-pdm"
+                    plug = "pi40"
+                    positions =
+                      [ 12, (I2sSharedBus, "bclk")
+                        35, (I2sSharedBus, "ws")
+                        40, (I2sSharedBus, "sd_out")
+                        16, (PdmMics, "pdm_clk")
+                        18, (PdmMics, "pdm_data") ] }
+
+              let board = { plug pdmFront "PI40" (icepiAt 50_000_000) with host = NoHost }
+              Expect.isTrue (BoardTop.micsOnPdm board) "the harness says so"
+
+              let top = BoardTop.boardTop board viaPins lit
+              let sim = Sim top.top
+              Expect.equal (sim.Peek "pdm_clk") 0UL "the top drives the microphones' clock"
+              Expect.throws (fun () -> sim.Peek "sd_in" |> ignore) "and has no I2S line in"
+
+              // A -20 dBFS tone through the modulator model and the decimator
+              // comes out of the I2S line at the level the CIC's droop predicts.
+              let rate = BoardTop.boardRate board BoardTop.nominalRate
+              let hz = 1_000.0
+              let amplitude = 0.1
+
+              let tone =
+                  Seq.initInfinite (fun i ->
+                      let v = amplitude * sin (2.0 * System.Math.PI * hz * float i / rate)
+                      v, v)
+
+              let signed (v: uint64) =
+                  if v >= 0x800000UL then float (int64 v - 0x1000000L) else float v
+
+              let heard =
+                  pdmThroughI2s sim defaultPdmSimPins sharedBusSimPins BoardTop.pdmBitsPerFrame tone
+                  |> Seq.skip 400
+                  |> Seq.take 1024
+                  |> Seq.map (fun (l, _) -> signed l / float (1 <<< (sampleWidth - 1)))
+                  |> Array.ofSeq
+
+              let rms = sqrt (Array.averageBy (fun v -> v * v) heard)
+              let levelDb = 20.0 * log10 (rms * sqrt 2.0)
+              let expectedDb = 20.0 * log10 amplitude + cicDroopDb pdmCicOrder BoardTop.pdmBitsPerFrame rate hz
+              Expect.isLessThan (abs (levelDb - expectedDb)) 0.5 $"heard %.2f{levelDb} dBFS, expected %.2f{expectedDb}"
+
               let m: Mapping.Mapping =
                   { board = kv260
                     path =

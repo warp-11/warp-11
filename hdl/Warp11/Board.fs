@@ -232,6 +232,11 @@ type DeviceRole =
     /// `bclk`, `ws`, `sd_in`, `sd_out`. A board has one I2S connector or
     /// the other, and the top takes the pinout the connector says.
     | I2sSharedBus
+    /// `pdmPins p`: a PDM microphone bus — `pdm_clk` out, `pdm_data` in. A
+    /// board whose harness carries this takes a design's input from the
+    /// microphones on it, decimated, and its I2S connector then carries the
+    /// output alone.
+    | PdmMics
     /// `uartPins p "host"`.
     | HostUart
     /// The board's own clock input, for a wrapper that takes a crystal.

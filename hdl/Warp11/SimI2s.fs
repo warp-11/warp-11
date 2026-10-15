@@ -62,7 +62,12 @@ let separateCodecSimPins =
 /// Ticking is the caller's, not the model's, because a test usually wants to do
 /// something else on the way past — write a register through `SimAxi`, flip a
 /// port, watch a counter. `i2sExchange` is the shorthand for when it does not.
-type I2sCodec(sim: Sim, pins: I2sSimPins, ?width: int) =
+///
+/// `listenOnly` is for a design whose input arrives some other way — PDM
+/// microphones — and whose output is still this bus: the model decodes the
+/// line out and drives nothing, so the design need not have a line in.
+type I2sCodec(sim: Sim, pins: I2sSimPins, ?width: int, ?listenOnly: bool) =
+    let drives = not (defaultArg listenOnly false)
     // Defaults to the library's sample width rather than restating it. This
     // file is compiled after `Audio.fs` for exactly that reason: an audio
     // constant should have one definition, and a simulation helper is not a
@@ -83,7 +88,9 @@ type I2sCodec(sim: Sim, pins: I2sSimPins, ?width: int) =
     let mutable sent = 0
 
     /// Put this cycle's bit on the line. Call before the tick.
-    member _.Drive() = sim.Poke(pins.toDesign, line)
+    member _.Drive() =
+        if drives then
+            sim.Poke(pins.toDesign, line)
 
     /// Read the pins back and work out the next bit. Call after the tick.
     member _.Sample() =

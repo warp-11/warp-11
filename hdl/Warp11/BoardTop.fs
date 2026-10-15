@@ -1094,6 +1094,49 @@ let private linkOnConverterClock (board: Board) (mk: int -> I2sLink) : I2sLink =
                 let toConverter = asyncFifo audioClockDomain "i2s_out_cross" 8 s
                 withDomain audioClockDomain (fun () -> raw.send toConverter) }
 
+/// Bits a PDM microphone gives per frame of the converter it shares a clock
+/// with: the bit clock is the I2S bit clock, and a frame is two slots of it.
+/// Stated as that ratio rather than as 64, so the decimation and the frame
+/// cannot be two numbers.
+let pdmBitsPerFrame = 2 * stockBitsPerSlot
+
+/// Whether a board's harness puts PDM microphones on the design's input.
+let micsOnPdm (board: Board) = (connectorFor PdmMics board).IsSome
+
+/// The pins the converter half of a top declares: the duplex I2S bus, or —
+/// when the harness carries PDM microphones — the bus's transmit side and
+/// the microphones' two pins. Called from the io factory.
+type private ConverterPins =
+    | Duplex of I2sPins
+    | PdmIn of I2sTxPins * PdmPins
+
+let private converterPins (board: Board) (p: Ports) : ConverterPins =
+    if micsOnPdm board then
+        PdmIn(i2sTxPins p (pinoutOf board), pdmPins p)
+    else
+        Duplex(i2sPins p (pinoutOf board))
+
+/// The link those pins make, as the design sees it: samples in, somewhere to
+/// put samples out. With PDM microphones the input is the decimator's and the
+/// bit clock it makes is the I2S one — the same divisor from the same rate —
+/// so the microphones and the amplifiers frame together from one crystal.
+let private converterLink (board: Board) (pins: ConverterPins) (rate: int) : I2sLink =
+    linkOnConverterClock board (fun hz ->
+        match pins with
+        | Duplex pins -> i2sLink "audio" pins hz rate stockBitsPerSlot
+        | PdmIn(tx, mics) ->
+            let out = i2sTxLink "audio" tx hz rate stockBitsPerSlot
+            let pdm = pdmLink "mics" mics hz (rate * pdmBitsPerFrame) pdmBitsPerFrame
+
+            // The decimator declares its samples signed; the I2S receiver hands
+            // out bits. The boundary deals in bits, as the design's layout says
+            // what they mean — and the play link muxes the host's words against
+            // these, which the IR allows only between one reading.
+            let left, right = pdm.input.payload
+
+            { input = { pdm.input with payload = (asUInt left, asUInt right) }
+              send = out.sendOnly })
+
 let private pinsTop (board: Board) (path: DataPath) (d: Design) : BoardTop =
     check board path d
     // No binding here wants a contract, so the map is exactly the design's
@@ -1229,14 +1272,14 @@ let private pinsTop (board: Board) (path: DataPath) (d: Design) : BoardTop =
                     name
                     (fun p ->
                         axiLiteSlavePorts p map.apertureAddrWidth,
-                        i2sPins p (pinoutOf board),
+                        converterPins board p,
                         (match recorder, memory with
                          | Some _, Some m -> Some(axiWriteBusPorts p "m_axi" 32 m.width)
                          | _ -> None),
                         pinOuts p)
                     (fun (slavePorts, pins, writeBusPorts, outs) ->
                         let regs = regMapSlave slavePorts map
-                        let i2s = linkOnConverterClock board (fun hz -> i2sLink "audio" pins hz rate stockBitsPerSlot)
+                        let i2s = converterLink board pins rate
 
                         let sink =
                             match recorder, writeBusPorts, memory with
@@ -1253,9 +1296,9 @@ let private pinsTop (board: Board) (path: DataPath) (d: Design) : BoardTop =
             let top =
                 defModule
                     name
-                    (fun p -> uartPins p "host", i2sPins p (pinoutOf board), pinOuts p)
+                    (fun p -> uartPins p "host", converterPins board p, pinOuts p)
                     (fun (uart, pins, outs) ->
-                        let i2s = linkOnConverterClock board (fun hz -> i2sLink "audio" pins hz rate stockBitsPerSlot)
+                        let i2s = converterLink board pins rate
 
                         match recorder, player with
                         | Some(RecordToFrames _), _
@@ -1318,9 +1361,9 @@ let private pinsTop (board: Board) (path: DataPath) (d: Design) : BoardTop =
             let top =
                 defModule
                     name
-                    (fun p -> i2sPins p (pinoutOf board), pinOuts p)
+                    (fun p -> converterPins board p, pinOuts p)
                     (fun (pins, outs) ->
-                        let i2s = linkOnConverterClock board (fun hz -> i2sLink "audio" pins hz rate stockBitsPerSlot)
+                        let i2s = converterLink board pins rate
                         d.body (onPins d path baked (reporter None outs) unwritable None None i2s))
 
             name, top.def, []

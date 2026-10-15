@@ -142,7 +142,11 @@ let private diffDesigns () =
     @ [ multibandStageFolded.def, 4 * 200
         // A UART frame is ten bits of 24 cycles; a few of them under random
         // pokes on `rx` is the receiver seeing every state.
-        serialRegMap.def, 2_000 ]
+        serialRegMap.def, 2_000
+        // A sample is a frame of bits, each four cycles here, and the first
+        // five frames are the decimator warming up: a dozen frames is the
+        // combs running on real history under random bits and random ready.
+        pdmMics.def, 12 * pdmMicsDecimation * (pdmMicsFabricHz / pdmMicsClockHz) ]
 
 /// `streamWindow`/`lineWindow`'s defining property, driven rather than trusted: across two
 /// frames of distinct rows, the emitted windows are exactly rows r−1, r, r+1

@@ -111,6 +111,12 @@ let cicDroopDb (order: int) (decimation: int) (sampleRate: float) (hz: float) : 
 /// Each integrator adds the *registered* value of the one before it, so the
 /// chain is a pipeline rather than a ripple of adders — one sample of extra
 /// delay per stage, and the longest path one adder deep at any order.
+///
+/// The sample is held at zero for the first `order + 1` output ticks. Until
+/// then the combs have no history and the integrators are still filling, and
+/// what comes out is a full-scale transient — a click at power-on into
+/// whatever follows, and a ring down a low band that lasts hundreds of frames.
+/// With the gate, a quiet microphone is silence from the first sample.
 let cicDecimatorDef (name: string) (order: int) (decimation: int) (sampleWidth: int) : TypedModule<CicPorts> =
     if order < 1 then failwith $"cicDecimator '{name}': order must be >= 1, got {order}"
     if decimation < 2 then failwith $"cicDecimator '{name}': decimation must be >= 2, got {decimation}"
@@ -174,11 +180,15 @@ let cicDecimatorDef (name: string) (order: int) (decimation: int) (sampleWidth: 
             let sampleReg = reg "sample_reg" (SInt sampleWidth)
             sampleReg ==> io.sample
 
+            let warm = counter "warm" (order + 1) io.outTick
+            let settled = regBit "settled"
+            If warm.wrap (fun () -> lit 1UL 1 ==> settled)
+
             If io.outTick (fun () ->
                 for (x, _), previous in List.zip combStages combPrevious do
                     x ==> previous
 
-                sample ==> sampleReg))
+                mux settled sample (lit 0UL sampleWidth) ==> sampleReg))
 
 /// One decimator under `instName`, called as a function: the bit, its tick and
 /// the sample tick in, the sample out.
@@ -216,10 +226,11 @@ let pdmSampleRateOf (fabricHz: int) (halfDiv: int) (decimation: int) : float =
 
 /// A bus, as the body sees it: the stereo stream off the two microphones.
 type PdmLink =
-    { /// The pair, left the microphone whose select pin is low. `valid` pulses
-      /// once per sample; downstream is assumed always-ready, as the I2S
-      /// receiver assumes it, since a consumer has `decimation` bit periods to
-      /// take each one.
+    { /// The pair, left the microphone whose select pin is low. A beat is
+      /// offered from the cycle after the pair registers until it is taken,
+      /// or until the next pair lands on it: the microphones cannot be
+      /// stalled, so a consumer that misses a whole frame loses that sample
+      /// and keeps its alignment.
       input: Stream<Expr * Expr> }
 
 /// The whole front end: the bit clock at the board's rate, two decimators on
@@ -280,12 +291,15 @@ let pdmLink (prefix: string) (pins: PdmPins) (fabricHz: int) (targetClockHz: int
     let leftSample = left pins.dataIn falling outTick
     let rightSample = right pins.dataIn rising outTick
 
-    // The samples register on `outTick`; the beat is valid the cycle after.
+    // The samples register on `outTick`; the beat is offered from the cycle
+    // after until it is taken. Held rather than pulsed: an I2S transmitter is
+    // ready one cycle a frame, and a pulse from a divider it does not share
+    // met that cycle every other frame — half the samples out were zero.
     let valid = regBit $"{prefix}_valid"
-    outTick ==> valid
-
     let ready = wireBit $"{prefix}_ready"
     registerStreamReady ready
+
+    ifElse [ (outTick, fun () -> lit 1UL 1 ==> valid); (valid &&& ready, fun () -> lit 0UL 1 ==> valid) ]
 
     { input =
         { payload = (leftSample, rightSample)

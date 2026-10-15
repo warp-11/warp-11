@@ -2720,7 +2720,13 @@ let private allPassDesign (fc: float) (fs: float) : BiquadDesign =
 /// For eight bands: seven splits, ten all-passes, and every band's path
 /// exactly seven sections long. Sections are listed breadth-first, so a
 /// section's input was produced as many beats before it as the tree allows.
-let crossoverTree (crossovers: float list) (sampleRate: float) : CrossoverTree =
+///
+/// `crossoverTreeWith prefilter` chains `prefilter`'s sections from the sample
+/// first, and the tree reads the last of them: a low-pass ahead of every band
+/// — what a design wants above a PDM decimator, whose output carries the
+/// modulator's noise just under Nyquist — at the cost of a section a sample
+/// rather than a biquad a channel. The empty prefilter is the tree as it was.
+let crossoverTreeWith (prefilter: BiquadDesign list) (crossovers: float list) (sampleRate: float) : CrossoverTree =
     let fc = List.toArray crossovers
     let mutable nextNode = 1
     let fresh () = let n = nextNode in nextNode <- nextNode + 1; n
@@ -2759,16 +2765,25 @@ let crossoverTree (crossovers: float list) (sampleRate: float) : CrossoverTree =
             let highSections, highLeaves = build highNode highLevel (mid + 1) hi
             splits @ lowComp @ highComp @ lowSections @ highSections, lowLeaves @ highLeaves
 
-    let sections, leaves = build 0 0 0 (fc.Length - 1)
+    let root, rootLevel, pre =
+        ((0, 0, []), List.indexed prefilter)
+        ||> List.fold (fun (node, level, acc) (k, d) ->
+            let out = fresh ()
+            out, level + 1, acc @ [ level, { input = node; output = out; coefficients = quantise d; role = $"pre %d{k}" } ])
+
+    let sections, leaves = build root rootLevel 0 (fc.Length - 1)
     let depths = leaves |> List.map snd |> List.distinct
 
     if List.length depths <> 1 then
         failwith $"crossover tree: bands at different depths %A{depths} — a balanced count of bands is required"
 
-    { sections = sections |> List.sortBy fst |> List.map snd
+    { sections = pre @ sections |> List.sortBy fst |> List.map snd
       bands = leaves |> List.map fst
       nodes = nextNode
       depth = List.head depths }
+
+let crossoverTree (crossovers: float list) (sampleRate: float) : CrossoverTree =
+    crossoverTreeWith [] crossovers sampleRate
 
 /// The eight-band compressor's ports. One crossover feeding one compressor per
 /// band, with independent left and right makeup gains.
@@ -2809,11 +2824,20 @@ type MultibandCompressorPorts =
 /// global threshold is meaningful here only because each band compresses its
 /// own post-makeup level (see `monoBandCompressor`). `envelope` reports the
 /// loudest band detector across both ears, for host metering.
-let multibandCompressor8Def (name: string) (crossovers: float list) (sampleRate: float) : TypedModule<MultibandCompressorPorts> =
+///
+/// `prefilter` runs ahead of the tree as sections of its own — the spatial
+/// form of what `multibandCompressor8FoldedPrefilteredDef` folds, so the two
+/// engines stay comparable sample for sample with a low-pass in front.
+let multibandCompressor8PrefilteredDef
+    (name: string)
+    (prefilter: BiquadDesign list)
+    (crossovers: float list)
+    (sampleRate: float)
+    : TypedModule<MultibandCompressorPorts> =
     if List.length crossovers <> multibandBands - 1 then
         failwith $"multibandCompressor8 needs {multibandBands - 1} crossovers, got {List.length crossovers}"
 
-    let tree = crossoverTree crossovers sampleRate
+    let tree = crossoverTreeWith prefilter crossovers sampleRate
     let section = biquadSection $"{name}_biquad"
     let compressor = monoBandCompressor $"{name}_band"
     let sumWidth = gainedWidth + 3
@@ -3106,8 +3130,15 @@ let private multibandInstance (io: MultibandCompressorPorts) =
         List.iter2 (fun port g -> g ==> port) io.rightGains settings.rightGains
         stereoSplice io.s s, io.envelope
 
+let multibandCompressor8Def (name: string) (crossovers: float list) (sampleRate: float) : TypedModule<MultibandCompressorPorts> =
+    multibandCompressor8PrefilteredDef name [] crossovers sampleRate
+
+/// One bank under `instName`, `prefilter` ahead of its tree.
+let multibandCompressor8Prefiltered (name: string) (prefilter: BiquadDesign list) (crossovers: float list) (sampleRate: float) instName =
+    multibandInstance ((multibandCompressor8PrefilteredDef name prefilter crossovers sampleRate).NewNamed instName)
+
 let multibandCompressor8 (name: string) (crossovers: float list) (sampleRate: float) instName =
-    multibandInstance ((multibandCompressor8Def name crossovers sampleRate).NewNamed instName)
+    multibandCompressor8Prefiltered name [] crossovers sampleRate instName
 
 /// The stock 8-band compressor: the default crossovers, at **the rate the
 /// design actually runs**.
@@ -4378,11 +4409,20 @@ let private streamToStereo (sp: StereoPorts) (s: Stream<Expr * Expr>) =
 /// it takes, and nothing here is scheduled: a beat moves when the next stage
 /// can take it. The state lives in memory, so it does not reset with the
 /// registers.
-let multibandCompressor8FoldedDef (name: string) (crossovers: float list) (sampleRate: float) : TypedModule<MultibandFoldedPorts> =
+///
+/// `prefilter` runs ahead of the tree as sections of the same program — a
+/// low-pass above a PDM front end costs a few issues a sample here, where it
+/// would cost a biquad a channel in parallel logic.
+let multibandCompressor8FoldedPrefilteredDef
+    (name: string)
+    (prefilter: BiquadDesign list)
+    (crossovers: float list)
+    (sampleRate: float)
+    : TypedModule<MultibandFoldedPorts> =
     if List.length crossovers <> multibandBands - 1 then
         failwith $"multibandCompressor8Folded needs {multibandBands - 1} crossovers, got {List.length crossovers}"
 
-    let shape = treeShape (crossoverTree crossovers sampleRate)
+    let shape = treeShape (crossoverTreeWith prefilter crossovers sampleRate)
 
     defModule
         name
@@ -4446,10 +4486,18 @@ let private multibandFoldedInstance (io: MultibandFoldedPorts) (instName: string
 
         stereoSplice io.s s, io.envelope
 
+let multibandCompressor8FoldedDef (name: string) (crossovers: float list) (sampleRate: float) : TypedModule<MultibandFoldedPorts> =
+    multibandCompressor8FoldedPrefilteredDef name [] crossovers sampleRate
+
+/// One folded bank under `instName`, with `multibandCompressor8`'s call shape
+/// over the folded settings, `prefilter` ahead of its tree.
+let multibandCompressor8FoldedPrefiltered (name: string) (prefilter: BiquadDesign list) (crossovers: float list) (sampleRate: float) instName =
+    multibandFoldedInstance ((multibandCompressor8FoldedPrefilteredDef name prefilter crossovers sampleRate).NewNamed instName) instName
+
 /// One folded bank under `instName`, with `multibandCompressor8`'s call shape
 /// over the folded settings.
 let multibandCompressor8Folded (name: string) (crossovers: float list) (sampleRate: float) instName =
-    multibandFoldedInstance ((multibandCompressor8FoldedDef name crossovers sampleRate).NewNamed instName) instName
+    multibandCompressor8FoldedPrefiltered name [] crossovers sampleRate instName
 
 /// The stock 8-band compressor on one multiplier: `multibandCompressor`'s
 /// call shape, over `MultibandFoldedSettings` — the same law, with the makeup

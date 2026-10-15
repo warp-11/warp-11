@@ -36,6 +36,7 @@ let private roleText (r: DeviceRole) =
     match r with
     | I2sSeparateCodecs -> "I2sSeparateCodecs"
     | I2sSharedBus -> "I2sSharedBus"
+    | PdmMics -> "PdmMics"
     | HostUart -> "HostUart"
     | ClockIn -> "ClockIn"
     | AudioClockIn -> "AudioClockIn"
@@ -45,6 +46,7 @@ let private readRole (text: string) : Result<DeviceRole, string> =
     match text with
     | "I2sSeparateCodecs" -> Ok I2sSeparateCodecs
     | "I2sSharedBus" -> Ok I2sSharedBus
+    | "PdmMics" -> Ok PdmMics
     | "HostUart" -> Ok HostUart
     | "ClockIn" -> Ok ClockIn
     | "AudioClockIn" -> Ok AudioClockIn
@@ -671,6 +673,7 @@ let showBoard (b: Board) : string =
         match r with
         | I2sSeparateCodecs -> "I2sSeparateCodecs"
         | I2sSharedBus -> "I2sSharedBus"
+        | PdmMics -> "PdmMics"
         | HostUart -> "HostUart"
         | ClockIn -> "ClockIn"
         | AudioClockIn -> "AudioClockIn"
