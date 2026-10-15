@@ -112,6 +112,7 @@ let private diffDesignsAtDefault () =
       i2sLinkCodec.def
       i2sLinkTone.def
       i2sLinkHalfVolume.def
+      pdmMics.def
       selectLadder.def
       multibandStage.def
       delayTap.def
@@ -1681,6 +1682,98 @@ let private fifoStorageIsInvisible () =
 /// pass an arithmetic check and be useless. Random backpressure is what makes
 /// the queue depths vary; with a consumer that always takes, the FIFO holds one
 /// beat and the bug hides.
+/// The decimator's defining property: a bit stream whose density is a tone
+/// comes out as that tone, at the level the CIC's own droop predicts, with
+/// nothing else in the band. A CIC with the wrong order, the wrong centring or
+/// a comb reading the wrong stage still passes *a* tone — the level and the
+/// floor are what tell them apart, and only measuring both does.
+///
+/// The tone sits on a DFT bin so the spectrum needs no window, and the expected
+/// level is stated through `cicGain`, `cicDroopDb` and the low-pass's own
+/// magnitude rather than assumed to be unity. Silence runs second: the
+/// modulator's idle pattern through the decimator is the floor the design will
+/// hear with the microphones covered.
+///
+/// Measured when written: −20.04 dBFS against −20.0 expected, 80.2 / 80.6 dB of
+/// signal to noise in 0–10 kHz, silence at −138.5 dBFS. The noise is the
+/// model's — a second-order modulator at 64× oversampling has ~85 dB there in
+/// theory — so the gate sits 2 dB under the measurement rather than on it, to
+/// be about the decimator and not about the quantiser's exact gain.
+let private pdmDecimatorRecoversTheTone () =
+    let halfDiv = pdmClockHalfDiv pdmMicsFabricHz pdmMicsClockHz
+    let rate = pdmSampleRateOf pdmMicsFabricHz halfDiv pdmMicsDecimation
+    let n = 4096
+    let bin = 84 // ~1 kHz, on a bin
+    let hz = float bin * rate / float n
+    let amplitude = 0.1 // −20 dBFS
+    let settle = 512
+    let bandBins = int (10_000.0 / rate * float n)
+    let fullScale = float (1L <<< (sampleWidth - 1))
+
+    let tone =
+        Seq.initInfinite (fun i ->
+            let phase = 2.0 * System.Math.PI * hz * float i / rate
+            (amplitude * sin phase, amplitude * sin (phase + System.Math.PI / 3.0)))
+
+    let out = streamPins "out" sampleLayout
+
+    let heard (frames: seq<float * float>) =
+        let sim = Sim(pdmMics.def)
+
+        pdmThrough sim defaultPdmSimPins pdmMicsDecimation out frames
+        |> Seq.skip settle
+        |> Seq.take n
+        |> Array.ofSeq
+
+    let channel (pick: int64 * int64 -> int64) (pairs: (int64 * int64)[]) =
+        pairs |> Array.map (fun pair -> float (pick pair) / fullScale)
+
+    let power (xs: float[]) =
+        [| for k in 0..bandBins ->
+               let mutable re = 0.0
+               let mutable im = 0.0
+
+               for i in 0 .. n - 1 do
+                   let angle = 2.0 * System.Math.PI * float k * float i / float n
+                   re <- re + xs[i] * cos angle
+                   im <- im - xs[i] * sin angle
+
+               re * re + im * im |]
+
+    let measure (xs: float[]) =
+        let p = power xs
+        let signal = p[bin]
+        let noise = p |> Array.indexed |> Array.sumBy (fun (k, v) -> if k = 0 || k = bin then 0.0 else v)
+        20.0 * log10 (2.0 * sqrt signal / float n), 10.0 * log10 (signal / noise)
+
+    let rmsDb (xs: float[]) =
+        20.0 * log10 (sqrt (Array.averageBy (fun x -> x * x) xs))
+
+    let expectedDb =
+        20.0 * log10 amplitude
+        + 20.0 * log10 (cicGain pdmCicOrder pdmMicsDecimation sampleWidth)
+        + cicDroopDb pdmCicOrder pdmMicsDecimation rate hz
+        + (butterworthLowPass 4 pdmMicsLowPassHz rate
+           |> List.sumBy (fun d -> 20.0 * log10 (biquadMagnitude d hz rate)))
+
+    let toneHeard = heard tone
+    let leftDb, leftSnr = measure (channel fst toneHeard)
+    let rightDb, rightSnr = measure (channel snd toneHeard)
+
+    let silenceHeard = heard (Seq.initInfinite (fun _ -> (0.0, 0.0)))
+    let leftFloor = rmsDb (channel fst silenceHeard)
+    let rightFloor = rmsDb (channel snd silenceHeard)
+
+    printfn
+        $"  pdm: %.0f{hz} Hz at %.1f{expectedDb} dBFS expected, heard %.2f{leftDb} / %.2f{rightDb}; snr to 10 kHz %.1f{leftSnr} / %.1f{rightSnr} dB; silence %.1f{leftFloor} / %.1f{rightFloor} dBFS"
+
+    abs (leftDb - expectedDb) <= 0.5
+    && abs (rightDb - expectedDb) <= 0.5
+    && leftSnr > 78.0
+    && rightSnr > 78.0
+    && leftFloor < -100.0
+    && rightFloor < -100.0
+
 let private contextRidesAlong () =
     let sim = Sim taggedDivide.def
     let rng = System.Random 99
@@ -2373,6 +2466,7 @@ let private mainDemo () =
     printfn $"roms hold their contents:     %b{romsHoldTheirContents ()}"
     printfn $"reads do not fold:            %b{readsDoNotFold ()}"
     printfn $"context rides along:          %b{contextRidesAlong ()}"
+    printfn $"pdm decimator recovers tone:  %b{pdmDecimatorRecoversTheTone ()}"
     printfn $"farm carries context:         %b{farmCarriesContext ()}"
     printfn $"ram style rule holds:         %b{ramStyleRule ()}"
     printfn $"a literal borrows the sign:   %b{literalBorrowsTheSign ()}"

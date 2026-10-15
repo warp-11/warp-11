@@ -2851,6 +2851,39 @@ let i2sLinkTone =
             toneGenerator "ToneGenerator" "tone" enable (lit toneStep440 tonePhaseWidth)
             |> link.sendOnly)
 
+/// The PDM bus's bit clock: what the I2S bit clock is on the boards here, so
+/// the same divider serves both and the microphones and the amplifiers tick
+/// from one crystal.
+let pdmMicsClockHz = 3_125_000
+
+/// The toy's fabric clock: four cycles a bit period, the least `pdmLink`
+/// accepts, so the living check runs a tone through in about a second rather
+/// than the thirty a real fabric rate would cost it. The arithmetic is the
+/// same at any ratio; only the sample point's position in the half period
+/// moves, and the check is where that is exercised.
+let pdmMicsFabricHz = 4 * pdmMicsClockHz
+
+/// Bits per sample: the bit clock over the band's rate, 48 828.125 Hz.
+let pdmMicsDecimation = 64
+
+/// The corner of the low-pass that follows the decimator.
+let pdmMicsLowPassHz = 10_000.0
+
+/// Two PDM microphones to a stereo stream: the bus's two pins in, the
+/// decimated pair out as a stream port group, a fourth-order Butterworth
+/// between them taking the modulator's shaped noise off the top of the band.
+let pdmMics =
+    defModule
+        "PdmMics"
+        (fun p -> pdmPins p, streamOutputPorts p "out" sampleLayout)
+        (fun (pins, out) ->
+            let rate = pdmSampleRateOf pdmMicsFabricHz (pdmClockHalfDiv pdmMicsFabricHz pdmMicsClockHz) pdmMicsDecimation
+            let mics = pdmLink "pdm" pins pdmMicsFabricHz pdmMicsClockHz pdmMicsDecimation
+
+            mics.input
+            |> biquadCascade "Biquad" "lp" (butterworthLowPass 4 pdmMicsLowPassHz rate)
+            |> streamSink out)
+
 /// The 8-band multiband compressor as a stream stage.
 let multibandStage =
     defModule

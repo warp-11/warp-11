@@ -2459,6 +2459,29 @@ let toQ230 (d: BiquadDesign) : uint64 list =
 let lowPassCoeffsQ230 (fc: float) (q: float) (fs: float) : uint64 list =
     toQ230 (rbjDesign LowPass fc q 0.0 fs)
 
+/// An even-order Butterworth low-pass as cascaded cookbook sections: section k
+/// of n/2 at `Q = 1 / (2 sin((2k+1)π/2n))`, the pole pairs of the maximally
+/// flat response. Order 4 at 10 kHz is what follows a PDM decimator — 0.0 dB
+/// through the band, −24 dB an octave above the corner, ~15 µs of group delay
+/// at 1 kHz against the ~0.3 ms a linear-phase FIR of the same job costs.
+let butterworthLowPass (order: int) (fc: float) (fs: float) : BiquadDesign list =
+    if order < 2 || order % 2 <> 0 then
+        failwith $"butterworthLowPass: the order must be even and >= 2, got {order}"
+
+    [ for k in 0 .. order / 2 - 1 ->
+          let q = 1.0 / (2.0 * sin (System.Math.PI * float (2 * k + 1) / (2.0 * float order)))
+          rbjDesign LowPass fc q 0.0 fs ]
+
+/// A section's magnitude at `hz`, as a ratio: `|B(z)| / |A(z)|` on the unit
+/// circle with the cookbook's sign convention. For stating a check's
+/// expectation through the filter it drives, and for a fit's display.
+let biquadMagnitude (d: BiquadDesign) (hz: float) (fs: float) : float =
+    let z1 = System.Numerics.Complex.FromPolarCoordinates(1.0, -2.0 * System.Math.PI * hz / fs)
+    let z2 = z1 * z1
+    let numerator = System.Numerics.Complex(d.b0, 0.0) + z1 * d.b1 + z2 * d.b2
+    let denominator = System.Numerics.Complex.One + z1 * d.a1 + z2 * d.a2
+    (numerator / denominator).Magnitude
+
 /// An envelope time constant in seconds as the Q1.15 coefficient the
 /// compressors take: `alpha = 1 - exp(-1/(tau*Fs))`. Zero or negative means
 /// instantaneous, which is the largest representable alpha rather than an

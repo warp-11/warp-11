@@ -64,8 +64,10 @@
         <Compile Include="Windows.fs"/>
         <Compile Include="Bands.fs"/>
         <Compile Include="Audio.fs"/>
+        <Compile Include="Pdm.fs"/>
         <Compile Include="SimI2s.fs"/>
         <Compile Include="Wav.fs"/>
+        <Compile Include="SimPdm.fs"/>
         <Compile Include="Pgm.fs"/>
         <Compile Include="Csv.fs"/>
         <Compile Include="Fu.fs"/>

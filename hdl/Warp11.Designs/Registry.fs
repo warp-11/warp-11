@@ -133,6 +133,8 @@ let catalog =
           entry "I2S link (codec pins)" (nameof i2sLinkCodec) (fun () -> i2sLinkCodec.def)
           entry "I2S link (transmit only)" (nameof i2sLinkTone) (fun () -> i2sLinkTone.def)
           entry "I2S link + half volume" (nameof i2sLinkHalfVolume) (fun () -> i2sLinkHalfVolume.def)
+          entry "PDM microphones (CIC decimator)" (nameof pdmMics) (fun () -> pdmMics.def)
+          |> poking [ "out_ready", 1UL ]
           entry "Select ladder (first match wins)" (nameof selectLadder) (fun () -> selectLadder.def)
           entry "Max pool, combinational" (nameof maxPoolCombinational) (fun () -> maxPoolCombinational.def)
           entry "Delay tap (accepted beats)" (nameof delayTap) (fun () -> delayTap.def)

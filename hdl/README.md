@@ -94,7 +94,8 @@ it.
   `NumberOperators.fs`, `Verilog.fs`, `Flatten.fs`, `Firrtl.fs`,
   `FirrtlImport.fs`, `Inventory.fs`, `Sim.fs`, `SimAxi.fs`, `Breakpoint.fs`,
   `Debug.fs`, `Catalog.fs`, `Vcd.fs`, `Diff.fs`, `Stdlib.fs`, `Uart.fs`,
-  `SerialRegMap.fs`, `SimUart.fs`, `Audio.fs`, `Wav.fs`. Most modules are
+  `SerialRegMap.fs`, `SimUart.fs`, `Audio.fs`, `Pdm.fs`, `Wav.fs`, `SimPdm.fs`.
+  Most modules are
   `[<AutoOpen>]` — so `open Warp11` is the whole DSL
   surface — the exceptions being `Breakpoint`, `Catalog`, `Debug`, `Firrtl`,
   `FirrtlImport`, `Inventory`, `Number` and `Vcd`, which are reached by
