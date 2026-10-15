@@ -490,11 +490,11 @@ segment by segment and *numeric* segments compare numerically, so the dot in
 Spelled `alpha2`/`alpha10` the segment would be a string and `alpha10` would sort
 *below* `alpha2`. Keep the dot.
 
-**All three packages move together.** One `<Version>` in
+**All four packages move together.** One `<Version>` in
 `Directory.Build.props`, and every package takes it. This is a decision, not an
 accident: a `ProjectReference` packs as a dependency pinned to the referenced
 project's version, so versioning them independently would mean hand-managing a
-compatibility matrix across three packages that only ever ship together.
+compatibility matrix across four packages that only ever ship together.
 
 **While the version is `0.x`, nothing here promises compatibility**, and
 `-alpha` says it a second time. So the question at each release is not "am I
@@ -531,9 +531,12 @@ to tell two alphas apart.
 
 ## Releasing the packages
 
-Three projects ship: **`Warp11`** (the library), **`Warp11.SimView`** (the
-debugger as a component) and **`Warp11.SimView.Desktop`** (the desktop head).
-Everything else here is a *user* of them.
+Four projects ship: **`Warp11`** (the library), **`Warp11.Host`** (a design's
+register map over a serial port, and a stream played into it — the F# twin
+of the Rust `SerialWindow`),
+**`Warp11.SimView`** (the debugger as a component) and
+**`Warp11.SimView.Desktop`** (the desktop head). Everything else here is a
+*user* of them.
 
 **nuget.org will not accept a re-push of a version that already exists**, so
 republishing always means a version bump. The version lives in **one place** —
@@ -559,8 +562,8 @@ dotnet run --project Warp11.Designs
 cd ../runtime && cargo test --workspace && cd ../hdl
 # and ./run_differential.sh if the toolchain moved — ask first, it is not cheap
 
-# 3. pack all three
-for p in Warp11 Warp11.SimView Warp11.SimView.Desktop; do
+# 3. pack all four
+for p in Warp11 Warp11.Host Warp11.SimView Warp11.SimView.Desktop; do
     dotnet pack $p/$p.fsproj -c Release -o artifacts
 done
 

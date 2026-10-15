@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <TargetFramework>net10.0</TargetFramework>
+        <WarningsAsErrors>FS0025</WarningsAsErrors>
+        <PackageId>Warp11.Host</PackageId>
+        <Description>The host half of Warp 11 in F#: a design's register map reached over a serial port, the twin of the Rust warp11-host crate.</Description>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <Compile Include="Serial.fs"/>
+    </ItemGroup>
+
+    <ItemGroup>
+        <ProjectReference Include="../Warp11/Warp11.fsproj"/>
+    </ItemGroup>
+
+    <!-- The one thing the library itself must not carry: a tty. Kept out of
+         `Warp11` so the HDL stays free of platform packages, and out of any
+         view assembly so a mobile head, which has no System.IO.Ports, can
+         still reference the view. -->
+    <ItemGroup>
+        <PackageReference Include="System.IO.Ports" Version="10.0.0"/>
+    </ItemGroup>
+
+</Project>

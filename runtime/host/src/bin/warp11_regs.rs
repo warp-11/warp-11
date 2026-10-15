@@ -11,7 +11,7 @@
 use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 use warp11_host::mmap::MmapWindow;
-use warp11_host::seam::{parse_number, read_layout, resolve};
+use warp11_host::seam::{parse_number, read_aperture_words, read_layout, resolve};
 use warp11_host::serial_window::SerialWindow;
 use warp11_host::udmabuf::find_uio;
 use warp11_runtime::RegisterWindow;
@@ -81,9 +81,15 @@ fn main() {
     };
 
     let result = match (serial, uio) {
-        (Some(tty), None) => match SerialWindow::open(Path::new(&tty), baud, 10) {
+        (Some(tty), None) => match read_aperture_words(&layout)
+            .map_err(|e| format!("{}: {e}", layout.display()))
+            .and_then(|words| {
+                // The map's width decides the frame's shape — see warp11_record.
+                let words = words.unwrap_or(warp11_host::serial_window::MAX_WORDS);
+                SerialWindow::open_words(Path::new(&tty), baud, 10, words).map_err(|e| format!("{}: {e}", tty.display()))
+            }) {
             Ok(window) => run(window, &registers, &actions),
-            Err(e) => Err(format!("{}: {e}", tty.display())),
+            Err(e) => Err(e),
         },
         (None, Some(name)) => match find_uio(&name) {
             Ok(Some(path)) => match OpenOptions::new().read(true).write(true).open(&path) {

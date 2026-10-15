@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Pack the three shipping packages into hdl/artifacts, for consumers on a local
+# Pack the four shipping packages into hdl/artifacts, for consumers on a local
 # package source (a downstream repo's nuget.config pointing here).
 #
 # The reason this is a script rather than a `dotnet pack` in the shell history:
@@ -15,7 +15,7 @@ export PATH="$HOME/.dotnet:$PATH"
 version=$(grep -oPm1 '(?<=<Version>)[^<]+' Directory.Build.props)
 echo "packing $version"
 
-for project in Warp11 Warp11.SimView Warp11.SimView.Desktop; do
+for project in Warp11 Warp11.Host Warp11.SimView Warp11.SimView.Desktop; do
     dotnet pack "$project/$project.fsproj" -c Release -o artifacts
 done
 

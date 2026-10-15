@@ -31,7 +31,17 @@
 ///     host ← A5 | 02 | d0 d1 d2 d3 | xor           a streamed word
 ///
 /// The status byte is the frame's type, so a host tells them apart by the
-/// byte it already had to read. Replies win every race: a stream frame only
+/// byte it already had to read.
+///
+/// **And one frame the host sends unasked**, the other direction of the
+/// same idea — a player, a stimulus, bulk data into a design that has no
+/// other way in. It opens with a different sync byte, so the receiver knows
+/// from the first byte that no command follows, and it is never replied to:
+///
+///     host → 5A | d0 d1 d2 d3 | xor                a played word
+///
+/// A design that does not ask for played words gets no receiver state for
+/// them, and emits what it emitted before. Replies win every race: a stream frame only
 /// starts when nothing is replying and no read is in flight, so putting a
 /// recorder on the link cannot make `wdrc show` slower to answer — only
 /// to answer *later*, by however long one frame takes.
@@ -47,6 +57,11 @@ let serialSync = 0xA5UL
 /// mistaken for either.
 let serialStreamStatus = 0x02UL
 
+/// The byte a played frame begins with instead of `serialSync`: the sync
+/// inverted, so it has the same edges to find and cannot be mistaken for a
+/// request.
+let serialPlaySync = 0x5AUL
+
 /// How far the receiver is through a request.
 type SerialRequestState =
     | AwaitSync
@@ -55,6 +70,10 @@ type SerialRequestState =
     | AwaitAddress
     | AwaitData
     | AwaitChecksum
+    /// Only on a link that takes played words: the four data bytes of a
+    /// played frame, then its checksum.
+    | AwaitPlayData
+    | AwaitPlayChecksum
 
 /// Address bits a command byte carries on its own.
 let serialCommandAddrBits = 7
@@ -68,15 +87,34 @@ let serialAddressBytes (wordWidth: int) =
 /// The widest map a request can address.
 let serialMaxAddrBits = serialCommandAddrBits + 8
 
+/// Words the host played into the link, as the receiver offers them.
+type SerialPlayed =
+    { /// A played word whose checksum matched, offered for one cycle. Nothing
+      /// holds it: what wants it buffers it.
+      words: Flow<Expr>
+      /// High for one cycle when a played frame's checksum did not match
+      /// and the word was dropped.
+      refused: Expr }
+
+/// What a serial link gives the design around its register map: the channel
+/// a `RegMap` slave consumes, the reply bytes for the transmitter, and the
+/// played words where the link was asked to take them.
+type SerialLinkEnds =
+    { channel: AxiLiteChannel
+      reply: Stream<Expr>
+      played: SerialPlayed option }
+
 /// Parse requests from a byte flow into the write and read fires a
-/// `RegMap` slave wants, and reply on a byte stream. Returns the channel
-/// for `regMapSlaveOn` and the reply stream for the transmitter.
-let serialRegMapChannelWith
+/// `RegMap` slave wants, reply on a byte stream, interleave `stream`'s
+/// words into the replies, and — when `play` — take played words off the
+/// same flow.
+let serialRegMapLink
     (name: string)
     (wordWidth: int)
     (stream: Stream<Expr> option)
+    (play: bool)
     (bytes: Flow<Expr>)
-    : AxiLiteChannel * Stream<Expr> =
+    : SerialLinkEnds =
     if wordWidth > serialMaxAddrBits then
         failwith
             $"serial register map: a request addresses %d{1 <<< serialMaxAddrBits} words; the map wants %d{1 <<< wordWidth}"
@@ -87,17 +125,24 @@ let serialRegMapChannelWith
     // The wide map's extra state goes after `AwaitCommand`, so the narrow
     // encoding — and therefore the emitted Verilog of every design that had one
     // — is untouched.
+    // The played states go after every request state for the same reason the
+    // wide map's goes after `AwaitCommand`: a link without them encodes as
+    // it always did.
     let st =
         machine
             $"{name}_request"
-            ([ AwaitSync; AwaitCommand ] @ (if wide then [ AwaitAddress ] else []) @ [ AwaitData; AwaitChecksum ])
+            ([ AwaitSync; AwaitCommand ]
+             @ (if wide then [ AwaitAddress ] else [])
+             @ [ AwaitData; AwaitChecksum ]
+             @ (if play then [ AwaitPlayData; AwaitPlayChecksum ] else []))
 
     let command = reg $"{name}_command" 8
     let addrHigh = if wide then Some(reg $"{name}_addr_high" 8) else None
     let dataBytes = [ for i in 0..3 -> reg $"{name}_data%d{i}" 8 ]
     let data = wire $"{name}_data" 32
     cat dataBytes[3] (cat dataBytes[2] (cat dataBytes[1] dataBytes[0])) ==> data
-    let index = counter $"{name}_data_index" 4 (arrived &&& st.Is AwaitData)
+    let takingData = if play then st.Is AwaitData ||| st.Is AwaitPlayData else st.Is AwaitData
+    let index = counter $"{name}_data_index" 4 (arrived &&& takingData)
     let running = reg $"{name}_xor" 8
     let isWrite = wire $"{name}_is_write" 1
     slice 7 7 command ==> isWrite
@@ -110,13 +155,39 @@ let serialRegMapChannelWith
     lit 0UL 1 ==> readFire
     lit 0UL 1 ==> refused
 
+    // A played word's fires, only built when the link takes them.
+    let playFire = if play then Some(regBit $"{name}_play_fire") else None
+    let playRefused = if play then Some(regBit $"{name}_play_refused") else None
+    playFire |> Option.iter (fun f -> lit 0UL 1 ==> f)
+    playRefused |> Option.iter (fun f -> lit 0UL 1 ==> f)
+
+    // The four data bytes, least significant first, as a request's and a
+    // played frame's both arrive.
+    let takeDataByte () =
+        ifElse
+            [ for i, d in List.indexed dataBytes -> (eq index.count (lit (uint64 i) 2), fun () -> byte ==> d) ]
+
+        (running ^^^ byte) ==> running
+
     st.Switch
         [ yield
               (AwaitSync,
                fun () ->
-                   If (arrived &&& eq byte (lit serialSync 8)) (fun () ->
-                       lit 0UL 8 ==> running
-                       st.Goto AwaitCommand))
+                   if play then
+                       If arrived (fun () ->
+                           ifElse
+                               [ (eq byte (lit serialSync 8),
+                                  fun () ->
+                                      lit 0UL 8 ==> running
+                                      st.Goto AwaitCommand)
+                                 (eq byte (lit serialPlaySync 8),
+                                  fun () ->
+                                      lit 0UL 8 ==> running
+                                      st.Goto AwaitPlayData) ])
+                   else
+                       If (arrived &&& eq byte (lit serialSync 8)) (fun () ->
+                           lit 0UL 8 ==> running
+                           st.Goto AwaitCommand))
           yield
               (AwaitCommand,
                fun () ->
@@ -147,11 +218,7 @@ let serialRegMapChannelWith
               (AwaitData,
                fun () ->
                    If arrived (fun () ->
-                       // Least significant byte first.
-                       ifElse
-                           [ for i, d in List.indexed dataBytes -> (eq index.count (lit (uint64 i) 2), fun () -> byte ==> d) ]
-
-                       (running ^^^ byte) ==> running
+                       takeDataByte ()
                        If index.wrap (fun () -> st.Goto AwaitChecksum)))
           yield
               (AwaitChecksum,
@@ -164,7 +231,26 @@ let serialRegMapChannelWith
                                   bnot isWrite ==> readFire)
                              (otherwise, fun () -> lit 1UL 1 ==> refused) ]
 
-                       st.Goto AwaitSync)) ]
+                       st.Goto AwaitSync))
+          match playFire, playRefused with
+          | Some fire, Some bad ->
+              yield
+                  (AwaitPlayData,
+                   fun () ->
+                       If arrived (fun () ->
+                           takeDataByte ()
+                           If index.wrap (fun () -> st.Goto AwaitPlayChecksum)))
+
+              yield
+                  (AwaitPlayChecksum,
+                   fun () ->
+                       If arrived (fun () ->
+                           ifElse
+                               [ (eq byte running, fun () -> lit 1UL 1 ==> fire)
+                                 (otherwise, fun () -> lit 1UL 1 ==> bad) ]
+
+                           st.Goto AwaitSync))
+          | _ -> () ]
 
     // The read: the slave answers `answersAfter` cycles on, and the word is
     // held for it from the fire until the reply has gone out.
@@ -297,14 +383,37 @@ let serialRegMapChannelWith
     let awWord = wire $"{name}_write_word" wordWidth
     slice (wordWidth - 1) 0 requestAddr ==> awWord
 
-    { wordWidth = wordWidth
-      wdata = data
-      writeFire = writeFire
-      awWord = awWord
-      beginRead = beginRead
-      answersAfter = answersAfter
-      rdata = readData },
-    reply
+    let played =
+        match playFire, playRefused with
+        | Some fire, Some bad ->
+            Some
+                { words =
+                    { payload = data
+                      valid = fire
+                      layout = layout1 ("word", 32) }
+                  refused = bad }
+        | _ -> None
+
+    { channel =
+        { wordWidth = wordWidth
+          wdata = data
+          writeFire = writeFire
+          awWord = awWord
+          beginRead = beginRead
+          answersAfter = answersAfter
+          rdata = readData }
+      reply = reply
+      played = played }
+
+/// The channel with a stream of words going out and nothing played in.
+let serialRegMapChannelWith
+    (name: string)
+    (wordWidth: int)
+    (stream: Stream<Expr> option)
+    (bytes: Flow<Expr>)
+    : AxiLiteChannel * Stream<Expr> =
+    let ends = serialRegMapLink name wordWidth stream false bytes
+    ends.channel, ends.reply
 
 /// The channel with no stream on it — what every design had before one could
 /// be asked for, and still the common case.
@@ -342,3 +451,21 @@ let serialRegMapSlaveWith
     let regs = regMapSlaveOn channel m
     uartTransmit name fabricHz baud reply ==> pins.tx
     regs
+
+/// The slave with whichever of the two unasked frames the design wants: a
+/// stream of words going out, played words coming in, or both. The played
+/// words come back beside the registers; `None` when `play` was false.
+let serialRegMapSlaveLink
+    (name: string)
+    (fabricHz: int)
+    (baud: int)
+    (pins: UartPins)
+    (m: RegMap)
+    (stream: Stream<Expr> option)
+    (play: bool)
+    : SlaveRegs * SerialPlayed option =
+    let received = uartReceive name fabricHz baud pins.rx
+    let ends = serialRegMapLink name (m.apertureAddrWidth - 2) stream play received
+    let regs = regMapSlaveOn ends.channel m
+    uartTransmit name fabricHz baud ends.reply ==> pins.tx
+    regs, ends.played

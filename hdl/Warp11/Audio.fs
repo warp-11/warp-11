@@ -558,20 +558,19 @@ let gainExpWordWidth = 2 * gainExpMantissaBits
 /// Bits the exponent takes.
 let gainExpExponentBits = gainLogWidth - gainLogFracBits
 
-/// Octaves of gain the apply delivers, either side of unity — ±48 dB.
+/// Octaves of gain the apply delivers, either side of unity — the whole of
+/// the gain format, ±96 dB.
 ///
 /// **This number sizes the variable shifter, which is the one expensive thing
-/// in the audio path**, so it is bounded on purpose rather than left at what the
-/// gain format could hold. Two things follow from it and each is worth about as
-/// much: the shift is never less than `gainExpMantissaBits - gainApplyOctaves`,
-/// so that much of it is constant and therefore free wiring; and what is left
-/// spans `2 * gainApplyOctaves` positions rather than the format's 32, which is
-/// one barrel stage fewer.
-///
-/// The gain *format* stays wider, because a sum of terms — a volume control, a
-/// noise-reduction decision — needs headroom above what any one of them asks
-/// for. It is the apply that clamps, which is where the shifter is.
-let gainApplyOctaves = 8
+/// in the audio path.** It was 8 (±48 dB) while an earphone was the output:
+/// the shift's low `gainExpMantissaBits - gainApplyOctaves` bits are then
+/// constant and free, and the barrel is a stage shorter. A bone-conduction
+/// exciter needs 60 dB and more where the earphone needed 40 (measured
+/// 2026-10-12: conversational speech at the microphones is −67 dBFS a band
+/// and the exciter wants −30), so the apply now delivers what the format
+/// holds, and the saturate at the end is the clamp. Narrow it again here if
+/// a part is short of LUTs and the fit does not need the reach.
+let gainApplyOctaves = 16
 
 /// The part of the shift that is the same for every gain, and so costs nothing.
 let private gainApplyShiftFloor = gainExpMantissaBits - gainApplyOctaves

@@ -148,6 +148,64 @@ let writeWav (w: WavData) : byte[] =
 
 /// Read a WAV file from disk.
 let readWavFile (path: string) = readWav (File.ReadAllBytes path)
+
+/// `w` mixed down to one channel: the mean of its channels, frame by frame.
+let toMono (w: WavData) : WavData =
+    if w.channels = 1 then
+        w
+    else
+        let frames = w.FrameCount
+
+        let samples =
+            [| for frame in 0 .. frames - 1 ->
+                   let sum = Seq.sum (seq { for c in 0 .. w.channels - 1 -> int w.samples[frame * w.channels + c] })
+                   int16 (sum / w.channels) |]
+
+        { w with channels = 1; samples = samples }
+
+/// Taps a side of the interpolating sinc `resample` uses: 32 is a stopband
+/// deep enough that a 44.1 kHz file's top octave does not fold back audibly.
+let resampleTaps = 32
+
+/// `w` at `rate`, by windowed-sinc interpolation — each output frame is the
+/// sinc-weighted sum of the input frames around its instant, the sinc cut
+/// off at the lower of the two Nyquist rates and shaped by a Hann window
+/// `resampleTaps` wide each side. A file at the rate already is returned as
+/// it is. Not real time: a minute of stereo takes about a second.
+let resample (rate: int) (w: WavData) : WavData =
+    if rate = w.sampleRate then
+        w
+    else
+        let ratio = float w.sampleRate / float rate
+        let cutoff = min 1.0 (1.0 / ratio)
+        let frames = int (float w.FrameCount / ratio)
+        let taps = resampleTaps
+
+        let weight (u: float) =
+            if abs u >= float taps then
+                0.0
+            else
+                let sinc =
+                    let x = Math.PI * cutoff * u
+                    if abs x < 1e-9 then 1.0 else sin x / x
+
+                cutoff * sinc * 0.5 * (1.0 + cos (Math.PI * u / float taps))
+
+        let samples = Array.zeroCreate<int16> (frames * w.channels)
+
+        for n in 0 .. frames - 1 do
+            let t = float n * ratio
+            let centre = int (floor t)
+
+            for c in 0 .. w.channels - 1 do
+                let mutable acc = 0.0
+
+                for k in max 0 (centre - taps + 1) .. min (w.FrameCount - 1) (centre + taps) do
+                    acc <- acc + float w.samples[k * w.channels + c] * weight (t - float k)
+
+                samples[n * w.channels + c] <- int16 (max -32768.0 (min 32767.0 (round acc)))
+
+        { w with sampleRate = rate; samples = samples }
 /// Write a WAV file to disk.
 let writeWavFile (path: string) (w: WavData) = File.WriteAllBytes(path, writeWav w)
 

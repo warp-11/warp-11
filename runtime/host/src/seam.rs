@@ -46,6 +46,22 @@ pub fn read_layout(path: &Path) -> Result<(Vec<(String, usize)>, Option<u32>), S
     Ok((registers, hash))
 }
 
+/// The map's width in words, from the `APERTURE_BYTES` the seam states —
+/// what decides the serial frame's shape, so a tool opens its link with
+/// this rather than guessing narrow. `None` for a seam that does not say.
+pub fn read_aperture_words(path: &Path) -> Result<Option<usize>, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    for line in text.lines() {
+        let line = line.trim();
+        let Some(rest) = line.strip_prefix("pub const APERTURE_BYTES") else { continue };
+        let Some((_, value)) = rest.split_once('=') else { continue };
+        let value = value.trim().trim_end_matches(';').trim();
+        let bytes = parse_number(value).ok_or_else(|| format!("bad aperture in {line}"))? as usize;
+        return Ok(Some(bytes / 4));
+    }
+    Ok(None)
+}
+
 /// A register named the person's way, resolved to its offset — or which
 /// names the seam does know.
 pub fn resolve(name: &str, registers: &[(String, usize)]) -> Result<usize, String> {

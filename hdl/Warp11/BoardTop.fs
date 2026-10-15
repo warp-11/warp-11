@@ -401,9 +401,16 @@ let private onPins
     (report: string -> Expr -> unit)
     (tables: string -> Expr -> HostArrayPort)
     (record: (Stream<Expr list> -> Expr -> unit) option)
+    (play: (string * (Stream<Expr list> -> Stream<Expr list>)) option)
     (i2s: I2sLink)
     : Boundary =
-    { streamIn = fun name -> i2s.input |> Stream.mapTo (layoutOfList (fieldsOf d name)) (fun (l, r) -> [ l; r ])
+    { streamIn =
+        fun name ->
+            let beats = i2s.input |> Stream.mapTo (layoutOfList (fieldsOf d name)) (fun (l, r) -> [ l; r ])
+
+            match play with
+            | Some(played, into) when played = name -> into beats
+            | _ -> beats
       streamOut =
         fun name produced ->
             let toConverter (s: Stream<Expr list>) =
@@ -522,6 +529,21 @@ let recordArmOf =
     | RecordToMemory(arm, _, _, _, _) -> arm
     | RecordToFrames(arm, _, _) -> arm
 
+/// The registers a **playing** binding adds — a stream in bound to the
+/// converter and to the host link both, the host's samples taking the
+/// converter's place while armed: the switch, what the host paces by, and
+/// what it checks after.
+type PlayRegs =
+    { /// 1: the need's beats carry the host's samples; 0: the converter's.
+      arm: RegEntry
+      /// Words waiting in the buffer — what a host tops up against.
+      fill: RegEntry
+      /// Words the host sent that did not land: the buffer was full, or the
+      /// frame's checksum did not match.
+      dropped: RegEntry
+      /// Beats taken while armed with nothing waiting: silence went out.
+      starved: RegEntry }
+
 /// The output need a converter top records, and what carries the recording:
 /// a need bound twice — the converter and a recorder, the fork case — or a
 /// need bound to a recorder alone, a stream the design sends only to be kept.
@@ -542,6 +564,28 @@ let internal recordingCarrier (path: DataPath) (d: Design) =
     | [ one ] -> Some one
     | several ->
         failwith $"""{d.name}: {several |> List.map fst |> String.concat " and "} are each bound to a recorder, and a top builds one"""
+
+/// The input need a converter top plays into from the host link: a stream
+/// in bound to the converter and to link frames both, the converter still
+/// pacing the beats. `None` when nothing is played. One a top, as one
+/// recorder.
+let internal playingCarrier (path: DataPath) (d: Design) =
+    let players =
+        d.needs
+        |> List.choose (function
+            | StreamIn(name, _) as n ->
+                match carriersOfNeed path n with
+                | [ OnPins; InLinkFrames ] -> Some name
+                | carriers when List.contains InLinkFrames carriers ->
+                    failwith
+                        $"{d.name}: '{name}' is played over the host link, which paces it by the converter — bind it [OnPins, InLinkFrames]"
+                | _ -> None
+            | _ -> None)
+
+    match players with
+    | [] -> None
+    | [ one ] -> Some one
+    | several -> failwith $"""{d.name}: {several |> String.concat " and "} are each played over the host link, and a top plays one"""
 
 /// A register a binding contributes, named for the need it serves and the
 /// carrier serving it — `outMemArm`, `recordLinkSent` — so it can never
@@ -574,7 +618,12 @@ let private contributesBatchContract =
 /// declaration order, then what a recording binding needs, then the design's
 /// tables. Declaration order is therefore register order, and so part of the
 /// seam — which is why the map is pinned.
-let private registersFor (path: DataPath) (recording: (string * Carrier) option) (d: Design) : BatchRegs option * RecordRegs option * (string * RegEntry) list * RegMap =
+let private registersFor
+    (path: DataPath)
+    (recording: (string * Carrier) option)
+    (playing: string option)
+    (d: Design)
+    : BatchRegs option * RecordRegs option * PlayRegs option * (string * RegEntry) list * RegMap =
     // A recorder brings its own registers, and never the batch contract: a
     // stream bound to the host's memory only to be kept is not a batch.
     let recorded = recording |> Option.map fst
@@ -589,7 +638,7 @@ let private registersFor (path: DataPath) (recording: (string * Carrier) option)
                 |> Option.map contributesBatchContract
                 |> Option.defaultValue false)
 
-    let (batch, recorder, controls), map =
+    let (batch, recorder, player, controls), map =
         buildRegMapAtLeast apertureAddrWidth (fun r ->
             let batch =
                 if not wantsContract then
@@ -645,6 +694,17 @@ let private registersFor (path: DataPath) (recording: (string * Carrier) option)
                     Some(RecordToFrames(r.RwReg(named "Arm", 1, 0UL), r.RoField(named "Sent", 32), r.RoField(named "Dropped", 32)))
                 | _ -> None
 
+            // A playing binding contributes the same way, after the recorder's.
+            let player =
+                playing
+                |> Option.map (fun need ->
+                    let named = bindingRegister need "Link"
+
+                    { arm = r.RwReg(named "Arm", 1, 0UL)
+                      fill = r.RoField(named "Fill", 32)
+                      dropped = r.RoField(named "Dropped", 32)
+                      starved = r.RoField(named "Starved", 32) })
+
             // Tables last: each is aligned to its own size, so it lands at
             // the same offset whatever the scalars before it came to, and the
             // scalars after it would otherwise start past it and double the
@@ -661,9 +721,9 @@ let private registersFor (path: DataPath) (recording: (string * Carrier) option)
                         | words -> Some(name, r.RwArray(name, entries, storage, words))
                     | _ -> None)
 
-            batch, recorder, scalars @ tables)
+            batch, recorder, player, scalars @ tables)
 
-    batch, recorder, controls, map
+    batch, recorder, player, controls, map
 
 /// One beat becomes its rows, a row a cycle. The beat is not copied: `ready`
 /// is asserted as the last row leaves, and the read master holds its payload
@@ -924,6 +984,91 @@ let private recordFrames
       ready = outReady
       layout = layout1 ("word", 32) }
 
+/// Words a played stream buffers between the link and the beats: two 16-bit
+/// samples a word, so 170 ms at 48 kHz. The slack is against the host, not
+/// the link — a register exchange the player waits behind, a scheduler
+/// pause — and 1024 words (42 ms) measured as a fifth of the beats starved
+/// on a Linux host (2026-10-12). Eight block RAMs on an ECP5.
+let playBufferWords = 4096
+
+/// The width of a sample a played frame carries, two a word. Stereo 24-bit
+/// at a converter's rate does not fit a 3 Mbaud link; 16-bit mono does with
+/// the register traffic beside it, so that is what the link plays — into
+/// every field of the beat.
+let playedSampleWidth = 16
+
+/// The host's samples into a need's beats in place of the converter's while
+/// armed. The converter keeps pacing: a beat still leaves when it did, and
+/// only its payload is switched, so the design cannot tell. Words are taken
+/// whether or not armed, so a host primes the buffer before it arms; a beat
+/// taken armed with the buffer empty carries silence and is counted.
+let private playInto
+    (regs: SlaveRegs)
+    (p: PlayRegs)
+    (played: SerialPlayed)
+    (pins: (string * NumberFormat) list)
+    (beats: Stream<Expr list>)
+    : Stream<Expr list> =
+    for name, f in pins do
+        if f.totalWidth < playedSampleWidth then
+            failwith $"playing over the link: '{name}' is %d{f.totalWidth} bits and a played sample is %d{playedSampleWidth}"
+
+    let armed = regs.value p.arm
+
+    let incoming: Stream<Expr> =
+        { payload = played.words.payload
+          valid = played.words.valid
+          ready = wireBit "play_in_ready"
+          layout = layout1 ("word", 32) }
+
+    let buffered = streamFifo "play_buffer" playBufferWords incoming
+    let landed = incoming.valid &&& incoming.ready
+    let lost = incoming.valid &&& bnot incoming.ready
+
+    let taking = beats.valid &&& beats.ready &&& armed
+    // A word holds two samples, the low half first; the word leaves with
+    // its second. Disarmed, the next word starts at its first again.
+    let second = regBit "play_second_half"
+    If (taking &&& buffered.valid) (fun () -> bnot second ==> second)
+    If (bnot armed) (fun () -> lit 0UL 1 ==> second)
+    (taking &&& second) ==> buffered.ready
+    let drained = buffered.valid &&& buffered.ready
+
+    let fill = reg "play_fill" 32
+
+    ifElse
+        [ (landed &&& bnot drained, fun () -> fill + lit 1UL 32 ==> fill)
+          (drained &&& bnot landed, fun () -> fill - lit 1UL 32 ==> fill) ]
+
+    let dropped = reg "play_dropped" 32
+    If (lost ||| played.refused) (fun () -> dropped + lit 1UL 32 ==> dropped)
+    let starved = reg "play_starved" 32
+    If (taking &&& bnot buffered.valid) (fun () -> starved + lit 1UL 32 ==> starved)
+    regs.drive p.fill fill
+    regs.drive p.dropped dropped
+    regs.drive p.starved starved
+
+    let word = wire "play_word" 32
+    buffered.payload ==> word
+    let sample = wire "play_sample" playedSampleWidth
+    mux second (slice 31 playedSampleWidth word) (slice (playedSampleWidth - 1) 0 word) ==> sample
+    let heard = wire "play_heard" playedSampleWidth
+    mux buffered.valid sample (lit 0UL playedSampleWidth) ==> heard
+
+    // Widened by shift, so full scale stays full scale.
+    let widened (f: NumberFormat) =
+        if f.totalWidth = playedSampleWidth then heard else cat heard (lit 0UL (f.totalWidth - playedSampleWidth))
+
+    // Each field as a declared signal, since what the design does with its
+    // input — a slice, a sign — needs one.
+    { beats with
+        payload =
+            List.zip pins beats.payload
+            |> List.map (fun ((name, f), e) ->
+                let field = wire $"play_{name}" f.totalWidth
+                mux armed (widened f) e ==> field
+                field) }
+
 /// The I2S link on the clock the board's converter actually runs at. With no
 /// oscillator this is `mk board.fabricHz`, exactly as before. With one, the
 /// whole link — clock generator, framers — elaborates inside the audio
@@ -955,7 +1100,14 @@ let private pinsTop (board: Board) (path: DataPath) (d: Design) : BoardTop =
     // own values — which is what the pins path always had, now by assembly
     // rather than by a second builder.
     let recording = recordingCarrier path d
-    let _, recorder, entries, map = registersFor path recording d
+    let playing = playingCarrier path d
+    let _, recorder, player, entries, map = registersFor path recording playing d
+
+    // The played need's own row, as the recorder's.
+    let playedFields () =
+        match playing with
+        | Some name -> fieldsOf d name
+        | None -> []
 
     // The recorded need's own row — not every output's fields run together,
     // which only ever agreed while a design had one output.
@@ -1039,6 +1191,11 @@ let private pinsTop (board: Board) (path: DataPath) (d: Design) : BoardTop =
         failwith $"{d.name}: its output is bound to frames on the host link as well as the pins, and the {board.name} has no host link to carry them"
     | _ -> ()
 
+    match playing, board.host with
+    | Some name, (AxiLiteAt _ | NoHost) ->
+        failwith $"{d.name}: '{name}' is played over the host link as well as taken from the pins, and the {board.name} has no host link to play it over"
+    | _ -> ()
+
     // What the recording binding added to the map, whichever kind it is, so
     // both host branches expose it the same way.
     let recorderEntries: (string * RegEntry) list =
@@ -1046,6 +1203,11 @@ let private pinsTop (board: Board) (path: DataPath) (d: Design) : BoardTop =
         | None -> []
         | Some(RecordToMemory(arm, ringAddr, ringBeats, written, dropped)) -> [ arm; ringAddr; ringBeats; written; dropped ] |> List.map (fun e -> e.name, e)
         | Some(RecordToFrames(arm, sent, dropped)) -> [ arm; sent; dropped ] |> List.map (fun e -> e.name, e)
+
+    let playerEntries: (string * RegEntry) list =
+        match player with
+        | None -> []
+        | Some p -> [ p.arm; p.fill; p.dropped; p.starved ] |> List.map (fun e -> e.name, e)
 
     let name, top, registers =
         match board.host with
@@ -1082,9 +1244,9 @@ let private pinsTop (board: Board) (path: DataPath) (d: Design) : BoardTop =
                                 Some(recordInto regs arm ringAddr ringBeats written dropped m (axiWriteBusOf busPorts) (recordedFields ()))
                             | _ -> None
 
-                        d.body (onPins d path (fromRegisters regs) (toRegisters regs outs) (tablesIn regs) sink i2s))
+                        d.body (onPins d path (fromRegisters regs) (toRegisters regs outs) (tablesIn regs) sink None i2s))
 
-            name, top.def, recorderEntries @ entries
+            name, top.def, recorderEntries @ playerEntries @ entries
         | UartAt baud ->
             let name = $"{d.name}Uart"
 
@@ -1095,37 +1257,61 @@ let private pinsTop (board: Board) (path: DataPath) (d: Design) : BoardTop =
                     (fun (uart, pins, outs) ->
                         let i2s = linkOnConverterClock board (fun hz -> i2sLink "audio" pins hz rate stockBitsPerSlot)
 
-                        match recorder with
-                        | Some(RecordToFrames(arm, sent, dropped)) ->
-                            // The recorder's words and the register map share
-                            // the one wire, so the slave is built *around*
-                            // the stream: the words are produced by the fork
-                            // inside `through`, which is below this, so the
-                            // stream is threaded back through a wire pair.
-                            let words = wire "record_frame_word" 32
-                            let wordsValid = wireBit "record_frame_valid"
-                            let wordsReady = wireBit "record_frame_ready_back"
+                        match recorder, player with
+                        | Some(RecordToFrames _), _
+                        | _, Some _ ->
+                            // The recorder's words, the played words and the
+                            // register map share the one wire, so the slave
+                            // is built *around* them. The recorder's words
+                            // are produced by the fork inside `through`,
+                            // which is below this, so that stream is
+                            // threaded back through a wire pair.
+                            let frames =
+                                match recorder with
+                                | Some(RecordToFrames(arm, sent, dropped)) ->
+                                    let words = wire "record_frame_word" 32
+                                    let wordsValid = wireBit "record_frame_valid"
+                                    let wordsReady = wireBit "record_frame_ready_back"
 
-                            let stream: Stream<Expr> =
-                                { payload = words
-                                  valid = wordsValid
-                                  ready = wordsReady
-                                  layout = layout1 ("word", 32) }
+                                    let stream: Stream<Expr> =
+                                        { payload = words
+                                          valid = wordsValid
+                                          ready = wordsReady
+                                          layout = layout1 ("word", 32) }
 
-                            let regs = serialRegMapSlaveWith "host" board.fabricHz baud uart map stream
+                                    Some(stream, (arm, sent, dropped), (words, wordsValid, wordsReady))
+                                | _ -> None
 
-                            let sink (rows: Stream<Expr list>) (dropCount: Expr) =
-                                let produced = recordFrames regs arm sent dropped (recordedFields ()) rows dropCount
-                                produced.payload ==> words
-                                produced.valid ==> wordsValid
-                                wordsReady ==> produced.ready
+                            let regs, played =
+                                serialRegMapSlaveLink
+                                    "host"
+                                    board.fabricHz
+                                    baud
+                                    uart
+                                    map
+                                    (frames |> Option.map (fun (stream, _, _) -> stream))
+                                    player.IsSome
 
-                            d.body (onPins d path (fromRegisters regs) (toRegisters regs outs) (tablesIn regs) (Some sink) i2s)
+                            let sink =
+                                frames
+                                |> Option.map (fun (_, (arm, sent, dropped), (words, wordsValid, wordsReady)) ->
+                                    fun (rows: Stream<Expr list>) (dropCount: Expr) ->
+                                        let produced = recordFrames regs arm sent dropped (recordedFields ()) rows dropCount
+                                        produced.payload ==> words
+                                        produced.valid ==> wordsValid
+                                        wordsReady ==> produced.ready)
+
+                            let play =
+                                match playing, player, played with
+                                | Some name, Some p, Some words -> Some(name, playInto regs p words (playedFields ()))
+                                | _ -> None
+
+                            d.body (onPins d path (fromRegisters regs) (toRegisters regs outs) (tablesIn regs) sink play i2s)
                         | _ ->
                             let regs = serialRegMapSlave "host" board.fabricHz baud uart map
-                            d.body (onPins d path (fromRegisters regs) (toRegisters regs outs) (tablesIn regs) None i2s))
+                            d.body (onPins d path (fromRegisters regs) (toRegisters regs outs) (tablesIn regs) None None i2s))
 
-            name, top.def, recorderEntries @ entries
+            name, top.def, recorderEntries @ playerEntries @ entries
         | NoHost ->
             let name = $"{d.name}Top"
 
@@ -1135,7 +1321,7 @@ let private pinsTop (board: Board) (path: DataPath) (d: Design) : BoardTop =
                     (fun p -> i2sPins p (pinoutOf board), pinOuts p)
                     (fun (pins, outs) ->
                         let i2s = linkOnConverterClock board (fun hz -> i2sLink "audio" pins hz rate stockBitsPerSlot)
-                        d.body (onPins d path baked (reporter None outs) unwritable None i2s))
+                        d.body (onPins d path baked (reporter None outs) unwritable None None i2s))
 
             name, top.def, []
 
@@ -1216,7 +1402,7 @@ let private hostMemoryTop (board: Board) (path: DataPath) (d: Design) : BoardTop
     let destPin = if scattered then Some (outputsOf d).Head else None
     let payloadPins = if scattered then List.tail (outputsOf d) else (outputsOf d)
 
-    let batchOption, _, entries, map = registersFor path None d
+    let batchOption, _, _, entries, map = registersFor path None None d
 
     let batch =
         match batchOption with

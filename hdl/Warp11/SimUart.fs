@@ -54,6 +54,32 @@ module SerialFrame =
     /// How long the reply to a request is, sync and checksum included.
     let replyLength (isRead: bool) = if isRead then 7 else 3
 
+    /// The bytes that play `value` into a link that takes played words: the
+    /// play sync, the four data bytes least significant first, their xor.
+    /// Nothing replies to it.
+    let play (value: uint64) : byte list =
+        let body =
+            [ byte (value &&& 0xFFUL)
+              byte ((value >>> 8) &&& 0xFFUL)
+              byte ((value >>> 16) &&& 0xFFUL)
+              byte ((value >>> 24) &&& 0xFFUL) ]
+
+        byte serialPlaySync :: body @ [ xorOf body ]
+
+    /// How long a frame the fabric sends unasked is — sync, the stream
+    /// status, one word, checksum.
+    let streamedLength = 7
+
+    /// `bytes` with any streamed frames at its front removed. A design
+    /// streaming on the same wire as its register map can put one between a
+    /// request and its reply; a client reading for the reply steps over them,
+    /// and what no client may do is mistake one for the reply.
+    let rec skipStreamed (bytes: byte list) =
+        match bytes with
+        | s :: status :: rest when s = sync && status = byte serialStreamStatus ->
+            if List.length rest >= streamedLength - 2 then skipStreamed (List.skip (streamedLength - 2) rest) else []
+        | _ -> bytes
+
     /// A reply's status and, for a read, its value — or the reason it is not
     /// a reply.
     let parse (isRead: bool) (reply: byte list) : Result<uint64 option, string> =
@@ -163,14 +189,8 @@ let serialClientOn
 
     // Frames the fabric sends unasked — a design streaming on the same wire
     // — are dropped here, because this client's job is the register map. A
-    // real host that wants them reads the same status byte and keeps them;
-    // what neither may do is mistake one for a reply.
-    let rec dropStreamed (bytes: byte list) =
-        match bytes with
-        | sync :: status :: rest when sync = byte serialSync && status = byte serialStreamStatus ->
-            // sync, status, four data bytes, checksum.
-            if List.length rest >= 5 then dropStreamed (List.skip 5 rest) else []
-        | _ -> bytes
+    // real host that wants them reads the same status byte and keeps them.
+    let dropStreamed = SerialFrame.skipStreamed
 
     let exchange (isRead: bool) (request: byte list) =
         uart.TakeReceived() |> ignore

@@ -23,7 +23,7 @@
 //! `out` — so `--need` says which need, `out` unless told otherwise.
 
 use std::path::{Path, PathBuf};
-use warp11_host::seam::{read_layout, resolve};
+use warp11_host::seam::{read_aperture_words, read_layout, resolve};
 use warp11_host::serial_window::SerialWindow;
 use warp11_host::wav::write_wav;
 use warp11_runtime::RegisterWindow;
@@ -108,7 +108,11 @@ fn record(args: &Args, registers: &[(String, usize)]) -> Result<(), String> {
     let sent = resolve(&format!("{}LinkSent", args.need), registers).ok();
     let dropped = resolve(&format!("{}LinkDropped", args.need), registers).ok();
 
-    let mut window = SerialWindow::open(&args.tty, args.baud, 5).map_err(|e| e.to_string())?;
+    // The frame's shape is the map's, which the seam states: a design with a
+    // table in it is wider than the command byte addresses, and a link opened
+    // narrow has every request refused on its checksum.
+    let words = read_aperture_words(&args.layout)?.unwrap_or(warp11_host::serial_window::MAX_WORDS);
+    let mut window = SerialWindow::open_words(&args.tty, args.baud, 5, words).map_err(|e| e.to_string())?;
     let wanted = args.frames * args.channels;
 
     window.write32(arm, 1).map_err(|e| e.to_string())?;
