@@ -73,6 +73,15 @@ type Need =
     /// of `format`, kept in `storage`, starting as `starting`. The aid's gain
     /// curves are one — 512 words a host refits while the design runs.
     | TableIn of name: string * format: NumberFormat * entries: int * storage: RamStyle * starting: uint64 list
+    /// A coherent surface the design keeps live — `rows` rows of `fields`,
+    /// every one of them a register that may change in the same cycle, a
+    /// Life world or a framebuffer. A stream cannot say that: its rows leave
+    /// one at a time, and a surface copied a row a cycle while it runs is
+    /// torn. So a carrier takes a surface whole — latched in one cycle when
+    /// the host asks, then streamed — and what passes between pulls is
+    /// never seen, which is the conflation the snapshot path has always
+    /// meant.
+    | SurfaceOut of name: string * fields: (string * NumberFormat) list * rows: int
 
 /// Rows into the design, under a name.
 let streamIn name fields = StreamIn(name, fields)
@@ -92,6 +101,9 @@ let valueOut name format = ValueOut(name, format)
 /// A table the host sets and the design reads.
 let tableIn name format entries storage starting = TableIn(name, format, entries, storage, starting)
 
+/// A surface the design keeps live, taken whole when the host asks.
+let surfaceOut name fields rows = SurfaceOut(name, fields, rows)
+
 /// A design's boundary as its body meets it: each need realised by whatever
 /// the mapping bound it to, reached by the need's name. From inside, a
 /// converter, a ring in the host's memory and a register are the same kind
@@ -107,13 +119,44 @@ type Boundary =
       /// Report a `ValueOut` need.
       valueOut: string -> Expr -> unit
       /// A `TableIn` need's read port: hand it the index, once.
-      tableIn: string -> Expr -> HostArrayPort }
+      tableIn: string -> Expr -> HostArrayPort
+      /// Hand a `SurfaceOut` need its rows — the live registers, one list a
+      /// row, each the row's fields. Call once a need.
+      surfaceOut: string -> Expr list list -> unit }
 
 /// What a board's clock makes of a design's streams: the rate its converter
 /// frames at, and the fabric cycles each beat gets.
 type Clocking =
     { rate: float
       cyclesPerBeat: int }
+
+/// What a board makes of a design before it is built: its clocking, the
+/// part it is for — whose facts a design that scales reads its size from —
+/// and the sizes the mapping named instead. A size is **derived by default
+/// and named only when chosen** (the release plan's fork 8): a design asks
+/// `size ("world", derived)` and gets the mapping's word where there is
+/// one. What was asked is remembered, so a mapping naming a size nobody
+/// reads is refused rather than ignored.
+type Fit internal (clocking: Clocking, board: Board, sizes: (string * int) list) =
+    let asked = ResizeArray<string>()
+
+    member _.clocking = clocking
+    /// The board the design is being built for: what it has — LEDs, a link.
+    member _.board = board
+    /// Its part: what it holds.
+    member _.part = board.part
+
+    /// The size called `name`: the mapping's where it names one, else
+    /// `derived` — what the design makes of the part's facts.
+    member _.size(name: string, derived: int) : int =
+        asked.Add name
+
+        match sizes |> List.tryFind (fun (n, _) -> n = name) with
+        | Some(_, chosen) -> chosen
+        | None -> derived
+
+    member internal _.Asked = List.ofSeq asked
+    member internal _.Named = sizes
 
 type Design =
     { name: string
@@ -126,11 +169,12 @@ type Design =
       answers: int
       /// The design itself, given its boundary.
       body: Boundary -> unit
-      /// A design whose needs depend on the rate its streams arrive at — a
-      /// starting coefficient computed from it — is only known once it meets
-      /// a board. `boardTop` hands it the board's clocking first, and builds
-      /// what comes back. `None` for a design that is the same on every board.
-      atClocking: (Clocking -> Design) option }
+      /// A design whose needs depend on the board — a starting coefficient
+      /// computed from the rate its streams arrive at, a world sized from
+      /// the part's cells — is only known once it meets one. `boardTop`
+      /// hands it the fit first, and builds what comes back. `None` for a
+      /// design that is the same on every board.
+      atClocking: (Fit -> Design) option }
 
 /// The body of a design that is one instance with one stream through it —
 /// every drawn design, and the typed ones written before a boundary could
@@ -177,13 +221,20 @@ type Incoming<'p> =
 /// the handles of the first run are stand-ins, and a stream touched there is
 /// an error. What it *may* read on either run is the clocking, which is the
 /// point — a starting value derived from the rate is right on every board.
-type Needs internal (clocking: Clocking, boundary: Boundary option) =
+type Needs internal (fit: Fit, boundary: Boundary option) =
     let declared = ResizeArray<Need>()
 
     member internal _.Declared = List.ofSeq declared
 
     /// The rate the board's clock makes of this design's streams.
-    member _.clocking = clocking
+    member _.clocking = fit.clocking
+
+    /// The part the design is being built for: its facts size what scales.
+    member _.part = fit.part
+
+    /// A size: the mapping's where it names one, else what the design
+    /// derives from the part.
+    member _.size(name: string, derived: int) = fit.size (name, derived)
 
     /// Rows in, typed by their layout.
     member _.streamIn(name: string, layout: Layout<'p>) : Incoming<'p> =
@@ -195,8 +246,8 @@ type Needs internal (clocking: Clocking, boundary: Boundary option) =
             | None -> Unchecked.defaultof<Stream<'p>>
 
         { stream = stream
-          rate = clocking.rate
-          cyclesPerBeat = clocking.cyclesPerBeat }
+          rate = fit.clocking.rate
+          cyclesPerBeat = fit.clocking.cyclesPerBeat }
 
     /// Rows out: hand it the stream, once.
     member _.streamOut(name: string, layout: Layout<'p>) : Stream<'p> -> unit =
@@ -230,6 +281,15 @@ type Needs internal (clocking: Clocking, boundary: Boundary option) =
         | Some b -> b.tableIn name
         | None -> fun _ -> failwith $"'{name}': a needs factory declares its tables, and does not read them"
 
+    /// A surface the design keeps live — `rows` rows of the layout, taken
+    /// whole when the host asks: hand it the rows, once.
+    member _.surfaceOut(name: string, layout: Layout<'p>, rows: int) : 'p list -> unit =
+        declared.Add(SurfaceOut(name, layout.fields, rows))
+
+        match boundary with
+        | Some b -> fun surface -> surface |> List.map layout.pack |> b.surfaceOut name
+        | None -> fun _ -> failwith $"'{name}': a needs factory declares its surfaces, and does not hand them over"
+
 /// The converter's rate when nothing says otherwise: a board frames at the
 /// nearest rate its clock divides to from here — 46 875 Hz at 24 MHz,
 /// 48 828.125 Hz at 100 MHz.
@@ -240,16 +300,16 @@ let nominalRate = 48_000.0
 /// a pin, a bus or a clock — the board says those, and the design takes the
 /// rate it is handed.
 let design (name: string) (needs: Needs -> 'io) (body: 'io -> unit) : Design =
-    let atClocking (clocking: Clocking) =
-        let collecting = Needs(clocking, None)
+    let atClocking (fit: Fit) =
+        let collecting = Needs(fit, None)
         needs collecting |> ignore
 
         { name = name
-          sampleRate = clocking.rate
+          sampleRate = fit.clocking.rate
           streams = 1
           needs = collecting.Declared
           answers = 1
-          body = fun boundary -> body (needs (Needs(clocking, Some boundary)))
+          body = fun boundary -> body (needs (Needs(fit, Some boundary)))
           atClocking = None }
 
     { name = name
@@ -259,6 +319,25 @@ let design (name: string) (needs: Needs -> 'io) (body: 'io -> unit) : Design =
       answers = 1
       body = fun _ -> failwith $"{name}: a design takes its needs from the board it is on — build it through `boardTop`"
       atClocking = Some atClocking }
+
+/// A design chosen once the board is known — its size from the part's
+/// facts or the mapping's word, its name with the size in it. `choose` is
+/// handed the fit and returns the design for it, which may itself be one
+/// that waits for the fit.
+let sized (name: string) (choose: Fit -> Design) : Design =
+    { name = name
+      sampleRate = 0.0
+      streams = 1
+      needs = []
+      answers = 1
+      body = fun _ -> failwith $"{name}: a design sized for its board is built through `boardTop`"
+      atClocking =
+        Some(fun fit ->
+            let chosen = choose fit
+
+            match chosen.atClocking with
+            | Some resolve -> resolve fit
+            | None -> chosen) }
 
 /// What carries the design's input stream, and its output stream. Each asks
 /// the path by the need's own name first, so a mapping can rebind one need
@@ -270,6 +349,8 @@ let private carrierOfNeed (path: DataPath) (need: Need) =
     | ValueIn(name, _, _) -> carrierFor path EveryValueIn name
     | ValueOut(name, _) -> carrierFor path EveryValueIn name
     | TableIn(name, _, _, _, _) -> carrierFor path EveryValueIn name
+    // A surface leaves the design the way its rows out do.
+    | SurfaceOut(name, _, _) -> carrierFor path EveryStreamOut name
 
 /// Every carrier bound to a need, in binding order.
 let internal carriersOfNeed (path: DataPath) (need: Need) =
@@ -279,6 +360,7 @@ let internal carriersOfNeed (path: DataPath) (need: Need) =
     | ValueIn(name, _, _) -> carriersFor path EveryValueIn name
     | ValueOut(name, _) -> carriersFor path EveryValueIn name
     | TableIn(name, _, _, _, _) -> carriersFor path EveryValueIn name
+    | SurfaceOut(name, _, _) -> carriersFor path EveryStreamOut name
 
 let internal carrierOfInput (path: DataPath) (d: Design) =
     d.needs
@@ -289,7 +371,8 @@ let internal carrierOfInput (path: DataPath) (d: Design) =
 let internal carrierOfOutput (path: DataPath) (d: Design) =
     d.needs
     |> List.tryPick (function
-        | StreamOut _ as n -> carrierOfNeed path n
+        | StreamOut _
+        | SurfaceOut _ as n -> carrierOfNeed path n
         | _ -> None)
 
 /// The fields of the stream need called `name`.
@@ -337,6 +420,14 @@ let tablesOf (d: Design) =
         | TableIn(name, format, entries, _, _) -> Some(name, format, entries)
         | _ -> None)
 
+/// The surfaces the design keeps live, in declaration order: name, the
+/// fields of a row, and the rows.
+let surfacesOf (d: Design) =
+    d.needs
+    |> List.choose (function
+        | SurfaceOut(name, fields, rows) -> Some(name, fields, rows)
+        | _ -> None)
+
 /// Where each of those starts.
 let startingOf (d: Design) =
     d.needs
@@ -374,7 +465,10 @@ let check (board: Board) (path: DataPath) (d: Design) =
         |> function
             | [] -> ()
             | [ pins ] ->
-                if pins <> stereo then
+                // A one-field input on the converter is the converter's pace
+                // and nothing heard: a beat a frame, the frame's index in the
+                // field — a tone with nothing listening.
+                if pins <> stereo && not (side = "input" && pins.Length = 1) then
                     failwith $"{d.name}: the {board.name}'s converter needs the {side} box to be [{describePins stereo}], and it is [{describePins pins}]"
             | several -> failwith $"{d.name}: %d{several.Length} {side} streams are bound to the {board.name}'s one converter"
 
@@ -406,7 +500,16 @@ let private onPins
     : Boundary =
     { streamIn =
         fun name ->
-            let beats = i2s.input |> Stream.mapTo (layoutOfList (fieldsOf d name)) (fun (l, r) -> [ l; r ])
+            let beats =
+                match fieldsOf d name with
+                | [ _, f ] ->
+                    // The converter's pace with nothing heard: the frame's
+                    // index on the one field, which `check` allowed.
+                    let framed = reg "converter_frame" 32
+                    If (i2s.input.valid &&& i2s.input.ready) (fun () -> framed + lit 1UL 32 ==> framed)
+                    let index = if f.totalWidth >= 32 then pad f.totalWidth framed else slice (f.totalWidth - 1) 0 framed
+                    i2s.input |> Stream.mapTo (layoutOfList [ fieldsOf d name |> List.head ]) (fun _ -> [ index ])
+                | fields -> i2s.input |> Stream.mapTo (layoutOfList fields) (fun (l, r) -> [ l; r ])
 
             match play with
             | Some(played, into) when played = name -> into beats
@@ -438,7 +541,8 @@ let private onPins
             | carriers, _ -> failwith $"{d.name}: nothing builds '{name}' carried by %A{carriers} on the converter top"
       valueIn = values
       valueOut = report
-      tableIn = tables }
+      tableIn = tables
+      surfaceOut = fun name _ -> failwith $"{d.name}: '{name}' is a surface, and the converter top carries none — bind it to the host link" }
 
 /// The registers the host-memory path adds ahead of the design's controls:
 /// the batch contract every such top speaks, so one driver runs any of them.
@@ -544,6 +648,41 @@ type PlayRegs =
       /// Beats taken while armed with nothing waiting: silence went out.
       starved: RegEntry }
 
+/// The registers a **counting** binding adds where no batch contract is
+/// there to count for it — beats minted in fabric on a board with no host
+/// memory, the rows they produce going out over the link: how many, the
+/// go, and whether it is still going.
+type CountRegs =
+    { /// Beats to mint: `0 …` this less one.
+      total: RegEntry
+      /// Pulse: start minting. The design's rows then follow on the link.
+      start: RegEntry
+      /// 1 from the start until the last row the count produces has left.
+      busy: RegEntry }
+
+/// The registers a **surface** binding adds — a surface taken whole and
+/// sent as frames on the link: the pull, and what it managed.
+type SnapshotRegs =
+    { /// Pulse: latch the surface now, and send it, every row, as frames.
+      pull: RegEntry
+      /// Words sent, over every pull.
+      sent: RegEntry
+      /// Pulls that arrived while a snapshot was still leaving — ignored,
+      /// and counted, so a host pulling faster than the link carries learns
+      /// it here rather than from a torn picture.
+      missed: RegEntry }
+
+/// What the bindings contributed to the register map, with the design's own
+/// entries and the map itself.
+type private BindingRegs =
+    { batchRegs: BatchRegs option
+      recorderRegs: RecordRegs option
+      playerRegs: PlayRegs option
+      counterRegs: CountRegs option
+      snapshotRegs: SnapshotRegs option
+      designEntries: (string * RegEntry) list
+      regMap: RegMap }
+
 /// The output need a converter top records, and what carries the recording:
 /// a need bound twice — the converter and a recorder, the fork case — or a
 /// need bound to a recorder alone, a stream the design sends only to be kept.
@@ -622,8 +761,10 @@ let private registersFor
     (path: DataPath)
     (recording: (string * Carrier) option)
     (playing: string option)
+    (counting: string option)
+    (snapshotting: string option)
     (d: Design)
-    : BatchRegs option * RecordRegs option * PlayRegs option * (string * RegEntry) list * RegMap =
+    : BindingRegs =
     // A recorder brings its own registers, and never the batch contract: a
     // stream bound to the host's memory only to be kept is not a batch.
     let recorded = recording |> Option.map fst
@@ -638,7 +779,7 @@ let private registersFor
                 |> Option.map contributesBatchContract
                 |> Option.defaultValue false)
 
-    let (batch, recorder, player, controls), map =
+    let (batch, recorder, player, counter, snapshot, controls), map =
         buildRegMapAtLeast apertureAddrWidth (fun r ->
             let batch =
                 if not wantsContract then
@@ -705,6 +846,28 @@ let private registersFor
                       dropped = r.RoField(named "Dropped", 32)
                       starved = r.RoField(named "Starved", 32) })
 
+            // A counting binding contributes only where nothing else counts:
+            // on the host-memory path the batch contract's `frameCount` and
+            // `start` are the count, and these would be a second one.
+            let counter =
+                counting
+                |> Option.map (fun need ->
+                    let named = bindingRegister need "Count"
+
+                    { total = r.RwReg(named "Total", 32, 0UL)
+                      start = r.Word(fun w -> w.Pulse(named "Start"))
+                      busy = r.Word(fun w -> w.Field(named "Busy", 1)) })
+
+            // A surface's binding, the same way.
+            let snapshot =
+                snapshotting
+                |> Option.map (fun need ->
+                    let named = bindingRegister need "Link"
+
+                    { pull = r.Word(fun w -> w.Pulse(named "Pull"))
+                      sent = r.RoField(named "Sent", 32)
+                      missed = r.RoField(named "Missed", 32) })
+
             // Tables last: each is aligned to its own size, so it lands at
             // the same offset whatever the scalars before it came to, and the
             // scalars after it would otherwise start past it and double the
@@ -721,9 +884,27 @@ let private registersFor
                         | words -> Some(name, r.RwArray(name, entries, storage, words))
                     | _ -> None)
 
-            batch, recorder, player, scalars @ tables)
+            batch, recorder, player, counter, snapshot, scalars @ tables)
 
-    batch, recorder, player, controls, map
+    { batchRegs = batch
+      recorderRegs = recorder
+      playerRegs = player
+      counterRegs = counter
+      snapshotRegs = snapshot
+      designEntries = controls
+      regMap = map }
+
+/// `e` times a constant known at elaboration: shifts and adds, so it need
+/// not be a power of two — which `answers` stops being as soon as a chunk is
+/// sized to divide its row rather than to be a round number.
+let private timesConstant (k: int) (e: Expr) =
+    let shifted i =
+        if i = 0 then e else cat (slice (31 - i) 0 e) (lit 0UL i)
+
+    [ for i in 0..31 do
+          if (k >>> i) &&& 1 = 1 then
+              yield shifted i ]
+    |> List.reduce (+)
 
 /// One beat becomes its rows, a row a cycle. The beat is not copied: `ready`
 /// is asserted as the last row leaves, and the read master holds its payload
@@ -765,12 +946,24 @@ let private beatsToRows (shape: RowShape) (pins: (string * NumberFormat) list) (
 /// — unavoidable, because the producer has already been told its row was
 /// taken.
 let private rowsToBeats (shape: RowShape) (pins: (string * NumberFormat) list) (beatWidth: int) (rows: Stream<Expr list>) : Stream<Expr> =
-    // A field fills its lanes, sign-extended to the last.
-    let lane (f: NumberFormat) (e: Expr) =
+    // A field fills its lanes, sign-extended to the last. Sign extension
+    // replicates a named bit, so a field that arrives computed — or is the
+    // input's own slice, as the identity's is — is named first; one that
+    // already is stays as it is.
+    let lane (name: string) (f: NumberFormat) (e: Expr) =
         let w = lanesOf f * laneWidth
+
+        let e =
+            if f.signed && not (isNamed e) then
+                let named = wire $"pack_field_{name}" f.totalWidth
+                e ==> named
+                named
+            else
+                e
+
         if f.signed then asUInt (pad w (asSInt e)) else pad w e
 
-    let lanes = List.map2 (fun (_, f) e -> lane f e) pins rows.payload
+    let lanes = List.map2 (fun (name, f) e -> lane name f e) pins rows.payload
 
     let rowBits =
         let padding = shape.lanesPerRow - (pins |> List.sumBy (fun (_, f) -> lanesOf f))
@@ -829,13 +1022,19 @@ type BoardTop =
       batch: BatchRegs option
       map: RegMap
       /// The Verilog target the board's toolchain wants.
-      target: Target }
+      target: Target
+      /// Rust lines the design adds to its seam after the register map's —
+      /// its own constants (a grid's size, a frame's dimensions, a cluster's
+      /// shape), so the host compiles against the numbers the fabric was
+      /// built with rather than a copy of them. Empty for a design whose
+      /// register map is the whole of what the host needs.
+      seamExtras: string list }
 
 /// The emitter's target for a part.
 let targetOf (part: Part) =
     match part.family with
     | UltraScalePlus -> Xilinx
-    | Ice40UltraPlus -> Ice40
+    | Family.Ice40 -> Ice40
     | Family.Ecp5 -> Target.Ecp5
 
 /// The design on the board's I2S pins, the registers reached the way the
@@ -931,29 +1130,32 @@ let private recordInto
 /// which is why the fork in front of this drops.
 let private recordFrames
     (regs: SlaveRegs)
-    (armReg: RegEntry)
+    (armed: Expr)
     (sentReg: RegEntry)
     (droppedReg: RegEntry)
     (pins: (string * NumberFormat) list)
     (rows: Stream<Expr list>)
     (dropped: Expr)
     : Stream<Expr> =
-    for name, f in pins do
-        if f.totalWidth > laneWidth then
-            failwith $"recording over the link: '{name}' is %d{f.totalWidth} bits and a frame carries %d{laneWidth}"
-
-    let armed = regs.value armReg
-    let n = pins.Length
-
     // Each field, sign-extended into its word the way the seam will read it.
     // The field is named first because it arrives computed — out of the
-    // fork's buffer — and sign extension replicates a named bit.
+    // fork's buffer — and sign extension replicates a named bit. A field
+    // wider than a lane goes as `lanesOf` words, low word first, the top one
+    // padded — the order the host-memory path packs it in a beat.
     let words =
         List.zip pins rows.payload
-        |> List.map (fun ((name: string, f: NumberFormat), e) ->
+        |> List.collect (fun ((name: string, f: NumberFormat), e) ->
             let w = wire $"record_field_{name}" f.totalWidth
             e ==> w
-            if f.signed then asUInt (pad laneWidth (asSInt w)) else pad laneWidth w)
+
+            if f.totalWidth <= laneWidth then
+                [ if f.signed then asUInt (pad laneWidth (asSInt w)) else pad laneWidth w ]
+            else
+                [ for k in 0 .. lanesOf f - 1 ->
+                      let part = slice (min (laneWidth * (k + 1)) f.totalWidth - 1) (laneWidth * k) w
+                      if width part = laneWidth then part else pad laneWidth part ])
+
+    let n = words.Length
 
     let outReady = wireBit "record_frame_ready"
     registerStreamReady outReady
@@ -984,12 +1186,99 @@ let private recordFrames
       ready = outReady
       layout = layout1 ("word", 32) }
 
+/// Words a row of these fields takes on the link.
+let linkWordsOf (pins: (string * NumberFormat) list) =
+    pins |> List.sumBy (fun (_, f) -> lanesOf f)
+
+/// A surface taken whole when the host pulls, then sent a row at a time as
+/// frames on the link. The latch is one cycle, so the copy is coherent
+/// however fast the design runs; the rows then leave at the link's pace
+/// while the design goes on, and a pull that lands mid-copy is counted and
+/// ignored rather than tearing the one in flight. What the design did
+/// between two pulls is never seen — the conflation the snapshot path has
+/// always meant, with the host's pull as the pace.
+let private snapshotFrames
+    (regs: SlaveRegs)
+    (s: SnapshotRegs)
+    (pins: (string * NumberFormat) list)
+    (surface: Expr list list)
+    : Stream<Expr> =
+    let rows = surface.Length
+
+    if rows < 2 then
+        failwith $"a surface over the link has at least two rows, and this one has %d{rows}"
+
+    for row in surface do
+        if row.Length <> pins.Length then
+            failwith $"a surface's row has the %d{pins.Length} fields it declared, and one has %d{row.Length}"
+
+    let copying = regBit "snapshot_copying"
+    let indexWidth = ceilLog2 rows
+    let index = reg "snapshot_index" indexWidth
+
+    let shadows =
+        [ for r in 0 .. rows - 1 -> [ for name, f in pins -> reg $"snapshot_%d{r}_{name}" f.totalWidth ] ]
+
+    let pull = regs.pulse s.pull
+    let outReady = wireBit "snapshot_ready"
+    registerStreamReady outReady
+    let last = eq index (lit (uint64 (rows - 1)) indexWidth)
+    let missed = reg "snapshot_missed" 32
+
+    ifElse
+        [ (bnot copying,
+           fun () ->
+               If pull (fun () ->
+                   for row, shadow in List.zip surface shadows do
+                       for e, sh in List.zip row shadow do
+                           e ==> sh
+
+                   lit 1UL 1 ==> copying
+                   lit 0UL indexWidth ==> index))
+          (otherwise,
+           fun () ->
+               If pull (fun () -> missed + lit 1UL 32 ==> missed)
+
+               If outReady (fun () ->
+                   ifElse
+                       [ (last,
+                          fun () ->
+                              lit 0UL 1 ==> copying
+                              lit 0UL indexWidth ==> index)
+                         (otherwise, fun () -> index + lit 1UL indexWidth ==> index) ])) ]
+
+    let fields =
+        [ for k, (name, f) in List.indexed pins ->
+              let w = wire $"snapshot_row_{name}" f.totalWidth
+              selectIndexed index [ for shadow in shadows -> List.item k shadow ] ==> w
+              w ]
+
+    let rowStream: Stream<Expr list> =
+        { payload = fields
+          valid = copying
+          ready = outReady
+          layout = layoutOfList pins }
+
+    recordFrames regs (lit 1UL 1) s.sent s.missed pins rowStream missed
+
 /// Words a played stream buffers between the link and the beats: two 16-bit
 /// samples a word, so 170 ms at 48 kHz. The slack is against the host, not
 /// the link — a register exchange the player waits behind, a scheduler
 /// pause — and 1024 words (42 ms) measured as a fifth of the beats starved
 /// on a Linux host (2026-10-12). Eight block RAMs on an ECP5.
 let playBufferWords = 4096
+
+/// The buffer a part affords: `playBufferWords` where the block RAM is
+/// there, else the largest power of two that takes no more than a quarter
+/// of it — 512 words on an HX1K (16 blocks of 4 kbit, where 4 096 words
+/// would be 24) and on a UP5K, where 4 096 words were measured taking 24 of
+/// its 30 blocks (2026-11-07). The slack is against the host's pauses, and
+/// a link slow enough for a small part is a host that cannot outrun it.
+let playBufferWordsFor (part: Part) =
+    let quarter = part.facts.blockRamBits / 4 / laneWidth
+    let mutable words = 1
+    while words * 2 <= quarter do words <- words * 2
+    min playBufferWords (max 64 words)
 
 /// The width of a sample a played frame carries, two a word. Stereo 24-bit
 /// at a converter's rate does not fit a 3 Mbaud link; 16-bit mono does with
@@ -1003,6 +1292,7 @@ let playedSampleWidth = 16
 /// whether or not armed, so a host primes the buffer before it arms; a beat
 /// taken armed with the buffer empty carries silence and is counted.
 let private playInto
+    (part: Part)
     (regs: SlaveRegs)
     (p: PlayRegs)
     (played: SerialPlayed)
@@ -1021,7 +1311,7 @@ let private playInto
           ready = wireBit "play_in_ready"
           layout = layout1 ("word", 32) }
 
-    let buffered = streamFifo "play_buffer" playBufferWords incoming
+    let buffered = streamFifo "play_buffer" (playBufferWordsFor part) incoming
     let landed = incoming.valid &&& incoming.ready
     let lost = incoming.valid &&& bnot incoming.ready
 
@@ -1068,6 +1358,106 @@ let private playInto
                 let field = wire $"play_{name}" f.totalWidth
                 mux armed (widened f) e ==> field
                 field) }
+
+/// The host's words as a design's rows, for a top with no converter: the
+/// mirror of `recordFrames` — one field a word, in the row's order, the
+/// word's low bits the field's — buffered as a played stream is, and paced
+/// by nothing but the design taking rows. A word that arrives with the
+/// buffer full is dropped and counted; `fill` is what the host paces by.
+/// Nothing is starved here: a design with no row waiting simply waits.
+let private playRows
+    (part: Part)
+    (regs: SlaveRegs)
+    (p: PlayRegs)
+    (played: SerialPlayed)
+    (pins: (string * NumberFormat) list)
+    : Stream<Expr list> =
+    let armed = regs.value p.arm
+
+    let incoming: Stream<Expr> =
+        { payload = played.words.payload
+          valid = played.words.valid
+          ready = wireBit "play_in_ready"
+          layout = layout1 ("word", 32) }
+
+    let buffered = streamFifo "play_buffer" (playBufferWordsFor part) incoming
+    let landed = incoming.valid &&& incoming.ready
+    let lost = incoming.valid &&& bnot incoming.ready
+
+    // A field wider than a lane arrives as `lanesOf` words, low word
+    // first — the mirror of how the recorder sends one.
+    let n = linkWordsOf pins
+    let outReady = wireBit "play_row_ready"
+    registerStreamReady outReady
+    let word = wire "play_word" 32
+    buffered.payload ==> word
+
+    // All but a row's last word are held as they arrive; the row is offered
+    // while its last word is at the buffer's head, and that word leaves with
+    // the row — the handshake does the storing, as it does everywhere here.
+    let sources, takeWord, rowValid =
+        if n = 1 then
+            [ word ], (outReady &&& armed), (buffered.valid &&& armed)
+        else
+            let phaseWidth = ceilLog2 n
+            let phase = reg "play_phase" phaseWidth
+            let last = eq phase (lit (uint64 (n - 1)) phaseWidth)
+            let held = [ for k in 0 .. n - 2 -> reg $"play_held%d{k}" 32 ]
+            let fire = buffered.valid &&& armed &&& (bnot last ||| outReady)
+
+            If fire (fun () ->
+                mux last (lit 0UL phaseWidth) (phase + lit 1UL phaseWidth) ==> phase
+
+                held
+                |> List.iteri (fun k h -> If (eq phase (lit (uint64 k) phaseWidth)) (fun () -> word ==> h)))
+
+            // Disarming rewinds the row, so the next word starts one.
+            If (bnot armed) (fun () -> lit 0UL phaseWidth ==> phase)
+
+            held @ [ word ], fire, (buffered.valid &&& armed &&& last)
+
+    takeWord ==> buffered.ready
+    let drained = buffered.valid &&& buffered.ready
+
+    let fill = reg "play_fill" 32
+
+    ifElse
+        [ (landed &&& bnot drained, fun () -> fill + lit 1UL 32 ==> fill)
+          (drained &&& bnot landed, fun () -> fill - lit 1UL 32 ==> fill) ]
+
+    let dropped = reg "play_dropped" 32
+    If (lost ||| played.refused) (fun () -> dropped + lit 1UL 32 ==> dropped)
+    regs.drive p.fill fill
+    regs.drive p.dropped dropped
+    regs.drive p.starved (lit 0UL 32)
+
+    // Each field as a declared signal, since what the design does with its
+    // input — a slice, a sign — needs one; a wide field's lanes are joined
+    // first, the later word the higher.
+    let fields =
+        pins
+        |> List.fold
+            (fun (fields, remaining: Expr list) (name, f) ->
+                let lanes, rest = List.splitAt (lanesOf f) remaining
+                let field = wire $"play_{name}" f.totalWidth
+
+                let joined =
+                    match lanes with
+                    | [ one ] -> one
+                    | several ->
+                        let all = wire $"play_{name}_lanes" (laneWidth * several.Length)
+                        (several |> List.rev |> List.reduce cat) ==> all
+                        all
+
+                slice (f.totalWidth - 1) 0 joined ==> field
+                fields @ [ field ], rest)
+            ([], sources)
+        |> fst
+
+    { payload = fields
+      valid = rowValid
+      ready = outReady
+      layout = layoutOfList pins }
 
 /// The I2S link on the clock the board's converter actually runs at. With no
 /// oscillator this is `mk board.fabricHz`, exactly as before. With one, the
@@ -1137,14 +1527,84 @@ let private converterLink (board: Board) (pins: ConverterPins) (rate: int) : I2s
             { input = { pdm.input with payload = (asUInt left, asUInt right) }
               send = out.sendOnly })
 
+/// The pins a design's reported values are bound to — an LED — each one
+/// bit, and each its own output port on the top.
+let private pinnedOutputs (d: Design) (path: DataPath) =
+    [ for need in d.needs do
+          match need with
+          | ValueOut(name, f) ->
+              for carrier in carriersOfNeed path need do
+                  match carrier with
+                  | OnPin port ->
+                      if f.totalWidth <> 1 then
+                          failwith $"{d.name}: '{name}' is %d{f.totalWidth} bits, and a pin carries one"
+
+                      yield name, port
+                  | _ -> ()
+          | _ -> () ]
+
+let private pinOutsOf (pinned: (string * string) list) (p: Ports) =
+    [ for _, port in pinned -> port, p.outPort port 1 ]
+
+/// Whether what is on a pin lights when driven low: the board's wiring, so
+/// the design's `limit` means lit whichever way the LED is wired.
+let private activeLowOn (board: Board) (port: string) =
+    board.connectors
+    |> List.collect (fun c -> c.pins)
+    |> List.tryFind (fun (p, _) -> p = port)
+    |> Option.map (fun (_, pin) -> pin.activeLow)
+    |> Option.defaultValue false
+
+/// What the design reports goes to every carrier it is bound to — its
+/// read-only field, a pin. With no host there is no field, and a register
+/// binding reaches nothing.
+let private reporterFor
+    (board: Board)
+    (d: Design)
+    (path: DataPath)
+    (entries: (string * RegEntry) list)
+    (regs: SlaveRegs option)
+    (outs: (string * Expr) list)
+    =
+    let byName = Map.ofList entries
+    let outs = Map.ofList outs
+
+    fun (name: string) (value: Expr) ->
+        let need = d.needs |> List.find (function ValueOut(n, _) -> n = name | _ -> false)
+
+        for carrier in carriersOfNeed path need do
+            match carrier, regs with
+            | InRegisterMap, Some regs -> regs.drive byName[name] value
+            | InRegisterMap, None -> ()
+            | OnPin port, _ -> (if activeLowOn board port then bnot value else value) ==> outs[port]
+            | other, _ -> failwith $"{d.name}: '{name}' is a value it reports, and nothing carries one as {other}"
+
+/// The design's values, by need name, out of the slave's registers.
+let private valuesOf (entries: (string * RegEntry) list) (regs: SlaveRegs) =
+    let byName = Map.ofList entries
+    fun (name: string) -> regs.value byName[name]
+
+/// The design's tables' read ports, by need name.
+let private tablesInOf (entries: (string * RegEntry) list) (regs: SlaveRegs) =
+    let byName = Map.ofList entries
+    fun (name: string) (index: Expr) -> regs.readArray byName[name] index
+
+/// A surface goes out whole, on a pull, and only the link top takes one.
+let private refuseSurfaces (where: string) (d: Design) =
+    match surfacesOf d with
+    | (name, _, _) :: _ -> failwith $"{d.name}: '{name}' is a surface, and {where} — bind it to the host link"
+    | [] -> ()
+
 let private pinsTop (board: Board) (path: DataPath) (d: Design) : BoardTop =
     check board path d
+    refuseSurfaces "the converter top carries none" d
     // No binding here wants a contract, so the map is exactly the design's
     // own values — which is what the pins path always had, now by assembly
     // rather than by a second builder.
     let recording = recordingCarrier path d
     let playing = playingCarrier path d
-    let _, recorder, player, entries, map = registersFor path recording playing d
+    let contributed = registersFor path recording playing None None d
+    let recorder, player, entries, map = contributed.recorderRegs, contributed.playerRegs, contributed.designEntries, contributed.regMap
 
     // The played need's own row, as the recorder's.
     let playedFields () =
@@ -1160,59 +1620,13 @@ let private pinsTop (board: Board) (path: DataPath) (d: Design) : BoardTop =
         | None -> []
     let rate = int (round d.sampleRate)
 
-    let fromRegisters (regs: SlaveRegs) =
-        let byName = Map.ofList entries
-        fun (name: string) -> regs.value byName[name]
+    let fromRegisters (regs: SlaveRegs) = valuesOf entries regs
 
-    // The pins reported values are bound to — an LED — each one bit, and
-    // each its own output port on the top.
-    let pinned =
-        [ for need in d.needs do
-              match need with
-              | ValueOut(name, f) ->
-                  for carrier in carriersOfNeed path need do
-                      match carrier with
-                      | OnPin port ->
-                          if f.totalWidth <> 1 then
-                              failwith $"{d.name}: '{name}' is %d{f.totalWidth} bits, and a pin carries one"
-
-                          yield name, port
-                      | _ -> ()
-              | _ -> () ]
-
-    let pinOuts (p: Ports) = [ for _, port in pinned -> port, p.outPort port 1 ]
-
-    // Whether what is on a pin lights when driven low: the board's wiring,
-    // so the design's `limit` means lit whichever way the LED is wired.
-    let activeLow (port: string) =
-        board.connectors
-        |> List.collect (fun c -> c.pins)
-        |> List.tryFind (fun (p, _) -> p = port)
-        |> Option.map (fun (_, pin) -> pin.activeLow)
-        |> Option.defaultValue false
-
-    // The other direction: what the design reports goes to every carrier it
-    // is bound to — its read-only field, a pin. With no host there is no
-    // field, and a register binding reaches nothing.
-    let reporter (regs: SlaveRegs option) (outs: (string * Expr) list) =
-        let byName = Map.ofList entries
-        let outs = Map.ofList outs
-
-        fun (name: string) (value: Expr) ->
-            let need = d.needs |> List.find (function ValueOut(n, _) -> n = name | _ -> false)
-
-            for carrier in carriersOfNeed path need do
-                match carrier, regs with
-                | InRegisterMap, Some regs -> regs.drive byName[name] value
-                | InRegisterMap, None -> ()
-                | OnPin port, _ -> (if activeLow port then bnot value else value) ==> outs[port]
-                | other, _ -> failwith $"{d.name}: '{name}' is a value it reports, and nothing carries one as {other}"
-
+    let pinned = pinnedOutputs d path
+    let pinOuts (p: Ports) = pinOutsOf pinned p
+    let reporter (regs: SlaveRegs option) (outs: (string * Expr) list) = reporterFor board d path entries regs outs
     let toRegisters (regs: SlaveRegs) = reporter (Some regs)
-
-    let tablesIn (regs: SlaveRegs) =
-        let byName = Map.ofList entries
-        fun (name: string) (index: Expr) -> regs.readArray byName[name] index
+    let tablesIn (regs: SlaveRegs) = tablesInOf entries regs
 
     let baked =
         let starting = (startingOf d) |> Map.ofList
@@ -1339,14 +1753,14 @@ let private pinsTop (board: Board) (path: DataPath) (d: Design) : BoardTop =
                                 frames
                                 |> Option.map (fun (_, (arm, sent, dropped), (words, wordsValid, wordsReady)) ->
                                     fun (rows: Stream<Expr list>) (dropCount: Expr) ->
-                                        let produced = recordFrames regs arm sent dropped (recordedFields ()) rows dropCount
+                                        let produced = recordFrames regs (regs.value arm) sent dropped (recordedFields ()) rows dropCount
                                         produced.payload ==> words
                                         produced.valid ==> wordsValid
                                         wordsReady ==> produced.ready)
 
                             let play =
                                 match playing, player, played with
-                                | Some name, Some p, Some words -> Some(name, playInto regs p words (playedFields ()))
+                                | Some name, Some p, Some words -> Some(name, playInto board.part regs p words (playedFields ()))
                                 | _ -> None
 
                             d.body (onPins d path (fromRegisters regs) (toRegisters regs outs) (tablesIn regs) sink play i2s)
@@ -1374,7 +1788,319 @@ let private pinsTop (board: Board) (path: DataPath) (d: Design) : BoardTop =
       registers = registers
       batch = None
       map = map
-      target = targetOf board.part }
+      target = targetOf board.part
+      seamExtras = [] }
+
+/// The design with no converter, on the host link alone: the host's words
+/// in as its rows, its rows out as frames, both on the wire its register map
+/// is on. The batch path of a board whose only connection is a UART — and
+/// built from the player's and the recorder's registers, so the tools that
+/// drive those drive this.
+///
+/// Nothing paces the design but the link: a row is taken when its words have
+/// arrived and the design is ready, and a row goes out as the transmitter
+/// takes it, back-pressuring the design when the link is the slow part.
+/// What the link tops share: the UART, the one stream in (played words or
+/// a count), the one output (rows as frames, or a surface as snapshots),
+/// the map assembled from what the bindings want.
+let private linkBaud (board: Board) (d: Design) =
+    match board.host with
+    | UartAt baud -> baud
+    | _ -> failwith $"{d.name}: rows over the host link need a UART host, and the {board.name}'s is %A{board.host}"
+
+/// The one input need and the one output need a link top carries, the
+/// output a stream or a surface.
+let private linkEnds (d: Design) =
+    if d.streams <> 1 then
+        failwith $"{d.name}: a board carries one stream, and the design declares %d{d.streams}"
+
+    let one side (names: string list) =
+        match names with
+        | [ name ] -> name
+        | names -> failwith $"{d.name}: the link carries one {side}, and %d{names.Length} are bound to it"
+
+    let inName = one "input stream" (d.needs |> List.choose (function StreamIn(name, _) -> Some name | _ -> None))
+
+    let outputs =
+        d.needs
+        |> List.choose (function
+            | StreamOut(name, _) -> Some(name, None)
+            | SurfaceOut(name, fields, rows) -> Some(name, Some(fields, rows))
+            | _ -> None)
+
+    let outName, surface =
+        match outputs with
+        | [ one ] -> one
+        | several -> failwith $"{d.name}: the link carries one output, and %d{several.Length} are bound to it"
+
+    inName, outName, surface
+
+/// The seam's word of what each link-carried need takes on the wire: words
+/// a row, and for a surface its rows — so a host reads a snapshot without
+/// a number of its own.
+let private linkSeamExtras (part: Part) (d: Design) (inName: string option) (outName: string) (surface: ((string * NumberFormat) list * int) option) =
+    [ match inName with
+      | Some name ->
+          yield $"pub const {upperSnake name}_WORDS: usize = %d{linkWordsOf (fieldsOf d name)};"
+          // What the player holds, so a host plays no more than fits
+          // between its reads of `…LinkFill`.
+          yield $"pub const {upperSnake name}_BUFFER_WORDS: usize = %d{playBufferWordsFor part};"
+      | None -> ()
+
+      match surface with
+      | Some(fields, rows) ->
+          yield $"pub const {upperSnake outName}_WORDS: usize = %d{linkWordsOf fields};"
+          yield $"pub const {upperSnake outName}_ROWS: usize = %d{rows};"
+      | None -> yield $"pub const {upperSnake outName}_WORDS: usize = %d{linkWordsOf (fieldsOf d outName)};" ]
+
+/// The output half of a link top: the design's rows out as frames, or its
+/// surface as snapshots, either way threaded back through a wire pair to
+/// the slave that was built before the design's body ran.
+let private linkOutput
+    (d: Design)
+    (regs: SlaveRegs)
+    (contributed: BindingRegs)
+    (outName: string)
+    (surface: ((string * NumberFormat) list * int) option)
+    (words: Expr, wordsValid: Expr, wordsReady: Expr)
+    =
+    let send (out: Stream<Expr>) =
+        out.payload ==> words
+        out.valid ==> wordsValid
+        wordsReady ==> out.ready
+
+    let streamOut (n: string) (produced: Stream<Expr list>) =
+        if n <> outName || surface.IsSome then
+            failwith $"{d.name}: no stream out called '{n}'"
+
+        match contributed.recorderRegs with
+        | Some(RecordToFrames(arm, sent, dropped)) ->
+            // Nothing drops on this path: the link's pace reaches the design
+            // as back-pressure.
+            send (recordFrames regs (regs.value arm) sent dropped (fieldsOf d outName) produced (lit 0UL 32))
+        | _ -> failwith $"{d.name}: the link top's recorder is frames on the link"
+
+    let surfaceOut (n: string) (rows: Expr list list) =
+        match surface, contributed.snapshotRegs with
+        | Some(fields, declared), Some snap when n = outName ->
+            if rows.Length <> declared then
+                failwith $"{d.name}: '{n}' declared %d{declared} rows and handed over %d{rows.Length}"
+
+            send (snapshotFrames regs snap fields rows)
+        | _ -> failwith $"{d.name}: no surface called '{n}'"
+
+    streamOut, surfaceOut
+
+/// The registers a link top's bindings contributed, by name, for the seam.
+let private linkRegisters (contributed: BindingRegs) =
+    let recorder =
+        match contributed.recorderRegs with
+        | Some(RecordToFrames(arm, sent, dropped)) -> [ arm; sent; dropped ]
+        | _ -> []
+
+    let snapshot =
+        match contributed.snapshotRegs with
+        | Some s -> [ s.pull; s.sent; s.missed ]
+        | None -> []
+
+    let player =
+        match contributed.playerRegs with
+        | Some p -> [ p.arm; p.fill; p.dropped; p.starved ]
+        | None -> []
+
+    let counter =
+        match contributed.counterRegs with
+        | Some c -> [ c.total; c.start; c.busy ]
+        | None -> []
+
+    (recorder @ snapshot @ player @ counter |> List.map (fun e -> e.name, e)) @ contributed.designEntries
+
+let private linkTop (board: Board) (path: DataPath) (d: Design) : BoardTop =
+    let baud = linkBaud board d
+    let inName, outName, surface = linkEnds d
+
+    let contributed =
+        registersFor
+            path
+            (if surface.IsNone then Some(outName, InLinkFrames) else None)
+            (Some inName)
+            None
+            (if surface.IsSome then Some outName else None)
+            d
+
+    let map = contributed.regMap
+
+    let player =
+        match contributed.playerRegs with
+        | Some p -> p
+        | None -> failwith $"{d.name}: the link top's player is words on the link"
+
+    let pinned = pinnedOutputs d path
+    let name = $"{d.name}Link"
+
+    let top =
+        defModule
+            name
+            (fun p -> uartPins p "host", pinOutsOf pinned p)
+            (fun (uart, outs) ->
+                // The recorder's words are produced by the design's output,
+                // which is wired below the slave, so that stream is threaded
+                // back through a wire pair — as the converter top does.
+                let words = wire "record_frame_word" 32
+                let wordsValid = wireBit "record_frame_valid"
+                let wordsReady = wireBit "record_frame_ready_back"
+
+                let stream: Stream<Expr> =
+                    { payload = words
+                      valid = wordsValid
+                      ready = wordsReady
+                      layout = layout1 ("word", 32) }
+
+                let regs, played = serialRegMapSlaveLink "host" board.fabricHz baud uart map (Some stream) true
+
+                let played =
+                    match played with
+                    | Some p -> p
+                    | None -> failwith $"{d.name}: the link was asked to take played words"
+
+                let rows = playRows board.part regs player played (fieldsOf d inName)
+                let streamOut, surfaceOut = linkOutput d regs contributed outName surface (words, wordsValid, wordsReady)
+
+                let boundary: Boundary =
+                    { streamIn =
+                        fun n ->
+                            if n <> inName then
+                                failwith $"{d.name}: no stream in called '{n}'"
+
+                            rows
+                      streamOut = streamOut
+                      valueIn = valuesOf contributed.designEntries regs
+                      valueOut = reporterFor board d path contributed.designEntries (Some regs) outs
+                      tableIn = tablesInOf contributed.designEntries regs
+                      surfaceOut = surfaceOut }
+
+                d.body boundary)
+
+    { board = board
+      name = name
+      top = top.def
+      registers = linkRegisters contributed
+      batch = None
+      map = map
+      target = targetOf board.part
+      seamExtras = linkSeamExtras board.part d (Some inName) outName surface }
+
+/// The counted path over the link: beats minted in fabric — `0 …` as many
+/// as the host asked for — and the rows they produce out as frames, a frame
+/// drawn on a board with no host memory. The count is the design's input
+/// box's one field, as on the host-memory path; the rows leave at the
+/// link's pace and the count waits with them, so nothing in fabric runs
+/// ahead of the wire.
+let private countedLinkTop (board: Board) (path: DataPath) (d: Design) : BoardTop =
+    let baud = linkBaud board d
+    let inName, outName, surface = linkEnds d
+
+    if surface.IsSome then
+        failwith $"{d.name}: a surface is taken when the host pulls, and a count would mint beats nobody asked for — bind '{outName}' with the link path"
+
+    if (inputsOf d).Length <> 1 then
+        failwith $"{d.name}: the counted path puts the beat index on the input box's one field, and the design declares [{describePins (inputsOf d)}]"
+
+    let contributed = registersFor path (Some(outName, InLinkFrames)) None (Some inName) None d
+    let map = contributed.regMap
+
+    let counter =
+        match contributed.counterRegs with
+        | Some c -> c
+        | None -> failwith $"{d.name}: the counted link top's count is a register"
+
+    let pinned = pinnedOutputs d path
+    let name = $"{d.name}Link"
+
+    let top =
+        defModule
+            name
+            (fun p -> uartPins p "host", pinOutsOf pinned p)
+            (fun (uart, outs) ->
+                let words = wire "record_frame_word" 32
+                let wordsValid = wireBit "record_frame_valid"
+                let wordsReady = wireBit "record_frame_ready_back"
+
+                let stream: Stream<Expr> =
+                    { payload = words
+                      valid = wordsValid
+                      ready = wordsReady
+                      layout = layout1 ("word", 32) }
+
+                let regs, _ = serialRegMapSlaveLink "host" board.fabricHz baud uart map (Some stream) false
+
+                // --- the count: `total` beats, the index each ------------
+                let total = regs.value counter.total
+                let running = regBit "count_running"
+                let issued = reg "count_issued" 32
+                let more = wireBit "count_more"
+                (running &&& lt issued total) ==> more
+                let countReady = wireBit "count_ready"
+                registerStreamReady countReady
+                If (more &&& countReady) (fun () -> issued + lit 1UL 32 ==> issued)
+
+                let _, f = (inputsOf d).Head
+                let index = if f.totalWidth >= 32 then pad f.totalWidth issued else slice (f.totalWidth - 1) 0 issued
+
+                let beats: Stream<Expr list> =
+                    { payload = [ index ]
+                      valid = more
+                      ready = countReady
+                      layout = layoutOfList (inputsOf d) }
+
+                // Busy until the rows the count produces — `answers` a beat —
+                // have all been taken by the link.
+                let rowsTotal = wire "count_rows_total" 32
+                timesConstant d.answers total ==> rowsTotal
+                let rowsOut = reg "count_rows_out" 32
+                let rowTaken = wireBit "count_row_taken"
+
+                ifElse
+                    [ (regs.pulse counter.start,
+                       fun () ->
+                           lit 1UL 1 ==> running
+                           lit 0UL 32 ==> issued
+                           lit 0UL 32 ==> rowsOut)
+                      (otherwise,
+                       fun () ->
+                           If rowTaken (fun () -> rowsOut + lit 1UL 32 ==> rowsOut)
+                           If (running &&& eq rowsOut rowsTotal) (fun () -> lit 0UL 1 ==> running)) ]
+
+                regs.drive counter.busy running
+
+                let streamOut, surfaceOut = linkOutput d regs contributed outName None (words, wordsValid, wordsReady)
+
+                let boundary: Boundary =
+                    { streamIn =
+                        fun n ->
+                            if n <> inName then
+                                failwith $"{d.name}: no stream in called '{n}'"
+
+                            beats
+                      streamOut =
+                        fun n produced ->
+                            (produced.valid &&& produced.ready) ==> rowTaken
+                            streamOut n produced
+                      valueIn = valuesOf contributed.designEntries regs
+                      valueOut = reporterFor board d path contributed.designEntries (Some regs) outs
+                      tableIn = tablesInOf contributed.designEntries regs
+                      surfaceOut = surfaceOut }
+
+                d.body boundary)
+
+    { board = board
+      name = name
+      top = top.def
+      registers = linkRegisters contributed
+      batch = None
+      map = map
+      target = targetOf board.part
+      seamExtras = linkSeamExtras board.part d None outName None }
 
 /// The counters a batch top's read and write sides share.
 type private BatchCounters =
@@ -1406,6 +2132,7 @@ let private hostMemoryTop (board: Board) (path: DataPath) (d: Design) : BoardTop
     // What carries each half, asked per need rather than decoded from a name:
     // nothing is read when the input is a beat count, and the design says
     // where a beat goes only when the output is carried at an address.
+    refuseSurfaces "the host-memory top carries none yet (the KV260's snapshot into DDR is still GoL's own top)" d
     let counted = carrierOfInput path d = Some AsBeatCount
     let scattered = carrierOfOutput path d = Some InHostRowsAt
     let memory =
@@ -1423,18 +2150,8 @@ let private hostMemoryTop (board: Board) (path: DataPath) (d: Design) : BoardTop
     if counted && (inputsOf d).Length <> 1 then
         failwith $"{d.name}: the counted path puts the beat index on the input box's one field, and the design declares [{describePins (inputsOf d)}]"
 
-    // Rows out are rows in times the answers. `answers` is a constant at
-    // elaboration, so this is shifts and adds and need not be a power of two
-    // — which it stops being as soon as a chunk is sized to divide its row
-    // rather than to be a round number.
-    let timesAnswers (e: Expr) =
-        let shifted i =
-            if i = 0 then e else cat (slice (31 - i) 0 e) (lit 0UL i)
-
-        [ for i in 0..31 do
-              if (d.answers >>> i) &&& 1 = 1 then
-                  yield shifted i ]
-        |> List.reduce (+)
+    // Rows out are rows in times the answers.
+    let timesAnswers = timesConstant d.answers
 
     // On the scatter path the design's FIRST output field is where the beat
     // goes; the rest are the beat itself.
@@ -1445,7 +2162,8 @@ let private hostMemoryTop (board: Board) (path: DataPath) (d: Design) : BoardTop
     let destPin = if scattered then Some (outputsOf d).Head else None
     let payloadPins = if scattered then List.tail (outputsOf d) else (outputsOf d)
 
-    let batchOption, _, _, entries, map = registersFor path None None d
+    let contributed = registersFor path None None None None d
+    let batchOption, entries, map = contributed.batchRegs, contributed.designEntries, contributed.regMap
 
     let batch =
         match batchOption with
@@ -1619,7 +2337,8 @@ let private hostMemoryTop (board: Board) (path: DataPath) (d: Design) : BoardTop
                       streamOut = rowsOut
                       valueIn = fun name -> regs.value byName[name]
                       valueOut = fun name value -> regs.drive byName[name] value
-                      tableIn = fun name index -> regs.readArray byName[name] index }
+                      tableIn = fun name index -> regs.readArray byName[name] index
+                      surfaceOut = fun name _ -> failwith $"{d.name}: '{name}' is a surface, and the host-memory top carries none yet — the KV260's snapshot into DDR is still GoL's own top; bind it to the host link" }
 
                 let { running = running; arIssued = arIssued; beatsWritten = beatsWritten; beatsTotal = beatsTotal; cycleCount = cycleCount; frameCount = frameCount; burstAddrShift = burstAddrShift } =
                     counters.Force()
@@ -1679,21 +2398,118 @@ let private hostMemoryTop (board: Board) (path: DataPath) (d: Design) : BoardTop
         @ entries
       batch = Some batch
       map = map
-      target = targetOf board.part }
+      target = targetOf board.part
+      seamExtras = [] }
 
 /// The design on a board, the way the path says: the converter on the pins,
 /// or the host's memory.
-let boardTop (board: Board) (path: DataPath) (d: Design) : BoardTop =
+/// A design with no stream and no surface: values the host sets and reads,
+/// bits on pins — `hello`, the first design on any board. The host reaches
+/// it through whatever the board's link is; with no host the values are
+/// baked at their starting values and only the pins remain.
+let private registersTop (board: Board) (path: DataPath) (d: Design) : BoardTop =
+    let contributed = registersFor path None None None None d
+    let map = contributed.regMap
+    let entries = contributed.designEntries
+    let pinned = pinnedOutputs d path
+    let starting = Map.ofList (startingOf d)
+    let formats = Map.ofList (controlsOf d)
+
+    let body (regs: SlaveRegs option) (outs: (string * Expr) list) =
+        let boundary: Boundary =
+            { streamIn = fun n -> failwith $"{d.name}: no stream in called '{n}'"
+              streamOut = fun n _ -> failwith $"{d.name}: no stream out called '{n}'"
+              surfaceOut = fun n _ -> failwith $"{d.name}: no surface called '{n}'"
+              valueIn =
+                match regs with
+                | Some regs -> valuesOf entries regs
+                | None -> fun name -> lit starting[name] formats[name].totalWidth
+              valueOut = reporterFor board d path entries regs outs
+              tableIn =
+                match regs with
+                | Some regs -> tablesInOf entries regs
+                | None -> fun name _ -> failwith $"{d.name}: the table '{name}' is the host's to fill, and the {board.name} has no host" }
+
+        d.body boundary
+
+    let name, top =
+        match board.host with
+        | AxiLiteAt _ ->
+            let name = $"{d.name}Axi"
+
+            name,
+            (defModuleClocked
+                axiClock
+                name
+                (fun p -> axiLiteSlavePorts p map.apertureAddrWidth, pinOutsOf pinned p)
+                (fun (slavePorts, outs) -> body (Some(regMapSlave slavePorts map)) outs))
+                .def
+        | UartAt baud ->
+            let name = $"{d.name}Uart"
+
+            name,
+            (defModule
+                name
+                (fun p -> uartPins p "host", pinOutsOf pinned p)
+                (fun (uart, outs) -> body (Some(serialRegMapSlave "host" board.fabricHz baud uart map)) outs))
+                .def
+        | NoHost ->
+            let name = $"{d.name}Top"
+            name, (defModule name (fun p -> pinOutsOf pinned p) (fun outs -> body None outs)).def
+
+    { board = board
+      name = name
+      top = top
+      registers = (if board.host = NoHost then [] else entries)
+      batch = None
+      map = map
+      target = targetOf board.part
+      seamExtras = [] }
+
+/// The design on a board, the way the path says, at the sizes the mapping
+/// named — `boardTop` with sizes.
+let boardTopSized (board: Board) (path: DataPath) (sizes: (string * int) list) (d: Design) : BoardTop =
     checkBoard board
 
+    // The rate the design is made for: the converter's where a converter
+    // paces the rows, and the nominal one where the host does — rows in a
+    // file or on a link carry no rate of their own, and a coefficient
+    // designed for the converter the board happens to have would be wrong
+    // for the 48 kHz WAV the host actually sends.
     let d =
         match d.atClocking with
-        | None -> d
+        | None ->
+            match sizes with
+            | [] -> d
+            | (name, _) :: _ -> failwith $"{d.name}: the mapping names a size '{name}', and the design is the same on every board"
         | Some resolve ->
-            let rate = boardRate board nominalRate
-            resolve { rate = rate; cyclesPerBeat = int (float board.fabricHz / rate) }
+            // Asked of the path rather than the design's needs, which are
+            // not known until it has been handed its clocking.
+            let onConverter = path.bindings |> List.exists (fun b -> b.carrier = OnPins)
+            let rate = if onConverter then boardRate board nominalRate else nominalRate
+            let fit = Fit({ rate = rate; cyclesPerBeat = int (float board.fabricHz / rate) }, board, sizes)
+            let resolved = resolve fit
 
-    // Four combinations of carriers are built. The rest are sayable — which
+            for name, _ in fit.Named do
+                if not (List.contains name fit.Asked) then
+                    failwith
+                        $"""{resolved.name}: the mapping names a size '{name}', and the design sizes nothing by that name — it asks for [{fit.Asked |> List.distinct |> String.concat "; "}]"""
+
+            resolved
+
+    let carriesRows =
+        d.needs
+        |> List.exists (function
+            | StreamIn _
+            | StreamOut _
+            | SurfaceOut _ -> true
+            | _ -> false)
+
+    if not carriesRows then
+        registersTop board path d
+    else
+
+    // Six combinations of carriers are built. The rest are sayable — which
     // is the point of binding per need — and are refused here by name, so
     // "not built yet" is distinguishable from "cannot be described".
     match carrierOfInput path d, carrierOfOutput path d with
@@ -1702,6 +2518,8 @@ let boardTop (board: Board) (path: DataPath) (d: Design) : BoardTop =
         failwith
             $"{d.name}: nothing carries one of the design's streams on this path — every need wants a binding, by name or by kind"
     | Some OnPins, Some OnPins -> pinsTop board path d
+    | Some InLinkFrames, Some InLinkFrames -> linkTop board path d
+    | Some AsBeatCount, Some InLinkFrames -> countedLinkTop board path d
     | Some InHostRows, Some InHostRows
     | Some AsBeatCount, Some InHostRows
     | Some AsBeatCount, Some InHostRowsAt -> hostMemoryTop board path d
@@ -1717,12 +2535,22 @@ let boardTop (board: Board) (path: DataPath) (d: Design) : BoardTop =
     | Some inCarrier, Some outCarrier ->
         failwith $"{d.name}: nothing builds {inCarrier} in and {outCarrier} out"
 
+/// The design on a board, the way the path says: the converter on the pins,
+/// or the host's memory, or its link. Sizes derived, none named.
+let boardTop (board: Board) (path: DataPath) (d: Design) : BoardTop = boardTopSized board path [] d
+
+/// The design as a mapping says: its board with every harness plugged in,
+/// its path, the sizes it names.
+let boardTopFor (m: Mapping.Mapping) (d: Design) : BoardTop =
+    boardTopSized (Mapping.boardOf m) m.path m.sizes d
+
 /// The register map as the Rust seam prints it, headed for the top it serves.
 let seamLines (t: BoardTop) : string list =
     [ $"//! Register map for the `{t.name}` slave on the {t.board.name}."
       "//! Generated from the design's own register map. Do not edit by hand."
       "" ]
     @ regMapRsLines t.map
+    @ (if List.isEmpty t.seamExtras then [] else "" :: t.seamExtras)
 
 /// The top's Verilog and its seam, written into `dir`: `{Name}.v` and
 /// `{name}_layout.rs`. The paths written come back.

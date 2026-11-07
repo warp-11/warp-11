@@ -39,7 +39,7 @@ let gain (rate: float) : Graph =
 
 /// The gain example's mapping: the KV260 preset, the boundary in the
 /// host's memory — a WAV in, the design, a WAV out, no codec needed.
-let gainMapping: Warp11.Mapping.Mapping = { board = kv260; path = viaHostMemory; plugged = [] }
+let gainMapping: Warp11.Mapping.Mapping = { board = kv260; path = viaHostMemory; plugged = []; sizes = [] }
 
 /// M2's design: three `eq` sections with creation arguments — a low shelf,
 /// a peaking cut, a high shelf — designed for the rate.
@@ -151,14 +151,46 @@ let all (rate: float) : (string * Graph) list =
       "blur.json", imageBlur gradient.width gradient.height
       "adder.json", adder ]
 
-/// Write every example into `dir`, and the image and table they open with.
+/// Every example's mapping files, one per board that holds it: rows
+/// through the KV260's memory, and over the link on the three boards with
+/// one wire. Which boards, measured through the open flow 2026-11-07 (the
+/// gate's numbers, cells used of the part's): the Go Board holds nothing
+/// with a multiplier in it — the gain alone is 2 096 of 1 280 — so gain,
+/// controls (a gain with settings), the EQ, twice and the blur are not
+/// written for it; the iCEBreaker holds the gain (its 5 280 cells) but not
+/// the three-band EQ (5 489), twice (8 825) or the blur (11 364, and 32 of
+/// its 30 block RAMs). The blur is not written for the KV260's memory path
+/// either, whose row shape gives every field a 32-bit lane — a row of
+/// sixteen 8-bit pixels is 512 bits to it, four beats, which it does not
+/// pack (the link sends the same row as sixteen words). The gain example's
+/// `gain.kv260.json` is the one its design file names.
+let mappings: (string * Warp11.Mapping.Mapping) list =
+    let on (board: Board) (path: DataPath) : Warp11.Mapping.Mapping = { board = board; path = path; plugged = []; sizes = [] }
+    let link = [ "icebreaker", on (iceBreakerAt 24_000_000) viaLink; "icepi", on icepi viaLink; "goboard", on goBoard viaLink ]
+    let memory = [ "kv260", gainMapping ]
+
+    let holds (example: string) (boards: string list) =
+        [ for name, m in memory @ link do
+              if List.contains name boards then
+                  yield $"{example}.{name}.json", m ]
+
+    holds "gain" [ "kv260"; "icebreaker"; "icepi" ]
+    @ holds "three-band-eq" [ "kv260"; "icepi" ]
+    @ holds "controls" [ "kv260"; "icebreaker"; "icepi" ]
+    @ holds "twice" [ "kv260"; "icepi" ]
+    @ holds "blur" [ "icepi" ]
+    @ holds "adder" [ "kv260"; "icebreaker"; "icepi"; "goboard" ]
+
+/// Write every example into `dir`, its mapping files, and the image and
+/// table they open with.
 let write (dir: string) =
     System.IO.Directory.CreateDirectory dir |> ignore
 
     for file, g in all recordingRate do
         Warp11.DesignFile.save (System.IO.Path.Combine(dir, file)) g
 
-    Warp11.Mapping.save (System.IO.Path.Combine(dir, "gain.kv260.json")) gainMapping
+    for file, m in mappings do
+        Warp11.Mapping.save (System.IO.Path.Combine(dir, file)) m
 
     writePgm (System.IO.Path.Combine(dir, "gradient.pgm")) gradient
     writeCsv (System.IO.Path.Combine(dir, "numbers.csv")) numbers

@@ -1605,7 +1605,7 @@ let view (opening: Opening) : Control =
                             | Some m when b.hostMemory.IsSome -> m.path
                             | _ -> viaPins
 
-                        useMapping (Some { board = b; path = path; plugged = [] })
+                        useMapping (Some { board = b; path = path; plugged = []; sizes = [] })
                     | Error why -> message.Set why
 
             [ heading "target"; line [ label "preset"; combo presetNames current pick ] ]

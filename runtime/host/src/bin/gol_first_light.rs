@@ -1,5 +1,5 @@
 //! First light for the F#-elaborated Game of Life accelerator on the KV260.
-//! Run on the board after `xmutil loadapp gol-fs`:
+//! Run on the board after `xmutil loadapp gol-axi`:
 //!
 //!     ./gol_first_light              # registers via the uio node, no root
 //!     ./gol_first_light /dev/mem     # root mode (sudo)
@@ -83,8 +83,8 @@ fn main() {
     });
 
     let (device_path, reg_offset) = if reg_arg == "auto" {
-        let uio = find_uio("golfs").unwrap_or_else(|| {
-            eprintln!("no uio node named 'golfs' — is the gol-fs app loaded?");
+        let uio = find_uio("gol_axi").unwrap_or_else(|| {
+            eprintln!("no uio node named 'gol_axi' — is the gol-axi app loaded?");
             exit(1);
         });
         (uio, 0i64)

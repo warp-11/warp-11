@@ -258,8 +258,14 @@ let serialRegMapLink
     let readData = wire $"{name}_rdata" 32
     let answered = regBit $"{name}_answered"
     let answerDue = delayChain $"{name}_answer_due" 1 answersAfter readFire
+    // The answer is parked until its reply starts, not loaded into the
+    // reply's own word: a streamed frame may be half-way out when the read
+    // is answered, and its last bytes and checksum come from that word.
+    // Loading it at the answer corrupted the frame in flight — found by the
+    // first test that read a register while frames streamed (2026-11-07).
     let replyData = reg $"{name}_reply_data" 32
-    If answerDue (fun () -> readData ==> replyData)
+    let pendingData = reg $"{name}_reply_pending_data" 32
+    If answerDue (fun () -> readData ==> pendingData)
 
     // The index a request named: the command byte's low bits, with the extra
     // byte above them on a wide map.
@@ -319,6 +325,7 @@ let serialRegMapLink
         pendingIsRead ==> replyIsRead
         lit 0UL 1 ==> replyIsStream
         pendingBad ==> replyBad
+        If pendingIsRead (fun () -> pendingData ==> replyData)
         lit 0UL 1 ==> pendingReply)
 
     // A streamed word goes out only in the gaps: nothing replying, no reply

@@ -51,7 +51,12 @@ clock and fabric rate, data path (the boundary on the I2S pins, or in the
 host's memory: a recording in, the design, a recording out, no codec
 needed), host driver, loading, connectors — and any row edited makes it
 custom. Save writes it beside the design as `gain.kv260.json`, and the
-design names it; `gain.json` ships with that one. **Build → Build…** asks
+design names it; `gain.json` ships with that one, and every example ships
+with a mapping file per board that holds it — `adder.goboard.json`,
+`blur.icepi.json`, `three-band-eq.kv260.json` — rows through the KV260's
+memory or over the other boards' UART, the design unchanged; `-- build
+adder.json adder.goboard.json out/` builds from one. Which boards a design
+is written for, and why not the others, is beside `Examples.mappings`. **Build → Build…** asks
 for a folder and writes everything the board's toolchain builds from into
 it, and says how to run it; `dotnet run --project Warp11.Placement --
 build <file> <dir>` does the same from the shell. The iCEBreaker frames at

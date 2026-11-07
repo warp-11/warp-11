@@ -349,7 +349,8 @@ type Target =
     /// Vivado, UltraScale+ and friends. What every existing call site means,
     /// and what `emitDesign` still does.
     | Xilinx
-    /// Lattice iCE40 through yosys.
+    /// Lattice iCE40 through yosys — UltraPlus and HX alike: neither has a
+    /// LUT-RAM primitive, so the memory rule is one rule.
     | Ice40
     /// Lattice ECP5 through yosys.
     | Ecp5

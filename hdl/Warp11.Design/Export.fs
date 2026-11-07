@@ -256,6 +256,9 @@ let exportWith (mapping: Warp11.Mapping.Mapping option) (g: Graph) : Result<stri
                     | "memory" -> "viaHostMemory"
                     | "count" -> "viaCount"
                     | "scatter" -> "viaScatter"
+                    | "link" -> "viaLink"
+                    | "countlink" -> "viaCountLink"
+                    | "registers" -> "viaRegisters"
                     | _ ->
                         let binding (b: Binding) = $"{{ need = {b.need}; carrier = {b.carrier} }}"
                         $"""{{ bindings = [ {String.concat "; " (List.map binding p.bindings)} ] }}"""

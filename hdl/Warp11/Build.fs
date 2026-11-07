@@ -33,10 +33,11 @@ let private portsOf (m: ModuleDef) =
         | Output(n, t) -> Some(n, false, t.Width)
         | _ -> None)
 
-/// A port that is a bus rather than a pin: the AXI-Lite slave's and the
-/// masters' nets go into the block design, never to a package pin.
+/// A port that goes into the block design rather than to a package pin: the
+/// AXI-Lite slave's and the masters' nets, and the interrupt, which the block
+/// design wires into the PS.
 let private isBusPort (n: string) =
-    n.StartsWith "s_axi_" || n.StartsWith "m_axi_"
+    n.StartsWith "s_axi_" || n.StartsWith "m_axi_" || n = "irq"
 
 /// The pin gate: every pin port of the top lands on a pin the board's
 /// connectors name, and a connector the top uses is used whole — LEDs aside. Refused by
@@ -124,6 +125,13 @@ let private hasMaster (t: BoardTop) =
         | Output(n, _) -> n = "m_axi_awaddr" || n = "m_axi_araddr"
         | _ -> false)
 
+/// Whether the top raises an interrupt: an output named `irq`, which the
+/// block design wires into `pl_ps_irq0` and the overlay declares as SPI 89.
+let private hasIrq (t: BoardTop) =
+    t.top.decls |> List.exists (function
+        | Output(n, _) -> n = "irq"
+        | _ -> false)
+
 /// `100`, `99.999001`, `166.666672`: the megahertz the PS configuration
 /// takes.
 let private megahertz (hz: int) = (float hz / 1e6).ToString("0.######", System.Globalization.CultureInfo.InvariantCulture)
@@ -193,6 +201,14 @@ let private blockDesignTcl (t: BoardTop) (pinned: Pinned list) (psClock: int) =
               $"create_bd_port -dir {dir} {p.port}\nconnect_bd_net [get_bd_pins {cell}/{p.port}] [get_bd_ports {p.port}]" ]
         |> String.concat "\n"
 
+    // The top's interrupt, where it has one, into the concat's first input:
+    // GIC SPI 89, which is what the overlay declares.
+    let irqNet =
+        if hasIrq t then
+            $"connect_bd_net -net {cell}_irq [get_bd_pins {cell}/irq] [get_bd_pins irq_concat/In0]"
+        else
+            ""
+
     let masterCells, masterNets, masterClocks, masterResets, masterAddress =
         match memory with
         | Some m ->
@@ -247,6 +263,7 @@ connect_bd_net -net zynq_ultra_ps_e_0_pl_clk0 [get_bd_pins zynq_ultra_ps_e_0/pl_
 connect_bd_net -net zynq_ultra_ps_e_0_pl_resetn0 [get_bd_pins zynq_ultra_ps_e_0/pl_resetn0] \
   [get_bd_pins rst_ps8_0/ext_reset_in]{audioReset}
 connect_bd_net -net irq_concat_dout [get_bd_pins irq_concat/dout] [get_bd_pins zynq_ultra_ps_e_0/pl_ps_irq0]
+{irqNet}
 {audioNets}
 
 {ports}
@@ -313,6 +330,177 @@ proc warp11_assert_timing_met {run} {
     }
 }
 """
+
+/// The post-build gate, nextpnr's half: the utilisation block and the clock
+/// out of the log, into `build/report.json`, and three refusals, each naming
+/// its number — a resource over the part's total, a clock short of the
+/// target, and a fact in the board that disagrees with the tool's own total
+/// for the part (the board said 1 280 cells; nextpnr says 5 280). It runs
+/// whether or not nextpnr succeeded, because the utilisation is printed
+/// before placement: a design that does not fit is refused with its numbers
+/// rather than with the placer's message. The report is what the boards
+/// table is written from.
+let private nextpnrGate (t: BoardTop) (top: string) (cells: string) (rams: string) (ramBits: int) (mults: string) =
+    let f = t.board.part.facts
+
+    """
+# The gate: utilisation and the clock out of the log, into build/report.json.
+# Runs whether or not nextpnr succeeded — the utilisation is printed before
+# placement, so a design that does not fit is refused with its numbers.
+echo
+echo "== gate =="
+python3 - "$out/$top.pnr.log" "$freq" "$out/report.json" "$pnr_status" <<'PY'
+import json, re, sys
+
+log, target, report, status = sys.argv[1], float(sys.argv[2]), sys.argv[3], int(sys.argv[4])
+text = open(log).read()
+
+def usage(primitive):
+    m = re.search(r"^Info:\s+" + re.escape(primitive) + r":\s+(\d+)/\s*(\d+)", text, re.M)
+    return (int(m.group(1)), int(m.group(2))) if m else None
+
+# What the board says the part has, against what the tool says. nextpnr
+# lists only the primitives the design used, so an absent row is none used
+# and the board's total stands unchecked - a tone with no multiply says
+# nothing about how many multipliers the part has.
+board = dict(cells=@CELLS@, blockRams=@BRAMS@, multipliers=@MULTS@)
+found = dict(cells=usage("@CELLS_PRIM@"), blockRams=usage("@RAMS_PRIM@"), multipliers=usage("@MULTS_PRIM@"))
+tool = {}
+failed = []
+
+for name in ("cells", "blockRams", "multipliers"):
+    if found[name] is None:
+        used, total = 0, board[name]
+    else:
+        used, total = found[name]
+        if total != board[name]:
+            failed.append("the board says the part has %d %s; nextpnr says %d - a fact in the board is wrong" % (board[name], name, total))
+    tool[name] = (used, total)
+    print("  %-12s %6d / %6d" % (name, used, total))
+    if used > total:
+        failed.append("%s: %d used of %d - the design does not fit the part" % (name, used, total))
+
+achieved = [float(m) for m in re.findall(r"Max frequency for clock.*?:\s*([\d.]+)\s*MHz", text)]
+worst = min(achieved) if achieved else None
+if worst is None:
+    failed.append("nextpnr reported no clock frequency - cannot gate on timing")
+else:
+    print("  %-12s %6.2f MHz against %.2f - %.2fx" % ("clock", worst, target, worst / target))
+    if worst < target:
+        failed.append("TIMING FAILED: %.2f MHz < %.2f MHz" % (worst, target))
+
+json.dump(
+    dict(
+        board="@BOARD@", part="@PART@", top="@TOP@",
+        cells=dict(used=tool["cells"][0], total=tool["cells"][1]),
+        blockRams=dict(used=tool["blockRams"][0], total=tool["blockRams"][1], bitsEach=@RAM_BITS@),
+        multipliers=dict(used=tool["multipliers"][0], total=tool["multipliers"][1]),
+        clock=dict(targetMhz=target, achievedMhz=worst),
+        passed=(not failed) and status == 0),
+    open(report, "w"), indent=2)
+print("  report: " + report)
+
+for why in failed:
+    print(why, file=sys.stderr)
+if failed:
+    sys.exit(1)
+if status != 0:
+    print("nextpnr failed - see " + log, file=sys.stderr)
+    sys.exit(status)
+PY
+"""
+        .Replace("@CELLS@", string f.cells)
+        .Replace("@BRAMS@", string (f.blockRamBits / ramBits))
+        .Replace("@MULTS@", string f.multipliers)
+        .Replace("@CELLS_PRIM@", cells)
+        .Replace("@RAMS_PRIM@", rams)
+        .Replace("@MULTS_PRIM@", mults)
+        .Replace("@RAM_BITS@", string ramBits)
+        .Replace("@TOP@", top)
+        .Replace("@BOARD@", t.board.name)
+        .Replace("@PART@", t.board.part.device)
+
+/// The same gate for Vivado: the placed utilisation report and the routed
+/// timing summary, the same `report.json`, the same three refusals. The
+/// achieved clock is derived from the slack — `1 / (period − WNS)` — so the
+/// report reads the same on every tool. `check_timing.tcl` has already made
+/// Vivado's own run fail on negative slack; this reads the number out
+/// either way, so a failed build still says by how much.
+let private vivadoGate (t: BoardTop) (snake: string) (bd: string) =
+    let f = t.board.part.facts
+
+    """
+impl="$here/@SNAKE@/@SNAKE@.runs/impl_1"
+mkdir -p "$here/build"
+echo
+echo "== gate =="
+python3 - "$impl/@BD@_wrapper_utilization_placed.rpt" "$impl/@BD@_wrapper_timing_summary_routed.rpt" "$here/build/report.json" "@FREQ@" "$vivado_status" <<'PY'
+import json, os, re, sys
+
+util, timing, report, target, status = sys.argv[1], sys.argv[2], sys.argv[3], float(sys.argv[4]), int(sys.argv[5])
+if not os.path.exists(util):
+    print("no utilisation report at " + util + " - Vivado did not get through placement; see vivado.log", file=sys.stderr)
+    sys.exit(status or 1)
+text = open(util).read()
+
+def usage(row):
+    m = re.search(r"^\| " + re.escape(row) + r"\s*\|\s*(\d+)\s*\|\s*\d+\s*\|\s*\d+\s*\|\s*(\d+)\s*\|", text, re.M)
+    return (int(m.group(1)), int(m.group(2))) if m else (0, 0)
+
+board = dict(cells=@CELLS@, blockRams=@BRAMS@, multipliers=@MULTS@)
+tool = dict(cells=usage("CLB LUTs"), blockRams=usage("Block RAM Tile"), multipliers=usage("DSPs"))
+failed = []
+
+for name in ("cells", "blockRams", "multipliers"):
+    used, total = tool[name]
+    print("  %-12s %6d / %6d" % (name, used, total))
+    if total != board[name]:
+        failed.append("the board says the part has %d %s; Vivado says %d - a fact in the board is wrong" % (board[name], name, total))
+    if used > total:
+        failed.append("%s: %d used of %d - the design does not fit the part" % (name, used, total))
+
+wns = None
+if os.path.exists(timing):
+    m = re.search(r"WNS\(ns\)[^\n]*\n[^\n]*\n\s*(-?[\d.]+)", open(timing).read())
+    wns = float(m.group(1)) if m else None
+if wns is None:
+    achieved = None
+    failed.append("no routed timing summary - cannot gate on timing")
+else:
+    period = 1000.0 / target
+    achieved = 1000.0 / (period - wns)
+    print("  %-12s %6.2f MHz against %.2f - WNS %.3f ns" % ("clock", achieved, target, wns))
+    if wns < 0:
+        failed.append("TIMING FAILED: WNS %.3f ns at %.2f MHz" % (wns, target))
+
+json.dump(
+    dict(
+        board="@BOARD@", part="@PART@", top="@BD@_wrapper",
+        cells=dict(used=tool["cells"][0], total=tool["cells"][1]),
+        blockRams=dict(used=tool["blockRams"][0], total=tool["blockRams"][1], bitsEach=36864),
+        multipliers=dict(used=tool["multipliers"][0], total=tool["multipliers"][1]),
+        clock=dict(targetMhz=target, achievedMhz=achieved),
+        passed=(not failed) and status == 0),
+    open(report, "w"), indent=2)
+print("  report: " + report)
+
+for why in failed:
+    print(why, file=sys.stderr)
+if failed:
+    sys.exit(1)
+if status != 0:
+    print("vivado failed - see vivado.log", file=sys.stderr)
+    sys.exit(status)
+PY
+"""
+        .Replace("@CELLS@", string f.cells)
+        .Replace("@BRAMS@", string (f.blockRamBits / 36864))
+        .Replace("@MULTS@", string f.multipliers)
+        .Replace("@SNAKE@", snake)
+        .Replace("@BD@", bd)
+        .Replace("@FREQ@", megahertz t.board.fabricHz)
+        .Replace("@BOARD@", t.board.name)
+        .Replace("@PART@", t.board.part.device)
 
 let private buildTcl (t: BoardTop) (hasPins: bool) =
     let snake = snakeOf t.name
@@ -409,6 +597,15 @@ let private overlayDts (t: BoardTop) (app: string) (psClock: int) =
 """
         | _ -> ""
 
+    // The one interrupt line every Warp 11 app on this board raises: pl_ps_irq0
+    // bit 0 is GIC SPI 89, level-high, and uio_pdrv_genirq binds to it
+    // through `generic-uio`.
+    let interrupts =
+        if hasIrq t then
+            "\n        interrupt-parent = <&gic>;\n        interrupts = <0x0 0x59 0x4>;"
+        else
+            ""
+
     $"""/dts-v1/;
 /plugin/;
 
@@ -421,7 +618,7 @@ let private overlayDts (t: BoardTop) (app: string) (psClock: int) =
 &{{/}} {{{arena}
     {snake}@%x{baseAddr} {{
         compatible = "generic-uio";
-        reg = <0x0 0x%x{baseAddr} 0x0 0x%x{apertureRange t.map}>;
+        reg = <0x0 0x%x{baseAddr} 0x0 0x%x{apertureRange t.map}>;{interrupts}
         /* Loading a bitstream does not program the PS clock registers, so
          * the clock the design was elaborated for is pinned here. */
         clocks = <&zynqmp_clk %d{psClock}>;
@@ -434,6 +631,7 @@ let private overlayDts (t: BoardTop) (app: string) (psClock: int) =
 let private packageSh (t: BoardTop) (app: string) (firmwareDir: string) =
     let snake = snakeOf t.name
     let bd = $"{snake}_bd"
+    let gate = vivadoGate t snake bd
 
     $"""#!/usr/bin/env bash
 # build.sh — {t.name} for the {t.board.name}: the bitstream, then the app
@@ -453,7 +651,11 @@ for tool in vivado bootgen dtc; do
 done
 
 cd "$here"
+set +e
 vivado -mode batch -source build.tcl
+vivado_status=$?
+set -e
+{gate}
 
 bit="$here/{snake}/{snake}.runs/impl_1/{bd}_wrapper.bit"
 if [ ! -f "$bit" ]; then
@@ -691,6 +893,17 @@ let private openFlowSh (t: BoardTop) (top: string) (sources: string list) =
     let freq = megahertz t.board.fabricHz
     let sourceList = sources |> List.map (fun f -> $"\"$here/{f}\"") |> String.concat " "
 
+    // On a part with multipliers, `-dsp` or every multiply maps to logic and
+    // every area number is meaningless; on one without, the flag would ask
+    // for a primitive the part does not have.
+    let gate = nextpnrGate t top "ICESTORM_LC" "ICESTORM_RAM" 4096 "SB_MAC16"
+
+    let dsp, dspNote =
+        if hasMultipliers t.board.part then
+            " -dsp", "# -dsp, or every multiply maps to logic and every area number is meaningless."
+        else
+            "", $"# No -dsp: the {t.board.part.device} has no multipliers, so a multiply is LUTs here."
+
     $"""#!/usr/bin/env bash
 # build.sh — {t.name} on the {t.board.name}: yosys → nextpnr-ice40 → icepack,
 # generated by Warp11.Build.
@@ -735,10 +948,10 @@ json="$out/$top.json"
 asc="$out/$top.asc"
 bin="$out/$top.bin"
 
-# -dsp, or every multiply maps to logic and every area number is meaningless.
+{dspNote}
 echo
 echo "== synth =="
-yosys -p "read_verilog ${{sources[*]}}; synth_ice40 -dsp -top $top -json $json"
+yosys -p "read_verilog ${{sources[*]}}; synth_ice40{dsp} -top $top -json $json"
 
 # Every port is pinned: nextpnr places an unpinned port wherever it likes and
 # carries on with a warning, so a pin map missing a line builds a
@@ -781,32 +994,12 @@ PY
 
 echo
 echo "== place and route =="
+set +e
 nextpnr-ice40 "--$part" --package "$package" --pcf "$pcf" --json "$json" \
     --asc "$asc" --freq "$freq" 2>&1 | tee "$out/$top.pnr.log"
-
-# The simulators have no timing model, so this is the only place a cone too
-# slow for the clock shows up. Read out of the log rather than trusted to
-# nextpnr's exit code: it reports a timing failure and still writes an .asc.
-echo
-echo "== timing =="
-python3 - "$out/$top.pnr.log" "$freq" <<'PY'
-import re, sys
-
-log, target = sys.argv[1], float(sys.argv[2])
-achieved = [float(m) for m in re.findall(r"Max frequency for clock.*?:\s*([\d.]+)\s*MHz", open(log).read())]
-
-if not achieved:
-    print("nextpnr reported no clock frequency — cannot gate on timing", file=sys.stderr)
-    sys.exit(1)
-
-worst = min(achieved)
-print(f"  Fmax {{worst:.2f}} MHz against {{target:.2f}} MHz target — {{worst / target:.2f}}x")
-
-if worst < target:
-    print(f"TIMING FAILED: {{worst:.2f}} MHz < {{target:.2f}} MHz", file=sys.stderr)
-    sys.exit(1)
-PY
-
+pnr_status=$?
+set -e
+{gate}
 echo
 echo "== pack =="
 icepack "$asc" "$bin"
@@ -1036,6 +1229,8 @@ let private ecp5FlowSh (t: BoardTop) (top: string) (sources: string list) =
     let loader = t.board.part.boardPart |> Option.defaultWith (fun () -> failwith $"{t.board.name}: an ECP5 board names its openFPGALoader board in `boardPart`")
     let sourceList = sources |> List.map (fun f -> $"\"$here/{f}\"") |> String.concat " "
 
+    let gate = nextpnrGate t top "TRELLIS_COMB" "DP16KD" 18432 "MULT18X18D"
+
     $"""#!/usr/bin/env bash
 # build.sh — {t.name} on the {t.board.name}: yosys → nextpnr-ecp5 → ecppack,
 # generated by Warp11.Build.
@@ -1113,31 +1308,12 @@ PY
 
 echo
 echo "== place and route =="
+set +e
 nextpnr-ecp5 "--$device" --package "$package" --lpf "$lpf" --json "$json" \
     --textcfg "$config" --freq "$freq" 2>&1 | tee "$out/$top.pnr.log"
-
-# The simulators have no timing model, so this is the only place a cone too
-# slow for the clock shows up — read out of the log, not the exit code.
-echo
-echo "== timing =="
-python3 - "$out/$top.pnr.log" "$freq" <<'PY'
-import re, sys
-
-log, target = sys.argv[1], float(sys.argv[2])
-achieved = [float(m) for m in re.findall(r"Max frequency for clock.*?:\s*([\d.]+)\s*MHz", open(log).read())]
-
-if not achieved:
-    print("nextpnr reported no clock frequency — cannot gate on timing", file=sys.stderr)
-    sys.exit(1)
-
-worst = min(achieved)
-print(f"  Fmax {{worst:.2f}} MHz against {{target:.2f}} MHz target — {{worst / target:.2f}}x")
-
-if worst < target:
-    print(f"TIMING FAILED: {{worst:.2f}} MHz < {{target:.2f}} MHz", file=sys.stderr)
-    sys.exit(1)
-PY
-
+pnr_status=$?
+set -e
+{gate}
 echo
 echo "== pack =="
 ecppack --compress "$config" "$bit"
@@ -1207,7 +1383,7 @@ let private writeOpenFlow (dir: string) (t: BoardTop) : BuildOutput =
 
     let familyFiles =
         match t.board.part.family with
-        | Ice40UltraPlus ->
+        | Family.Ice40 ->
             if audio.IsSome then
                 failwith
                     $"{t.board.name}: the iCE40 wrapper is not built for the audio clock — and its parts refuse the asyncFifo's LUT-RAM anyway; the ECP5 and Vivado flows carry the audio domain"

@@ -2302,6 +2302,16 @@ let main argv =
         printfn $"wrote {verilogPath} ({verilog.Length / 1024} KiB, {started.ElapsedMilliseconds} ms)"
         printfn $"wrote {layoutPath}"
         0
+    // The directory the KV260's toolchain builds the cluster from: `build <dir>`.
+    | [| "build"; dir |] ->
+        let out =
+            Warp11.Build.write dir (ClusterAxi.clusterTop ClusterAxi.clusterSiliconShape ClusterAxi.clusterAxiSilicon.Value)
+
+        for file in out.files do
+            printfn $"wrote {file}"
+
+        printfn $"build with: {out.run}"
+        0
     | [| "boardvector"; dir |]
     | [| "boardvector"; dir; _ |] ->
         // The silicon first-light vector: a population, a set of fitness cases,

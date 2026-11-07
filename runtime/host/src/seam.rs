@@ -62,6 +62,37 @@ pub fn read_aperture_words(path: &Path) -> Result<Option<usize>, String> {
     Ok(None)
 }
 
+/// A need's name as the seam spells a constant about it: `world` is
+/// `WORLD`, `cxOrigin` is `CX_ORIGIN`.
+pub fn screaming(name: &str) -> String {
+    let mut out = String::new();
+    for (i, c) in name.chars().enumerate() {
+        if c.is_ascii_uppercase() && i > 0 {
+            out.push('_');
+        }
+        out.push(c.to_ascii_uppercase());
+    }
+    out
+}
+
+/// A `pub const NAME: usize = …;` the seam states beside the map — a
+/// surface's rows, a link row's words — or `None` for a seam that does not.
+pub fn read_const(path: &Path, name: &str) -> Result<Option<u32>, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    for line in text.lines() {
+        let line = line.trim();
+        let Some(rest) = line.strip_prefix("pub const ") else { continue };
+        let Some((found, value)) = rest.split_once(':') else { continue };
+        if found.trim() != name {
+            continue;
+        }
+        let Some((_, value)) = value.split_once('=') else { continue };
+        let value = value.trim().trim_end_matches(';').trim();
+        return parse_number(value).map(Some).ok_or_else(|| format!("bad value in {line}"));
+    }
+    Ok(None)
+}
+
 /// A register named the person's way, resolved to its offset — or which
 /// names the seam does know.
 pub fn resolve(name: &str, registers: &[(String, usize)]) -> Result<usize, String> {

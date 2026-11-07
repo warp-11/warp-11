@@ -63,6 +63,8 @@ let private diffDesignsAtDefault () =
       sumFromReadWindow.def
       sumReportsDone.def
       sumWhollyOnChip.def
+      Hello.helloOnIceBreaker
+      Hello.helloOnKv260
       assertedSaturate.def
       cmdProcessor.def
       unionRoundTrip.def
@@ -2057,6 +2059,41 @@ let private dividersAreStallIndependent () =
       streamAgreesUnderStalls false "divider farm" farmedDivide.def ignore [ "dividend"; "divisor"; "tag" ] [ "quotient"; "remainder"; "tag_out" ] tagged ]
     |> List.forall id
 
+/// Hello on the iCEBreaker in the Sim: the pattern written over the UART,
+/// each LED pin showing its bit the way the board wires it (lit low on this
+/// board, which the top inverts for); and on the KV260, the register read
+/// back over AXI-Lite, there being no LED to show it.
+let private helloLightsWhatTheHostWrote () : bool =
+    let board = iceBreakerAt 24_000_000
+    let top = BoardTop.boardTopFor (Hello.mappingFor board) Hello.hello
+    let sim = Sim top.top
+    let baud = match board.host with UartAt b -> b | _ -> failwith "the iCEBreaker's host is a UART"
+    let cyclesPerBit = uartCyclesPerBit board.fabricHz baud
+    let link, _ = serialClientForMap top.map sim (uartSimPins "host") cyclesPerBit
+    let pattern = (top.registers |> List.find (fun (n, _) -> n = "pattern") |> snd).offset
+    let leds = connectorFor Leds board |> Option.defaultValue []
+    link.write32 pattern 0b101UL
+    sim.Tick()
+
+    let lit =
+        leds
+        |> List.mapi (fun k (port, pin) ->
+            let expected = (0b101UL >>> k) &&& 1UL
+            let shown = sim.Peek port
+            (if pin.activeLow then 1UL - shown else shown) = expected)
+        |> List.forall id
+
+    let onKv260 =
+        let top = BoardTop.boardTopFor (Hello.mappingFor kv260) Hello.hello
+        let sim = Sim top.top
+        let axi = SimAxi.client sim
+        let pattern = (top.registers |> List.find (fun (n, _) -> n = "pattern") |> snd).offset
+        axi.write32 pattern 1UL
+        axi.read32 pattern = 1UL && top.name = "HelloAxi"
+
+    printfn $"      hello: {top.name}, %d{leds.Length} LEDs showing 0b101 the way the board wires them %b{lit}; HelloAxi reads back %b{onKv260}"
+    lit && onKv260 && leds.Length > 0
+
 let private mainDemo () =
     for d in
         [ add3
@@ -2454,6 +2491,7 @@ let private mainDemo () =
     printfn $"gray walks one bit at a time: %b{grayWalksOneBitAtATime ()}"
     printfn $"reset release aligns:         %b{resetReleaseAligns ()}"
     printfn $"async fifo delivers in order: %b{asyncFifoDelivers ()}"
+    printfn $"hello lights what the host wrote: %b{helloLightsWhatTheHostWrote ()}"
     printfn $"dynamic shifts shift:         %b{dynamicShiftsShift ()}"
     printfn $"bit reductions reduce:        %b{reductionsReduce ()}"
     printfn $"constant division divides:    %b{divisionDivides ()}"
@@ -2540,6 +2578,21 @@ let main argv =
         printfn $"out: {output.FrameCount} frames, peaks {inL}/{inR} -> {outL}/{outR}"
         printfn $"wrote {outPath}"
         0
+    // Hello for a board, from its mapping file: `hello hello.goboard.json
+    // out/`, then `out/build.sh`, then `warp11_regs … --set pattern=5`.
+    | [| "hello"; mapping; dir |] ->
+        match Warp11.Mapping.load mapping with
+        | Error why ->
+            eprintfn $"{mapping}: {why}"
+            1
+        | Ok m ->
+            let out = Warp11.Build.write dir (BoardTop.boardTopFor m Hello.hello)
+
+            for file in out.files do
+                printfn $"wrote {file}"
+
+            printfn $"build with: {out.run}"
+            0
     | [| "diff"; outDir |] ->
         writeDiffWith (diffDesigns ()) outDir
         0

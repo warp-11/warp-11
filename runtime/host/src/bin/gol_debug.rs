@@ -49,7 +49,7 @@ fn life_step(rows: &[u64; 64]) -> [u64; 64] {
 }
 
 fn main() {
-    let uio = find_uio("golfs").expect("golfs uio");
+    let uio = find_uio("gol_axi").expect("gol_axi uio");
     let reg_file = OpenOptions::new()
         .read(true)
         .write(true)

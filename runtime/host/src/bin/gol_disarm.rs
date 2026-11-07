@@ -24,8 +24,8 @@ fn find_uio(name: &str) -> Option<String> {
 }
 
 fn main() {
-    let uio = find_uio("golfs").unwrap_or_else(|| {
-        eprintln!("no uio node named 'golfs' — nothing to disarm");
+    let uio = find_uio("gol_axi").unwrap_or_else(|| {
+        eprintln!("no uio node named 'gol_axi' — nothing to disarm");
         exit(0);
     });
     let file = OpenOptions::new()
@@ -58,5 +58,5 @@ fn main() {
     regs.write32(layout::STOP_OFFSET, 1 << layout::STOP_BIT).unwrap();
     regs.write32(layout::FB_BASE_ADDR_OFFSET, 0).unwrap();
     std::thread::sleep(std::time::Duration::from_millis(1));
-    println!("gol-fs disarmed: writer quiesced, safe to unload");
+    println!("gol-axi disarmed: writer quiesced, safe to unload");
 }

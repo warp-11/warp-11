@@ -121,6 +121,54 @@ let renderThroughBoardTop (width: int) (height: int) (pixels: int) (maxIter: int
     let frame = ddr.Memory[dst .. dst + beats * pixels - 1]
     frame, spins, top
 
+/// The same frame over a board's host link, in the Sim: the counted path
+/// with the link as the carrier, which is how a board with no host memory
+/// draws one. The view and the count written over the serial client, the
+/// recorder armed, start pulsed, and the pixels read back as streamed
+/// frames — four a word, low byte first — until the count's worth has
+/// come. What `warp11_batch --serial frame:…` does on the Icepi.
+let renderThroughLink (width: int) (height: int) (pixels: int) (maxIter: int) (fracBits: int) (threads: int) (lanes: int) (view: uint64 * uint64 * uint64 * uint64) =
+    let design = mandelChunks "MandelChunks" width pixels maxIter fracBits threads lanes
+    let top = BoardTop.boardTop icepi viaCountLink design
+    let sim = Sim top.top
+    let cyclesPerBit = uartCyclesPerBit icepi.fabricHz 1_000_000
+    let link, uart = serialClientForMap top.map sim (uartSimPins "host") cyclesPerBit
+    let device = uart :> ISimDevice
+    let offset name = (top.registers |> List.find (fun (n, _) -> n = name) |> snd).offset
+    let chunks = chunkedWidth pixels width / pixels
+    let beats = height * chunks
+    let wordsPerRow = beatBits / 32
+    let words = beats * design.answers * wordsPerRow
+    let cxOrigin, cyOrigin, dx, dy = view
+
+    for name, value in [ "cxOrigin", cxOrigin; "cyOrigin", cyOrigin; "dx", dx; "dy", dy ] do
+        link.write32 (offset name) value
+
+    link.write32 (offset "pixelsLinkArm") 1UL
+    link.write32 (offset "beatsCountTotal") (uint64 beats)
+    link.write32 (offset "beatsCountStart") 1UL
+    let budget = words * 7 * 10 * cyclesPerBit * 2 + 200_000
+    let mutable cycles = 0
+    let mutable received = []
+
+    while received.Length < words && cycles < budget do
+        device.Drive()
+        sim.Tick()
+        device.Sample()
+        cycles <- cycles + 1
+
+        if cycles % 1000 = 0 then
+            received <- fst (SerialFrame.streamedWords uart.Received)
+
+    received <- fst (SerialFrame.streamedWords uart.Received)
+    let busy = link.read32 (offset "beatsCountBusy")
+
+    let frame =
+        [| for w in received do
+               for j in 0..3 -> byte ((w >>> (8 * j)) &&& 255UL) |]
+
+    frame, cycles, busy, top
+
 /// The scattered design as a board top takes it: the same boundary as
 /// `mandelChunks` with one field added — the beat's destination — which is
 /// what lets everything under it run in no order.
@@ -203,8 +251,31 @@ let laneThreads = 8
 
 let fabricHz = 166_666_672
 
-/// Every lane the part's 1,248 DSPs hold, at twelve DSPs a lane.
-let siliconLanes = 104
+/// What a lane takes of a part's multipliers: three 32×32 products, four
+/// of a 16- or 18-bit multiplier each — twelve, on every part so far.
+let multipliersPerLane = 12
+
+/// The lanes a part holds: its multipliers at twelve a lane. None when it
+/// has fewer than a lane's worth — a lane in LUTs would be the whole part.
+let lanesFor (part: Part) : int option =
+    let lanes = part.facts.multipliers / multipliersPerLane
+    if lanes >= 1 then Some lanes else None
+
+/// Every lane the KV260's part holds: 104, from its 1 248 DSPs.
+let siliconLanes = (lanesFor kv260.part).Value
+
+/// The frame sized for its board: lanes from the part's multipliers, or the
+/// mapping's `lanes`.
+let mandelChunksSized (name: string) (width: int) (pixels: int) (maxIter: int) (fracBits: int) (threads: int) : BoardTop.Design =
+    BoardTop.sized name (fun fit ->
+        let derived =
+            match lanesFor fit.part with
+            | Some lanes -> lanes
+            | None ->
+                failwith
+                    $"{name}: a lane takes %d{multipliersPerLane} multipliers and the {fit.part.device} has %d{fit.part.facts.multipliers} — impossible on this part"
+
+        mandelChunks name width pixels maxIter fracBits threads (fit.size ("lanes", derived)))
 
 /// The example on the KV260 as the directory its toolchain builds from,
 /// straight from the typed design: the counted path, so the host asks for a
@@ -213,6 +284,15 @@ let siliconLanes = 104
 let buildDirectory (dir: string) (lanes: int) =
     mandelChunks "Mandelbrot" frameWidth chunkPixels maxIterations viewFracBits laneThreads lanes
     |> BoardTop.boardTop (kv260At fabricHz) viaCount
+    |> Warp11.Build.write dir
+
+/// The example on any board, from its mapping: the design is the same, the
+/// lanes are the part's (or the mapping's `lanes`), and the board top is
+/// whatever the path says — the frame into the host's memory on a board
+/// with one, or over its link.
+let buildFor (m: Warp11.Mapping.Mapping) (dir: string) =
+    mandelChunksSized "Mandelbrot" frameWidth chunkPixels maxIterations viewFracBits laneThreads
+    |> BoardTop.boardTopFor m
     |> Warp11.Build.write dir
 
 /// The same, on the **scatter** path: every beat carrying where it goes, so

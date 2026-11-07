@@ -12,4 +12,10 @@ module Warp11.GoL.Board
 
 open Warp11
 
-let board = kv260At 166_666_672
+let board =
+    let kv = kv260At 166_666_672
+
+    // The hand block design mastered DDR through S_AXI_HP0_FPD rather than the
+    // preset's HPC0 — kept, so the generated block design matches what ran.
+    { kv with
+        hostMemory = kv.hostMemory |> Option.map (fun m -> { m with port = "S_AXI_HP0_FPD" }) }

@@ -662,6 +662,27 @@ and no design here both shares a write bus and wants per-item granularity. A
 design that does reaches past the window to `axiMasterWriterTracked` and owns
 its bus outright, which is the honest way to spend the extra hardware.
 
+### The first design on a board
+
+The LED-from-a-register design — the one a person builds first on any new
+board, to prove the clock, the link and the pins before anything else is
+asked of them — and what each HDL offers for the board half of it.
+
+| HDL | Where the board enters |
+|---|---|
+| Chisel | The design is pure; a board is the user's constraint file and top wrapper, or a platform in a surrounding framework (RocketChip, LiteX) |
+| SpinalHDL | The same: the design, then a wrapper and constraints per board; `SpinalConfig` carries device-level choices such as reset kind |
+| HardCaml | The design; boards through the user's build scripts |
+| Amaranth | `amaranth-boards`: a platform per board, resources by name, `platform.request("led")` in the design, and the platform's toolchain runs from the same program |
+| Clash, Bluespec, Veryl | The design; boards through the toolchain's own files |
+| Warp 11 | A design declares *needs* — one value, one reported bit per LED — and never names a pin or a link. A board is a file (part, clock, host link, connectors by role, sockets). A mapping binds the two: `hello.goboard.json` says the host's registers and `led1 → OnPin:led1`. `hello` then builds for the KV260 over AXI-Lite and for three boards over a UART from the same source, `warp11_regs --set pattern=5` writes it over either, and the build's gate reads the toolchain's own report back |
+
+Amaranth's platforms are the nearest thing: a board as a Python object the
+design asks for resources from. Warp 11 puts the board in a data file a
+design never sees, so a board can be added without source and a design
+moved by changing one file — which is what the release matrix (every
+example on every board) is built on.
+
 ### Formal verification
 
 | HDL | Support |

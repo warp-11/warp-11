@@ -694,7 +694,7 @@ let exportIsTheDesign () : bool =
     // build function are compiled too.
     let mappingFor (g: Graph) : Warp11.Mapping.Mapping option =
         if g.name = Warp11.Graph.gainGraph.name then
-            Some { board = kv260; path = viaHostMemory; plugged = [] }
+            Some { board = kv260; path = viaHostMemory; plugged = []; sizes = [] }
         else
             None
 
@@ -1372,19 +1372,19 @@ let mappingIsAFile () : bool =
     let carried = Warp11.DesignFile.parse (Warp11.DesignFile.write g)
 
     let exported =
-        match Warp11.Export.exportWith (Some { board = kv260; path = viaHostMemory; plugged = [] }) g with
+        match Warp11.Export.exportWith (Some { board = kv260; path = viaHostMemory; plugged = []; sizes = [] }) g with
         | Ok text -> text
         | Error why -> failwith why
 
     let refused =
-        match Warp11.Mapping.parse (Warp11.Mapping.write { board = { ice with host = AxiLiteAt 0UL }; path = viaPins; plugged = [] }) with
+        match Warp11.Mapping.parse (Warp11.Mapping.write { board = { ice with host = AxiLiteAt 0UL }; path = viaPins; plugged = []; sizes = [] }) with
         | Error why -> why.Contains "no processing system"
         | Ok _ -> false
 
-    roundTrips { board = kv260; path = viaHostMemory; plugged = [] }
-    && roundTrips { board = kv260; path = viaPins; plugged = [] }
-    && roundTrips { board = ice; path = viaPins; plugged = [] }
-    && roundTrips { board = custom; path = viaHostMemory; plugged = [] }
+    roundTrips { board = kv260; path = viaHostMemory; plugged = []; sizes = [] }
+    && roundTrips { board = kv260; path = viaPins; plugged = []; sizes = [] }
+    && roundTrips { board = ice; path = viaPins; plugged = []; sizes = [] }
+    && roundTrips { board = custom; path = viaHostMemory; plugged = []; sizes = [] }
     && boardRoundTrips kv260
     && boardRoundTrips ice
     && boardRoundTrips { ice with connectors = [ { role = I2sSharedBus; pins = [ "bclk", { pin = "43"; standard = None; activeLow = false } ] } ] }
@@ -1400,3 +1400,30 @@ let mappingIsAFile () : bool =
     && exported.Contains "let design: Warp11.BoardTop.Design ="
     && Warp11.Mapping.fileFor "/tmp/x/gain.json" "kv260" = "/tmp/x/gain.kv260.json"
     && refused
+
+// UD22 — Every example on every board that holds it. Each mapping file
+// written beside an example builds that example's board top with nothing
+// but the file: the memory path on the KV260, the link on the boards with
+// one wire — the same design, a different carrier, no change to the design.
+// The boards a design is not written for are the matrix's ✗ cells, each
+// with its reason beside `Examples.mappings`.
+
+// CHECK
+let everyExampleOnItsBoards () : bool =
+    let examples = Warp11.Placement.Examples.all Warp11.Placement.Examples.recordingRate |> Map.ofList
+
+    Warp11.Placement.Examples.mappings
+    |> List.map (fun (file, m) ->
+        let example = file.Substring(0, file.IndexOf '.') + ".json"
+        let g = examples[example]
+
+        try
+            let top = Warp11.Elaborate.boardTopFor m g
+            let expectedSuffix = if m.path = viaHostMemory then "Batch" else "Link"
+            let ok = top.name.EndsWith expectedSuffix && top.board.name = m.board.name
+            printfn $"      {file}: {top.name} on the {top.board.name}"
+            ok
+        with e ->
+            printfn $"      {file}: {e.Message}"
+            false)
+    |> List.forall id

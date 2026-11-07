@@ -93,7 +93,7 @@ FIRTOOL_LEG=1 ./run_differential.sh
 - For simulation-clean corruption on hardware, inspect routed timing/WNS first; the simulators have no timing model.
 - Never unload a bitstream while fabric AXI transactions are in flight. Stop and disarm Game of Life before unload; HP0 pairing skew can otherwise require a board reboot.
 - `runtime/.cargo/config.toml` intentionally uses `rust-lld` and the 8-byte `runtime/musl-stub/libdl.a` for musl cross-linking. Do not remove the archive.
-- Use `hardware/ice40/build.sh` for iCEBreaker work; it selects the pinned OSS CAD suite and sanitizes `LD_LIBRARY_PATH`. `iceprog -S` does not configure the tested board; use `PROG=1` and verify `cdone`.
+- iCEBreaker work builds through a generated directory (`-- build <mapping> <dir>` in any design project, then its `build.sh`), which selects the pinned OSS CAD suite and sanitizes `LD_LIBRARY_PATH`. `iceprog -S` does not configure the tested board; use `PROG=1` and verify `cdone` (`hardware/icebreaker/README.md`).
 
 ## Site
 

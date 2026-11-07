@@ -780,7 +780,7 @@ let regMapSlave (ports: AxiLiteSlavePorts) (m: RegMap) : SlaveRegs =
 
     regMapSlaveOn (axiLiteChannelOn ports 1) m
 
-let private upperSnake (name: string) =
+let internal upperSnake (name: string) =
     [ for i, c in Seq.indexed name do
           if System.Char.IsUpper c && i > 0 then yield '_'
           yield System.Char.ToUpperInvariant c ]

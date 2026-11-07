@@ -11,13 +11,12 @@ let private designs =
       "AudioEffectsAxi", audioEffectsAxi.def
       "AudioBatchAxi", Batch.audioBatchAxi.def ]
 
-/// The iCEBreaker's two, kept apart from the list above because they emit for a
-/// different target and have no register map to generate a Rust layout from.
-/// `hardware/ice40/` is where the top wrapper, the pin map and the build script
-/// that consume them live.
-let private iceDesigns =
-    [ "AudioToneIce", audioToneIce.def
-      "AudioPassthruIce", audioPassthruIce.def ]
+/// The two rungs as designs, built for the iCEBreaker's converter: what the
+/// hand tops in `hardware/ice40/` were, through `boardTop` — and what any
+/// mapping builds them to for another board or another path.
+let private rungsOnIce () =
+    [ "ToneIce", (BoardTop.boardTop iceBoard viaPins tone).top
+      "PassthruIce", (BoardTop.boardTop iceBoard viaPins passthru).top ]
 
 /// Every register's reset value must be a no-op, because these bitstreams ship
 /// without a host daemon: load one and it has to pass audio (or, for the tone,
@@ -462,7 +461,7 @@ let private foldedPassFitsTheFrame () =
         cycle <- cycle + 1
 
     let pass = acceptedAt[2] - acceptedAt[1]
-    let frame = Ice.iceBoard.fabricHz / Ice.iceSampleRate
+    let frame = iceBoard.fabricHz / iceSampleRate
     printfn $"      folded pass: %d{pass} cycles a stereo frame, against %d{frame} on the iCEBreaker (%d{pass * 100 / frame}%%)"
     acceptedAt.Count = 3 && pass <= frame
 
@@ -557,7 +556,7 @@ let private clockRatios (design: ModuleDef) (frames: int) : int * int =
 /// are properties of the pins, so both are counted off the pins.
 let private iceClocksAreWhatTheConverterNeeds () : bool =
     let frames = 4
-    let mclkRises, sclkRises = clockRatios audioPassthruIce.def frames
+    let mclkRises, sclkRises = clockRatios (BoardTop.boardTop iceBoard viaPins passthru).top frames
 
     let mclkRatio = mclkRises / frames
     let sclkRatio = sclkRises / frames
@@ -582,7 +581,7 @@ let private iceClocksAreWhatTheConverterNeeds () : bool =
 /// like audio, and the frame arithmetic changing under a new set of divisors is
 /// precisely the thing being asked about.
 let private icePassthruPassesAudio () : bool =
-    let sim = Sim audioPassthruIce.def
+    let sim = Sim (BoardTop.boardTop iceBoard viaPins passthru).top
 
     let samples =
         [ 0x123456UL, 0x654321UL
@@ -606,51 +605,73 @@ let private icePassthruPassesAudio () : bool =
 
     ok
 
-/// The indicators are paced by the *link*, not by the clock.
-///
-/// A blink counter advanced on the fabric clock would run 512 times faster here
-/// and would keep counting with the converter unplugged, which is exactly the
-/// failure it exists to report. So the check is the counter's *increment* over a
-/// known number of frames — three frames, three counts.
-///
-/// The increment rather than the value, because the receiver leads the
-/// transmitter by the link's pre-roll: by the time a frame has come back out,
-/// two more have been taken in. Pinning the absolute count would pin that
-/// pre-roll as well, and a framer legitimately changing its pipeline depth is
-/// not this check's business.
-let private iceLedsFollowTheLink () : bool =
-    let loud = 1UL <<< (sampleWidth - 2)
-    let quiet = 1UL <<< (sampleWidth - 12)
-    let measured = 3
+/// The passthru over a board's host link: rows played in, the same rows back
+/// as frames, nothing between — the WAV-through row of the release matrix on
+/// a board with one wire, byte for byte.
+let private passthruOverTheLink () : bool =
+    let top = BoardTop.boardTop icepi viaLink passthru
+    let sim = Sim top.top
+    let cyclesPerBit = uartCyclesPerBit icepi.fabricHz 1_000_000
+    let link, uart = serialClientForMap top.map sim (uartSimPins "host") cyclesPerBit
+    let device = uart :> ISimDevice
+    let offset name = (top.registers |> List.find (fun (n, _) -> n = name) |> snd).offset
+    link.write32 (offset "inLinkArm") 1UL
+    link.write32 (offset "outLinkArm") 1UL
+    let rows = [ for k in 1..8 -> int64 (k * 1000), int64 (-k * 777) ]
+    let word (v: int64) = uint64 (uint32 v)
 
-    let countAcross (sample: uint64) (settle: int) =
-        let sim = Sim audioPassthruIce.def
+    for l, r in rows do
+        uart.Send(SerialFrame.play (word l) @ SerialFrame.play (word r))
 
-        let frames =
-            (i2sThrough sim separateCodecSimPins (List.replicate (settle + measured + 2) (sample, sample)))
-                .GetEnumerator()
+    for _ in 1 .. 16 * 7 * 10 * cyclesPerBit * 3 do
+        device.Drive()
+        sim.Tick()
+        device.Sample()
 
-        for _ in 1..settle do
-            frames.MoveNext() |> ignore
+    let words, _ = SerialFrame.streamedWords uart.Received
+    let back = words |> List.map (fun w -> int64 (int32 (uint32 w)))
+    let ok = back = (rows |> List.collect (fun (l, r) -> [ l; r ])) && link.read32 (offset "inLinkDropped") = 0UL
+    printfn $"      passthru link ({top.name}): %d{rows.Length} rows in, %d{back.Length / 2} back, exact %b{ok}"
+    ok
 
-        let before = sim.Peek "blink_count"
+/// The tone over the counted link: the host asks for a count and the samples
+/// come back as frames — the generator's own, as a Sim of it alone produces
+/// them, so what is pinned is the carrier rather than the tone.
+let private toneOverTheCountedLink () : bool =
+    let top = BoardTop.boardTop icepi viaCountLink tone
+    let count = 24
+    let sim = Sim top.top
+    let cyclesPerBit = uartCyclesPerBit icepi.fabricHz 1_000_000
+    let link, uart = serialClientForMap top.map sim (uartSimPins "host") cyclesPerBit
+    let device = uart :> ISimDevice
+    let offset name = (top.registers |> List.find (fun (n, _) -> n = name) |> snd).offset
+    let step = link.read32 (offset "step")
+    link.write32 (offset "outLinkArm") 1UL
+    link.write32 (offset "beatsCountTotal") (uint64 count)
+    link.write32 (offset "beatsCountStart") 1UL
 
-        for _ in 1..measured do
-            frames.MoveNext() |> ignore
+    for _ in 1 .. count * 2 * 7 * 10 * cyclesPerBit * 2 do
+        device.Drive()
+        sim.Tick()
+        device.Sample()
 
-        int (sim.Peek "blink_count") - int before, sim.Peek "led_signal"
+    let words, _ = SerialFrame.streamedWords uart.Received
+    let back = words |> List.chunkBySize 2 |> List.map (fun w -> w[0] &&& ((1UL <<< sampleWidth) - 1UL), w[1] &&& ((1UL <<< sampleWidth) - 1UL))
 
-    let advanced, signalOnLoud = countAcross loud 2
-    let _, signalOnQuiet = countAcross quiet 2
+    let expected =
+        let alone = Sim (toneGeneratorDef "ToneAlone").def
+        alone.Poke("enable", 1UL)
+        alone.Poke("step", step)
+        alone.Poke("out_ready", 1UL)
 
-    printfn
-        $"      ice leds: blink_count +%d{advanced} across %d{measured} frames, led_signal %d{signalOnLoud} loud / %d{signalOnQuiet} quiet"
+        [ for _ in 1..count ->
+              let sample = alone.Peek "out_left", alone.Peek "out_right"
+              alone.Tick()
+              sample ]
 
-    advanced = measured
-    // Above -48 dBFS lights the signal indicator; a sample 66 dB down does not,
-    // which is what stops it being an LED that is simply always on.
-    && signalOnLoud = 1UL
-    && signalOnQuiet = 0UL
+    let ok = back = expected && link.read32 (offset "beatsCountBusy") = 0UL && step = toneStepFor BoardTop.nominalRate 440.0
+    printfn $"      tone link ({top.name}): %d{count} samples asked, %d{back.Length} back, the generator's %b{back = expected}, step for 440 Hz at %g{BoardTop.nominalRate} Hz"
+    ok
 
 let private checks =
     [ "effects defaults are passthrough", defaultsArePassthrough
@@ -665,7 +686,8 @@ let private checks =
       "audio: folded pass fits an iCE40 frame", foldedPassFitsTheFrame
       "ice: clock ratios are the converter's", iceClocksAreWhatTheConverterNeeds
       "ice: passthru passes audio exactly", icePassthruPassesAudio
-      "ice: indicators are paced by the link", iceLedsFollowTheLink ]
+      "link: passthru rows back exactly", passthruOverTheLink
+      "link: tone samples are the generator's", toneOverTheCountedLink ]
 
 /// The seam: each design's Verilog beside a Rust layout generated from the very
 /// map the slave was elaborated from. Nothing in public warp11 drives these
@@ -680,16 +702,6 @@ let private writeHardware (repoRoot: string) =
     for name, design in designs do
         let path = System.IO.Path.Combine(buildDir, $"{name}.v")
         System.IO.File.WriteAllText(path, emitDesign design + "\n")
-        printfn $"wrote {path}"
-
-    // **`Ice40`, not the default.** Neither of these declares a memory today,
-    // so the two targets emit the same bytes and the distinction costs nothing
-    // — which is exactly why it is worth making now rather than after a stage
-    // with a delay line is added to the passthru and gets its storage decided
-    // for it by yosys.
-    for name, design in iceDesigns do
-        let path = System.IO.Path.Combine(buildDir, $"{name}.v")
-        System.IO.File.WriteAllText(path, emitDesignFor Ice40 design + "\n")
         printfn $"wrote {path}"
 
     let layoutFor (title: string) (m: RegMap) =
@@ -1300,6 +1312,30 @@ let main argv =
     | [| "hardware"; repoRoot |] ->
         writeHardware repoRoot
         0
+    // A rung for any board, from its mapping file: `build tone
+    // tone.icepi.json out/` — the path in the mapping says whether the rows
+    // go through the board's memory, over its link, or through a converter
+    // on its pins.
+    | [| "build"; rung; mapping; dir |] ->
+        let design =
+            match rung with
+            | "tone" -> Ok tone
+            | "passthru" -> Ok passthru
+            | other -> Error $"a rung is tone or passthru, not '{other}'"
+
+        match design, Warp11.Mapping.load mapping with
+        | Error why, _
+        | _, Error why ->
+            eprintfn $"{why}"
+            1
+        | Ok d, Ok m ->
+            let out = Warp11.Build.write dir (BoardTop.boardTopFor m d)
+
+            for file in out.files do
+                printfn $"wrote {file}"
+
+            printfn $"build with: {out.run}"
+            0
     | [| "diff"; outDir |] ->
         writeDiff (List.map snd designs) outDir
         0
@@ -1307,8 +1343,8 @@ let main argv =
         for name, design in designs do
             printfn $"{name}: {(emitDesign design).Split('\n').Length} lines of Verilog"
 
-        for name, design in iceDesigns do
-            printfn $"{name}: {(emitDesignFor Ice40 design).Split('\n').Length} lines of Verilog"
+        for name, design in rungsOnIce () do
+            printfn $"{name}: {(emitDesignFor Target.Ice40 design).Split('\n').Length} lines of Verilog"
 
         let mutable ok = true
 

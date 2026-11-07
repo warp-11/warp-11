@@ -384,3 +384,6 @@ let ofGraph (g: Graph) : BoardTop.Design =
 
 /// `Warp11.BoardTop.boardTop` for a drawn design.
 let boardTopOf (board: Board) (path: DataPath) (g: Graph) : BoardTop.BoardTop = BoardTop.boardTop board path (ofGraph g)
+
+/// The drawn design on the board its mapping says, at the sizes it names.
+let boardTopFor (m: Warp11.Mapping.Mapping) (g: Graph) : BoardTop.BoardTop = BoardTop.boardTopFor m (ofGraph g)

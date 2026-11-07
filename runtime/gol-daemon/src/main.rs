@@ -1,5 +1,5 @@
 //! The GoL board daemon: the accelerator's live face on the Zenoh mesh.
-//! Runs on the KV260 after `xmutil loadapp gol-fs`, listens as a Zenoh peer,
+//! Runs on the KV260 after `xmutil loadapp gol-axi`, listens as a Zenoh peer,
 //! and speaks two key spaces:
 //!
 //!   warp11/gol/frame            published at ~30 Hz, CongestionControl::Drop
@@ -190,8 +190,8 @@ fn main() {
         .unwrap_or_else(|| "tcp/0.0.0.0:7447".into());
 
     // ---- the accelerator ----
-    let uio = find_uio("golfs").unwrap_or_else(|| {
-        eprintln!("no uio node named 'golfs' — is the gol-fs app loaded?");
+    let uio = find_uio("gol_axi").unwrap_or_else(|| {
+        eprintln!("no uio node named 'gol_axi' — is the gol-axi app loaded?");
         exit(1);
     });
     let reg_file = OpenOptions::new()

@@ -110,7 +110,15 @@ beat ──▶ coords ──cx0 cy dx──▶ mandelChunk x 104 ──pixels─
   the Sim.
 - `Chunked.fs` is the design, and `-- bitstream <dir> [lanes]` writes the
   directory the KV260's toolchain builds from — block design, overlay,
-  flow and the Rust seam, all derived from the design itself.
+  flow and the Rust seam, all derived from the design itself. `-- bitstream
+  <mapping.json> <dir>` does the same for any board from its mapping, with
+  the lanes the part's multipliers hold at twelve a lane — 104 on the
+  KV260, 2 on the Icepi, refused by number on a part with fewer than
+  twelve — unless the mapping names `lanes`: `mandelbrot.kv260.json` is the frame into DDR, and
+  `mandelbrot.icepi.json` (`"path": "countlink"`) is the frame over the
+  board's UART — the same count, the pixels back as streamed frames, which
+  `warp11_batch frame:320x200 out.pgm --serial /dev/ttyUSB1 --layout
+  out/mandelbrot_link_layout.rs --chunk 128 --set …` reads.
 
 Measured against the frame design at equal configurations in the Sim
 (`-- lanescale` beside `-- chunkscale w h pixels maxIter lanes`): 16-pixel

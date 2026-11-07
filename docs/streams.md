@@ -173,6 +173,13 @@ The gate that matters: publication is held behind `writerIdle`, so no in-flight
 AXI write can race a host read. Game of Life streams 167M generations/s into
 DDR through this and the host sees coherent frames at 30 Hz.
 
+The same shape as a design's *need*: `surfaceOut` declares rows of fields the
+design keeps live — a world, a framebuffer — and the mapping says how a
+host takes them. Over a board's host link the carrier latches the whole
+surface in one cycle when the host pulls and sends it a row at a time as
+frames, so the design never pauses, the copy is never torn, and what passed
+between two pulls is never seen; the pull is the pace.
+
 ## What is not built
 
 - `constIn` (a one-entry latching stream for run constants), `streamThrottle`

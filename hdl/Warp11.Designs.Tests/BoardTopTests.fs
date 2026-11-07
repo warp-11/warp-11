@@ -310,7 +310,8 @@ let tests =
                               @ [ { need = ByName "record"; carrier = InHostRows }
                                   { need = ByName "limit"; carrier = OnPin "led" }
                                   { need = ByName "limit"; carrier = InRegisterMap } ] }
-                    plugged = [ frontEnd, "J2" ] }
+                    plugged = [ frontEnd, "J2" ]
+                    sizes = [] }
 
               let text = Mapping.write m
 
@@ -320,7 +321,7 @@ let tests =
                   Expect.equal (Mapping.write back) text "and writes the same bytes again"
               | Error why -> failtest why
 
-              let presetOnly: Mapping.Mapping = { board = kv260; path = viaPins; plugged = [] }
+              let presetOnly: Mapping.Mapping = { board = kv260; path = viaPins; plugged = []; sizes = [] }
               Expect.isFalse ((Mapping.write presetOnly).Contains "bind") "a preset-only mapping reads as it always did"
 
           testCase "a reported bit lights an LED the way the board has it wired" <| fun _ ->
@@ -387,7 +388,363 @@ let tests =
               Expect.stringContains lpf "LOCATE COMP \"bclk\" SITE \"N4\";" "header pin 12 is N4"
               Expect.stringContains lpf "LOCATE COMP \"clk50\" SITE \"M1\";" "the oscillator"
               Expect.stringContains lpf "FREQUENCY PORT \"clk50\" 50 MHZ;" "constrained at its rate"
-              Expect.stringContains (System.IO.File.ReadAllText out.run) "openFPGALoader -b icepi-zero" "programmed the way the board's own Makefile does"
+              let sh = System.IO.File.ReadAllText out.run
+              Expect.stringContains sh "openFPGALoader -b icepi-zero" "programmed the way the board's own Makefile does"
+              Expect.stringContains sh "usage(\"TRELLIS_COMB\")" "the gate reads nextpnr-ecp5's utilisation"
+              Expect.stringContains sh "cells=24288, blockRams=56, multipliers=28" "against the part's facts"
+
+              let kvDir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"warp11-kv260-gate-{System.Guid.NewGuid()}")
+              let kv = Warp11.Build.write kvDir (BoardTop.boardTop kv260 viaHostMemory (tableDesign []))
+              let kvSh = System.IO.File.ReadAllText kv.run
+              Expect.stringContains kvSh "usage(\"CLB LUTs\")" "the gate reads Vivado's placed utilisation"
+              Expect.stringContains kvSh "cells=117120, blockRams=144, multipliers=1248" "against the part's facts"
+              Expect.stringContains kvSh "timing_summary_routed.rpt" "and the routed slack"
+
+          testCase "the Go Board: the oscillator straight in, no multipliers asked for, every pin from its constraints" <| fun _ ->
+              checkBoard goBoard
+              Expect.isFalse (hasMultipliers goBoard.part) "HX has no multipliers"
+              Expect.isFalse (hasLutRam goBoard.part) "and no LUT RAM"
+              Expect.isFalse (hasPs goBoard.part) "and no processing system"
+
+              match Mapping.parseBoard (Mapping.writeBoard goBoard) with
+              | Ok back -> Expect.equal back goBoard "a board file carries the part and its facts"
+              | Error why -> failtest why
+
+              // The facts are data on the part, so a board file can say them —
+              // and may leave them out on a part the library knows.
+              let written = Mapping.writeBoard goBoard
+              Expect.stringContains written "\"multipliers\": 0" "the file states what the part has"
+              let factless = System.Text.RegularExpressions.Regex.Replace(written, ",\\s*\"facts\": \\{[^}]*\\}", "")
+              Expect.isFalse (factless.Contains "facts") "stripped"
+              match Mapping.parseBoard factless with
+              | Ok back -> Expect.equal back goBoard "a known part fills its own facts in"
+              | Error why -> failtest why
+              match Mapping.parseBoard (factless.Replace("\"hx1k\"", "\"hx8k\"")) with
+              | Ok _ -> failtest "an unknown part with no facts should be refused"
+              | Error why -> Expect.stringContains why "facts" "naming what the file has to state"
+              match Mapping.parseBoard (written.Replace("\"Ice40\"", "\"Ice40Hx\"")) with
+              | Ok back -> Expect.equal back.part.family Family.Ice40 "the family's older names still read"
+              | Error why -> failtest why
+
+              Expect.throwsC
+                  (fun () -> checkBoard { goBoard with fabricHz = 50_000_000 })
+                  (fun e -> Expect.stringContains e.Message "no PLL" "an oscillator is the fabric clock, not a choice")
+
+              // A design with streams needs a converter, and the board has none of
+              // its own: a shared-bus I2S harness in the Pmod is where one goes.
+              // The no-stream shape — one bit the host writes, on an LED — is
+              // `hello`'s, and `boardTop` does not build it yet.
+              let pmodI2s: Harness =
+                  { name = "pmod-i2s"
+                    plug = "pmod"
+                    positions = [ 1, (I2sSharedBus, "bclk"); 2, (I2sSharedBus, "ws"); 3, (I2sSharedBus, "sd_in"); 4, (I2sSharedBus, "sd_out") ] }
+
+              let path =
+                  { viaPins with bindings = viaPins.bindings @ [ { need = ByName "limit"; carrier = OnPin "led1" } ] }
+
+              let top = BoardTop.boardTop (plug pmodI2s "PMOD" goBoard) path lit
+              let sim = Sim top.top
+              sim.Tick()
+              Expect.equal (sim.Peek "led1") 1UL "active high: lit is driven high"
+              Expect.isNonEmpty top.registers "the bit the host writes is a register over the UART"
+
+              let dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"warp11-goboard-{System.Guid.NewGuid()}")
+              let out = Warp11.Build.write dir top
+              let sh = System.IO.File.ReadAllText out.run
+              Expect.stringContains sh "synth_ice40 -top" "no -dsp on a part with no multipliers"
+              Expect.stringContains sh "part=hx1k" "nextpnr's --hx1k"
+              Expect.stringContains sh "package=vq100" "and its package"
+              Expect.stringContains sh "iceprog -S" "loaded the way the FT2232H's channel A does"
+              Expect.stringContains sh "usage(\"ICESTORM_LC\")" "the gate reads nextpnr-ice40's utilisation"
+              Expect.stringContains sh "cells=1280, blockRams=16, multipliers=0" "against the part's facts"
+              Expect.stringContains sh "report.json" "and writes the report the boards table is written from"
+              let wrapper = System.IO.Directory.GetFiles(dir, "*_top.v") |> Array.head |> System.IO.File.ReadAllText
+              Expect.stringContains wrapper "wire clk = clk25;" "25 MHz is the fabric clock: no PLL between them"
+              Expect.isFalse (wrapper.Contains "SB_PLL40_PAD") "and no PLL primitive, which this package has not bonded"
+              let pcf = System.IO.Directory.GetFiles(dir, "*.pcf") |> Array.head |> System.IO.File.ReadAllText
+              Expect.stringContains pcf "set_io clk25 15" "the oscillator"
+              Expect.stringContains pcf "set_io host_rx 73" "the UART in"
+              Expect.stringContains pcf "set_io host_tx 74" "and out"
+              Expect.stringContains pcf "set_io led1 56" "LED 1"
+              Expect.stringContains pcf "set_io bclk 65" "Pmod position 1"
+
+          testCase "a hand-written AXI top goes through the generator: its irq is wired, its constants reach the seam" <| fun _ ->
+              // The shape GoL and GEP take: a complete top with a slave, a
+              // master and an interrupt, handed to the generator as a record.
+              let level, map = buildRegMap (fun r -> r.RwReg("level", 8, 0UL))
+              let top =
+                  defModuleClocked
+                      axiClock
+                      "IrqTop"
+                      (fun p -> (axiLiteSlavePorts p map.apertureAddrWidth, p.outPort "irq" 1))
+                      (fun (slave, irq) ->
+                          let regs = regMapSlave slave map
+                          anyBitSet (regs.value level) ==> irq)
+
+              let t: BoardTop.BoardTop =
+                  { board = kv260
+                    name = "IrqTop"
+                    top = top.def
+                    registers = []
+                    batch = None
+                    map = map
+                    target = BoardTop.targetOf kv260.part
+                    seamExtras = [ "pub const GRID_WIDTH: usize = 64;" ] }
+
+              let dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"warp11-irq-{System.Guid.NewGuid()}")
+              let out = Warp11.Build.write dir t
+              let read name = System.IO.Directory.GetFiles(dir, name) |> Array.head |> System.IO.File.ReadAllText
+              Expect.stringContains (read "*_bd.tcl") "[get_bd_pins IrqTop_0/irq] [get_bd_pins irq_concat/In0]" "the interrupt into pl_ps_irq0"
+              Expect.stringContains (read "*.dts") "interrupts = <0x0 0x59 0x4>;" "and declared to the kernel as SPI 89"
+              Expect.stringContains (read "*_layout.rs") "pub const GRID_WIDTH: usize = 64;" "the design's own constant, after the map's"
+              Expect.stringContains (read "*_layout.rs") "LEVEL_OFFSET" "which is still there"
+              Expect.isNonEmpty out.files "written"
+
+          testCase "rows over the host link alone: the host's words in, the design's rows out, no converter" <| fun _ ->
+              // The batch path of a board whose only connection is a UART —
+              // the Icepi here, with no harness in its socket, since nothing
+              // is on the pins.
+              let stereo = pins2 ("left", signedInt sampleWidth) ("right", signedInt sampleWidth)
+
+              let swap =
+                  BoardTop.design
+                      "Swap"
+                      (fun n -> n.streamIn ("in", stereo), n.streamOut ("out", stereo), n.valueIn ("gain", unsignedInt 2, 1UL))
+                      (fun (i, o, _) -> i.stream |> Stream.map (fun (l, r) -> r, l) |> o)
+
+              let top = BoardTop.boardTop icepi viaLink swap
+              Expect.equal top.name "SwapLink" "the top's name says the host path"
+              Expect.isTrue (top.registers |> List.exists (fun (n, _) -> n = "inLinkArm")) "the player's registers"
+              Expect.isTrue (top.registers |> List.exists (fun (n, _) -> n = "outLinkSent")) "and the recorder's"
+              Expect.isTrue (top.registers |> List.exists (fun (n, _) -> n = "gain")) "and the design's own"
+
+              let sim = Sim top.top
+              let cyclesPerBit = uartCyclesPerBit icepi.fabricHz 1_000_000
+              let link, uart = serialClientForMap top.map sim (uartSimPins "host") cyclesPerBit
+              let device = uart :> ISimDevice
+              let offset name = (top.registers |> List.find (fun (n, _) -> n = name) |> snd).offset
+
+              link.write32 (offset "inLinkArm") 1UL
+              link.write32 (offset "outLinkArm") 1UL
+
+              // Eight stereo rows, one field a word, sign-extended as the seam
+              // reads them — the recorder's own convention, mirrored.
+              let rows = [ for k in 1 .. 8 -> int64 (k * 1000), int64 (-k * 777) ]
+              let word (v: int64) = uint64 (uint32 v)
+
+              for l, r in rows do
+                  uart.Send(SerialFrame.play (word l) @ SerialFrame.play (word r))
+
+              let budget = 16 * 7 * 10 * cyclesPerBit * 3
+
+              for _ in 1 .. budget do
+                  device.Drive()
+                  sim.Tick()
+                  device.Sample()
+
+              let words, _ = SerialFrame.streamedWords uart.Received
+              let back = words |> List.map (fun w -> int64 (int32 (uint32 w)))
+              Expect.equal back (rows |> List.collect (fun (l, r) -> [ r; l ])) "every row came back, swapped, in order"
+              Expect.equal (link.read32 (offset "outLinkSent")) 16UL "the recorder counted every word"
+              Expect.equal (link.read32 (offset "inLinkDropped")) 0UL "and nothing was lost on the way in"
+              Expect.equal (link.read32 (offset "inLinkFill")) 0UL "the buffer drained"
+
+              // And the same design on the Go Board builds for its UART, with no harness.
+              let dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"warp11-link-{System.Guid.NewGuid()}")
+              let out = Warp11.Build.write dir (BoardTop.boardTop goBoard viaLink swap)
+              Expect.stringContains (System.IO.File.ReadAllText out.run) "part=hx1k" "built for the part"
+              let m: Mapping.Mapping = { board = goBoard; path = viaLink; plugged = []; sizes = [] }
+              Expect.stringContains (Mapping.write m) "\"link\"" "and the mapping file names the path"
+
+          testCase "a frame over the host link: beats counted in fabric, the rows out as frames, a wide field as lanes" <| fun _ ->
+              // The counted path on a board with no host memory: the host
+              // writes a count and a start, and reads the rows the design
+              // draws for `0 … count-1` as streamed frames.
+              let triple =
+                  BoardTop.design
+                      "Triple"
+                      (fun n -> n.streamIn ("beats", pins1 ("beat", unsignedInt 16)), n.streamOut ("rows", pins2 ("twice", unsignedInt 17) ("wide", unsignedInt 40)))
+                      (fun (i, o) -> i.stream |> Stream.mapTo (pins2 ("twice", unsignedInt 17) ("wide", unsignedInt 40)) (fun b -> pad 17 b + pad 17 b, pad 40 (cat b b)) |> o)
+
+              let top = BoardTop.boardTop icepi viaCountLink triple
+              Expect.equal top.name "TripleLink" "the top's name says the host path"
+              let names = top.registers |> List.map fst
+              Expect.equal names [ "rowsLinkArm"; "rowsLinkSent"; "rowsLinkDropped"; "beatsCountTotal"; "beatsCountStart"; "beatsCountBusy" ] "the recorder's registers, then the count's"
+              Expect.contains top.seamExtras "pub const ROWS_WORDS: usize = 3;" "the seam says a row is three words: one, and two for the 40-bit field"
+
+              let sim = Sim top.top
+              let cyclesPerBit = uartCyclesPerBit icepi.fabricHz 1_000_000
+              let link, uart = serialClientForMap top.map sim (uartSimPins "host") cyclesPerBit
+              let device = uart :> ISimDevice
+              let offset name = (top.registers |> List.find (fun (n, _) -> n = name) |> snd).offset
+
+              link.write32 (offset "rowsLinkArm") 1UL
+              link.write32 (offset "beatsCountTotal") 5UL
+              link.write32 (offset "beatsCountStart") 1UL
+              Expect.equal (link.read32 (offset "beatsCountBusy")) 1UL "busy while the rows leave"
+
+              let budget = 15 * 7 * 10 * cyclesPerBit * 3
+
+              for _ in 1 .. budget do
+                  device.Drive()
+                  sim.Tick()
+                  device.Sample()
+
+              let words, _ = SerialFrame.streamedWords uart.Received
+
+              let expected =
+                  [ for k in 0UL .. 4UL do
+                        yield 2UL * k
+                        yield (k <<< 16) ||| k
+                        yield 0UL ]
+
+              Expect.equal words expected "five rows, three words each: the sum, the wide field's low word, its padded top"
+              Expect.equal (link.read32 (offset "beatsCountBusy")) 0UL "and done once the last row has gone"
+              Expect.equal (link.read32 (offset "rowsLinkSent")) 15UL "the recorder counted every word"
+
+              let m: Mapping.Mapping = { board = goBoard; path = viaCountLink; plugged = []; sizes = [] }
+              Expect.stringContains (Mapping.write m) "\"countlink\"" "the mapping file names the path"
+              Expect.equal (Mapping.parse (Mapping.write m)) (Ok m) "and reads it back"
+
+          testCase "a field wider than a lane crosses the link as several words, low word first, both ways" <| fun _ ->
+              let wide =
+                  BoardTop.design
+                      "Wide"
+                      (fun n -> n.streamIn ("in", pins1 ("x", unsignedInt 48)), n.streamOut ("out", pins1 ("y", unsignedInt 48)))
+                      (fun (i, o) -> i.stream |> o)
+
+              let top = BoardTop.boardTop icepi viaLink wide
+              Expect.contains top.seamExtras "pub const IN_WORDS: usize = 2;" "two words a row in"
+              Expect.contains top.seamExtras "pub const OUT_WORDS: usize = 2;" "and out"
+              let sim = Sim top.top
+              let cyclesPerBit = uartCyclesPerBit icepi.fabricHz 1_000_000
+              let link, uart = serialClientForMap top.map sim (uartSimPins "host") cyclesPerBit
+              let device = uart :> ISimDevice
+              let offset name = (top.registers |> List.find (fun (n, _) -> n = name) |> snd).offset
+              link.write32 (offset "inLinkArm") 1UL
+              link.write32 (offset "outLinkArm") 1UL
+              let rows = [ 0x0000_ABCD_1234_5678UL; 0x0000_0001_0000_0002UL; 0x0000_FFFF_FFFF_FFFFUL ]
+
+              for v in rows do
+                  uart.Send(SerialFrame.play (v &&& 0xFFFF_FFFFUL) @ SerialFrame.play (v >>> 32))
+
+              for _ in 1 .. 6 * 7 * 10 * cyclesPerBit * 3 do
+                  device.Drive()
+                  sim.Tick()
+                  device.Sample()
+
+              let words, _ = SerialFrame.streamedWords uart.Received
+              let back = words |> List.chunkBySize 2 |> List.map (fun w -> w[0] ||| (w[1] <<< 32))
+              Expect.equal back rows "every 48-bit row back whole, the high word's top sixteen bits zero"
+
+          testCase "a surface over the host link: latched whole when the host pulls, sent as frames, the pace the host's" <| fun _ ->
+              // Four rows of registers that all move every cycle. A copy a row
+              // a cycle would tear; a latch does not, and the rows' relation
+              // holds in what comes back whatever cycle the pull landed on.
+              let counters =
+                  BoardTop.design
+                      "Counters"
+                      (fun n -> n.streamIn ("in", pins1 ("x", unsignedInt 8)), n.surfaceOut ("grid", pins2 ("a", unsignedInt 8) ("b", unsignedInt 8), 4))
+                      (fun (i, surface) ->
+                          Ir.lit 1UL 1 ==> i.stream.ready
+                          let t = reg "t" 8
+                          t + Ir.lit 1UL 8 ==> t
+
+                          surface
+                              [ for r in 0UL .. 3UL ->
+                                    let a = reg $"a%d{r}" 8
+                                    let b = reg $"b%d{r}" 8
+                                    t + Ir.lit (r + 1UL) 8 ==> a
+                                    Ir.lit 255UL 8 - (t + Ir.lit (r + 1UL) 8) ==> b
+                                    a, b ])
+
+              let top = BoardTop.boardTop icepi viaLink counters
+              let names = top.registers |> List.map fst
+              Expect.equal names [ "gridLinkPull"; "gridLinkSent"; "gridLinkMissed"; "inLinkArm"; "inLinkFill"; "inLinkDropped"; "inLinkStarved" ] "the surface's registers, then the player's"
+              Expect.contains top.seamExtras "pub const GRID_ROWS: usize = 4;" "the seam says how many rows a snapshot is"
+              Expect.contains top.seamExtras "pub const GRID_WORDS: usize = 2;" "and how many words a row"
+
+              let sim = Sim top.top
+              let cyclesPerBit = uartCyclesPerBit icepi.fabricHz 1_000_000
+              let link, uart = serialClientForMap top.map sim (uartSimPins "host") cyclesPerBit
+              let device = uart :> ISimDevice
+              let offset name = (top.registers |> List.find (fun (n, _) -> n = name) |> snd).offset
+
+              let drain cycles =
+                  for _ in 1 .. cycles do
+                      device.Drive()
+                      sim.Tick()
+                      device.Sample()
+
+              let snapshot () =
+                  let words, _ = SerialFrame.streamedWords (uart.TakeReceived())
+                  words |> List.chunkBySize 2 |> List.map (fun w -> w[0], w[1])
+
+              link.write32 (offset "gridLinkPull") 1UL
+              link.write32 (offset "gridLinkPull") 1UL
+              drain (8 * 7 * 10 * cyclesPerBit * 2)
+              let first = snapshot ()
+              Expect.equal first.Length 4 "one snapshot came back from two pulls"
+              Expect.equal (link.read32 (offset "gridLinkMissed")) 1UL "the second pull landed mid-copy and was counted"
+
+              let coherent (rows: (uint64 * uint64) list) =
+                  let t = fst rows[0] - 1UL
+                  Expect.equal rows [ for r in 0UL .. 3UL -> (t + r + 1UL) &&& 255UL, (255UL - (t + r + 1UL)) &&& 255UL ] "every row is from the same cycle"
+                  t
+
+              let t1 = coherent first
+              link.write32 (offset "gridLinkPull") 1UL
+              drain (8 * 7 * 10 * cyclesPerBit * 2)
+              let t2 = coherent (snapshot ())
+              Expect.notEqual t1 t2 "the surface moved on between pulls"
+              Expect.equal (link.read32 (offset "gridLinkSent")) 16UL "two snapshots, eight words each"
+
+          testCase "a surface bound to the host's memory is refused by name" <| fun _ ->
+              let d =
+                  BoardTop.design
+                      "Surfaced"
+                      (fun n -> n.streamIn ("in", pins1 ("x", unsignedInt 8)), n.surfaceOut ("grid", pins1 ("a", unsignedInt 8), 2))
+                      (fun (i, surface) ->
+                          Ir.lit 1UL 1 ==> i.stream.ready
+                          surface [ Ir.lit 1UL 8; Ir.lit 2UL 8 ])
+
+              Expect.throwsC
+                  (fun () -> BoardTop.boardTop kv260 viaHostMemory d |> ignore)
+                  (fun e -> Expect.stringContains e.Message "'grid' is a surface" "the refusal names the need and the path")
+
+          testCase "a design sized for its board: derived from the part, named by the mapping, refused when nobody asks" <| fun _ ->
+              // A design whose one field is as wide as the part's multiplier
+              // count lets it be sized, and refuses a part with none.
+              let scaled =
+                  BoardTop.sized "Scaled" (fun fit ->
+                      let derived =
+                          if fit.part.facts.multipliers = 0 then
+                              failwith $"Scaled: a lane takes a multiplier and the {fit.part.device} has none — impossible on this part"
+                          else
+                              fit.part.facts.multipliers
+
+                      let lanes = fit.size ("lanes", derived)
+
+                      BoardTop.design
+                          $"Scaled%d{lanes}"
+                          (fun n -> n.streamIn ("in", pins1 ("x", unsignedInt lanes)), n.streamOut ("out", pins1 ("y", unsignedInt lanes)))
+                          (fun (i, o) -> i.stream |> o))
+
+              Expect.equal (BoardTop.boardTop icepi viaLink scaled).name "Scaled28Link" "derived from the Icepi's 28 multipliers"
+              Expect.equal (BoardTop.boardTopSized icepi viaLink [ "lanes", 4 ] scaled).name "Scaled4Link" "or the mapping's word"
+
+              Expect.throwsC
+                  (fun () -> BoardTop.boardTopSized icepi viaLink [ "world", 4 ] scaled |> ignore)
+                  (fun e -> Expect.stringContains e.Message "names a size 'world', and the design sizes nothing by that name" "a size nobody reads is refused")
+
+              Expect.throwsC
+                  (fun () -> BoardTop.boardTop goBoard viaLink scaled |> ignore)
+                  (fun e -> Expect.stringContains e.Message "the hx1k has none — impossible" "and a part that cannot hold the smallest is refused by number")
+
+              let m: Mapping.Mapping = { board = icepi; path = viaLink; plugged = []; sizes = [ "lanes", 4 ] }
+              Expect.stringContains (Mapping.write m) "\"sizes\"" "the mapping file names the size"
+              Expect.equal (Mapping.parse (Mapping.write m)) (Ok m) "and reads it back"
+              Expect.equal (BoardTop.boardTopFor m scaled).name "Scaled4Link" "the mapping builds it at that size"
 
           testCase "on ECP5 a LUT RAM stays distributed and a LUT ROM becomes logic, as measured" <| fun _ ->
               let verilog = emitDesignFor Target.Ecp5 lutMemories.def

@@ -212,34 +212,37 @@ Only `audioBatchAxi` and `audioToneAxi` have a working bitstream path today;
 the two that *receive* audio do not, for one specific reason — see
 [To the board](#to-the-board).
 
-### The same ladder on an iCEBreaker
+### The same two rungs as designs, for any board
 
-`Ice.fs` carries the first two rungs again for a part with no host on it:
-`audioToneIce` and `audioPassthruIce`, over a Pmod I2S2, building to an iCE40
-UP5K bitstream through [`hardware/ice40/`](../../hardware/ice40/README.md). The
-hardware below them is unchanged — the same `i2sPins`, `i2sLink` and
-`toneGenerator` the KV260 apps call — and what differs is entirely outside the
-design:
+`Rungs.fs` carries the first two rungs again as *designs* — `tone` and
+`passthru` declare needs and nothing else, and a mapping says how the rows
+reach the host:
+
+| mapping path | what the rows are | host tool |
+|---|---|---|
+| `memory` / `count` (KV260) | rows through DDR, the batch contract | `warp11_batch in.wav out.wav --board …`, `count:N` for the tone |
+| `link` / `countlink` (iCEBreaker, Icepi, Go Board) | played words in, streamed frames out, on the UART beside the register map | `warp11_batch … --serial` |
+| `pins` | the I2S converter on the board's header, the Pmod I2S2 | nothing: it is heard |
+
+`-- build tone tone.icepi.json out/` writes the directory; the eight mapping
+files beside the project cover the four boards. The converter path is where
+these started (the iCEBreaker's hand tops in `hardware/ice40/`, retired
+2026-11-07), and the living checks still frame the passthru through the
+iCEBreaker's I2S and count the ratios off its pins:
 
 | | KV260 | iCEBreaker |
 |---|---|---|
 | fabric clock | 100 MHz from the PS | 24 MHz from an `SB_PLL40_PAD` |
-| frame rate | 48 828 Hz | 46 875 Hz |
-| controls | AXI-Lite register map | none — fixed function |
-| the two taps | `receivedCount`, `lastLeft` | the two on-board LEDs |
-| reset | the PS | a counter, released on PLL lock |
+| converter rate | 48 828 Hz | 46 875 Hz |
+| host rate (memory, link) | 48 kHz, the WAV's | 48 kHz, the WAV's |
 
-The rate is not a preference. MCLK has to be 256x the frame rate for a CS5343 to
-lock, MCLK is made by toggling a register, so the fastest a design can present is
-half its fabric clock — and 24 MHz / 512 is 46 875 Hz exactly. 48 kHz is
-unavailable from a 12 MHz crystal, and `i2sMasterHz` refuses it rather than
-landing 2.3% out.
-
-**Fixed function is the same property as the KV260 apps' no-op defaults, arrived
-at from the other side.** There, every register resets to something that passes
-audio because the bitstream ships without a host daemon; here there is no host
-to write one, so the tone plays on load and the passthru passes on load because
-there is nothing else it could do.
+The converter's rate is not a preference. MCLK has to be 256x the frame rate
+for a CS5343 to lock, MCLK is made by toggling a register, so the fastest a
+design can present is half its fabric clock — and 24 MHz / 512 is 46 875 Hz
+exactly. 48 kHz is unavailable from a 12 MHz crystal, and `i2sMasterHz`
+refuses it rather than landing 2.3% out. On a host path the rows carry no
+rate, so the design is handed the nominal 48 kHz and the tone's step starts
+there; on the converter it starts at the converter's.
 
 ## The shape of it
 

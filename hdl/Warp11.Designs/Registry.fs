@@ -15,6 +15,7 @@ open Warp11.Catalog
 open Warp11.Designs.Catalog
 open Warp11.Designs.MemoryCatalog
 open Warp11.Designs.BusCatalog
+open Warp11.Designs.Hello
 
 /// The multiband toys at the Effects demo's settings, with unity makeup and the
 /// stream free-running, so stepping one shows every band's envelope moving.
@@ -35,8 +36,10 @@ let private multibandDemo =
 let catalog =
     embeddedFrom
         (System.Reflection.Assembly.GetExecutingAssembly())
-        [ "MemoryDesigns.fs"; "BusDesigns.fs"; "Designs.fs" ]
-        [ entry "Counter" (nameof onCounter) (fun () -> onCounter.def)
+        [ "MemoryDesigns.fs"; "BusDesigns.fs"; "Designs.fs"; "Hello.fs" ]
+        [ entry "Hello on the iCEBreaker" (nameof helloOnIceBreaker) (fun () -> helloOnIceBreaker)
+          entry "Hello on the KV260" (nameof helloOnKv260) (fun () -> helloOnKv260)
+          entry "Counter" (nameof onCounter) (fun () -> onCounter.def)
           entry "Counter (explicit builder)" (nameof counterMutable) (fun () -> counterMutable)
           entry "Comparator" (nameof comparator8) (fun () -> comparator8.def)
           entry "Add3" (nameof add3) (fun () -> add3)

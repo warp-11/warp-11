@@ -80,6 +80,46 @@ module SerialFrame =
             if List.length rest >= streamedLength - 2 then skipStreamed (List.skip (streamedLength - 2) rest) else []
         | _ -> bytes
 
+    /// The words of every streamed frame in `bytes`, in order, and what is
+    /// left once they and any reply frames before them are taken: what a
+    /// host that wants the fabric's frames keeps, where `skipStreamed` is
+    /// what a client that wants only replies drops.
+    let rec streamedWords (bytes: byte list) : uint64 list * byte list =
+        match bytes with
+        | s :: status :: rest when s = sync && status = byte serialStreamStatus && List.length rest >= streamedLength - 2 ->
+            let data = List.take 4 rest
+            let check = rest[4]
+            let more, left = streamedWords (List.skip (streamedLength - 2) rest)
+
+            if xorOf (status :: data) = check then
+                (data |> List.mapi (fun i b -> uint64 b <<< (8 * i)) |> List.sum) :: more, left
+            else
+                more, left
+        | s :: rest when s = sync && List.length rest >= 2 ->
+            // A reply frame in the stream: stepped over at its own length.
+            let status = List.head rest
+            let isRead = List.length rest >= 6 && status = 0uy
+            let length = if isRead then replyLength true else replyLength false
+            if List.length bytes >= length then streamedWords (List.skip length bytes) else [], bytes
+        | [] -> [], []
+        | _ :: rest -> streamedWords rest
+
+    /// The bytes of every complete streamed frame in `bytes`, in order, with
+    /// any reply frames among them stepped over: what a client that read
+    /// past them for its reply hands back, so a host that wants the
+    /// fabric's frames still finds every one.
+    let rec streamedFrames (bytes: byte list) : byte list =
+        match bytes with
+        | s :: status :: rest when s = sync && status = byte serialStreamStatus && List.length rest >= streamedLength - 2 ->
+            List.take streamedLength bytes @ streamedFrames (List.skip streamedLength bytes)
+        | s :: rest when s = sync && List.length rest >= 2 ->
+            let status = List.head rest
+            let isRead = List.length rest >= 6 && status = 0uy
+            let length = if isRead then replyLength true else replyLength false
+            if List.length bytes >= length then streamedFrames (List.skip length bytes) else []
+        | [] -> []
+        | _ :: rest -> streamedFrames rest
+
     /// A reply's status and, for a read, its value — or the reason it is not
     /// a reply.
     let parse (isRead: bool) (reply: byte list) : Result<uint64 option, string> =
@@ -128,6 +168,17 @@ type SimUart(sim: Sim, pins: UartSimPins, cyclesPerBit: int) =
     member _.Send(bytes: byte seq) = for b in bytes do outgoing.Enqueue b
     member _.Received: byte list = List.ofSeq received
     member _.TakeReceived() = let r = List.ofSeq received in received.Clear(); r
+
+    /// Put `bytes` back at the head of `Received`, ahead of whatever has
+    /// arrived since they were taken: what a client that stepped over the
+    /// fabric's streamed frames to find its reply hands back, so a host
+    /// that wants those frames still finds them, in order.
+    member _.Retain(bytes: byte list) =
+        let since = List.ofSeq received
+        received.Clear()
+
+        for b in bytes @ since do
+            received.Enqueue b
     member _.Idle = txBit < 0 && outgoing.Count = 0
 
     interface ISimDevice with
@@ -188,12 +239,13 @@ let serialClientOn
     let device = uart :> ISimDevice
 
     // Frames the fabric sends unasked — a design streaming on the same wire
-    // — are dropped here, because this client's job is the register map. A
-    // real host that wants them reads the same status byte and keeps them.
+    // — are stepped over to find the reply, and then put back where they
+    // were: this client's job is the register map, and what it must not do
+    // is cost a host the frames it was reading while it asked.
     let dropStreamed = SerialFrame.skipStreamed
 
     let exchange (isRead: bool) (request: byte list) =
-        uart.TakeReceived() |> ignore
+        let before = uart.TakeReceived()
         uart.Send request
         let wanted = SerialFrame.replyLength isRead
         // Bits on the wire for the request and the reply, plus slack. A
@@ -201,15 +253,17 @@ let serialClientOn
         // some going past while the reply is waited for.
         let budget = (List.length request + wanted) * 10 * cyclesPerBit + 512 * cyclesPerBit
         let mutable cycles = 0
-        let mutable pending = []
 
-        while List.length (dropStreamed (pending @ uart.Received)) < wanted && cycles < budget do
+        while List.length (dropStreamed (before @ uart.Received)) < wanted && cycles < budget do
             device.Drive()
             advance ()
             device.Sample()
             cycles <- cycles + 1
 
-        match SerialFrame.parse isRead (dropStreamed (pending @ uart.TakeReceived())) with
+        let all = before @ uart.TakeReceived()
+        uart.Retain(SerialFrame.streamedFrames all)
+
+        match SerialFrame.parse isRead (dropStreamed all) with
         | Ok v -> v
         | Error why -> failwith $"serial register map: {why} after %d{cycles} cycles"
 

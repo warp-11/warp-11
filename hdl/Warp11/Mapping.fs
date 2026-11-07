@@ -16,7 +16,11 @@ type Mapping =
     { board: Board
       path: DataPath
       /// Each harness and the socket it is plugged into.
-      plugged: (Harness * string) list }
+      plugged: (Harness * string) list
+      /// Sizes the mapping names in place of what the design would derive
+      /// from the part — `world`, `lanes` — by the name the design asks
+      /// for. Empty, and every size is derived.
+      sizes: (string * int) list }
 
 /// The board a mapping builds for: its board with every harness plugged in.
 let boardOf (m: Mapping) : Board =
@@ -67,10 +71,19 @@ let private boardNode (b: Board) : JsonObject =
     o["name"] <- str b.name
 
     let part = JsonObject()
-    part["family"] <- str (match b.part.family with UltraScalePlus -> "UltraScalePlus" | Ice40UltraPlus -> "Ice40UltraPlus" | Family.Ecp5 -> "Ecp5")
+    part["family"] <- str (match b.part.family with UltraScalePlus -> "UltraScalePlus" | Family.Ice40 -> "Ice40" | Family.Ecp5 -> "Ecp5")
     part["device"] <- str b.part.device
     part["package"] <- str b.part.package
     b.part.boardPart |> Option.iter (fun bp -> part["boardPart"] <- str bp)
+    // Always written, so a file copied to a part the library does not know
+    // shows what it has to state.
+    let facts = JsonObject()
+    facts["processingSystem"] <- JsonValue.Create b.part.facts.processingSystem
+    facts["lutRam"] <- JsonValue.Create b.part.facts.lutRam
+    facts["multipliers"] <- JsonValue.Create b.part.facts.multipliers
+    facts["cells"] <- JsonValue.Create b.part.facts.cells
+    facts["blockRamBits"] <- JsonValue.Create b.part.facts.blockRamBits
+    part["facts"] <- facts
     o["part"] <- part
 
     o["tool"] <- str (match b.tool with Vivado -> "Vivado" | OpenFlow -> "OpenFlow")
@@ -254,7 +267,11 @@ let private readBoard (o: JsonNode) : Result<Board, string> =
             >>= fun family ->
                 (match family with
                  | "UltraScalePlus" -> Ok UltraScalePlus
-                 | "Ice40UltraPlus" -> Ok Ice40UltraPlus
+                 // The two names the family had while its facts were a case
+                 // of it, still read so an older board file opens.
+                 | "Ice40"
+                 | "Ice40UltraPlus"
+                 | "Ice40Hx" -> Ok Family.Ice40
                  | "Ecp5" -> Ok Family.Ecp5
                  | other -> Error $"'family': no family called '{other}'")
                 >>= fun family ->
@@ -266,6 +283,33 @@ let private readBoard (o: JsonNode) : Result<Board, string> =
                              | Some bp -> asString "'boardPart'" bp |> Result.map Some
                              | None -> Ok None)
                             >>= fun boardPart ->
+                            // Stated in the file, or the library's own for a
+                            // part it knows; a part it does not know has to say.
+                            (match optional part "facts" with
+                             | Some f ->
+                                 field f "processingSystem" >>= asBool "'processingSystem'"
+                                 >>= fun processingSystem ->
+                                     field f "lutRam" >>= asBool "'lutRam'"
+                                     >>= fun lutRam ->
+                                         getInt f "multipliers"
+                                         >>= fun multipliers ->
+                                             getInt f "cells"
+                                             >>= fun cells ->
+                                                 getInt f "blockRamBits"
+                                                 >>= fun blockRamBits ->
+                                                     Ok
+                                                         { processingSystem = processingSystem
+                                                           lutRam = lutRam
+                                                           multipliers = multipliers
+                                                           cells = cells
+                                                           blockRamBits = blockRamBits }
+                             | None ->
+                                 match knownParts |> List.tryFind (fun p -> p.family = family && p.device = device) with
+                                 | Some p -> Ok p.facts
+                                 | None ->
+                                     Error
+                                         $"'part': '{device}' is not a part this library knows, so the file has to state its 'facts' — processingSystem, lutRam, multipliers, cells, blockRamBits")
+                            >>= fun facts ->
                                 getString o "tool"
                                 >>= fun tool ->
                                     (match tool with
@@ -368,7 +412,8 @@ let private readBoard (o: JsonNode) : Result<Board, string> =
                                                                                             { family = family
                                                                                               device = device
                                                                                               package = package
-                                                                                              boardPart = boardPart }
+                                                                                              boardPart = boardPart
+                                                                                              facts = facts }
                                                                                           tool = tool
                                                                                           clock = clock
                                                                                           fabricHz = fabricHz
@@ -412,10 +457,13 @@ let pathText (p: DataPath) =
         p.bindings |> List.tryFind (fun b -> b.need = kind) |> Option.map (fun b -> b.carrier)
 
     match byKind EveryStreamIn, byKind EveryStreamOut with
+    | None, None when byKind EveryValueIn = Some InRegisterMap -> "registers"
     | Some OnPins, Some OnPins -> "pins"
     | Some InHostRows, Some InHostRows -> "memory"
     | Some AsBeatCount, Some InHostRows -> "count"
     | Some AsBeatCount, Some InHostRowsAt -> "scatter"
+    | Some InLinkFrames, Some InLinkFrames -> "link"
+    | Some AsBeatCount, Some InLinkFrames -> "countlink"
     // A combination with no preset name prints as the carriers it is, so a
     // mapping file can still carry one once `boardTop` builds it.
     | inCarrier, outCarrier -> $"%A{inCarrier}/%A{outCarrier}"
@@ -426,7 +474,10 @@ let private readPath (text: string) : Result<DataPath, string> =
     | "memory" -> Ok viaHostMemory
     | "count" -> Ok viaCount
     | "scatter" -> Ok viaScatter
-    | other -> Error $"'path': a data path is pins, memory or count, not '{other}'"
+    | "link" -> Ok viaLink
+    | "countlink" -> Ok viaCountLink
+    | "registers" -> Ok viaRegisters
+    | other -> Error $"'path': a data path is pins, memory, count, scatter, link, countlink or registers, not '{other}'"
 
 /// A carrier as a mapping file names it: the case, and for a pin, which.
 let carrierText (c: Carrier) =
@@ -521,6 +572,14 @@ let write (m: Mapping) : string =
 
         o["bind"] <- bind
 
+    if not m.sizes.IsEmpty then
+        let sizes = JsonObject()
+
+        for name, value in m.sizes do
+            sizes[name] <- num value
+
+        o["sizes"] <- sizes
+
     if not m.plugged.IsEmpty then
         o["plugged"] <-
             JsonArray(
@@ -577,6 +636,22 @@ let private readPlugged (root: JsonNode) : Result<(Harness * string) list, strin
             (Ok [])
     | Some _ -> Error "'plugged': expected an array"
 
+let private readSizes (root: JsonNode) : Result<(string * int) list, string> =
+    match optional root "sizes" with
+    | None -> Ok []
+    | Some(:? JsonObject as sizes) ->
+        sizes
+        |> List.ofSeq
+        |> List.fold
+            (fun acc (KeyValue(name, value)) ->
+                acc
+                |> Result.bind (fun named ->
+                    match value with
+                    | :? JsonValue as v when v.TryGetValue<int>() |> fst -> Ok(named @ [ name, v.GetValue<int>() ])
+                    | _ -> Error $"'sizes.{name}': expected a whole number"))
+            (Ok [])
+    | Some _ -> Error "'sizes': expected an object keyed by what the design sizes"
+
 let parse (text: string) : Result<Mapping, string> =
     try
         let root = JsonNode.Parse text
@@ -590,10 +665,13 @@ let parse (text: string) : Result<Mapping, string> =
                 readBind root
                 |> Result.bind (fun named ->
                     readPlugged root
-                    |> Result.map (fun plugged ->
-                        { board = board
-                          path = { path with bindings = path.bindings @ named }
-                          plugged = plugged }))))
+                    |> Result.bind (fun plugged ->
+                        readSizes root
+                        |> Result.map (fun sizes ->
+                            { board = board
+                              path = { path with bindings = path.bindings @ named }
+                              plugged = plugged
+                              sizes = sizes })))))
         |> Result.bind (fun m -> checkBoard m.board; Ok m)
     with e ->
         Error e.Message
@@ -609,8 +687,8 @@ let load (path: string) : Result<Mapping, string> =
 /// A mapping from a preset by name, or a board file's path.
 let ofBoard (nameOrFile: string) (path: DataPath) : Result<Mapping, string> =
     match preset nameOrFile with
-    | Ok b -> Ok { board = b; path = path; plugged = [] }
-    | Error _ when System.IO.File.Exists nameOrFile -> loadBoard nameOrFile |> Result.map (fun b -> { board = b; path = path; plugged = [] })
+    | Ok b -> Ok { board = b; path = path; plugged = []; sizes = [] }
+    | Error _ when System.IO.File.Exists nameOrFile -> loadBoard nameOrFile |> Result.map (fun b -> { board = b; path = path; plugged = []; sizes = [] })
     | Error why -> Error why
 
 /// Where a design's mapping for a board lives: `gain.json` on the `kv260`
@@ -643,8 +721,12 @@ let showBoard (b: Board) : string =
     let family =
         match b.part.family with
         | UltraScalePlus -> "UltraScalePlus"
-        | Ice40UltraPlus -> "Ice40UltraPlus"
+        | Family.Ice40 -> "Ice40"
         | Family.Ecp5 -> "Ecp5"
+
+    let facts =
+        let f = b.part.facts
+        $"{{ processingSystem = %b{f.processingSystem}; lutRam = %b{f.lutRam}; multipliers = %d{f.multipliers}; cells = %d{f.cells}; blockRamBits = %d{f.blockRamBits} }}"
 
     let tool =
         match b.tool with
@@ -704,7 +786,7 @@ let showBoard (b: Board) : string =
     String.concat
         "\n"
         [ "    { name = " + quote b.name
-          $"      part = {{ family = {family}; device = {quote b.part.device}; package = {quote b.part.package}; boardPart = {showOption quote b.part.boardPart} }}"
+          $"      part = {{ family = {family}; device = {quote b.part.device}; package = {quote b.part.package}; boardPart = {showOption quote b.part.boardPart}; facts = {facts} }}"
           $"      tool = {tool}"
           $"      clock = {clock}"
           $"      fabricHz = %d{b.fabricHz}"

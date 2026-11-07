@@ -92,4 +92,5 @@ let main argv =
     run "UD19 the build directory, Vivado" buildDirectoryVivado
     run "UD20 the build directory, the open flow" buildDirectoryOpenFlow
     run "UD21 the mapping is a file" mappingIsAFile
+    run "UD22 every example on every board that holds it" everyExampleOnItsBoards
     0

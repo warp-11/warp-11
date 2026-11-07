@@ -304,6 +304,12 @@ let private mainDemo () =
     let boardOk = boardPixels = boardTwin
     printfn $"counted board top vs twin ({boardTop.name}, 2 lanes): %b{boardOk} (%d{boardCycles} cycles)"
 
+    // The same design over the Icepi's host link: the count written over the
+    // UART, the pixels back as streamed frames, the frame the twin's.
+    let linkPixels, linkCycles, linkBusy, linkTop = Chunked.renderThroughLink 32 8 16 48 28 8 2 chunkView
+    let linkOk = linkPixels = boardTwin && linkBusy = 0UL
+    printfn $"counted link top vs twin ({linkTop.name}, 2 lanes): %b{linkOk} (%d{linkCycles} cycles)"
+
     0
 
 /// What `debug` will open, by label — the pod designs on this side of the
@@ -432,6 +438,24 @@ let main argv =
     // of it — the directory's own `build.sh` runs Vivado and packages the
     // app. Fewer lanes than the part holds builds faster and renders the
     // same picture, so the count is a dial rather than a constant.
+    // The example for any board, from its mapping file: `bitstream
+    // <mapping.json> <dir>`. A mapping whose path is `countlink` is the
+    // frame over the board's host link, which is every board but the KV260;
+    // `count` is the KV260's frame into its memory. The lanes are the
+    // part's multipliers' worth unless the mapping names `lanes`.
+    | [| "bitstream"; mapping; dir |] when mapping.EndsWith ".json" ->
+        match Warp11.Mapping.load mapping with
+        | Error why ->
+            eprintfn $"{mapping}: {why}"
+            1
+        | Ok m ->
+            let out = Chunked.buildFor m dir
+
+            for file in out.files do
+                printfn $"wrote {file}"
+
+            printfn $"build with: {out.run}"
+            0
     | [| "bitstream"; dir |]
     | [| "bitstream"; dir; _ |]
     | [| "bitstream-scatter"; dir |]

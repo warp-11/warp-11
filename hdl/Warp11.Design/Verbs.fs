@@ -141,7 +141,7 @@ let run (argv: string[]) : int option =
                 Some 1
             | Ok m ->
                 try
-                    let top = Warp11.Elaborate.boardTopOf (Warp11.Mapping.boardOf m) m.path g
+                    let top = Warp11.Elaborate.boardTopFor m g
                     let out = Warp11.Build.write dir top
 
                     for file in out.files do

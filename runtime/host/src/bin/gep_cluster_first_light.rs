@@ -1,6 +1,6 @@
 //! First light for the F#-elaborated WarpCPU genetic-programming cluster on the
 //! KV260: 4 breeders x 8 DIV-resident 16-thread lanes, two fillers, inline
-//! parents. Run on the board after `xmutil loadapp gep-cluster-fs`:
+//! parents. Run on the board after `xmutil loadapp gep-cluster-axi`:
 //!
 //!     ./gep_cluster_first_light <vector-dir>              # uio node, no root
 //!     ./gep_cluster_first_light <vector-dir> /dev/mem     # root mode (sudo)
@@ -27,7 +27,7 @@ use warp11_runtime::gep::{GepClusterDevice, GepRegions, GepResult};
 use warp11_runtime::gep_layout as layout;
 
 const AXI_BASE: i64 = 0xB000_0000;
-/// Set in gepclusterfs_bd_bd.tcl and pinned by the app's dtbo. The operator
+/// Set by the generated block design and pinned by the app's dtbo. The operator
 /// engine's single-cycle Irwin-Hall multiply is what caps the design here.
 const PL_CLOCK_MHZ: f64 = 99.999_001;
 
@@ -125,8 +125,8 @@ fn main() {
     let expected_fitness = read_words(&dir, "expected_fitness.bin");
 
     // ---- the DDR buffer ----
-    let node = find_udmabuf("udmabuf-gep-cluster-fs").unwrap_or_else(|| {
-        eprintln!("no udmabuf for 'udmabuf-gep-cluster-fs' — is the app loaded and u-dma-buf up?");
+    let node = find_udmabuf("udmabuf-gep-cluster-axi").unwrap_or_else(|| {
+        eprintln!("no udmabuf for 'udmabuf-gep-cluster-axi' — is the app loaded and u-dma-buf up?");
         exit(1);
     });
     let phys = udmabuf_phys_addr(&node).unwrap_or_else(|| {
@@ -168,8 +168,8 @@ fn main() {
 
     // ---- the register window ----
     let reg_path = if reg_arg == "auto" {
-        find_uio("gepclusterfs").unwrap_or_else(|| {
-            eprintln!("no uio node named 'gepclusterfs' — pass /dev/mem to use root mode");
+        find_uio("gep_cluster_axi").unwrap_or_else(|| {
+            eprintln!("no uio node named 'gep_cluster_axi' — pass /dev/mem to use root mode");
             exit(1);
         })
     } else {

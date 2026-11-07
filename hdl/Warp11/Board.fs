@@ -35,20 +35,46 @@
 [<AutoOpen>]
 module Warp11.Boards
 
-/// The part's family: what the toolchain is told, and what the part can do.
-/// A family rather than a vendor because the two facts that matter — the
-/// memory kinds the fabric has, and whether a processing system sits beside
-/// it — are per family, not per vendor.
+/// The part's family: **what the toolchain is told**, and nothing about what
+/// the part can do. A family picks the emitter's dialect (which memory
+/// attributes it writes), the flow's files (a `.pcf` and `nextpnr-ice40`, an
+/// `.lpf` and `nextpnr-ecp5`, a block design and Vivado) and the loader. What
+/// the part *has* — a processing system, LUT RAM, multipliers, cells, block
+/// RAM — is `PartFacts`, data on the part, so a part this library has never
+/// seen is a board file that states them rather than a case here. The HX1K
+/// and the UP5K are one family: the same tools, the same dialect, different
+/// facts.
 type Family =
-    /// Zynq UltraScale+: a PS beside the fabric, LUTRAM, block RAM, UltraRAM.
+    /// Zynq UltraScale+ through Vivado.
     | UltraScalePlus
-    /// Lattice iCE40 UltraPlus: no PS, no LUTRAM; EBR and SPRAM.
-    | Ice40UltraPlus
-    /// Lattice ECP5: no PS; LUT RAM for what is written, DP16KD block RAM,
-    /// 18x18 multipliers.
+    /// Lattice iCE40 — HX and UltraPlus alike — through yosys and nextpnr-ice40.
+    | Ice40
+    /// Lattice ECP5 through yosys and nextpnr-ecp5.
     | Ecp5
 
-/// The part, as the toolchain names it.
+/// What a part can do, from its datasheet: the facts a design that sizes
+/// itself reads first, a board check refuses against, and the post-build gate
+/// confirms from the toolchain's own report. Data rather than a match on the
+/// family, so a board file can declare a part fully.
+type PartFacts =
+    { /// A processing system beside the fabric: PS clocks, an AXI-Lite
+      /// aperture, host memory and an OS-loaded app all need one.
+      processingSystem: bool
+      /// LUT RAM — the storage `distributedMem` asks for. Without it a
+      /// combinational read has nowhere to go but logic, and the emitter
+      /// refuses the declaration on the family's dialect.
+      lutRam: bool
+      /// Hard multipliers: DSP48s, MAC16s, MULT18s. Zero means a multiply is
+      /// LUTs, and the open flow asks yosys for none.
+      multipliers: int
+      /// Logic, in whatever the toolchain's report counts — LUTs on a Xilinx
+      /// or ECP5 part, logic cells on an iCE40, LEs on a MAX 10.
+      cells: int
+      /// Block RAM, in bits. UltraRAM and SPRAM are not counted: neither is
+      /// what `blockMem` asks for.
+      blockRamBits: int }
+
+/// The part, as the toolchain names it, and what it can do.
 type Part =
     { family: Family
       /// Vivado's `-part` (`xck26-sfvc784-2LV-c`), nextpnr's `--up5k`,
@@ -60,7 +86,74 @@ type Part =
       /// (`xilinx.com:kv260_som:part0:1.4`), which owns the PS
       /// configuration, or openFPGALoader's `-b` (`icepi-zero`), which knows
       /// the board's programmer. None for a bare part.
-      boardPart: string option }
+      boardPart: string option
+      facts: PartFacts }
+
+/// The parts the boards here are built on, as values a board starts from —
+/// `{ up5k with package = "sg48" }` is how a second board on the same part
+/// says so. The facts are the datasheets', with the block count visible so
+/// the arithmetic can be checked against the part's page.
+
+/// The KV260's Zynq UltraScale+ ZU5EV: 117 120 LUTs, 1 248 DSP48E2s, 144
+/// BRAM36s. Its 64 UltraRAMs are `ultraMem`'s and are not in `blockRamBits`.
+let zu5ev =
+    { family = UltraScalePlus
+      device = "xck26-sfvc784-2LV-c"
+      package = ""
+      boardPart = None
+      facts =
+        { processingSystem = true
+          lutRam = true
+          multipliers = 1_248
+          cells = 117_120
+          blockRamBits = 144 * 36 * 1024 } }
+
+/// The iCE40 UltraPlus UP5K: 5 280 logic cells, eight MAC16s, thirty 4 kbit
+/// EBRs; its four 256 kbit SPRAMs are not block RAM and are not counted.
+let up5k =
+    { family = Ice40
+      device = "up5k"
+      package = "sg48"
+      boardPart = None
+      facts =
+        { processingSystem = false
+          lutRam = false
+          multipliers = 8
+          cells = 5_280
+          blockRamBits = 30 * 4 * 1024 } }
+
+/// The iCE40 HX1K: 1 280 logic cells, sixteen 4 kbit EBRs, no multipliers
+/// and no SPRAM — the smallest part a preset here names, and the one that
+/// catches an assumption the UP5K would have carried.
+let hx1k =
+    { family = Ice40
+      device = "hx1k"
+      package = "vq100"
+      boardPart = None
+      facts =
+        { processingSystem = false
+          lutRam = false
+          multipliers = 0
+          cells = 1_280
+          blockRamBits = 16 * 4 * 1024 } }
+
+/// The ECP5-25F (LFE5U-25F): 24 288 LUTs, 28 MULT18s, fifty-six 18 kbit
+/// DP16KDs.
+let ecp5_25f =
+    { family = Ecp5
+      device = "25k"
+      package = "CABGA256"
+      boardPart = None
+      facts =
+        { processingSystem = false
+          lutRam = true
+          multipliers = 28
+          cells = 24_288
+          blockRamBits = 56 * 18 * 1024 } }
+
+/// The parts this library knows by device name, which is what lets a board
+/// file on one of them leave the facts out.
+let knownParts = [ zu5ev; up5k; hx1k; ecp5_25f ]
 
 /// Which flow builds the bitstream.
 type BuildTool =
@@ -179,6 +272,21 @@ let viaCount = everything AsBeatCount InHostRows
 
 /// Counted in, and each beat written where the design says.
 let viaScatter = everything AsBeatCount InHostRowsAt
+
+/// Rows in as the host's words on its link, rows back out as frames on it:
+/// the batch path of a board whose only connection is a UART. No converter
+/// is involved, so nothing paces the design but the link itself.
+let viaLink = everything InLinkFrames InLinkFrames
+
+/// Counted in, and the rows out as frames on the host link: a frame the
+/// design draws, on a board whose only connection is a UART. The count is
+/// a register the host writes, and the link's pace is the design's.
+let viaCountLink = everything AsBeatCount InLinkFrames
+
+/// The host's registers alone: a design with no stream in it, its values
+/// set and read over whatever link the board has, its reports on pins
+/// where the mapping binds them — `hello`.
+let viaRegisters = { bindings = [ { need = EveryValueIn; carrier = InRegisterMap } ] }
 
 /// **Everything** that carries a need. A need may be bound more than once —
 /// the aid's processed audio goes to the earphones *and* to a recorder — so
@@ -308,18 +416,14 @@ type Board =
       sockets: Socket list }
 
 /// Whether the part has a processing system beside the fabric.
-let hasPs (part: Part) =
-    match part.family with
-    | UltraScalePlus -> true
-    | Ice40UltraPlus
-    | Ecp5 -> false
+let hasPs (part: Part) = part.facts.processingSystem
 
 /// Whether the fabric has LUT RAM — the storage `distributedMem` asks for.
-let hasLutRam (part: Part) =
-    match part.family with
-    | UltraScalePlus
-    | Ecp5 -> true
-    | Ice40UltraPlus -> false
+let hasLutRam (part: Part) = part.facts.lutRam
+
+/// Whether the fabric has hard multipliers at all — what decides whether the
+/// open flow asks yosys to infer them (`-dsp`).
+let hasMultipliers (part: Part) = part.facts.multipliers > 0
 
 /// The pins a board gives a role, if it has that role at all.
 let connectorFor (role: DeviceRole) (board: Board) =
@@ -351,7 +455,7 @@ let checkBoard (board: Board) =
     let refuse (why: string) = failwith $"{board.name}: {why}"
 
     match board.tool, board.part.family with
-    | Vivado, Ice40UltraPlus -> refuse "Vivado does not build an iCE40 part"
+    | Vivado, Ice40 -> refuse "Vivado does not build an iCE40 part"
     | Vivado, Ecp5 -> refuse "Vivado does not build an ECP5 part"
     | OpenFlow, UltraScalePlus -> refuse "the open flow does not build an UltraScale+ part"
     | _ -> ()
@@ -407,11 +511,7 @@ let kv260At (fabricHz: int) =
     let lvcmos33 (pin: string) = { pin = pin; standard = Some "LVCMOS33"; activeLow = false }
 
     { name = "kv260"
-      part =
-        { family = UltraScalePlus
-          device = "xck26-sfvc784-2LV-c"
-          package = ""
-          boardPart = Some "xilinx.com:kv260_som:part0:1.4" }
+      part = { zu5ev with boardPart = Some "xilinx.com:kv260_som:part0:1.4" }
       tool = Vivado
       clock = PsClock 71
       fabricHz = fabricHz
@@ -488,11 +588,7 @@ let iceBreakerAt (fabricHz: int) =
     let bare (pin: int) = { pin = string pin; standard = None; activeLow = false }
 
     { name = "icebreaker"
-      part =
-        { family = Ice40UltraPlus
-          device = "up5k"
-          package = "sg48"
-          boardPart = None }
+      part = up5k
       tool = OpenFlow
       clock = Crystal 12_000_000
       fabricHz = fabricHz
@@ -549,11 +645,7 @@ let icepiAt (fabricHz: int) =
     let pin (site: string) = { pin = site; standard = Some "LVCMOS33"; activeLow = false }
 
     { name = "icepi"
-      part =
-        { family = Ecp5
-          device = "25k"
-          package = "CABGA256"
-          boardPart = Some "icepi-zero" }
+      part = { ecp5_25f with boardPart = Some "icepi-zero" }
       tool = OpenFlow
       // An oscillator on the board, but `Crystal` in this record's sense:
       // what reaches the fabric goes through the wrapper's PLL.
@@ -584,6 +676,46 @@ let icepiAt (fabricHz: int) =
 
 /// The Icepi Zero at 25 MHz, 50/2 exactly — see `icepiAt`.
 let icepi = icepiAt 25_000_000
+
+/// The Nandland Go Board: a Lattice iCE40HX1K (VQ100), the smallest part
+/// any preset here names — 1 280 logic cells, sixteen 4 kbit EBRs, no
+/// SPRAM, no multipliers, and on this package no PLL — clocked straight off
+/// its 25 MHz oscillator. So the fabric clock is not a choice here: an
+/// `Oscillator` drives `clk` at the rate it has, and `checkBoard` refuses any
+/// other `fabricHz`. The FT2232H's channel A programs the SPI flash
+/// (`iceprog`) and channel B is the UART, 115 200 baud; the four LEDs are
+/// wired pin → resistor → LED → ground, so **active high**; the one Pmod is
+/// the socket a harness plugs into.
+///
+/// Every pin from the board's own constraints file (iCEcube's
+/// `Go_Board_Constraints.pcf`, HX1K-VQ100). What the connector table does
+/// not carry yet, because no role reads it, is kept here so adding one is a
+/// lookup rather than a search: the four push buttons on 53, 51, 54, 52 (1
+/// to 4, active high, pulled down); the two seven-segment digits' segments
+/// A–G on 3, 4, 93, 91, 90, 1, 2 and 100, 99, 97, 95, 94, 8, 96; VGA
+/// hsync 26, vsync 27, red 36, 37, 40, green 29, 30, 33, blue 28, 41, 42.
+let goBoard =
+    let bare (pin: int) = { pin = string pin; standard = None; activeLow = false }
+
+    { name = "goboard"
+      part = hx1k
+      tool = OpenFlow
+      clock = Oscillator 25_000_000
+      fabricHz = 25_000_000
+      audioClockHz = None
+      hostMemory = None
+      host = UartAt 115_200
+      loading = Sram
+      connectors =
+        [ { role = ClockIn; pins = [ "clk25", bare 15 ] }
+          { role = HostUart
+            pins = [ "host_rx", bare 73; "host_tx", bare 74 ] }
+          { role = Leds
+            pins = [ "led1", bare 56; "led2", bare 57; "led3", bare 59; "led4", bare 60 ] } ]
+      sockets =
+        [ { name = "PMOD"
+            kind = "pmod"
+            positions = [ 1, bare 65; 2, bare 64; 3, bare 63; 4, bare 62; 7, bare 78; 8, bare 79; 9, bare 80; 10, bare 81 ] } ] }
 
 /// A harness plugged into one of a board's sockets: the board with the
 /// connectors that plugging it in gives it — each role the harness carries,
@@ -626,12 +758,13 @@ let plug (harness: Harness) (socketName: string) (board: Board) : Board =
 
     { board with connectors = kept @ given }
 
-/// The presets by name, for a verb or a dialog: the two boards this
-/// repository has been built for, at the clocks their audio designs use.
+/// The presets by name, for a verb or a dialog: the boards this repository
+/// is built for, at the clocks their designs use.
 let presets: (string * Board) list =
     [ "kv260", kv260
       "icebreaker", iceBreakerAt 24_000_000
-      "icepi", icepi ]
+      "icepi", icepi
+      "goboard", goBoard ]
 
 /// A preset by name, or the names there are.
 let preset (name: string) : Result<Board, string> =

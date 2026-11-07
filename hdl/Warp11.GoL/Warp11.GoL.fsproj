@@ -10,6 +10,7 @@
         <Compile Include="Core.fs"/>
         <Compile Include="Twin.fs"/>
         <Compile Include="Wrapper.fs"/>
+        <Compile Include="World.fs"/>
     </ItemGroup>
 
     <ItemGroup>

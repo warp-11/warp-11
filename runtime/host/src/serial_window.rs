@@ -311,6 +311,19 @@ fn speed_code(baud: u32) -> Option<u32> {
     })
 }
 
+/// The sync byte of a frame the host sends unasked — a played word, the
+/// other direction of a streamed one. `serialPlaySync` on the fabric side.
+pub const PLAY_SYNC: u8 = 0x5A;
+
+/// The bytes that play `value` into a link that takes played words: the
+/// play sync, the four data bytes least significant first, their xor.
+/// Nothing replies to it; a design's `…LinkFill` register is what a caller
+/// paces by.
+pub fn play_frame(value: u32) -> [u8; 6] {
+    let data = value.to_le_bytes();
+    [PLAY_SYNC, data[0], data[1], data[2], data[3], xor_of(&data)]
+}
+
 /// A `RegisterWindow` over a tty. One request in flight at a time: a write
 /// waits for its acknowledgement and a read for its value, so a driver's
 /// `write32` returning means the register holds the value.
@@ -424,6 +437,19 @@ impl SerialWindow {
         Err(SerialError::Flooded)
     }
 
+    /// Play `words` into the link, one frame each, with no reply to wait
+    /// for. A design's played buffer is finite, so a caller sends what its
+    /// `…LinkFill` register says there is room for.
+    pub fn play(&mut self, words: &[u32]) -> Result<(), SerialError> {
+        let mut bytes = Vec::with_capacity(words.len() * 6);
+        for &w in words {
+            bytes.extend_from_slice(&play_frame(w));
+        }
+        self.tty.write_all(&bytes)?;
+        self.tty.flush()?;
+        Ok(())
+    }
+
     /// Words the fabric has streamed so far, taken out of the window.
     ///
     /// They accumulate during ordinary register traffic, so a recorder loses
@@ -467,6 +493,13 @@ impl RegisterWindow for SerialWindow {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The fabric's `SerialFrame.play`: `5A | d0 d1 d2 d3 | xor` with the xor
+    // over the data alone.
+    #[test]
+    fn a_played_frame_matches_the_fabric_side() {
+        assert_eq!(play_frame(0x0403_0201), [0x5A, 0x01, 0x02, 0x03, 0x04, 0x04]);
+    }
 
     /// A map too wide for the command byte spends one more address byte, and a
     /// narrow one must be byte-for-byte what it always was — which is what lets

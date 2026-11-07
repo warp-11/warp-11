@@ -53,6 +53,21 @@ and always hands the host the newest complete frame, dropping the ones nobody
 could have seen. The host never waits for the fabric and the fabric never waits
 for the host.
 
+**The same world as a design, for any board** (`World.fs`, `life w h`): the
+seed rows are a stream in, the world is a *surface* the host takes whole,
+and `run`, `intervalCycles`, `generation` and `population` are values. On a
+board whose only connection is a UART the surface comes out as snapshots over
+it — latched in one cycle when the host pulls, sent a row at a time, nothing
+between pulls ever seen — which is the same conflation with the host's pull
+as the pace. `-- build life.icepi.json out/` builds it at the largest world
+the part holds — 32×32 on the Icepi, 64×64 on the KV260 — or at the
+`world` the mapping names (`"sizes": { "world": 16 }`); the Go Board is
+refused by number, 8×8 being more than its 1 280 cells;
+`warp11_snapshot --serial … --layout out/life64x64_link_layout.rs --seed
+glider.txt --set run=1 --pull 10 --every 100` seeds it, runs it and prints
+what it pulled. The KV260 keeps `GolAxi` until the host-memory path carries a
+surface.
+
 ## Running it
 
 In simulation, with the desktop UI:
