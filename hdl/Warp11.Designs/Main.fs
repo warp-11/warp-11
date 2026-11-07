@@ -1900,8 +1900,8 @@ let private farmCarriesContext () =
 /// throw exactly that away. The bits are checked next door by `satOps` through
 /// both differential legs; what is checked here is the *type*.
 let private saturateKeepsTheReading () =
-    let signed = signalS "s" 16
-    let unsigned = signal "u" 16
+    let signed = Ref("s", SInt 16)
+    let unsigned = Ref("u", UInt 16)
 
     isSigned (saturate 8 signed)
     && not (isSigned (saturate 8 unsigned))
@@ -1916,18 +1916,18 @@ let private saturateKeepsTheReading () =
     && not (isSigned (saturate 16 unsigned))
 
 let private literalBorrowsTheSign () =
-    let signed = signalS "d" 8
-    let unsigned = signal "u" 8
+    let signed = Ref("d", SInt 8)
+    let unsigned = Ref("u", UInt 8)
 
     // Each pairs a literal with a signed neighbour; each used to take the
     // literal's unsigned label, from the left operand or the true branch.
     isSigned (sub (lit 0UL 8) signed)
     && isSigned (add (lit 1UL 8) signed)
-    && isSigned (mux (signal "c" 1) (lit 0UL 8) signed)
+    && isSigned (mux (Ref("c", UInt 1)) (lit 0UL 8) signed)
     // And the reading still follows the neighbour rather than being assumed:
     // the same shapes around an unsigned neighbour stay unsigned.
     && not (isSigned (sub (lit 0UL 8) unsigned))
-    && not (isSigned (mux (signal "c" 1) (lit 0UL 8) unsigned))
+    && not (isSigned (mux (Ref("c", UInt 1)) (lit 0UL 8) unsigned))
 
 let private ramStyleRule () =
     // The refusal happens where the read is *written* — inside the design body —

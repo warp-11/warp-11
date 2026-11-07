@@ -25,9 +25,9 @@ type GroundType =
 
 /// The same width, the other reading. Zero hardware — this is `asUInt`/`asSInt`
 /// at the type level.
-let asUnsignedType (t: GroundType) = UInt t.Width
+let internal asUnsignedType (t: GroundType) = UInt t.Width
 /// The other direction, and the one `mul` and `lt` read.
-let asSignedType (t: GroundType) = SInt t.Width
+let internal asSignedType (t: GroundType) = SInt t.Width
 
 /// Which way a whole-value fold goes. `AllBits` is true only for all-ones,
 /// `AnyBit` false only for zero, and `Parity` is the XOR of every bit.
@@ -269,7 +269,7 @@ let private refsFolder: ExprFolder<string list> = {
     fAsSInt = fun v -> v
 }
 
-let refs expr = foldExpr refsFolder expr
+let internal refs expr = foldExpr refsFolder expr
 
 /// How many bits, whatever the reading. Widths live in the values, which is
 /// why so little of the DSL takes a width parameter.
@@ -284,13 +284,15 @@ let internal maskOf w =
 /// A constant at a stated width, read as unsigned.
 let lit value width = Lit(value, UInt width)
 /// A reference to a name at a stated width. Declaring the thing is someone
-/// else's job — this only refers to it.
-let signal name width = Ref(name, UInt width)
+/// else's job — this only refers to it, which is why it is internal: a design
+/// reaches a signal by declaring it, and a bare reference is wanted only by
+/// the checks on the IR's own rules.
+let internal signal name width = Ref(name, UInt width)
 
 /// The same, read as signed. The bits are identical; only the reading differs.
 let litS value width = Lit(value, SInt width)
 /// A reference read as signed.
-let signalS name width = Ref(name, SInt width)
+let internal signalS name width = Ref(name, SInt width)
 
 /// A bare number at a width it was not told, but can work out: the width of
 /// whatever it is written beside.
@@ -299,7 +301,7 @@ let signalS name width = Ref(name, SInt width)
 /// literal too big for the signal it is being connected to is a mistake, and
 /// keeping its low bits would hide the mistake rather than report it — the same
 /// rule `rom` already applies to its contents.
-let litAt (w: int) (value: uint64) =
+let internal litAt (w: int) (value: uint64) =
     if value > maskOf w then
         failwith $"literal %d{value} does not fit %d{w} bits"
 
@@ -310,7 +312,9 @@ let litAt (w: int) (value: uint64) =
 /// `input "a" 8` means `UInt 8` — which is what every declaration in the
 /// codebase meant before there was a choice — and `input "a" (SInt 8)` says the
 /// other thing. Resolved statically, the same way the connect operator decides
-/// what it is connecting.
+/// what it is connecting. Public, and not even hidden, because `wire` and
+/// `reg` are `inline`: the overload is resolved at their call sites, so any
+/// message on this type would be reported at every one of them.
 type AsType =
     | AsType
 
@@ -333,6 +337,7 @@ type Widen =
 /// Does this expression reach a declared signal? True through `asUInt` and
 /// `asSInt`, because a reinterpretation moves no bits — which is what lets
 /// `slice` take one.
+[<CompilerMessage("isNamed is the slice rule's guard, reached from the inline `shr`; `slice`, `shr`, `sra` and `saturate` apply it for you", 11001, IsHidden = true)>]
 let rec isNamed expr =
     match expr with
     | Ref _ -> true
@@ -343,6 +348,7 @@ let rec isNamed expr =
 /// A literal borrows its neighbour's *reading* as well as its width — the
 /// codebase's scalar rule, one attribute wider. Two named signals that disagree
 /// is an error: which of them is wrong is the author's to say.
+[<CompilerMessage("agreeOnSign is how `add`, `sub`, `mul`, `mux` and `lt` settle a literal's reading, reached from the inline `lt`; use those", 11001, IsHidden = true)>]
 let agreeOnSign (a: Expr) (b: Expr) =
     if isSigned a = isSigned b then
         a, b
@@ -581,7 +587,9 @@ let parity value = Reduce(Parity, value)
 /// How a shift amount is written: a number the elaborator knows, or a signal it
 /// does not. The call is the same either way — `shl 4 a` is a rewiring and
 /// `shl n a` is a barrel shifter, and which one you get follows from what you
-/// wrote rather than from remembering a second function's name.
+/// wrote rather than from remembering a second function's name. Public for
+/// `AsType`'s reason: `shl` and `shr` are `inline` and resolve it where they
+/// are called.
 type ShiftAmount =
     | ShiftAmount
 
@@ -712,7 +720,7 @@ type Decl =
 
 /// The name and type of a declaration. `Memory` is not one of these — its words
 /// are addressed, not driven, and it carries its own two widths.
-let declOf decl =
+let internal declOf decl =
     match decl with
     | Input (n, t)
     | Output (n, t)

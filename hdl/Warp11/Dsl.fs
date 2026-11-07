@@ -27,7 +27,7 @@ type internal Scope() =
 /// carry itself. `reached` is which states something has named as a destination,
 /// so finalize can say that a state exists with no way in. `machine` in the
 /// stdlib creates one; nothing else should.
-type StateMachineRecord =
+type internal StateMachineRecord =
     { stateReg: string
       states: (uint64 * string) list
       reached: System.Collections.Generic.HashSet<uint64> }
@@ -141,9 +141,9 @@ type internal StreamTracker() =
 ///
 /// Held on a stack rather than threaded through the design, which is what
 /// makes a module body ordinary F# code: `mul8 a b` is a call, not a call
-/// with a context argument. Designs rarely name this type; they get it from
-/// `design`, `moduleDef` or `defModule` and never see it again.
-type Builder(name: string, ?clockSpec: ClockSpec, ?domain: ClockDomain) =
+/// with a context argument. Designs rarely name this type: `moduleDef` hands
+/// one to its body, and `defModule` never shows it at all.
+type Builder internal (name: string, ?clockSpec: ClockSpec, ?domain: ClockDomain) =
     do requireNotVerilogKeyword name "a module"
     let clock = defaultArg clockSpec defaultClock
     // The module's own domain: the default unless `defModuleIn` declared one,
@@ -205,7 +205,7 @@ type Builder(name: string, ?clockSpec: ClockSpec, ?domain: ClockDomain) =
 
     /// A fresh unique name for library-internal signals (fork readies, merge
     /// state) — the combinator, not the user, owns these names.
-    member this.FreshName(stem: string) = names.Next(stem)
+    member internal this.FreshName(stem: string) = names.Next(stem)
 
     member private this.DeclareAs(decl, n, (t: GroundType), kind) = declColl.DeclareAs(decl, n, t, kind)
 
@@ -251,7 +251,7 @@ type Builder(name: string, ?clockSpec: ClockSpec, ?domain: ClockDomain) =
         defaultArg currentDomain ownDomain
 
     /// Run the body with `d` as the current domain — see `withDomain`.
-    member this.WithDomain(d: ClockDomain, body: unit -> unit) =
+    member internal this.WithDomain(d: ClockDomain, body: unit -> unit) =
         this.RegisterForeign d
         let saved = currentDomain
 
@@ -452,19 +452,19 @@ type Builder(name: string, ?clockSpec: ClockSpec, ?domain: ClockDomain) =
 
     /// Record a stream's ready net so `checkStreams` can judge at emission whether
     /// it ended up with exactly one consumer.
-    member _.RegisterStreamReady(ready) = streams.RegisterReady(ready)
+    member internal _.RegisterStreamReady(ready) = streams.RegisterReady(ready)
 
     /// Record a stall probe, so `streamReport` can find its counters later.
-    member _.RegisterProbe(name: string) = streams.RegisterProbe(name)
+    member internal _.RegisterProbe(name: string) = streams.RegisterProbe(name)
 
     /// Record a state machine, so the debugger can show a state register by name
     /// rather than as the number it is.
-    member _.RegisterStateMachine(record: StateMachineRecord) = machines.Register(record)
+    member internal _.RegisterStateMachine(record: StateMachineRecord) = machines.Register(record)
 
     /// Declare a memory of 2^addrWidth words. `style` decides what it becomes on
     /// silicon, and with it which reads are legal — the combinational read is only
     /// allowed on distributed storage.
-    member this.Memory(n, addrWidth, memWidth, init, style, readOnly) : Mem =
+    member internal this.Memory(n, addrWidth, memWidth, init, style, readOnly) : Mem =
         this.TagDomain n
         this.Declare(Memory(n, addrWidth, memWidth, init, style), n, UInt memWidth) |> ignore
 
@@ -477,7 +477,7 @@ type Builder(name: string, ?clockSpec: ClockSpec, ?domain: ClockDomain) =
     /// Record a write. Several writes to one memory fold into a single
     /// priority-muxed write site, because two write sites stop a synthesiser
     /// inferring a block RAM even when they are mutually exclusive.
-    member this.Write(mem: Mem, addr, data, enable, mask: Expr option) =
+    member internal this.Write(mem: Mem, addr, data, enable, mask: Expr option) =
         this.FlushPending() // a write is a statement: it seals a pending If
 
         if mem.readOnly then
@@ -504,7 +504,7 @@ type Builder(name: string, ?clockSpec: ClockSpec, ?domain: ClockDomain) =
     /// A claim that must hold on every edge. Inside `If` it is conditional —
     /// `!active || cond` — because a claim about a branch says nothing about
     /// the cycles that branch is not taken.
-    member this.AssertThat(cond: Expr, message: string) =
+    member internal this.AssertThat(cond: Expr, message: string) =
         this.FlushPending() // an assertion is a statement: it seals a pending If
 
         if width cond <> 1 then
@@ -513,7 +513,7 @@ type Builder(name: string, ?clockSpec: ClockSpec, ?domain: ClockDomain) =
         asserts.Add(conds |> Seq.fold (fun claim active -> Or(Not active, claim)) cond, message)
 
     /// A read that answers next cycle, as a register holding the word.
-    member this.SyncRead(mem: Mem, addr) =
+    member internal this.SyncRead(mem: Mem, addr) =
         let r = this.Reg(this.NextName $"{mem.memName}_rd", mem.memWidth, 0UL)
         this.Assign(r, MemRead(mem.memName, addr, mem.memWidth))
         r
@@ -582,7 +582,7 @@ type Builder(name: string, ?clockSpec: ClockSpec, ?domain: ClockDomain) =
 
     /// Finish elaboration and hand back the module. Dangling conditionals flush
     /// here, and a state machine with a state nothing transitions to fails here.
-    member this.Def =
+    member internal this.Def =
         this.FlushPending()
 
         // A child input nobody drove is a floating port on silicon. Checked at
@@ -894,14 +894,17 @@ let withDomain (d: ClockDomain) (body: unit -> unit) = (current ()).WithDomain(d
 let defModuleIn (d: ClockDomain) name (io: Ports -> 'io) (body: 'io -> unit) : TypedModule<'io> =
     defModuleWith (Builder(name, domain = d)) io body
 
-// The public seams, taking a type. Public because the declaration functions
-// below are `inline` — an inline body has to reach what it calls — while the
-// ambient builder itself stays internal.
+// The seams the inline declaration functions below reach — an inline body
+// has to reach what it calls, so these cannot be internal; they are hidden
+// instead, and the ambient builder itself stays internal.
 /// Declare a wire at a ground type.
+[<CompilerMessage("declareWire is the seam behind the inline `wire`; use `wire`", 11001, IsHidden = true)>]
 let declareWire name (t: GroundType) = (current ()).Wire(name, t)
 /// Declare a register at a ground type, with the value it takes under reset.
+[<CompilerMessage("declareReg is the seam behind the inline `reg` and `regInit`; use those", 11001, IsHidden = true)>]
 let declareReg name (t: GroundType) init = (current ()).Reg(name, t, init)
 /// Declare a register that reset does not reach.
+[<CompilerMessage("declareRegNoReset is the seam behind the inline `regNoReset`; use that", 11001, IsHidden = true)>]
 let declareRegNoReset name (t: GroundType) = (current ()).RegNoReset(name, t)
 
 /// A port bundle's field, read: `Input` and `Output` are `Expr` — direction is
@@ -966,9 +969,9 @@ let outPortArray (p: Ports) name rows cols width =
 /// state is the opposite case and should keep its reset: a state machine that
 /// survives reset is a bug.
 let inline regNoReset name spec = declareRegNoReset name (AsType $ spec)
-/// Connect, when both sides are already signals. Public because `==>` is
-/// `inline` and an inline body has to reach whatever it calls; the ambient
-/// builder itself stays internal.
+/// Connect, when both sides are already signals: the function form of `==>`,
+/// for a wrapper driving a port it was handed (`liftUnary` is one). The
+/// ambient builder itself stays internal.
 let connect (target: Expr) (value: Expr) = (current ()).Assign(target, value)
 
 /// Connect: the value, then the signal it drives.
