@@ -1,0 +1,201 @@
+{
+  "board": {
+    "name": "icepi",
+    "part": {
+      "family": "Ecp5",
+      "device": "25k",
+      "package": "CABGA256",
+      "boardPart": "icepi-zero",
+      "facts": {
+        "processingSystem": false,
+        "lutRam": true,
+        "multipliers": 28,
+        "cells": 24288,
+        "blockRamBits": 1032192
+      }
+    },
+    "tool": "OpenFlow",
+    "clock": {
+      "source": "Crystal",
+      "hz": 50000000
+    },
+    "fabricHz": 25000000,
+    "host": {
+      "driver": "Uart",
+      "baud": 1000000
+    },
+    "loading": {
+      "kind": "Sram"
+    },
+    "connectors": [
+      {
+        "role": "ClockIn",
+        "pins": {
+          "clk50": {
+            "pin": "M1",
+            "standard": "LVCMOS33"
+          }
+        }
+      },
+      {
+        "role": "HostUart",
+        "pins": {
+          "host_rx": {
+            "pin": "K16",
+            "standard": "LVCMOS33"
+          },
+          "host_tx": {
+            "pin": "K15",
+            "standard": "LVCMOS33"
+          }
+        }
+      },
+      {
+        "role": "Leds",
+        "pins": {
+          "led0": {
+            "pin": "E13",
+            "standard": "LVCMOS33"
+          },
+          "led1": {
+            "pin": "D14",
+            "standard": "LVCMOS33"
+          },
+          "led2": {
+            "pin": "E12",
+            "standard": "LVCMOS33"
+          },
+          "led3": {
+            "pin": "C13",
+            "standard": "LVCMOS33"
+          },
+          "led4": {
+            "pin": "D13",
+            "standard": "LVCMOS33"
+          }
+        }
+      }
+    ],
+    "sockets": [
+      {
+        "name": "PI40",
+        "kind": "pi40",
+        "positions": {
+          "3": {
+            "pin": "T2",
+            "standard": "LVCMOS33"
+          },
+          "5": {
+            "pin": "R2",
+            "standard": "LVCMOS33"
+          },
+          "7": {
+            "pin": "R1",
+            "standard": "LVCMOS33"
+          },
+          "8": {
+            "pin": "P1",
+            "standard": "LVCMOS33"
+          },
+          "10": {
+            "pin": "N1",
+            "standard": "LVCMOS33"
+          },
+          "11": {
+            "pin": "R3",
+            "standard": "LVCMOS33"
+          },
+          "12": {
+            "pin": "N4",
+            "standard": "LVCMOS33"
+          },
+          "13": {
+            "pin": "P3",
+            "standard": "LVCMOS33"
+          },
+          "15": {
+            "pin": "P2",
+            "standard": "LVCMOS33"
+          },
+          "16": {
+            "pin": "M2",
+            "standard": "LVCMOS33"
+          },
+          "18": {
+            "pin": "L1",
+            "standard": "LVCMOS33"
+          },
+          "19": {
+            "pin": "L2",
+            "standard": "LVCMOS33"
+          },
+          "21": {
+            "pin": "J1",
+            "standard": "LVCMOS33"
+          },
+          "22": {
+            "pin": "J2",
+            "standard": "LVCMOS33"
+          },
+          "23": {
+            "pin": "G2",
+            "standard": "LVCMOS33"
+          },
+          "24": {
+            "pin": "H2",
+            "standard": "LVCMOS33"
+          },
+          "26": {
+            "pin": "G1",
+            "standard": "LVCMOS33"
+          },
+          "27": {
+            "pin": "G3",
+            "standard": "LVCMOS33"
+          },
+          "28": {
+            "pin": "K3",
+            "standard": "LVCMOS33"
+          },
+          "29": {
+            "pin": "E1",
+            "standard": "LVCMOS33"
+          },
+          "31": {
+            "pin": "F3",
+            "standard": "LVCMOS33"
+          },
+          "32": {
+            "pin": "J3",
+            "standard": "LVCMOS33"
+          },
+          "33": {
+            "pin": "E3",
+            "standard": "LVCMOS33"
+          },
+          "35": {
+            "pin": "E4",
+            "standard": "LVCMOS33"
+          },
+          "36": {
+            "pin": "H3",
+            "standard": "LVCMOS33"
+          },
+          "37": {
+            "pin": "D4",
+            "standard": "LVCMOS33"
+          },
+          "38": {
+            "pin": "F1",
+            "standard": "LVCMOS33"
+          },
+          "40": {
+            "pin": "F2",
+            "standard": "LVCMOS33"
+          }
+        }
+      }
+    ]
+  },
+  "path": "link"
+}

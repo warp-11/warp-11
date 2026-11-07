@@ -1,0 +1,101 @@
+{
+  "board": {
+    "name": "goboard",
+    "part": {
+      "family": "Ice40",
+      "device": "hx1k",
+      "package": "vq100",
+      "facts": {
+        "processingSystem": false,
+        "lutRam": false,
+        "multipliers": 0,
+        "cells": 1280,
+        "blockRamBits": 65536
+      }
+    },
+    "tool": "OpenFlow",
+    "clock": {
+      "source": "Oscillator",
+      "hz": 25000000
+    },
+    "fabricHz": 25000000,
+    "host": {
+      "driver": "Uart",
+      "baud": 115200
+    },
+    "loading": {
+      "kind": "Sram"
+    },
+    "connectors": [
+      {
+        "role": "ClockIn",
+        "pins": {
+          "clk25": {
+            "pin": "15"
+          }
+        }
+      },
+      {
+        "role": "HostUart",
+        "pins": {
+          "host_rx": {
+            "pin": "73"
+          },
+          "host_tx": {
+            "pin": "74"
+          }
+        }
+      },
+      {
+        "role": "Leds",
+        "pins": {
+          "led1": {
+            "pin": "56"
+          },
+          "led2": {
+            "pin": "57"
+          },
+          "led3": {
+            "pin": "59"
+          },
+          "led4": {
+            "pin": "60"
+          }
+        }
+      }
+    ],
+    "sockets": [
+      {
+        "name": "PMOD",
+        "kind": "pmod",
+        "positions": {
+          "1": {
+            "pin": "65"
+          },
+          "2": {
+            "pin": "64"
+          },
+          "3": {
+            "pin": "63"
+          },
+          "4": {
+            "pin": "62"
+          },
+          "7": {
+            "pin": "78"
+          },
+          "8": {
+            "pin": "79"
+          },
+          "9": {
+            "pin": "80"
+          },
+          "10": {
+            "pin": "81"
+          }
+        }
+      }
+    ]
+  },
+  "path": "link"
+}

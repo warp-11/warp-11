@@ -1,0 +1,126 @@
+{
+  "board": {
+    "name": "icebreaker",
+    "part": {
+      "family": "Ice40",
+      "device": "up5k",
+      "package": "sg48",
+      "facts": {
+        "processingSystem": false,
+        "lutRam": false,
+        "multipliers": 8,
+        "cells": 5280,
+        "blockRamBits": 122880
+      }
+    },
+    "tool": "OpenFlow",
+    "clock": {
+      "source": "Crystal",
+      "hz": 12000000
+    },
+    "fabricHz": 24000000,
+    "host": {
+      "driver": "Uart",
+      "baud": 115200
+    },
+    "loading": {
+      "kind": "Sram"
+    },
+    "connectors": [
+      {
+        "role": "ClockIn",
+        "pins": {
+          "clk12": {
+            "pin": "35"
+          }
+        }
+      },
+      {
+        "role": "I2sSeparateCodecs",
+        "pins": {
+          "mclk": {
+            "pin": "4"
+          },
+          "lrclk": {
+            "pin": "2"
+          },
+          "sclk": {
+            "pin": "47"
+          },
+          "sdin": {
+            "pin": "45"
+          },
+          "mclk2": {
+            "pin": "3"
+          },
+          "lrclk2": {
+            "pin": "48"
+          },
+          "sclk2": {
+            "pin": "46"
+          },
+          "sdout": {
+            "pin": "44"
+          }
+        }
+      },
+      {
+        "role": "HostUart",
+        "pins": {
+          "host_rx": {
+            "pin": "6"
+          },
+          "host_tx": {
+            "pin": "9"
+          }
+        }
+      },
+      {
+        "role": "Leds",
+        "pins": {
+          "ledr_n": {
+            "pin": "11",
+            "activeLow": true
+          },
+          "ledg_n": {
+            "pin": "37",
+            "activeLow": true
+          }
+        }
+      }
+    ],
+    "sockets": [
+      {
+        "name": "PMOD1B",
+        "kind": "pmod",
+        "positions": {
+          "1": {
+            "pin": "43"
+          },
+          "2": {
+            "pin": "38"
+          },
+          "3": {
+            "pin": "34"
+          },
+          "4": {
+            "pin": "31"
+          },
+          "7": {
+            "pin": "42"
+          },
+          "8": {
+            "pin": "36"
+          },
+          "9": {
+            "pin": "32"
+          },
+          "10": {
+            "pin": "28"
+          }
+        }
+      }
+    ]
+  },
+  "path": "link"
+}
