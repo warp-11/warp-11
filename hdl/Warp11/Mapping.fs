@@ -71,7 +71,7 @@ let private boardNode (b: Board) : JsonObject =
     o["name"] <- str b.name
 
     let part = JsonObject()
-    part["family"] <- str (match b.part.family with UltraScalePlus -> "UltraScalePlus" | Family.Ice40 -> "Ice40" | Family.Ecp5 -> "Ecp5")
+    part["family"] <- str (match b.part.family with UltraScalePlus -> "UltraScalePlus" | Family.Ice40 -> "Ice40" | Family.Ecp5 -> "Ecp5" | Family.Max10 -> "Max10")
     part["device"] <- str b.part.device
     part["package"] <- str b.part.package
     b.part.boardPart |> Option.iter (fun bp -> part["boardPart"] <- str bp)
@@ -86,7 +86,7 @@ let private boardNode (b: Board) : JsonObject =
     part["facts"] <- facts
     o["part"] <- part
 
-    o["tool"] <- str (match b.tool with Vivado -> "Vivado" | OpenFlow -> "OpenFlow")
+    o["tool"] <- str (match b.tool with Vivado -> "Vivado" | OpenFlow -> "OpenFlow" | Quartus -> "Quartus")
 
     let clock = JsonObject()
 
@@ -273,6 +273,7 @@ let private readBoard (o: JsonNode) : Result<Board, string> =
                  | "Ice40UltraPlus"
                  | "Ice40Hx" -> Ok Family.Ice40
                  | "Ecp5" -> Ok Family.Ecp5
+                 | "Max10" -> Ok Family.Max10
                  | other -> Error $"'family': no family called '{other}'")
                 >>= fun family ->
                     getString part "device"
@@ -315,6 +316,7 @@ let private readBoard (o: JsonNode) : Result<Board, string> =
                                     (match tool with
                                      | "Vivado" -> Ok Vivado
                                      | "OpenFlow" -> Ok OpenFlow
+                                     | "Quartus" -> Ok Quartus
                                      | other -> Error $"'tool': no build tool called '{other}'")
                                     >>= fun tool ->
                                         field o "clock"
@@ -468,7 +470,8 @@ let pathText (p: DataPath) =
     // mapping file can still carry one once `boardTop` builds it.
     | inCarrier, outCarrier -> $"%A{inCarrier}/%A{outCarrier}"
 
-let private readPath (text: string) : Result<DataPath, string> =
+/// A data path by the word a mapping file uses for it.
+let pathNamed (text: string) : Result<DataPath, string> =
     match text with
     | "pins" -> Ok viaPins
     | "memory" -> Ok viaHostMemory
@@ -660,7 +663,7 @@ let parse (text: string) : Result<Mapping, string> =
         |> Result.bind readBoard
         |> Result.bind (fun board ->
             getString root "path"
-            |> Result.bind readPath
+            |> Result.bind pathNamed
             |> Result.bind (fun path ->
                 readBind root
                 |> Result.bind (fun named ->
@@ -723,6 +726,7 @@ let showBoard (b: Board) : string =
         | UltraScalePlus -> "UltraScalePlus"
         | Family.Ice40 -> "Ice40"
         | Family.Ecp5 -> "Ecp5"
+        | Family.Max10 -> "Max10"
 
     let facts =
         let f = b.part.facts
@@ -732,6 +736,7 @@ let showBoard (b: Board) : string =
         match b.tool with
         | Vivado -> "Vivado"
         | OpenFlow -> "OpenFlow"
+        | Quartus -> "Quartus"
 
     let clock =
         match b.clock with

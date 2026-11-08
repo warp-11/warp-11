@@ -58,14 +58,28 @@ dotnet run -c Release --project Warp11.Gep -- problems        # symbolic regress
 dotnet run -c Release --project Warp11.Gep -- diff <dir>      # differential testbenches
 ```
 
-Emit the hardware and its register map:
+The KV260 directory — block design, overlay, packaging, the Rust seam — and
+the committed seam alone:
 
 ```sh
+dotnet run -c Release --project Warp11.Gep -- build out/      # then out/build.sh; the app is gep-cluster-axi
 dotnet run -c Release --project Warp11.Gep -- hardware <repo-root>
 ```
 
-Then `build_gepclusterfs_axi.tcl`, the `gep-cluster-fs` app, and
-`gep_cluster_first_light` on the board.
+Then `gep_cluster_first_light <vector-dir>` on the board for one
+queue-mode pass against `-- boardvector <dir>`, and the whole streaming
+loop — emit, marshal, breed, generation after generation — against the
+mirror's answer:
+
+```sh
+dotnet run -c Release --project Warp11.Gep -- streamvector vec/ 6          # the oracle, six generations
+(cd ../runtime && cargo run --bin gep_cluster_evolve -- ../hdl/vec --sim)  # the same loop against the Sim, through the bridge
+./gep_cluster_evolve vec/                                                  # and on the board
+```
+
+`gep_cluster_evolve` prints, per generation, how many op-list entries,
+genomes and fitnesses matched the mirror and what each pass cost; a pass
+is every one of them, every generation.
 
 ## Files
 

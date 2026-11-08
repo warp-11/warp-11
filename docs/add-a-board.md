@@ -100,10 +100,11 @@ to be keyed by, and a role exists when a design declares a need for it.
 
 ## 2. Build for it
 
-Name the file where a preset's name would go:
+Name the file where a preset's name would go, with the path the board can
+carry — `link` on a board whose connection is a UART:
 
 ```sh
-dotnet run --project Warp11.Placement -- build my.json goboard.json pins out/
+dotnet run --project Warp11.Placement -- build my.json goboard.json link out/
 cd out && ./build.sh
 ```
 

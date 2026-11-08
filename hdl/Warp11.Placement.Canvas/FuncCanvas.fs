@@ -1600,9 +1600,13 @@ let view (opening: Opening) : Control =
                 | name ->
                     match preset name with
                     | Ok b ->
+                        // A board with host memory keeps the path it had; one
+                        // whose only connection is a UART starts on the link,
+                        // since the pins want a converter plugged in.
                         let path =
-                            match mapping.Current with
-                            | Some m when b.hostMemory.IsSome -> m.path
+                            match mapping.Current, b.host with
+                            | Some m, _ when b.hostMemory.IsSome -> m.path
+                            | _, UartAt _ -> viaLink
                             | _ -> viaPins
 
                         useMapping (Some { board = b; path = path; plugged = []; sizes = [] })
@@ -1623,7 +1627,7 @@ let view (opening: Opening) : Control =
                    let landed = Warp11.BoardTop.boardRate b g.sampleRate
 
                    [ row ("part", b.part.device + (b.part.boardPart |> Option.map (fun bp -> $" ({bp})") |> Option.defaultValue ""))
-                     row ("build tool", (match b.tool with Vivado -> "Vivado" | OpenFlow -> "yosys → nextpnr → icepack"))
+                     row ("build tool", (match b.tool with Vivado -> "Vivado" | OpenFlow -> "yosys → nextpnr → icepack" | Quartus -> "Quartus Prime"))
                      line
                          [ label "clock"
                            label clockSource
@@ -1635,8 +1639,10 @@ let view (opening: Opening) : Control =
                      row ("the design's rate lands at", $"%.3f{landed} Hz")
                      line
                          [ label "data path"
-                           combo [ "pins"; "memory"; "count"; "scatter" ] (Warp11.Mapping.pathText m.path) (fun p ->
-                               update (fun m -> { m with path = (match p with "memory" -> viaHostMemory | "count" -> viaCount | "scatter" -> viaScatter | _ -> viaPins) })) ]
+                           combo [ "pins"; "memory"; "count"; "scatter"; "link"; "countlink"; "registers" ] (Warp11.Mapping.pathText m.path) (fun p ->
+                               match Warp11.Mapping.pathNamed p with
+                               | Ok path -> update (fun m -> { m with path = path })
+                               | Error why -> message.Set why) ]
                      (match b.hostMemory with
                       | Some hm ->
                           line

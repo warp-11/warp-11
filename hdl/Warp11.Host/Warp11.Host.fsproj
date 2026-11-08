@@ -5,6 +5,7 @@
         <WarningsAsErrors>FS0025</WarningsAsErrors>
         <PackageId>Warp11.Host</PackageId>
         <Description>The host half of Warp 11 in F#: a design's register map reached over a serial port, the twin of the Rust warp11-host crate.</Description>
+        <PackageReleaseNotes>0.1.0, the first release of this package. A design's register map over a serial port from F# — the twin of the Rust warp11-host crate's SerialWindow — and a stream played into a design's input over the same link. The frame protocol it speaks is the one the fabric's serialRegMapSlaveLink speaks, including the fix in Warp11 0.1.0 for a streamed frame corrupted by a register read answered mid-frame.</PackageReleaseNotes>
     </PropertyGroup>
 
     <ItemGroup>

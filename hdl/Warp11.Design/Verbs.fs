@@ -84,6 +84,23 @@ let run (argv: string[]) : int option =
     | [| "frame"; path; size; out; _; _; _ |]
     | [| "frame"; path; size; out; _; _; _; _ |] ->
         frame path size out argv[4..] |> Some
+    // An image through the design in the Sim, from the shell: `image
+    // design.json in.pgm out.pgm` — rows in, the rows the design drew out,
+    // the oracle `warp11_batch in.pgm out.pgm` is judged against on a board.
+    | [| "image"; path; inPath; outPath |] ->
+        match Warp11.DesignFile.load path with
+        | Error why ->
+            eprintfn $"{path}: {why}"
+            Some 1
+        | Ok g ->
+            try
+                let image = Warp11.Pgm.readPgm inPath
+                let out = runImageInSim 10_000 g { image = image; outputPath = Some outPath }
+                printfn $"wrote {outPath} (%d{out.width}×%d{out.height})"
+                Some 0
+            with e ->
+                eprintfn $"{e.Message}"
+                Some 1
     // The batch bridge: `batchserve design.json <preset>` serves the design's
     // host-memory top in the Sim to a Rust driver on stdin.
     // A preset alone is the host-memory path; `<preset> count` the counted one;
@@ -157,11 +174,7 @@ let run (argv: string[]) : int option =
                     Some 1
     // ...or for a preset and a path named on the line.
     | [| "build"; path; which; way; dir |] ->
-        let dataPath =
-            match way with
-            | "pins" -> Ok viaPins
-            | "memory" -> Ok viaHostMemory
-            | other -> Error $"a data path is pins or memory, not '{other}'"
+        let dataPath = Warp11.Mapping.pathNamed way
 
         // `which` is a preset's name or a board file's path.
         match Warp11.DesignFile.load path, dataPath |> Result.bind (Warp11.Mapping.ofBoard which) with

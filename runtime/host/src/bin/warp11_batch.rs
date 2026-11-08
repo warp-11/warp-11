@@ -10,6 +10,13 @@
 //!   warp11_batch frame:1400x800 out.pgm --sim mandelbrot.json --chunk 128 --set cxOrigin=0xE0000000 ...
 //!   warp11_batch frame:320x200 out.pgm --serial /dev/ttyUSB1 --layout mandelbrot_link_layout.rs --chunk 128 --set ...
 //!   warp11_batch count:48000 tone.wav --serial /dev/ttyUSB1 --layout tone_link_layout.rs [--rate 48000]
+//!   warp11_batch gradient.pgm out.pgm --sim blur.json --preset kv260
+//!
+//! `in.pgm out.pgm` is an image a row a beat: the design's one input field
+//! is the row — sixty-four pixels is 512 bits, four beats of the KV260's
+//! memory or sixteen words of a link — and what it drew comes back as the
+//! same shape, `dotnet run --project Warp11.Placement -- image design.json
+//! in.pgm out.pgm` being the Sim's own answer to compare with.
 //!
 //! `count:<n>` is a design with nothing in — a tone — asked for `n` rows,
 //! written as a WAV at `--rate`, which the rows do not carry.
@@ -45,7 +52,7 @@ use warp11_runtime::RegisterWindow;
 use warp11_host::udmabuf::{find_uio, Udmabuf};
 use warp11_host::wav::{from_sample, read_wav, to_sample, write_wav};
 use warp11_runtime::batch::{BatchDevice, BatchError};
-use warp11_host::pgm::write_pgm;
+use warp11_host::pgm::{read_pgm, write_pgm};
 
 /// Rows a burst holds for a stereo boundary: what `frameCount` must be a
 /// multiple of. Two rows a 128-bit beat, sixteen beats a burst.
@@ -68,6 +75,27 @@ enum Source {
     Frame { width: usize, height: usize },
     /// Nothing in: a count of beats the design answers with rows — a tone.
     Count(usize),
+    /// An image, a row a beat: the design's one field is the row, `width`
+    /// pixels of a byte each.
+    Pgm(PathBuf),
+}
+
+/// How a row of `width` pixels sits in the host's memory — the fabric's
+/// `rowShape`, derived the same way: one 32-bit lane per field, so the
+/// row's one field takes `ceil(width / 4)` lanes; padded to a power of two
+/// within a beat, or to whole beats beyond one. Bytes per row, and rows a
+/// burst holds (what the count must be a multiple of).
+fn pgm_row_shape(width: usize) -> (usize, usize) {
+    let lanes = width.div_ceil(4);
+    let lanes_per_beat = 4;
+    if lanes <= lanes_per_beat {
+        let lanes_per_row = lanes.next_power_of_two();
+        let rows_per_beat = lanes_per_beat / lanes_per_row;
+        (lanes_per_row * 4, rows_per_beat * BEATS_PER_BURST)
+    } else {
+        let beats_per_row = lanes.div_ceil(lanes_per_beat);
+        (beats_per_row * 16, BEATS_PER_BURST / beats_per_row)
+    }
 }
 
 struct Args {
@@ -87,6 +115,9 @@ struct Args {
 }
 
 fn parse_frame(text: &str) -> Option<Source> {
+    if text.ends_with(".pgm") {
+        return Some(Source::Pgm(PathBuf::from(text)));
+    }
     if let Some(n) = text.strip_prefix("count:") {
         return n.parse().ok().filter(|&n: &usize| n > 0).map(Source::Count);
     }
@@ -98,7 +129,7 @@ fn parse_frame(text: &str) -> Option<Source> {
 }
 
 fn usage() -> ! {
-    eprintln!("usage: warp11_batch (in.wav out.wav | frame:<w>x<h> out.pgm [--chunk <pixels>] | count:<n> out.wav [--rate 48000]) (--board <uio name> --layout <seam.rs> | --serial <tty> [--baud 1000000] --layout <seam.rs> | --sim <design.json> [--preset kv260] [--fsproj <fsproj>]) [--set name=value]...");
+    eprintln!("usage: warp11_batch (in.wav out.wav | in.pgm out.pgm | frame:<w>x<h> out.pgm [--chunk <pixels>] | count:<n> out.wav [--rate 48000]) (--board <uio name> --layout <seam.rs> | --serial <tty> [--baud 1000000] --layout <seam.rs> | --sim <design.json> [--preset kv260] [--fsproj <fsproj>]) [--set name=value]...");
     std::process::exit(2)
 }
 
@@ -235,6 +266,35 @@ enum Output {
     Pixels(Vec<u8>),
 }
 
+/// The image a `Source::Pgm` names, read once.
+struct Image {
+    width: usize,
+    height: usize,
+    pixels: Vec<u8>,
+}
+
+fn image_of(args: &Args) -> Result<Image, String> {
+    match &args.input {
+        Source::Pgm(path) => {
+            let (width, height, pixels) = read_pgm(path)?;
+            Ok(Image { width, height, pixels })
+        }
+        _ => Err("not an image".into()),
+    }
+}
+
+/// The image's rows as the fabric reads them: pixel `c` at byte `c` of a
+/// row padded to the row shape, rows padded to whole bursts.
+fn stage_image(image: &Image) -> (Vec<u8>, usize, usize) {
+    let (bytes_per_row, rows_per_burst) = pgm_row_shape(image.width);
+    let padded = image.height.div_ceil(rows_per_burst) * rows_per_burst;
+    let mut bytes = vec![0u8; padded * bytes_per_row];
+    for r in 0..image.height {
+        bytes[r * bytes_per_row..r * bytes_per_row + image.width].copy_from_slice(&image.pixels[r * image.width..(r + 1) * image.width]);
+    }
+    (bytes, padded, bytes_per_row)
+}
+
 /// The staged input and its count: a recording's rows, or nothing and the
 /// beats of a frame.
 fn staged(args: &Args, frames: &[(i16, i16)]) -> (Vec<u8>, usize, usize) {
@@ -254,6 +314,15 @@ fn staged(args: &Args, frames: &[(i16, i16)]) -> (Vec<u8>, usize, usize) {
             let padded = n.div_ceil(FRAMES_PER_BURST) * FRAMES_PER_BURST;
             (Vec::new(), padded, padded * BYTES_PER_FRAME)
         }
+        Source::Pgm(_) => {
+            let image = image_of(args).unwrap_or_else(|e| {
+                eprintln!("{e}");
+                std::process::exit(1);
+            });
+            let (bytes, padded, _) = stage_image(&image);
+            let out_len = bytes.len();
+            (bytes, padded, out_len)
+        }
     }
 }
 
@@ -265,6 +334,18 @@ fn unstaged(args: &Args, frames: &[(i16, i16)], bytes: &[u8]) -> Output {
             Output::Pixels(crop(&bytes[..shape.beats() * PIXELS_PER_BEAT], *width, *height, shape.padded_width))
         }
         Source::Count(n) => Output::Frames(unstage(bytes, *n)),
+        Source::Pgm(_) => {
+            let image = image_of(args).unwrap_or_else(|e| {
+                eprintln!("{e}");
+                std::process::exit(1);
+            });
+            let (bytes_per_row, _) = pgm_row_shape(image.width);
+            let mut pixels = Vec::with_capacity(image.width * image.height);
+            for r in 0..image.height {
+                pixels.extend_from_slice(&bytes[r * bytes_per_row..r * bytes_per_row + image.width]);
+            }
+            Output::Pixels(pixels)
+        }
     }
 }
 
@@ -400,20 +481,59 @@ fn run_serial(args: &Args, frames: &[(i16, i16)]) -> Result<Output, String> {
         let words = count_over_link(args, &mut window, &registers, n, 2 * n, record_arm, sent, record_dropped)?;
         return Ok(Output::Frames(words.chunks(2).map(|w| (from_sample(w[0] as i32), from_sample(w[1] as i32))).collect()));
     }
+    if matches!(args.input, Source::Pgm(_)) {
+        let image = image_of(args)?;
+        // The row's one field as `lanesOf` words, low word first, pixel `c`
+        // at byte `c`: four pixels a word.
+        let lanes = image.width.div_ceil(4);
+        let staged: Vec<u32> = (0..image.height)
+            .flat_map(|r| {
+                let row = &image.pixels[r * image.width..(r + 1) * image.width];
+                (0..lanes).map(move |k| {
+                    let mut w = [0u8; 4];
+                    for j in 0..4 {
+                        if k * 4 + j < row.len() {
+                            w[j] = row[k * 4 + j];
+                        }
+                    }
+                    u32::from_le_bytes(w)
+                })
+            })
+            .collect();
+        let back = play_and_read(args, &mut window, &registers, &staged)?;
+        let pixels: Vec<u8> = (0..image.height)
+            .flat_map(|r| back[r * lanes..(r + 1) * lanes].iter().flat_map(|w| w.to_le_bytes()).take(image.width).collect::<Vec<u8>>())
+            .collect();
+        return Ok(Output::Pixels(pixels));
+    }
 
-    // The player's registers the same way; `Fill` is the player's alone.
-    let (player, _fill) = ending_in(&registers, "LinkFill")?;
-    let play_arm = seam::resolve(&format!("{player}LinkArm"), &registers)?;
-    let play_dropped = seam::resolve(&format!("{player}LinkDropped"), &registers)?;
 
     // Two words a row, the fields in the row's order, each the sample as
-    // the lane carries it. A chunk is what the fabric's buffer holds with
-    // room to spare, where the seam says how much it holds.
+    // the lane carries it.
+    let staged: Vec<u32> = frames.iter().flat_map(|&(l, r)| [to_sample(l) as u32, to_sample(r) as u32]).collect();
+    let back = play_and_read(args, &mut window, &registers, &staged)?;
+    Ok(Output::Frames(back.chunks(2).map(|w| (from_sample(w[0] as i32), from_sample(w[1] as i32))).collect()))
+}
+
+/// Words played into the link and as many read back as streamed frames,
+/// the player and the recorder armed around it: the rows go in a chunk at
+/// a time — what the fabric's buffer holds with room to spare, where the
+/// seam says how much — and the fabric's own counts say afterwards whether
+/// every word made it.
+fn play_and_read(args: &Args, window: &mut SerialWindow, registers: &[(String, usize)], staged: &[u32]) -> Result<Vec<u32>, String> {
+    let tty = args.serial.as_ref().unwrap();
+    let layout = args.layout.as_ref().unwrap();
+    let io = |e: warp11_host::serial_window::SerialError| e.to_string();
+    let (player, _fill) = ending_in(registers, "LinkFill")?;
+    let (recorder, sent) = ending_in(registers, "LinkSent")?;
+    let play_arm = seam::resolve(&format!("{player}LinkArm"), registers)?;
+    let play_dropped = seam::resolve(&format!("{player}LinkDropped"), registers)?;
+    let record_arm = seam::resolve(&format!("{recorder}LinkArm"), registers)?;
+    let record_dropped = seam::resolve(&format!("{recorder}LinkDropped"), registers)?;
     let chunk_words = match seam::read_const(layout, &format!("{}_BUFFER_WORDS", seam::screaming(player)))? {
         Some(buffer) => LINK_CHUNK_WORDS.min((buffer as usize / 2).max(2)),
         None => LINK_CHUNK_WORDS,
     };
-    let staged: Vec<u32> = frames.iter().flat_map(|&(l, r)| [to_sample(l) as u32, to_sample(r) as u32]).collect();
     let started = std::time::Instant::now();
     window.write32(record_arm, 1).map_err(io)?;
     window.write32(play_arm, 1).map_err(io)?;
@@ -453,8 +573,8 @@ fn run_serial(args: &Args, frames: &[(i16, i16)]) -> Result<Output, String> {
         ));
     }
 
-    eprintln!("{} rows in {:.3} s over {}", frames.len(), elapsed.as_secs_f64(), tty.display());
-    Ok(Output::Frames(back.chunks(2).map(|w| (from_sample(w[0] as i32), from_sample(w[1] as i32))).collect()))
+    eprintln!("{} words in {:.3} s over {}", staged.len(), elapsed.as_secs_f64(), tty.display());
+    Ok(back)
 }
 
 /// The counted path over the link: `total` beats minted in fabric from
@@ -544,6 +664,7 @@ fn main() {
         },
         Source::Frame { .. } => (0, Vec::new()),
         Source::Count(_) => (args.rate, Vec::new()),
+        Source::Pgm(_) => (0, Vec::new()),
     };
 
     let result = if args.sim.is_some() {
@@ -561,6 +682,10 @@ fn main() {
         }
         (Output::Pixels(pixels), Source::Frame { width, height }) => {
             write_pgm(&args.output, *width, *height, &pixels).map(|()| format!("{width}×{height}"))
+        }
+        (Output::Pixels(pixels), Source::Pgm(_)) => {
+            let image = image_of(&args)?;
+            write_pgm(&args.output, image.width, image.height, &pixels).map(|()| format!("{}×{}", image.width, image.height))
         }
         (Output::Pixels(_), Source::Wav(_) | Source::Count(_)) => Err("a recording came back as pixels".to_string()),
     });

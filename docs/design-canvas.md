@@ -152,12 +152,12 @@ have several, and the design names its default.
 With nothing selected, the design panel ends in **target**:
 
 ```
- preset      [ kv260 ▾ ]     kv260 · icebreaker · custom · simulator only
+ preset      [ kv260 ▾ ]     kv260 · icebreaker · icepi · goboard · de10lite · custom · simulator only
  part        xck26-sfvc784-2LV-c (xilinx.com:kv260_som:part0:1.4)
  build tool  Vivado
  clock       PS clock 71   [ 100000000 ] Hz
  the design's rate lands at   48828.125 Hz
- data path   [ memory ▾ ]    pins · memory
+ data path   [ memory ▾ ]    pins · memory · count · scatter · link · countlink · registers
  host memory S_AXI_HPC0_FPD, 128 bits, arena [ 8 ] MiB
  host driver AXI-Lite at [ 0xB0000000 ]
  loading     OS app under /lib/firmware/xilinx
@@ -212,7 +212,9 @@ What lands in the directory depends on the build tool:
 | `{name}.bif`, `shell.json` | the packaging |
 | `build.sh` | Vivado, bootgen, dtc → `app/`, then the deploy commands |
 
-**The open flow** (the iCEBreaker preset):
+**The open flow** (the iCEBreaker, Go Board and Icepi presets — the
+Icepi's files are the ECP5's, `.lpf` for `.pcf`, `openFPGALoader` for
+`iceprog`):
 
 | file | what |
 |---|---|

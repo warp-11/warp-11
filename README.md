@@ -42,9 +42,9 @@ since been removed; the design now runs one generation per 166.67 MHz cycle,
   combinational read of the wrong one cannot elaborate — each from a real bug
   that was legal Verilog, and therefore invisible to every tool downstream.
 
-> **Status: pre-release.** Everything described here runs today, and the
-> packages on NuGet are prereleases — the API is not stable. See
-> [what is not built](#what-is-not-built).
+> **Status: 0.1.0.** Everything described here runs today. Four packages on
+> NuGet — `Warp11`, `Warp11.SimView`, `Warp11.SimView.Desktop`, `Warp11.Host`
+> — and four boards. See [what is not built](#what-is-not-built).
 
 ## Try it without installing anything
 
@@ -111,6 +111,22 @@ None of those are demos written to look good in a README. Each has a software
 twin it is checked against bit-for-bit, and the numbers are measured on the
 board.
 
+**And the same designs build for boards with no processing system at all** —
+an iCEBreaker, a Go Board, an Icepi Zero — from one mapping file each, the
+host reaching them over a UART instead of AXI, a WAV or an image through the
+design coming back byte-identical to the simulator. The receipts, from each
+board's own toolchain report:
+
+| board | part | hello | what fits |
+|---|---|---|---|
+| KV260 | ZU5EV, 117 k LUTs, 1 248 DSPs | AXI-Lite | everything here |
+| Icepi Zero | ECP5-25F, 24 k cells | 143 cells, 212 MHz | Mandelbrot at 2 lanes, Life at 32×32, every audio and table example |
+| iCEBreaker | iCE40 UP5K, 5 280 cells | 192 cells, 60 MHz | gain, adder, passthru, tone, Life at 8×8 |
+| Go Board | iCE40 HX1K, 1 280 cells | 199 cells, 167 MHz | passthru, tone, adder |
+
+Every ✗ in the full matrix is a refusal with its number, not a guess —
+[Boards](https://warp11.org/guides/boards) has the whole table.
+
 ## Why it exists
 
 Most HDL toolkits ask you to be a hardware engineer who tolerates a
@@ -176,6 +192,8 @@ the IR did not invent its own semantics gets measured.
   [Game of Life](https://warp11.org/examples/game-of-life), each with its own write-up.
 - **[Runtime and host drivers](https://warp11.org/guides/runtime)** — the crates, cross-compiling
   for the board without a cross-gcc, and the first-light binaries.
+- **[Boards](https://warp11.org/guides/boards)** — the four boards, the mapping file
+  that puts a design on one, and [how to add your own](https://warp11.org/guides/add-a-board).
 - **[Hardware workflow](https://warp11.org/guides/dev-workflow)** — getting a bitstream onto a
   KV260 and driving it.
 
@@ -183,20 +201,20 @@ the IR did not invent its own semantics gets measured.
 
 Being clear about this is cheaper than letting you find out:
 
-- **The packages are prereleases.** `Warp11`, `Warp11.SimView` and
-  `Warp11.SimView.Desktop` are on NuGet at a `0.1.0-alpha` version, so `dotnet
-  add package` needs `--prerelease`. They are published to hold the names and to
-  make the debugger reachable; the repo is still the better way in while the
-  API moves.
-- **The API is not stable.** It is pre-1.0 and things move.
-- **Limited hardware support.** One board is proven — a Xilinx KV260 — and
-  while nothing about the toolkit is KV260-specific, nothing else has been run.
-  What you can plug it into is short to match: AXI4-Lite from a register map,
-  AXI4 master read and write, and I2S in and out is the whole list, where the
-  established libraries ship half a dozen bus families and a shelf of
-  controllers. That is about the hardware edges rather than the library as a
-  whole — the audio chain and the stream connect layer are deep.
-- **No formal verification, no multi-clock/CDC support.**
+- **The API is pre-1.0.** 0.1.0 is the first release whose public surface was
+  audited rather than accreted; things will still move between minor versions,
+  and the package notes say what did.
+- **Four boards, two toolchains.** A Xilinx KV260 through Vivado, and three
+  Lattice boards through the open flow. Intel's Quartus is the next toolchain
+  and is not in this release. What a design can plug into is short: AXI4-Lite
+  from a register map, AXI4 master read and write, a UART register link, I2S
+  and PDM in and out — where the established libraries ship half a dozen bus
+  families and a shelf of controllers.
+- **GEP runs on the KV260 alone.** Its cluster reaches DDR through two AXI
+  masters, and carrying it over a UART is a redesign that did not make this
+  release.
+- **No formal verification.** Clock domains and checked crossings exist;
+  nothing proves a design beyond simulation and the differential.
 
 ## License
 

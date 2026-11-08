@@ -369,6 +369,12 @@ cd ../xmutil && ./package_audio-batch.sh
 ssh ubuntu@<board> 'cd warp11-driver && ./audio_batch_first_light in.wav out.wav'
 ```
 
+That is the hand-written path the first bitstream took. The same rows
+through DDR are what any design built from a mapping gets — `-- build
+passthru passthru.kv260.json out/`, then `out/build.sh` — and
+`warp11_batch in.wav out.wav --board passthru_batch --layout
+out/passthru_batch_layout.rs` drives it with no first-light binary of its own.
+
 Its Vivado scaffolding is cloned from `gepclusterfs`, which is the other design
 here carrying both an AXI-Lite slave and a read+write AXI4 master. The two top
 modules have **identical port sets** — checked, not assumed — so the clone is a

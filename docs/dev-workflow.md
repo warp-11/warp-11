@@ -73,12 +73,21 @@ The layout is **committed**, because the runtime crate compiles against it —
 emit-before-compile would otherwise be circular. Commit the diff when a
 register map changes; that diff is the review.
 
-**2. Bitstream**, when the RTL changed (~20–30 min, gated on timing):
+**2. Bitstream**, when the RTL changed (~20–30 min, gated on timing). Every
+design project writes the directory Vivado builds from — block design,
+constraints, overlay, packaging, the Rust seam — from its mapping, and the
+directory's own script runs the flow, packages the app and ends with the gate
+that reads Vivado's reports back:
 
 ```sh
-cd hardware/vivado && vivado -stack 2000 -mode batch -source build_mandelframe_axi.tcl
-cd ../xmutil && ./package_mandel-frame.sh
+dotnet run -c Release --project Warp11.Mandelbrot -- bitstream Warp11.Mandelbrot/mandelbrot.kv260.json out/
+cd out && ./build.sh
 ```
+
+(`Warp11.GoL.App -- build life.kv260.json out/`, `Warp11.Gep -- build out/`
+and `Warp11.Placement -- build my.json my.kv260.json out/` are the same shape.
+The hand-written `hardware/vivado/*.tcl` scripts the first accelerators were
+built with are retired as each regenerated bitstream is run bit-exact.)
 
 A good free window for the differential oracle — four minutes of Verilator
 against twenty of Vivado costs nothing but contention, and a failure arrives in
@@ -151,8 +160,9 @@ active slot. A daemon that hits this exits non-zero rather than looping.
 The AXI base doesn't match what the bitstream decoded. Reads to undecoded
 addresses hang the smartconnect indefinitely — whole-board freeze, recoverable
 only by power-cycle. **Every Warp 11 slave app is at `0xB0000000`**, the only
-sub-4GB aperture HPM1_FPD exposes on the KV260; keep it in sync with
-`assign_bd_address` in the matching `hardware/vivado/*_bd_bd.tcl`.
+sub-4GB aperture HPM1_FPD exposes on the KV260. The generated block design
+takes it from the board's `AxiLiteAt`, so a mismatch means a bitstream built
+from a different board file than the driver's seam.
 
 ### Frames arrive rotated, but every register reads correctly
 

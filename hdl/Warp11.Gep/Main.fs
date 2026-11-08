@@ -2312,6 +2312,132 @@ let main argv =
 
         printfn $"build with: {out.run}"
         0
+    // The F# half of the streaming loop's bridge: the silicon-shape cluster
+    // in the Sim with a 4 MiB behavioural DDR, so `gep_cluster_evolve --sim`
+    // runs the whole host loop before any bitstream exists. ~6 k cycles a
+    // second at this shape (measured 2026-11-07), a few seconds a generation
+    // at a small population.
+    | [| "simserve" |] ->
+        BoardTop.ddrServe ClusterAxi.clusterAxiSilicon.Value.def [] (4 <<< 20) 16 "GEPSERVE"
+        0
+    // The streaming loop's vector: a population, cases, the policy, and the
+    // mirror's answer for every generation — the op-list the fabric must
+    // emit (parents relative to the region, as the fabric emits them), the
+    // offspring it must write back, their fitness — so the host loop is
+    // judged against the same oracle the Sim checks are, generation by
+    // generation, in the Sim and on the board alike.
+    | [| "streamvector"; dir; gensText |] ->
+        System.IO.Directory.CreateDirectory dir |> ignore
+        let gens = int gensText
+        let config = ClusterAxi.clusterSiliconConfig
+        let popSize = 16
+        let nCases = 32
+        let rng = GepRng(2_026_1107L)
+        let rangeFx = fx defaultConstantRange
+
+        let thresholds =
+            quantizeRates
+                { onePoint = thresholdOf 0.5
+                  twoPoint = thresholdOf 0.35
+                  geneRecomb = thresholdOf 0.25
+                  mutation = thresholdOf 0.2
+                  constReplace = thresholdOf 0.3
+                  creep = thresholdOf 0.4
+                  inversion = thresholdOf 0.3
+                  isTrans = thresholdOf 0.3
+                  risTrans = thresholdOf 0.3
+                  geneTrans = 0
+                  creepSigmaFx = fx 0.1
+                  constRangeFx = fx 10.0 }
+
+        let silent = silenceRates thresholds
+
+        let cases =
+            [ for _ in 1..nCases ->
+                Array.init config.variableCount (fun _ -> rng.NextBounded(6 * fxOne) - 3 * fxOne),
+                rng.NextBounded(12 * fxOne) - 6 * fxOne ]
+
+        let initialPop = Array.init (2 * popSize) (fun _ -> hwRandomChromosome config rangeFx rng)
+        let selSeedWords = expandSeed 4_711L
+        let mirror = mirrorGenerationLoop config cases thresholds silent popSize gens initialPop selSeedWords true
+        let high (v: int) = int ((uint32 v) >>> 16)
+
+        let rateWords =
+            [| for lo, hi in
+                   [ thresholds.mutation, thresholds.constReplace
+                     thresholds.creep, thresholds.inversion
+                     thresholds.isTrans, thresholds.risTrans
+                     thresholds.onePoint, thresholds.twoPoint
+                     thresholds.geneRecomb, 0 ] -> uint32 (high lo ||| (high hi <<< 16)) |]
+
+        let le32 (words: uint32 seq) =
+            [| for w in words do
+                   yield byte w
+                   yield byte (w >>> 8)
+                   yield byte (w >>> 16)
+                   yield byte (w >>> 24) |]
+
+        let write name (bytes: byte[]) =
+            let path = System.IO.Path.Combine(dir, name)
+            System.IO.File.WriteAllBytes(path, bytes)
+            printfn $"wrote {path} ({bytes.Length} bytes)"
+
+        write "population.bin" (le32 [ for s in 0 .. popSize - 1 do yield! geneRecordWords initialPop[s] ])
+
+        write
+            "cases.bin"
+            (le32
+                [ for vars, target in cases do
+                      for v in vars -> uint32 v
+                      yield uint32 target ])
+
+        write "rates.bin" (le32 (Array.append rateWords [| uint32 thresholds.creepSigmaFx; uint32 thresholds.constRangeFx |]))
+        write "seed.bin" (le32 [ for w in selSeedWords -> uint32 w ])
+
+        // Round 0 is the score round: the initial population's fitness, as
+        // generation 0's emit pass reports it in the result ring.
+        write "fitness_0.bin" (le32 [ for e in mirror.rounds[0] do yield uint32 e.fit; yield uint32 (e.fit >>> 32) ])
+
+        for g in 1..gens do
+            // The fabric resets its region flag at every start, so the parents it
+            // emits are relative to the region it was pointed at and every
+            // offspring goes to the other half; the mirror's absolute indices
+            // are rebased to say the same thing.
+            let aBase = ((g - 1) % 2) * popSize
+
+            let entry (e: {| id: int; parentA: int; parentB: int; dest: int; skip: bool; zeroRates: bool; seeds: int[]; child: Chromosome; fit: uint64 |}) =
+                let flags = if e.skip then Cluster.gepFlagSkipWriteback else 0
+                let rate i = if e.zeroRates then 0u else rateWords[i]
+
+                [| yield uint32 (e.parentA - aBase)
+                   yield uint32 (e.parentB - aBase)
+                   yield uint32 (popSize + e.id)
+                   for i in 0..3 -> rate i
+                   yield (uint32 flags <<< 16) ||| (rate 4 &&& 0xFFFFu)
+                   yield uint32 thresholds.creepSigmaFx
+                   yield uint32 thresholds.constRangeFx
+                   yield uint32 e.id
+                   yield 0u
+                   for w in e.seeds -> uint32 w |]
+
+            let round = mirror.rounds[g]
+            write $"oplist_%d{g}.bin" (le32 [ for e in round do yield! entry e ])
+            write $"genomes_%d{g}.bin" (le32 [ for e in round do yield! geneRecordWords e.child ])
+            write $"fitness_%d{g}.bin" (le32 [ for e in round do yield uint32 e.fit; yield uint32 (e.fit >>> 32) ])
+
+        let manifest =
+            [ $"pop {popSize}"
+              $"gens {gens}"
+              $"n_cases {nCases}"
+              $"var_count {config.variableCount}"
+              $"record_words {Cluster.gepRecordWords}"
+              $"work_item_words {Cluster.gepWorkItemWords}"
+              "" ]
+
+        let manifestPath = System.IO.Path.Combine(dir, "manifest.txt")
+        System.IO.File.WriteAllText(manifestPath, String.concat "\n" manifest)
+        printfn $"wrote {manifestPath}"
+        0
     | [| "boardvector"; dir |]
     | [| "boardvector"; dir; _ |] ->
         // The silicon first-light vector: a population, a set of fitness cases,

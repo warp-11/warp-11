@@ -51,6 +51,8 @@ type Family =
     | Ice40
     /// Lattice ECP5 through yosys and nextpnr-ecp5.
     | Ecp5
+    /// Intel MAX 10 through Quartus Prime.
+    | Max10
 
 /// What a part can do, from its datasheet: the facts a design that sizes
 /// itself reads first, a board check refuses against, and the post-build gate
@@ -151,13 +153,31 @@ let ecp5_25f =
           cells = 24_288
           blockRamBits = 56 * 18 * 1024 } }
 
+/// The MAX 10 10M50 (10M50DAF484C7G, the DE10-Lite's): 49 760 logic
+/// elements, 144 18×18 multipliers (Quartus counts them as 288 9-bit
+/// elements), 182 M9K blocks of 9 kbit. No LUT RAM: MAX 10 has no MLAB, so
+/// a `distributedMem` is logic there (`ramstyle = "logic"`).
+let max10_50 =
+    { family = Max10
+      device = "10M50DAF484C7G"
+      package = ""
+      boardPart = None
+      facts =
+        { processingSystem = false
+          lutRam = false
+          multipliers = 144
+          cells = 49_760
+          blockRamBits = 182 * 9 * 1024 } }
+
 /// The parts this library knows by device name, which is what lets a board
 /// file on one of them leave the facts out.
-let knownParts = [ zu5ev; up5k; hx1k; ecp5_25f ]
+let knownParts = [ zu5ev; up5k; hx1k; ecp5_25f; max10_50 ]
 
 /// Which flow builds the bitstream.
 type BuildTool =
     | Vivado
+    /// `quartus_sh --flow compile`, then `quartus_pgm` over the USB-Blaster.
+    | Quartus
     /// yosys → nextpnr → icepack.
     | OpenFlow
 
@@ -457,7 +477,10 @@ let checkBoard (board: Board) =
     match board.tool, board.part.family with
     | Vivado, Ice40 -> refuse "Vivado does not build an iCE40 part"
     | Vivado, Ecp5 -> refuse "Vivado does not build an ECP5 part"
+    | Vivado, Max10 -> refuse "Vivado does not build a MAX 10 part"
     | OpenFlow, UltraScalePlus -> refuse "the open flow does not build an UltraScale+ part"
+    | OpenFlow, Max10 -> refuse "the open flow does not build a MAX 10 part — Quartus does"
+    | Quartus, (UltraScalePlus | Ice40 | Ecp5) -> refuse "Quartus builds Intel parts, and this one is not"
     | _ -> ()
 
     match board.clock with
@@ -483,6 +506,8 @@ let checkBoard (board: Board) =
 
     match board.loading, board.tool with
     | OsApp _, OpenFlow -> refuse "an OS app loads through the FPGA manager, which the open flow has no part for"
+    | OsApp _, Quartus -> refuse "an OS app loads through the FPGA manager, which a MAX 10 has none of"
+    | Flash, Quartus -> refuse "the Quartus flow loads SRAM over the USB-Blaster; the configuration flash (.pof) is not built"
     | (Sram | Flash), Vivado -> refuse "SRAM and flash loading are the open flow's; Vivado programs through JTAG or an OS app"
     | _ -> ()
 
@@ -717,6 +742,62 @@ let goBoard =
             kind = "pmod"
             positions = [ 1, bare 65; 2, bare 64; 3, bare 63; 4, bare 62; 7, bare 78; 8, bare 79; 9, bare 80; 10, bare 81 ] } ] }
 
+/// The Terasic DE10-Lite: a MAX 10 10M50 with a 50 MHz oscillator straight
+/// into the fabric (no PLL is built for it yet, so `fabricHz` is 50 MHz),
+/// ten red LEDs lit high, and no USB-UART of its own — the host link is a
+/// 3.3 V USB-serial cable on the 2×20 GPIO header (release plan fork 2,
+/// 2026-11-07): the cable's TX to `host_rx` on GPIO_0 (header pin 1, V10),
+/// its RX to `host_tx` on GPIO_1 (header pin 2, W10), ground on header pin
+/// 12. The USB-Blaster II loads SRAM through `quartus_pgm`; the flash
+/// (`.pof`) is not built.
+///
+/// Every I/O here is 3.3-V LVTTL. The pins are from the board's user manual
+/// (CD: `DE10_LITE_golden_top.qsf`); **check them against that file before
+/// the first build** — it was not on this machine when the preset was
+/// written, which is why the pin gate and Quartus's own assignment report are
+/// the first things to read on the bench. Not in the connector table, since
+/// no role reads them: the two push buttons KEY0 B8, KEY1 A7 (active low);
+/// the ten switches SW0–9 C10, C11, D12, C12, A12, B12, A13, A14, B14, F15;
+/// the six seven-segment digits; VGA; the accelerometer; the Arduino header
+/// (a socket below, so a harness can use it).
+let de10Lite =
+    let lvttl (pin: string) = { pin = pin; standard = Some "3.3-V LVTTL"; activeLow = false }
+
+    { name = "de10lite"
+      part = max10_50
+      tool = Quartus
+      clock = Oscillator 50_000_000
+      fabricHz = 50_000_000
+      audioClockHz = None
+      hostMemory = None
+      host = UartAt 115_200
+      loading = Sram
+      connectors =
+        [ { role = ClockIn; pins = [ "clk50", lvttl "P11" ] }
+          { role = HostUart; pins = [ "host_rx", lvttl "V10"; "host_tx", lvttl "W10" ] }
+          { role = Leds
+            pins =
+              [ "led0", lvttl "A8"; "led1", lvttl "A9"; "led2", lvttl "A10"; "led3", lvttl "B10"; "led4", lvttl "D13"
+                "led5", lvttl "C13"; "led6", lvttl "E14"; "led7", lvttl "D14"; "led8", lvttl "A11"; "led9", lvttl "B11" ] } ]
+      sockets =
+        [ // JP1, the 2×20 header: GPIO_0 … GPIO_35 at the positions below; 11 is
+          // 5 V, 12 and 30 ground, 29 3.3 V. Positions 1 and 2 are the host
+          // link while the cable is on them.
+          { name = "GPIO"
+            kind = "gpio40"
+            positions =
+              [ 1, lvttl "V10"; 2, lvttl "W10"; 3, lvttl "V9"; 4, lvttl "W9"; 5, lvttl "V8"; 6, lvttl "W8"; 7, lvttl "V7"; 8, lvttl "W7"
+                9, lvttl "W6"; 10, lvttl "V5"; 13, lvttl "W5"; 14, lvttl "AA15"; 15, lvttl "AA14"; 16, lvttl "W13"; 17, lvttl "W12"
+                18, lvttl "AB13"; 19, lvttl "AB12"; 20, lvttl "Y11"; 21, lvttl "AB11"; 22, lvttl "W11"; 23, lvttl "AB10"; 24, lvttl "AA10"
+                25, lvttl "AA9"; 26, lvttl "Y8"; 27, lvttl "AA8"; 28, lvttl "Y7"; 31, lvttl "AA7"; 32, lvttl "Y6"; 33, lvttl "AA6"; 34, lvttl "Y5"
+                35, lvttl "AA5"; 36, lvttl "Y4"; 37, lvttl "AB3"; 38, lvttl "Y3"; 39, lvttl "AB2"; 40, lvttl "AA2" ] }
+          // The Arduino header's sixteen digital I/Os, 0 … 15.
+          { name = "ARDUINO"
+            kind = "arduino"
+            positions =
+              [ 0, lvttl "AB5"; 1, lvttl "AB6"; 2, lvttl "AB7"; 3, lvttl "AB8"; 4, lvttl "AB9"; 5, lvttl "Y10"; 6, lvttl "AA11"; 7, lvttl "AA12"
+                8, lvttl "AB17"; 9, lvttl "AA17"; 10, lvttl "AB19"; 11, lvttl "AA19"; 12, lvttl "Y19"; 13, lvttl "AB20"; 14, lvttl "AB21"; 15, lvttl "AA20" ] } ] }
+
 /// A harness plugged into one of a board's sockets: the board with the
 /// connectors that plugging it in gives it — each role the harness carries,
 /// its ports on the pins behind their positions, in place of whatever was in
@@ -764,7 +845,8 @@ let presets: (string * Board) list =
     [ "kv260", kv260
       "icebreaker", iceBreakerAt 24_000_000
       "icepi", icepi
-      "goboard", goBoard ]
+      "goboard", goBoard
+      "de10lite", de10Lite ]
 
 /// A preset by name, or the names there are.
 let preset (name: string) : Result<Board, string> =

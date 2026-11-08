@@ -1,6 +1,7 @@
 # Warp11.GolView — the GoL live view
 
-The Avalonia FuncUI view for the `gol-fs` accelerator: renders the fabric's
+The Avalonia FuncUI view for the `gol-axi` accelerator (the generated name of
+what the hand scripts called `gol-fs`): renders the fabric's
 conflate frames live and drives load/run/stop/reset. This project is the
 library — the view and the buses; the runnable heads sit next door.
 The comms sit behind `IGolBus` (`Bus.fs`) with three implementations — which

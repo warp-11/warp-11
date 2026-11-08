@@ -92,12 +92,16 @@ let pages =
       page "Cookbook" "Create a register map" "cookbook/register-map" "docs/cookbook/register-map.md"
       page "Cookbook" "Store and move data" "cookbook/memory" "docs/cookbook/memory.md"
       page "Cookbook" "Send and receive over I2S" "cookbook/i2s" "docs/cookbook/i2s.md"
+      page "Cookbook" "Put a design on a board" "cookbook/mapping-and-harness" "docs/cookbook/mapping-and-harness.md"
 
       page "Guides" "How it fits together" "guides/architecture" "docs/architecture.md"
       page "Guides" "Start your own project" "guides/start-a-project" "docs/start-a-project.md"
       page "Guides" "Drive it from Rust" "guides/drive-it-from-rust" "docs/drive-it-from-rust.md"
       page "Guides" "Runtime and host drivers" "guides/runtime" "runtime/README.md"
       page "Guides" "Streams" "guides/streams" "docs/streams.md"
+      page "Guides" "Boards" "guides/boards" "docs/boards.md"
+      page "Guides" "How to add a new board" "guides/add-a-board" "docs/add-a-board.md"
+      page "Guides" "How to add a new toolchain" "guides/add-a-toolchain" "docs/add-a-toolchain.md"
       page "Guides" "Hardware workflow" "guides/dev-workflow" "docs/dev-workflow.md"
       page "Guides" "The design canvas" "guides/design-canvas" "docs/design-canvas.md"
       page "Guides" "Comparison to other HDLs" "guides/comparison" "docs/HDL_COMPARISON.md" ]

@@ -1,9 +1,11 @@
 /// The Game of Life as a design: the world a surface the host takes whole,
 /// the seed rows the host sends, the pace a register. Nothing in it names
-/// a bus or a wire — the mapping says how the world reaches the host, and
-/// on a board whose only connection is a UART that is snapshots as frames
-/// on it, pulled by the host. The KV260's conflate into DDR stays
-/// `Wrapper.fs`'s own top until the host-memory path carries a surface.
+/// a bus or a wire — the mapping says how the world reaches the host: on a
+/// board whose only connection is a UART, snapshots as frames on it, pulled
+/// by the host; on the KV260, the keep-latest triple buffer in its DDR that
+/// `Wrapper.fs`'s hand top always had, now the host-memory top's to build
+/// (`life.kv260.json`). The hand top stays until the daemon and the view
+/// drive this one.
 module Warp11.GoL.World
 
 open Warp11

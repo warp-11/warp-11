@@ -129,6 +129,31 @@ afternoon every time a field moves.
 simulator over a bridge instead of to a real board, so host code and hardware
 can be developed and tested together before any silicon exists.
 
+**The board layer** (`Board.fs`, `Mapping.fs`, `BoardTop.fs`, `Build.fs`). A
+design never names a board: it declares *needs* — rows in and out, a value
+the host sets, a surface it keeps live — and a **board** is a record of facts:
+the part and what it holds, the clock, how the host reaches the design (an
+AXI-Lite aperture, a UART), how a bitstream is loaded, which pins carry which
+role. A **mapping** binds the two, and is a file beside the design. From
+those three `BoardTop` builds the top module — the converter on the pins, or
+rows through the host's memory, or rows as frames on a UART — with every
+control a register, and `Build` writes the directory the board's toolchain
+builds from, ending in a gate that reads the tool's own report back. Moving a
+design to another board is changing one file; a board that cannot hold it
+says so by number. [Boards](boards.md) is the page.
+
+**Clock domains.** A design has a default clock and may declare others;
+every crossing is a stdlib primitive the elaborator checks, and the simulator
+schedules each domain at its own rate. The audio tops use it to run a
+converter at its oscillator's exact rate beside a fabric clock that is not a
+multiple of it.
+
+**The design as data** (`Warp11.Design`). Above the library, a design can be
+a graph of boxes and wires — what the canvas edits and saves as JSON — that
+elaborates to the same circuit the typed F# would, byte for byte, and exports
+to that F# when you want to keep going in code. The library does not depend
+on it; a project brings its own units to it.
+
 ## What you actually type
 
 ```sh
@@ -173,6 +198,8 @@ happy with output our simulator also considered correct.
 - [**Counter**](../hdl/Warp11.Tutorial/doc/counter.md) and the rest of the tutorial — the mechanisms, one small design per
   page, each steppable in the browser.
 - [**Streams**](streams.md) — the connection layer most real designs are built out of.
+- [**Boards**](boards.md) — the four boards, what a mapping is, and the first
+  design to put on any of them.
 - [**Hardware workflow**](dev-workflow.md) — synthesis, the board, and the hardware-only gotchas.
 - [**Comparison to other HDLs**](HDL_COMPARISON.md) — how this relates to Chisel, SpinalHDL,
   Amaranth, Clash and the rest, feature by feature.

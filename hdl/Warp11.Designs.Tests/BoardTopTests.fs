@@ -556,6 +556,52 @@ let tests =
               let m: Mapping.Mapping = { board = goBoard; path = viaLink; plugged = []; sizes = [] }
               Expect.stringContains (Mapping.write m) "\"link\"" "and the mapping file names the path"
 
+          testCase "the DE10-Lite: the oscillator straight in, Quartus's files from the board file, the gate on its reports" <| fun _ ->
+              checkBoard de10Lite
+              Expect.isTrue (hasMultipliers de10Lite.part) "144 multipliers"
+              Expect.isFalse (hasLutRam de10Lite.part) "no MLAB on a MAX 10"
+              Expect.isFalse (hasPs de10Lite.part) "no processing system"
+
+              match Mapping.parseBoard (Mapping.writeBoard de10Lite) with
+              | Ok back -> Expect.equal back de10Lite "a board file carries the part and its facts"
+              | Error why -> failtest why
+
+              Expect.stringContains (Mapping.writeBoard de10Lite) "\"Max10\"" "the family by its name"
+
+              Expect.throwsC
+                  (fun () -> checkBoard { de10Lite with fabricHz = 100_000_000 })
+                  (fun e -> Expect.stringContains e.Message "no PLL" "an oscillator is the fabric clock")
+
+              Expect.throwsC
+                  (fun () -> checkBoard { de10Lite with tool = OpenFlow })
+                  (fun e -> Expect.stringContains e.Message "Quartus does" "the open flow refuses a MAX 10")
+
+              // Quartus's own spelling of the memory attribute, both kinds.
+              let verilog = emitDesignFor Target.Max10 lutMemories.def
+              Expect.stringContains verilog "(* ramstyle = \"logic\" *) reg [7:0] scratch" "a LUT RAM is logic on a MAX 10"
+              Expect.stringContains verilog "(* ramstyle = \"logic\" *) reg [7:0] squares" "and so is a LUT ROM"
+
+              // hello for it: the directory, from the mapping, with the flow's files.
+              let dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"warp11-de10-{System.Guid.NewGuid()}")
+              let top = BoardTop.boardTopFor (Warp11.Designs.Hello.mappingFor de10Lite) Warp11.Designs.Hello.hello
+              Expect.equal top.name "HelloUart" "over the UART cable"
+              let out = Warp11.Build.write dir top
+              let read name = System.IO.File.ReadAllText(System.IO.Path.Combine(dir, name))
+              let settings = read "hello_uart_top.qsf"
+              Expect.stringContains settings "set_global_assignment -name DEVICE 10M50DAF484C7G" "the device"
+              Expect.stringContains settings "set_location_assignment PIN_P11 -to clk50" "the oscillator's pin"
+              Expect.stringContains settings "set_location_assignment PIN_V10 -to host_rx" "the cable's pins"
+              Expect.stringContains settings "set_location_assignment PIN_A8 -to led0" "the LEDs"
+              Expect.stringContains settings "set_instance_assignment -name IO_STANDARD \"3.3-V LVTTL\" -to led9" "and every pin's standard"
+              Expect.stringContains (read "hello_uart_top.sdc") "create_clock -name clk50 -period 20.000" "the clock's period"
+              Expect.stringContains (read "hello_uart_top.v") "wire clk = clk50;" "no PLL: the oscillator is the clock"
+              let script = read "build.sh"
+              Expect.stringContains script "quartus_sh --flow compile" "the flow"
+              Expect.stringContains script "Total logic elements" "the gate reads the fit summary"
+              Expect.stringContains script "Embedded Multiplier 9-bit elements" "two 9-bit elements to a multiplier"
+              Expect.stringContains script "quartus_pgm -m jtag" "and loads over the USB-Blaster"
+              Expect.equal out.run (System.IO.Path.Combine(dir, "build.sh")) "run is the script"
+
           testCase "a frame over the host link: beats counted in fabric, the rows out as frames, a wide field as lanes" <| fun _ ->
               // The counted path on a board with no host memory: the host
               // writes a count and a start, and reads the rows the design
@@ -637,6 +683,44 @@ let tests =
               let back = words |> List.chunkBySize 2 |> List.map (fun w -> w[0] ||| (w[1] <<< 32))
               Expect.equal back rows "every 48-bit row back whole, the high word's top sixteen bits zero"
 
+          testCase "a row wider than a beat crosses the host's memory as several beats, both ways" <| fun _ ->
+              // An image row of sixty-four pixels is one 512-bit field: four
+              // beats of the KV260's memory in, four out, the identity between.
+              let wide =
+                  BoardTop.design
+                      "WideRows"
+                      (fun n -> n.streamIn ("in", pins1 ("row", unsignedInt 512)), n.streamOut ("out", pins1 ("row", unsignedInt 512)))
+                      (fun (i, o) -> i.stream |> o)
+
+              let top = BoardTop.boardTop kv260 viaHostMemory wide
+              let batch = top.batch.Value
+              let sim = Sim top.top
+              let rows = 8
+              let src, dst = 0x1000, 0x4000
+              let ddr = SimAxiDdr(sim, 0x8000, dataBytes = 16, awEvery = 3, bDelay = 6)
+              let axi = SimAxi.clientWith sim ddr.Cycle
+
+              // Row r: byte k is (r * 16 + k) mod 251, so every byte of every beat
+              // is accounted for in the order it crossed.
+              let staged = [| for r in 0 .. rows - 1 -> [| for k in 0..63 -> byte ((r * 16 + k) % 251) |] |]
+
+              for r in 0 .. rows - 1 do
+                  Array.blit staged[r] 0 ddr.Memory (src + r * 64) 64
+
+              axi.write32 batch.srcAddr.offset (uint64 src)
+              axi.write32 batch.dstAddr.offset (uint64 dst)
+              axi.write32 batch.frameCount.offset (uint64 rows)
+              axi.write32 batch.start.offset 1UL
+              let mutable spins = 0
+
+              while axi.read32 batch.busy.offset <> 0UL && spins < 100_000 do
+                  ddr.Cycle()
+                  spins <- spins + 1
+
+              Expect.isLessThan spins 100_000 "the batch finished"
+              let back = [| for r in 0 .. rows - 1 -> ddr.Memory[dst + r * 64 .. dst + r * 64 + 63] |]
+              Expect.equal back staged "every row back whole, beat for beat"
+
           testCase "a surface over the host link: latched whole when the host pulls, sent as frames, the pace the host's" <| fun _ ->
               // Four rows of registers that all move every cycle. A copy a row
               // a cycle would tear; a latch does not, and the rows' relation
@@ -699,18 +783,89 @@ let tests =
               Expect.notEqual t1 t2 "the surface moved on between pulls"
               Expect.equal (link.read32 (offset "gridLinkSent")) 16UL "two snapshots, eight words each"
 
-          testCase "a surface bound to the host's memory is refused by name" <| fun _ ->
-              let d =
+          testCase "a surface into the host's memory: the freshest complete snapshot in a slot the host holds, then lets go" <| fun _ ->
+              // The same four moving rows, into the KV260's DDR through the
+              // keep-latest triple buffer: capture grants a slot holding a
+              // whole coherent snapshot, release hands it back, and a second
+              // capture sees a later one.
+              let counters =
                   BoardTop.design
-                      "Surfaced"
-                      (fun n -> n.streamIn ("in", pins1 ("x", unsignedInt 8)), n.surfaceOut ("grid", pins1 ("a", unsignedInt 8), 2))
+                      "Counters"
+                      (fun n -> n.streamIn ("in", pins1 ("x", unsignedInt 8)), n.surfaceOut ("grid", pins2 ("a", unsignedInt 8) ("b", unsignedInt 8), 4))
                       (fun (i, surface) ->
                           Ir.lit 1UL 1 ==> i.stream.ready
-                          surface [ Ir.lit 1UL 8; Ir.lit 2UL 8 ])
+                          let t = reg "t" 8
+                          t + Ir.lit 1UL 8 ==> t
 
-              Expect.throwsC
-                  (fun () -> BoardTop.boardTop kv260 viaHostMemory d |> ignore)
-                  (fun e -> Expect.stringContains e.Message "'grid' is a surface" "the refusal names the need and the path")
+                          surface
+                              [ for r in 0UL .. 3UL ->
+                                    let a = reg $"a%d{r}" 8
+                                    let b = reg $"b%d{r}" 8
+                                    t + Ir.lit (r + 1UL) 8 ==> a
+                                    Ir.lit 255UL 8 - (t + Ir.lit (r + 1UL) 8) ==> b
+                                    a, b ])
+
+              let top = BoardTop.boardTop kv260 viaHostMemory counters
+              Expect.equal top.name "CountersBatch" "the host-memory top"
+              let names = top.registers |> List.map fst
+              Expect.contains names "gridMemBase" "the surface's base"
+              Expect.contains names "gridMemCapture" "its capture"
+              Expect.contains top.seamExtras "pub const GRID_MEM_BEATS: usize = 2;" "two rows a beat, four rows: two beats a snapshot"
+              Expect.contains top.seamExtras "pub const GRID_MEM_SLOT_BYTES: usize = 32;" "a slot is the snapshot rounded to a power of two"
+              Expect.isTrue (top.top.decls |> List.exists (function Output(n, _) -> n = "irq" | _ -> false)) "a surface top has an interrupt"
+
+              let sim = Sim top.top
+              let ddr = SimAxiDdr(sim, 0x4000, dataBytes = 16, awEvery = 3, bDelay = 6)
+              let axi = SimAxi.clientWith sim ddr.Cycle
+              let entry name = top.registers |> List.find (fun (n, _) -> n = name) |> snd
+
+              let field name =
+                  let e = entry name
+
+                  match e.kind with
+                  | RoField(bit, w) -> (axi.read32 e.offset >>> bit) &&& ((1UL <<< w) - 1UL)
+                  | _ -> failwith $"{name} is not a field"
+
+              let baseAddr = 0x2000UL
+              axi.write32 (entry "gridMemBase").offset baseAddr
+
+              let capture () =
+                  axi.write32 (entry "gridMemCapture").offset 1UL
+                  let mutable spins = 0
+
+                  while field "gridMemReady" = 0UL && spins < 20_000 do
+                      ddr.Cycle()
+                      spins <- spins + 1
+
+                  Expect.isLessThan spins 20_000 "a snapshot was granted"
+                  let slot = int (field "gridMemSlot")
+                  // Row r is lanes 2r and 2r+1 of the slot's two beats: a in the
+                  // low byte of the first lane, b in the low byte of the second.
+                  let at = int baseAddr + slot * 32
+
+                  [ for r in 0..3 -> uint64 ddr.Memory[at + r * 8], uint64 ddr.Memory[at + r * 8 + 4] ]
+
+              let coherent (rows: (uint64 * uint64) list) =
+                  let t = fst rows[0] - 1UL
+                  Expect.equal rows [ for r in 0UL .. 3UL -> (t + r + 1UL) &&& 255UL, (255UL - (t + r + 1UL)) &&& 255UL ] "every row is from the same cycle"
+                  t
+
+              let release () =
+                  axi.write32 (entry "gridMemRelease").offset 1UL
+
+                  for _ in 1..50 do
+                      ddr.Cycle()
+
+              // The first snapshot is the one latched at reset, before the
+              // surface had moved — every row zero, as the hand top's always
+              // was. The host lets it go and the next is live.
+              Expect.equal (capture ()) [ for _ in 0..3 -> 0UL, 0UL ] "the first snapshot is the surface at reset"
+              release ()
+              let t1 = coherent (capture ())
+              release ()
+              let t2 = coherent (capture ())
+              Expect.notEqual t1 t2 "the surface moved on between captures"
+              Expect.equal (field "gridMemOverrun") 0UL "no capture landed while one was held"
 
           testCase "a design sized for its board: derived from the part, named by the mapping, refused when nobody asks" <| fun _ ->
               // A design whose one field is as wide as the part's multiplier

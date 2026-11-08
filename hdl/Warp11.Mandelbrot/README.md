@@ -73,11 +73,15 @@ fabric cannot disagree about what offset the iteration count lives at.
 Then the bitstream, and the board:
 
 ```sh
-cd hardware/vivado && vivado -mode batch -source build_mandelfs_axi.tcl
+dotnet run -c Release --project Warp11.Mandelbrot -- bitstream out/   # the KV260 directory for the chunked frame
+cd out && ./build.sh
 # on the board
-xmutil unloadapp && xmutil loadapp mandel-fs
-mandel_first_light
+xmutil unloadapp && xmutil loadapp mandelbrot
 ```
+
+(The pod apps below, `mandel-fs` and `mandel-frame`, were built from the hand
+scripts in `hardware/vivado/`, which retire as each regenerated bitstream is
+run bit-exact.)
 
 **Two apps, and the numbers below are the second one.** `mandel-fs` is the
 one-shot pod; `mandel-frame` is the re-renderable frame accelerator — same

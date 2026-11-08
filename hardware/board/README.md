@@ -51,15 +51,16 @@ scp target/aarch64-unknown-linux-musl/release/mandel-daemon ubuntu@192.168.1.172
 ssh ubuntu@192.168.1.172 'cd warp11-driver && ./mandel_frame_first_light'
 ```
 
-A bitstream is the same shape, via the packager, which prints this recipe with
-the paths filled in when it finishes:
+A bitstream is the same shape. A design project writes the directory Vivado
+builds from (`dotnet run --project Warp11.GoL.App -- build out/`), its
+`build.sh` runs Vivado and packages the app, and the package is copied and
+loaded like this — the app named for the top, `gol-axi` here:
 
 ```sh
-cd hardware/xmutil && ./package_gol-fs.sh
-scp <out-dir>/* ubuntu@192.168.1.172:/tmp/gol-fs-app/
-ssh ubuntu@192.168.1.172 'sudo mkdir -p /lib/firmware/xilinx/gol-fs &&
-                          sudo cp /tmp/gol-fs-app/* /lib/firmware/xilinx/gol-fs/ &&
-                          sudo xmutil unloadapp && sudo xmutil loadapp gol-fs'
+scp out/build/gol-axi/* ubuntu@192.168.1.172:/tmp/gol-axi-app/
+ssh ubuntu@192.168.1.172 'sudo mkdir -p /lib/firmware/xilinx/gol-axi &&
+                          sudo cp /tmp/gol-axi-app/* /lib/firmware/xilinx/gol-axi/ &&
+                          sudo xmutil unloadapp && sudo xmutil loadapp gol-axi'
 ```
 
 ## 4. gol-daemon (GoL control plane)
@@ -102,7 +103,7 @@ the binary's own default. **7447, not 7448** — mandel-daemon has that one, and
 keeping them apart means the units never fight over a port even though only one
 of their bitstreams can be loaded at a time.
 
-Prereq: the `gol-fs` bitstream must be loaded (`sudo xmutil loadapp gol-fs`) and
+Prereq: the `gol-axi` bitstream must be loaded (`sudo xmutil loadapp gol-axi`) and
 `udmabuf.service` must have run, otherwise the uio probe fails. Like
 mandel-daemon it exits non-zero with the reason rather than crash-looping, and
 `StartLimitBurst=3` stops systemd retrying after three tries in a minute.

@@ -17,17 +17,21 @@ to clone and no solution of ours to build.
 ```sh
 dotnet new console -lang "F#" -o Blinker
 cd Blinker
-dotnet add package Warp11 --prerelease
-dotnet add package Warp11.SimView.Desktop --prerelease
+dotnet add package Warp11
+dotnet add package Warp11.SimView.Desktop
 ```
 
-`Warp11` is the DSL, the elaborator, the simulator and the emitter.
-`Warp11.SimView.Desktop` is the step-through debugger, and is optional — leave
-it out if you only want to simulate and emit.
+Four packages exist. `Warp11` is the DSL, the elaborator, the simulator, the
+emitter and the board layer. `Warp11.SimView.Desktop` is the step-through
+debugger, and is optional — leave it out if you only want to simulate and
+emit; `Warp11.SimView` is the debugger as a component, for a window of your
+own. `Warp11.Host` is the host half in F# — a design's register map over a
+serial port, the twin of the Rust `warp11-host` crate — for a program that
+drives a board without Rust.
 
-`--prerelease` is needed until 0.1.0; the API still moves between alphas, so pin
-the version in your `.fsproj` once you have something you care about rather
-than floating to whatever is newest.
+The API is pre-1.0 and moves between minor versions, so pin the version in
+your `.fsproj` once you have something you care about rather than floating to
+whatever is newest; each package's release notes say what moved.
 
 ## A design, and a way to look at it
 
@@ -244,6 +248,26 @@ deduplicated by name, so a component instantiated forty times is emitted once.
 `Blinker` is a single flat module, so there are no children yet. There will be
 the moment you instantiate anything, and you will not have to remember to do
 anything differently.
+
+## Put it on a board
+
+Nothing above needed hardware, and the step to a board is not a rewrite. A
+design declares what it needs — rows in and out, a value the host sets, a
+bit it reports — and a **mapping file** beside it names a board and how those
+needs are carried: through the host's memory on a KV260, as frames on a UART
+on an iCEBreaker, an Icepi or a Go Board. The build directory the mapping
+produces runs the board's toolchain, ends with a gate that reads the tool's
+own report, and writes the seam the host tools read, so `warp11_regs` and
+`warp11_batch` need telling nothing but which file.
+
+```sh
+dotnet run --project Warp11.Designs -- hello hello.icebreaker.json out/   # the first design on any board
+cd out && PROG=1 ./build.sh
+```
+
+[Boards](boards.md) is the page: the four boards, what a mapping is, what
+fits where. [How to add a new board](add-a-board.md) is the page for one
+that is not there, and it is a file rather than source.
 
 ## Where to go from here
 

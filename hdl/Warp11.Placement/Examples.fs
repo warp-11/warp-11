@@ -159,14 +159,12 @@ let all (rate: float) : (string * Graph) list =
 /// controls (a gain with settings), the EQ, twice and the blur are not
 /// written for it; the iCEBreaker holds the gain (its 5 280 cells) but not
 /// the three-band EQ (5 489), twice (8 825) or the blur (11 364, and 32 of
-/// its 30 block RAMs). The blur is not written for the KV260's memory path
-/// either, whose row shape gives every field a 32-bit lane — a row of
-/// sixteen 8-bit pixels is 512 bits to it, four beats, which it does not
-/// pack (the link sends the same row as sixteen words). The gain example's
-/// `gain.kv260.json` is the one its design file names.
+/// its 30 block RAMs). The blur's row is one 512-bit field — four beats of
+/// the KV260's memory, sixteen words of a link — and both carry it. The
+/// gain example's `gain.kv260.json` is the one its design file names.
 let mappings: (string * Warp11.Mapping.Mapping) list =
     let on (board: Board) (path: DataPath) : Warp11.Mapping.Mapping = { board = board; path = path; plugged = []; sizes = [] }
-    let link = [ "icebreaker", on (iceBreakerAt 24_000_000) viaLink; "icepi", on icepi viaLink; "goboard", on goBoard viaLink ]
+    let link = [ "icebreaker", on (iceBreakerAt 24_000_000) viaLink; "icepi", on icepi viaLink; "goboard", on goBoard viaLink; "de10lite", on de10Lite viaLink ]
     let memory = [ "kv260", gainMapping ]
 
     let holds (example: string) (boards: string list) =
@@ -174,12 +172,12 @@ let mappings: (string * Warp11.Mapping.Mapping) list =
               if List.contains name boards then
                   yield $"{example}.{name}.json", m ]
 
-    holds "gain" [ "kv260"; "icebreaker"; "icepi" ]
-    @ holds "three-band-eq" [ "kv260"; "icepi" ]
-    @ holds "controls" [ "kv260"; "icebreaker"; "icepi" ]
-    @ holds "twice" [ "kv260"; "icepi" ]
-    @ holds "blur" [ "icepi" ]
-    @ holds "adder" [ "kv260"; "icebreaker"; "icepi"; "goboard" ]
+    holds "gain" [ "kv260"; "icebreaker"; "icepi"; "de10lite" ]
+    @ holds "three-band-eq" [ "kv260"; "icepi"; "de10lite" ]
+    @ holds "controls" [ "kv260"; "icebreaker"; "icepi"; "de10lite" ]
+    @ holds "twice" [ "kv260"; "icepi"; "de10lite" ]
+    @ holds "blur" [ "kv260"; "icepi"; "de10lite" ]
+    @ holds "adder" [ "kv260"; "icebreaker"; "icepi"; "goboard"; "de10lite" ]
 
 /// Write every example into `dir`, its mapping files, and the image and
 /// table they open with.

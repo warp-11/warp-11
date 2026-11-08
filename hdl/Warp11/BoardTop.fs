@@ -585,12 +585,16 @@ let private laneSpans (pins: (string * NumberFormat) list) : (int * int) list =
 /// leaves to its caller, satisfied by making it unreachable.
 let beatsPerBurst = 16
 
-/// How a row of the boundary sits in a beat: one lane per field, padded to a
-/// power of two so rows tile beats evenly. Said as numbers a host and a
-/// check can both derive.
+/// How a row of the boundary sits in beats: one lane per field. A row no
+/// wider than a beat is padded to a power of two lanes so rows tile beats
+/// evenly (`rowsPerBeat` of them, `beatsPerRow` 1); a row wider than a beat
+/// — an image row of sixty-four pixels is 512 bits — is padded to whole
+/// beats and takes `beatsPerRow` of them (`rowsPerBeat` 1). Said as numbers
+/// a host and a check can both derive.
 type RowShape =
     { lanesPerRow: int
       rowsPerBeat: int
+      beatsPerRow: int
       rowsPerBurst: int
       bytesPerRow: int }
 
@@ -600,16 +604,30 @@ let rowShape (beatWidth: int) (pins: (string * NumberFormat) list) : RowShape =
     let lanesPerBeat = beatWidth / laneWidth
     let lanes = pins |> List.sumBy (fun (_, f) -> lanesOf f)
 
-    if lanes < 1 || lanes > lanesPerBeat then
-        failwith $"a row of %d{lanes} fields does not fit a %d{beatWidth}-bit beat — the host-memory path is not built for that"
+    if lanes < 1 then
+        failwith $"a row of no fields has no shape in a %d{beatWidth}-bit beat"
 
-    let lanesPerRow = 1 <<< ceilLog2 lanes
-    let rowsPerBeat = lanesPerBeat / lanesPerRow
+    if lanes <= lanesPerBeat then
+        let lanesPerRow = 1 <<< ceilLog2 lanes
+        let rowsPerBeat = lanesPerBeat / lanesPerRow
 
-    { lanesPerRow = lanesPerRow
-      rowsPerBeat = rowsPerBeat
-      rowsPerBurst = rowsPerBeat * beatsPerBurst
-      bytesPerRow = lanesPerRow * laneWidth / 8 }
+        { lanesPerRow = lanesPerRow
+          rowsPerBeat = rowsPerBeat
+          beatsPerRow = 1
+          rowsPerBurst = rowsPerBeat * beatsPerBurst
+          bytesPerRow = lanesPerRow * laneWidth / 8 }
+    else
+        let beatsPerRow = (lanes + lanesPerBeat - 1) / lanesPerBeat
+
+        if beatsPerBurst % beatsPerRow <> 0 then
+            failwith
+                $"a row of %d{lanes} lanes takes %d{beatsPerRow} beats, which does not divide the %d{beatsPerBurst} a burst holds — the host-memory path is not built for that"
+
+        { lanesPerRow = beatsPerRow * lanesPerBeat
+          rowsPerBeat = 1
+          beatsPerRow = beatsPerRow
+          rowsPerBurst = beatsPerBurst / beatsPerRow
+          bytesPerRow = beatsPerRow * beatWidth / 8 }
 
 /// The registers a **recording** binding adds: where the ring lives, how big
 /// it is, how far the fabric has got, and the arm bit.
@@ -663,14 +681,20 @@ type CountRegs =
 /// The registers a **surface** binding adds — a surface taken whole and
 /// sent as frames on the link: the pull, and what it managed.
 type SnapshotRegs =
-    { /// Pulse: latch the surface now, and send it, every row, as frames.
-      pull: RegEntry
-      /// Words sent, over every pull.
-      sent: RegEntry
-      /// Pulls that arrived while a snapshot was still leaving — ignored,
-      /// and counted, so a host pulling faster than the link carries learns
-      /// it here rather than from a torn picture.
-      missed: RegEntry }
+    /// Frames on the host link: the pull latches the surface and sends it a
+    /// row at a time; `sent` counts the words; `missed` the pulls that
+    /// arrived while a snapshot was still leaving — ignored, and counted, so
+    /// a host pulling faster than the link carries learns it here rather
+    /// than from a torn picture.
+    | SnapshotToFrames of pull: RegEntry * sent: RegEntry * missed: RegEntry
+    /// Slots in the host's memory — the keep-latest triple buffer
+    /// (`snapshotSource` + `streamConflate3`): `base` is where the three
+    /// slots start (and the arm: nothing is written while it is zero),
+    /// `capture` asks for the freshest complete snapshot and `release` hands
+    /// its slot back, `ready`/`slot` say which slot the host holds,
+    /// `overrun` counts captures that landed while one was held, and `irq`
+    /// pulses on every grant.
+    | SnapshotToMemory of baseReg: RegEntry * capture: RegEntry * release: RegEntry * ready: RegEntry * overrun: RegEntry * slot: RegEntry * irq: RegEntry
 
 /// What the bindings contributed to the register map, with the design's own
 /// entries and the map itself.
@@ -762,7 +786,7 @@ let private registersFor
     (recording: (string * Carrier) option)
     (playing: string option)
     (counting: string option)
-    (snapshotting: string option)
+    (snapshotting: (string * Carrier) option)
     (d: Design)
     : BindingRegs =
     // A recorder brings its own registers, and never the batch contract: a
@@ -858,15 +882,30 @@ let private registersFor
                       start = r.Word(fun w -> w.Pulse(named "Start"))
                       busy = r.Word(fun w -> w.Field(named "Busy", 1)) })
 
-            // A surface's binding, the same way.
+            // A surface's binding, the same way: what it contributes depends
+            // on its carrier, as a recorder's does.
             let snapshot =
-                snapshotting
-                |> Option.map (fun need ->
+                match snapshotting with
+                | Some(need, InLinkFrames) ->
                     let named = bindingRegister need "Link"
+                    Some(SnapshotToFrames(r.Word(fun w -> w.Pulse(named "Pull")), r.RoField(named "Sent", 32), r.RoField(named "Missed", 32)))
+                | Some(need, InHostRows) ->
+                    let named = bindingRegister need "Mem"
+                    let ready, overrun, slot = r.Word(fun w -> w.Field(named "Ready", 1), w.Field(named "Overrun", 8), w.Field(named "Slot", 2))
 
-                    { pull = r.Word(fun w -> w.Pulse(named "Pull"))
-                      sent = r.RoField(named "Sent", 32)
-                      missed = r.RoField(named "Missed", 32) })
+                    Some(
+                        SnapshotToMemory(
+                            r.RwReg(named "Base", 32, 0UL),
+                            r.Word(fun w -> w.Pulse(named "Capture")),
+                            r.Word(fun w -> w.Pulse(named "Release")),
+                            ready,
+                            overrun,
+                            slot,
+                            r.Word(fun w -> w.W1c(named "Irq"))
+                        )
+                    )
+                | Some(need, other) -> failwith $"{d.name}: '{need}' is a surface, and nothing carries one as {other}"
+                | None -> None
 
             // Tables last: each is aligned to its own size, so it lands at
             // the same offset whatever the scalars before it came to, and the
@@ -922,10 +961,33 @@ let private beatsToRows (shape: RowShape) (pins: (string * NumberFormat) list) (
     let laneAt (lane: int) (w: int) = slice (lane * laneWidth + w - 1) (lane * laneWidth) beat
     let spans = laneSpans pins
 
-    let fields =
-        if shape.rowsPerBeat = 1 then
+    let fields, rowValid =
+        if shape.beatsPerRow > 1 then
+            // A row wider than a beat: every beat but the last is held as it
+            // arrives, and the row is offered with its last beat, which
+            // leaves with the row — the handshake does the storing.
+            let phaseWidth = ceilLog2 shape.beatsPerRow
+            let phase = reg "unpack_phase" phaseWidth
+            let last = eq phase (lit (uint64 (shape.beatsPerRow - 1)) phaseWidth)
+            let held = [ for k in 0 .. shape.beatsPerRow - 2 -> reg $"unpack_held%d{k}" beatWidth ]
+            let take = beats.valid &&& (bnot last ||| outReady)
+            (bnot last ||| outReady) ==> beats.ready
+
+            If take (fun () ->
+                mux last (lit 0UL phaseWidth) (phase + lit 1UL phaseWidth) ==> phase
+
+                held
+                |> List.iteri (fun k h -> If (eq phase (lit (uint64 k) phaseWidth)) (fun () -> beat ==> h)))
+
+            // The row, the first beat at the low end.
+            let row = wire "unpack_row" (shape.lanesPerRow * laneWidth)
+            ((held @ [ beat ]) |> List.rev |> List.reduce cat) ==> row
+
+            [ for (start, _), (_, f) in List.zip spans pins -> slice (start * laneWidth + f.totalWidth - 1) (start * laneWidth) row ],
+            beats.valid &&& last
+        elif shape.rowsPerBeat = 1 then
             fire ==> beats.ready
-            [ for (start, _), (_, f) in List.zip spans pins -> laneAt start f.totalWidth ]
+            [ for (start, _), (_, f) in List.zip spans pins -> laneAt start f.totalWidth ], beats.valid
         else
             let phaseWidth = ceilLog2 shape.rowsPerBeat
             let phase = reg "unpack_phase" phaseWidth
@@ -935,10 +997,11 @@ let private beatsToRows (shape: RowShape) (pins: (string * NumberFormat) list) (
             If fire (fun () -> mux last (lit 0UL phaseWidth) (phase + lit 1UL phaseWidth) ==> phase)
 
             [ for (start, _), (_, f) in List.zip spans pins ->
-                  selectIndexed phase [ for row in 0 .. shape.rowsPerBeat - 1 -> laneAt (row * shape.lanesPerRow + start) f.totalWidth ] ]
+                  selectIndexed phase [ for row in 0 .. shape.rowsPerBeat - 1 -> laneAt (row * shape.lanesPerRow + start) f.totalWidth ] ],
+            beats.valid
 
     { payload = fields
-      valid = beats.valid
+      valid = rowValid
       ready = outReady
       layout = layoutOfList pins }
 
@@ -976,7 +1039,24 @@ let private rowsToBeats (shape: RowShape) (pins: (string * NumberFormat) list) (
     let outReady = wireBit "pack_out_ready"
     registerStreamReady outReady
 
-    if shape.rowsPerBeat = 1 then
+    if shape.beatsPerRow > 1 then
+        // A row wider than a beat leaves as several, the first from the low
+        // end; the row is held by its producer until the last has gone.
+        let row = wire "pack_row" rowWidth
+        rowBits ==> row
+        let phaseWidth = ceilLog2 shape.beatsPerRow
+        let phase = reg "pack_phase" phaseWidth
+        let last = eq phase (lit (uint64 (shape.beatsPerRow - 1)) phaseWidth)
+        let fire = rows.valid &&& outReady
+        If fire (fun () -> mux last (lit 0UL phaseWidth) (phase + lit 1UL phaseWidth) ==> phase)
+        (fire &&& last) ==> rows.ready
+        rows.valid ==> outValid
+
+        { payload = selectIndexed phase [ for k in 0 .. shape.beatsPerRow - 1 -> slice ((k + 1) * beatWidth - 1) (k * beatWidth) row ]
+          valid = outValid
+          ready = outReady
+          layout = layout1 ("data", beatWidth) }
+    elif shape.rowsPerBeat = 1 then
         rows.valid ==> outValid
         outReady ==> rows.ready
 
@@ -1036,6 +1116,7 @@ let targetOf (part: Part) =
     | UltraScalePlus -> Xilinx
     | Family.Ice40 -> Ice40
     | Family.Ecp5 -> Target.Ecp5
+    | Family.Max10 -> Target.Max10
 
 /// The design on the board's I2S pins, the registers reached the way the
 /// board's host reaches them.
@@ -1199,7 +1280,7 @@ let linkWordsOf (pins: (string * NumberFormat) list) =
 /// always meant, with the host's pull as the pace.
 let private snapshotFrames
     (regs: SlaveRegs)
-    (s: SnapshotRegs)
+    (pullReg: RegEntry, sentReg: RegEntry, missedReg: RegEntry)
     (pins: (string * NumberFormat) list)
     (surface: Expr list list)
     : Stream<Expr> =
@@ -1219,7 +1300,7 @@ let private snapshotFrames
     let shadows =
         [ for r in 0 .. rows - 1 -> [ for name, f in pins -> reg $"snapshot_%d{r}_{name}" f.totalWidth ] ]
 
-    let pull = regs.pulse s.pull
+    let pull = regs.pulse pullReg
     let outReady = wireBit "snapshot_ready"
     registerStreamReady outReady
     let last = eq index (lit (uint64 (rows - 1)) indexWidth)
@@ -1259,7 +1340,7 @@ let private snapshotFrames
           ready = outReady
           layout = layoutOfList pins }
 
-    recordFrames regs (lit 1UL 1) s.sent s.missed pins rowStream missed
+    recordFrames regs (lit 1UL 1) sentReg missedReg pins rowStream missed
 
 /// Words a played stream buffers between the link and the beats: two 16-bit
 /// samples a word, so 170 ms at 48 kHz. The slack is against the host, not
@@ -1882,11 +1963,11 @@ let private linkOutput
 
     let surfaceOut (n: string) (rows: Expr list list) =
         match surface, contributed.snapshotRegs with
-        | Some(fields, declared), Some snap when n = outName ->
+        | Some(fields, declared), Some(SnapshotToFrames(pull, sent, missed)) when n = outName ->
             if rows.Length <> declared then
                 failwith $"{d.name}: '{n}' declared %d{declared} rows and handed over %d{rows.Length}"
 
-            send (snapshotFrames regs snap fields rows)
+            send (snapshotFrames regs (pull, sent, missed) fields rows)
         | _ -> failwith $"{d.name}: no surface called '{n}'"
 
     streamOut, surfaceOut
@@ -1900,7 +1981,8 @@ let private linkRegisters (contributed: BindingRegs) =
 
     let snapshot =
         match contributed.snapshotRegs with
-        | Some s -> [ s.pull; s.sent; s.missed ]
+        | Some(SnapshotToFrames(pull, sent, missed)) -> [ pull; sent; missed ]
+        | Some(SnapshotToMemory(baseReg, capture, release, ready, overrun, slot, irq)) -> [ baseReg; capture; release; ready; overrun; slot; irq ]
         | None -> []
 
     let player =
@@ -1925,7 +2007,7 @@ let private linkTop (board: Board) (path: DataPath) (d: Design) : BoardTop =
             (if surface.IsNone then Some(outName, InLinkFrames) else None)
             (Some inName)
             None
-            (if surface.IsSome then Some outName else None)
+            (if surface.IsSome then Some(outName, InLinkFrames) else None)
             d
 
     let map = contributed.regMap
@@ -2132,7 +2214,15 @@ let private hostMemoryTop (board: Board) (path: DataPath) (d: Design) : BoardTop
     // What carries each half, asked per need rather than decoded from a name:
     // nothing is read when the input is a beat count, and the design says
     // where a beat goes only when the output is carried at an address.
-    refuseSurfaces "the host-memory top carries none yet (the KV260's snapshot into DDR is still GoL's own top)" d
+    // A surface is the output where the design has one: the keep-latest
+    // triple buffer in the host's memory, the design's rows out being then
+    // none — a design has one output, a stream or a surface.
+    let surface = surfacesOf d |> List.tryHead
+
+    match surface, outputsOf d with
+    | Some(name, _, _), _ :: _ -> failwith $"{d.name}: '{name}' is a surface and the design also has rows out, and a top carries one output"
+    | _ -> ()
+
     let counted = carrierOfInput path d = Some AsBeatCount
     let scattered = carrierOfOutput path d = Some InHostRowsAt
     let memory =
@@ -2162,7 +2252,8 @@ let private hostMemoryTop (board: Board) (path: DataPath) (d: Design) : BoardTop
     let destPin = if scattered then Some (outputsOf d).Head else None
     let payloadPins = if scattered then List.tail (outputsOf d) else (outputsOf d)
 
-    let contributed = registersFor path None None None None d
+    let contributed =
+        registersFor path None None None (surface |> Option.map (fun (name, _, _) -> name, InHostRows)) d
     let batchOption, entries, map = contributed.batchRegs, contributed.designEntries, contributed.regMap
 
     let batch =
@@ -2170,14 +2261,30 @@ let private hostMemoryTop (board: Board) (path: DataPath) (d: Design) : BoardTop
         | Some b -> b
         | None -> failwith $"{d.name}: the host-memory path needs the batch contract, and no binding contributed one"
     let inShape = rowShape memory.width (inputsOf d)
-    let outShape = rowShape memory.width payloadPins
+    // Rows out have a shape; a surface has its own, below.
+    let outShape = if payloadPins.IsEmpty then None else Some(rowShape memory.width payloadPins)
 
     // A scattered beat carries one address, so it has to BE one beat: there is
     // nowhere to put a second address if two rows shared a word, and no reason
     // to buffer rows that are not going to the same place.
-    if scattered && outShape.rowsPerBeat <> 1 then
+    match outShape with
+    | Some shape when scattered && shape.rowsPerBeat <> 1 ->
         failwith
-            $"{d.name}: the scatter path writes one payload per beat, and [{describePins payloadPins}] packs %d{outShape.rowsPerBeat} of them into a %d{memory.width}-bit word — widen the payload to fill one"
+            $"{d.name}: the scatter path writes one payload per beat, and [{describePins payloadPins}] packs %d{shape.rowsPerBeat} of them into a %d{memory.width}-bit word — widen the payload to fill one"
+    | _ -> ()
+
+    // The surface's rows in beats: a lane a field, rows packed into beats,
+    // padded to whole beats and to the two a snapshot source needs at least.
+    let surfaceShape =
+        surface
+        |> Option.map (fun (name, fields, rows) ->
+            let shape = rowShape memory.width fields
+
+            if shape.beatsPerRow > 1 then
+                failwith $"{d.name}: a surface's row is at most a beat, and '{name}' is %d{shape.lanesPerRow} lanes"
+
+            let beats = max 2 ((rows + shape.rowsPerBeat - 1) / shape.rowsPerBeat)
+            name, fields, rows, shape, beats)
 
     match destPin with
     | Some (n, f) when f.totalWidth > 32 ->
@@ -2185,6 +2292,7 @@ let private hostMemoryTop (board: Board) (path: DataPath) (d: Design) : BoardTop
     | _ -> ()
     let beatBytes = memory.width / 8
     let burstBytes = beatsPerBurst * beatBytes
+    let beatAddrShift = ceilLog2 beatBytes
     let name = $"{d.name}Batch"
 
     let top =
@@ -2194,8 +2302,11 @@ let private hostMemoryTop (board: Board) (path: DataPath) (d: Design) : BoardTop
             (fun p ->
                 axiLiteSlavePorts p map.apertureAddrWidth,
                 (if counted then None else Some(axiReadBusPorts p "m_axi" 32 memory.width)),
-                axiWriteBusPorts p "m_axi" 32 memory.width)
-            (fun (slavePorts, readBusPorts, writeBusPorts) ->
+                axiWriteBusPorts p "m_axi" 32 memory.width,
+                // A surface grants snapshots the host waits for, so it has an
+                // interrupt; a batch is polled on `busy`, as it always was.
+                (if surface.IsSome then Some(p.outPort "irq" 1) else None))
+            (fun (slavePorts, readBusPorts, writeBusPorts, irqPort) ->
                 let regs = regMapSlave slavePorts map
                 let byName = Map.ofList entries
 
@@ -2217,9 +2328,19 @@ let private hostMemoryTop (board: Board) (path: DataPath) (d: Design) : BoardTop
 
                         timesAnswers frameCount ==> rowsOut
 
+                        // Beats out: rows over the rows a beat holds, or rows
+                        // times the beats a row takes. A surface writes no
+                        // beats of the batch's: its total is the rows taken.
                         let beatsTotal = wire "beats_total" 32
-                        let outShift = ceilLog2 outShape.rowsPerBeat
-                        pad 32 (slice 31 outShift rowsOut) ==> beatsTotal
+
+                        match outShape with
+                        | Some shape when shape.beatsPerRow > 1 ->
+                            let outShift = ceilLog2 shape.beatsPerRow
+                            cat (slice (31 - outShift) 0 rowsOut) (lit 0UL outShift) ==> beatsTotal
+                        | Some shape ->
+                            let outShift = ceilLog2 shape.rowsPerBeat
+                            pad 32 (slice 31 outShift rowsOut) ==> beatsTotal
+                        | None -> frameCount ==> beatsTotal
 
                         let running = regBit "running"
                         let arIssued = reg "ar_issued" 32
@@ -2240,45 +2361,53 @@ let private hostMemoryTop (board: Board) (path: DataPath) (d: Design) : BoardTop
                 let writerIdle = ref None
 
                 let rowsIn (_: string) : Stream<Expr list> =
-                    let { frameCount = frameCount; bursts = bursts; running = running; arIssued = arIssued; burstAddrShift = burstAddrShift } =
+                    let { frameCount = frameCount; bursts = bursts; running = running; arIssued = arIssued; burstAddrShift = burstAddrShift; beatsWritten = beatsWritten } =
                         counters.Force()
 
-                    match readBusPorts with
-                    | Some readBusPorts ->
-                        // --- the read side: one descriptor per burst -------
-                        let reqReady = wireBit "req_ready"
-                        let arMore = wireBit "ar_more"
-                        (running &&& lt arIssued bursts) ==> arMore
+                    let rows =
+                        match readBusPorts with
+                        | Some readBusPorts ->
+                            // --- the read side: one descriptor per burst -------
+                            let reqReady = wireBit "req_ready"
+                            let arMore = wireBit "ar_more"
+                            (running &&& lt arIssued bursts) ==> arMore
 
-                        let reqAddr = wire "req_addr" 32
-                        (regs.value batch.srcAddr + asUInt (shl burstAddrShift (slice (31 - burstAddrShift) 0 arIssued))) ==> reqAddr
+                            let reqAddr = wire "req_addr" 32
+                            (regs.value batch.srcAddr + asUInt (shl burstAddrShift (slice (31 - burstAddrShift) 0 arIssued))) ==> reqAddr
 
-                        let requests: Stream<Expr * Expr> =
-                            { payload = (reqAddr, lit (uint64 (beatsPerBurst - 1)) 8)
-                              valid = arMore
-                              ready = reqReady
-                              layout = layout2 ("addr", 32) ("len", 8) }
+                            let requests: Stream<Expr * Expr> =
+                                { payload = (reqAddr, lit (uint64 (beatsPerBurst - 1)) 8)
+                                  valid = arMore
+                                  ready = reqReady
+                                  layout = layout2 ("addr", 32) ("len", 8) }
 
-                        If (arMore &&& reqReady) (fun () -> arIssued + lit 1UL 32 ==> arIssued)
+                            If (arMore &&& reqReady) (fun () -> arIssued + lit 1UL 32 ==> arIssued)
 
-                        axiMasterReaderBurstOn (axiReadBusOf readBusPorts) 4 beatsPerBurst requests
-                        |> beatsToRows inShape (inputsOf d)
-                    | None ->
-                        // --- the count: `frameCount` beats, the index each -
-                        // `arIssued` counts them, as it counts bursts read.
-                        let more = wireBit "count_more"
-                        (running &&& lt arIssued frameCount) ==> more
-                        let countReady = wireBit "count_ready"
-                        registerStreamReady countReady
-                        If (more &&& countReady) (fun () -> arIssued + lit 1UL 32 ==> arIssued)
+                            axiMasterReaderBurstOn (axiReadBusOf readBusPorts) 4 beatsPerBurst requests
+                            |> beatsToRows inShape (inputsOf d)
+                        | None ->
+                            // --- the count: `frameCount` beats, the index each -
+                            // `arIssued` counts them, as it counts bursts read.
+                            let more = wireBit "count_more"
+                            (running &&& lt arIssued frameCount) ==> more
+                            let countReady = wireBit "count_ready"
+                            registerStreamReady countReady
+                            If (more &&& countReady) (fun () -> arIssued + lit 1UL 32 ==> arIssued)
 
-                        let _, f = (inputsOf d).Head
-                        let index = if f.totalWidth >= 32 then pad f.totalWidth arIssued else slice (f.totalWidth - 1) 0 arIssued
+                            let _, f = (inputsOf d).Head
+                            let index = if f.totalWidth >= 32 then pad f.totalWidth arIssued else slice (f.totalWidth - 1) 0 arIssued
 
-                        { payload = [ index ]
-                          valid = more
-                          ready = countReady
-                          layout = layoutOfList (inputsOf d) }
+                            { payload = [ index ]
+                              valid = more
+                              ready = countReady
+                              layout = layoutOfList (inputsOf d) }
+
+                    // With a surface for an output the batch writes nothing, and
+                    // it is done when the design has taken every row it was sent.
+                    if surface.IsSome then
+                        If (rows.valid &&& rows.ready) (fun () -> beatsWritten + lit 1UL 32 ==> beatsWritten)
+
+                    rows
 
                 let rowsOut (_: string) (produced: Stream<Expr list>) =
                     let { beatsWritten = beatsWritten } = counters.Force()
@@ -2294,7 +2423,12 @@ let private hostMemoryTop (board: Board) (path: DataPath) (d: Design) : BoardTop
                         else
                             None, produced
 
-                    let outBeats = payloadRows |> rowsToBeats outShape payloadPins memory.width
+                    let shape =
+                        match outShape with
+                        | Some shape -> shape
+                        | None -> failwith $"{d.name}: the design handed rows out and declares none"
+
+                    let outBeats = payloadRows |> rowsToBeats shape payloadPins memory.width
 
                     // --- the write side -----------------------------------------
                     let wrAddr = wire "wr_addr" 32
@@ -2331,6 +2465,89 @@ let private hostMemoryTop (board: Board) (path: DataPath) (d: Design) : BoardTop
                     If (outBeats.valid &&& wrReady) (fun () -> beatsWritten + lit 1UL 32 ==> beatsWritten)
                     writerIdle.Value <- Some idle
 
+                // --- the surface: the keep-latest triple buffer -----------
+                // The surface is latched whole in one cycle, streamed as beats,
+                // and written into one of three slots in the host's memory; the
+                // host captures the freshest complete slot and releases it. The
+                // write path is armed by a non-zero base, as GoL's top always
+                // was: nothing enters the interconnect until the host has said
+                // where, which is also what keeps an unarmed master off address
+                // zero.
+                let surfaceOut (name: string) (rows: Expr list list) =
+                    match surfaceShape, contributed.snapshotRegs with
+                    | Some(sname, fields, declared, shape, beats), Some(SnapshotToMemory(baseReg, capture, release, ready, overrun, slot, irq)) when name = sname ->
+                        if rows.Length <> declared then
+                            failwith $"{d.name}: '{name}' declared %d{declared} rows and handed over %d{rows.Length}"
+
+                        let rowWidth = shape.lanesPerRow * laneWidth
+
+                        let packRow (r: int) (row: Expr list) =
+                            let lanes =
+                                List.map2
+                                    (fun (fname: string, f: NumberFormat) (e: Expr) ->
+                                        let w = lanesOf f * laneWidth
+
+                                        let e =
+                                            if f.signed && not (isNamed e) then
+                                                let named = wire $"surface_%d{r}_{fname}" f.totalWidth
+                                                e ==> named
+                                                named
+                                            else
+                                                e
+
+                                        if f.signed then asUInt (pad w (asSInt e)) else pad w e)
+                                    fields
+                                    row
+
+                            let padding = shape.lanesPerRow - (fields |> List.sumBy (fun (_, f) -> lanesOf f))
+                            let packed = wire $"surface_row_%d{r}" rowWidth
+                            (lanes @ List.replicate padding (lit 0UL laneWidth) |> List.rev |> List.reduce cat) ==> packed
+                            packed
+
+                        let rowWords = rows |> List.mapi packRow
+                        let rowsPadded = rowWords @ List.replicate ((shape.rowsPerBeat - rows.Length % shape.rowsPerBeat) % shape.rowsPerBeat) (lit 0UL rowWidth)
+
+                        let beatRows =
+                            rowsPadded
+                            |> List.chunkBySize shape.rowsPerBeat
+                            |> List.map (fun chunk ->
+                                match chunk with
+                                | low :: rest -> List.fold (fun acc r -> cat r acc) low rest
+                                | [] -> failwith "unreachable: a beat has a row")
+
+                        let beatRows = beatRows @ List.replicate (beats - beatRows.Length) (lit 0UL memory.width)
+                        let idle = wireBit "snapshot_writer_idle"
+
+                        let frames, status =
+                            snapshotSource "snapshot" beatRows
+                            |> streamConflate3 "conflate" (regs.pulse capture) (regs.pulse release) idle
+
+                        let baseAddr = regs.value baseReg
+                        let armed = wireBit "snapshot_armed"
+                        bnot (eq baseAddr (lit 0UL 32)) ==> armed
+
+                        (frames
+                         |> streamMapTo (axiWriteBeatLayout 32 memory.width) (fun (slotIndex, index, data) ->
+                             let offset = cat (cat slotIndex index) (lit 0UL beatAddrShift)
+                             baseAddr + cat (lit 0UL (32 - width offset)) offset, data, lit ((1UL <<< beatBytes) - 1UL) beatBytes)
+                         |> fun s ->
+                             let armedReady = wireBit "snapshot_armed_ready"
+                             (armedReady &&& armed) ==> s.ready
+
+                             axiMasterWriterWithIdleOn
+                                 (axiWriteBusOf writeBusPorts)
+                                 memory.writeOutstanding
+                                 { s with
+                                     valid = s.valid &&& armed
+                                     ready = armedReady })
+                        ==> idle
+
+                        regs.drive ready status.ready
+                        regs.drive overrun status.overrun
+                        regs.drive slot status.readSlot
+                        regs.setBit irq status.irq
+                    | _ -> failwith $"{d.name}: no surface called '{name}'"
+
                 // --- the design ---------------------------------------------
                 d.body
                     { streamIn = rowsIn
@@ -2338,15 +2555,22 @@ let private hostMemoryTop (board: Board) (path: DataPath) (d: Design) : BoardTop
                       valueIn = fun name -> regs.value byName[name]
                       valueOut = fun name value -> regs.drive byName[name] value
                       tableIn = fun name index -> regs.readArray byName[name] index
-                      surfaceOut = fun name _ -> failwith $"{d.name}: '{name}' is a surface, and the host-memory top carries none yet — the KV260's snapshot into DDR is still GoL's own top; bind it to the host link" }
+                      surfaceOut = surfaceOut }
+
+                match irqPort with
+                | Some port -> regs.irq ==> port
+                | None -> ()
 
                 let { running = running; arIssued = arIssued; beatsWritten = beatsWritten; beatsTotal = beatsTotal; cycleCount = cycleCount; frameCount = frameCount; burstAddrShift = burstAddrShift } =
                     counters.Force()
 
+                // With a surface the batch has no write side: it is done when the
+                // rows it was sent have been taken.
                 let writerIdle =
-                    match writerIdle.Value with
-                    | Some idle -> idle
-                    | None -> failwith $"{d.name}: the design never handed its rows out, so the batch has nothing to write"
+                    match writerIdle.Value, surface with
+                    | Some idle, _ -> idle
+                    | None, Some _ -> lit 1UL 1
+                    | None, None -> failwith $"{d.name}: the design never handed its rows out, so the batch has nothing to write"
 
                 // --- control ------------------------------------------------
                 let finished = wireBit "finished"
@@ -2376,12 +2600,33 @@ let private hostMemoryTop (board: Board) (path: DataPath) (d: Design) : BoardTop
                 assertThat (aligned batch.srcAddr) $"srcAddr must be %d{burstBytes}-byte aligned"
                 assertThat (aligned batch.dstAddr) $"dstAddr must be %d{burstBytes}-byte aligned"
 
-                let rowsPerBurst = if counted then outShape.rowsPerBurst else max inShape.rowsPerBurst outShape.rowsPerBurst
+                let rowsPerBurst =
+                    match outShape with
+                    | Some shape when counted -> shape.rowsPerBurst
+                    | Some shape -> max inShape.rowsPerBurst shape.rowsPerBurst
+                    | None -> inShape.rowsPerBurst
+
                 let rowShift = ceilLog2 rowsPerBurst
 
                 assertThat
                     (bnot running ||| eq (slice (rowShift - 1) 0 frameCount) (lit 0UL rowShift))
                     $"frameCount must be a multiple of the rows a burst holds (%d{rowsPerBurst})")
+
+    let snapshotEntries =
+        match contributed.snapshotRegs with
+        | Some(SnapshotToMemory(baseReg, capture, release, ready, overrun, slot, irq)) -> [ baseReg; capture; release; ready; overrun; slot; irq ] |> List.map (fun e -> e.name, e)
+        | _ -> []
+
+    // The seam's word of the surface's shape in memory: beats a snapshot,
+    // bytes a slot (three slots from the base), rows and words a row.
+    let surfaceExtras =
+        match surfaceShape with
+        | Some(sname, _, rows, shape, beats) ->
+            [ $"pub const {upperSnake sname}_ROWS: usize = %d{rows};"
+              $"pub const {upperSnake sname}_WORDS: usize = %d{shape.lanesPerRow};"
+              $"pub const {upperSnake sname}_MEM_BEATS: usize = %d{beats};"
+              $"pub const {upperSnake sname}_MEM_SLOT_BYTES: usize = %d{1 <<< (ceilLog2 beats + beatAddrShift)};" ]
+        | None -> []
 
     { board = board
       name = name
@@ -2396,10 +2641,11 @@ let private hostMemoryTop (board: Board) (path: DataPath) (d: Design) : BoardTop
           "frameCount", batch.frameCount
           "cycles", batch.cycles ]
         @ entries
+        @ snapshotEntries
       batch = Some batch
       map = map
       target = targetOf board.part
-      seamExtras = [] }
+      seamExtras = surfaceExtras }
 
 /// The design on a board, the way the path says: the converter on the pins,
 /// or the host's memory.
@@ -2568,36 +2814,30 @@ let write (dir: string) (t: BoardTop) : string list =
     System.IO.File.WriteAllText(seam, String.concat "\n" (seamLines t) + "\n")
     [ verilog; seam ]
 
-/// The F# half of the batch bridge: the host-memory top in the Sim, its
-/// DDR the behavioural model, spoken to over stdin the way `SimAxi.serve`
-/// is — `R`/`W` are AXI-Lite transactions, `C <hexn>` runs free cycles,
-/// `D <hexoff> <hexlen>` dumps DDR as hex, `L <hexoff> <hex>` loads it, and
-/// `M` names the design's registers with their offsets, so a host tool
-/// needs no seam file to set a control by name. The same Rust driver then
-/// runs against this before any bitstream exists.
-let batchServe (t: BoardTop) =
-    let memory =
-        match t.batch, t.board.hostMemory with
-        | Some _, Some m -> m
-        | _ -> failwith $"{t.name}: the batch bridge serves a host-memory top"
+/// The bridge loop behind every `*serve` verb: a top in the Sim with a
+/// behavioural DDR behind its AXI master, spoken to over stdin the way
+/// `SimAxi.serve` is — `R`/`W` are AXI-Lite transactions, `C <hexn>` runs
+/// free cycles, `D <hexoff> <hexlen>` dumps DDR as hex, `L <hexoff> <hex>`
+/// loads it, and `M` names the registers with their offsets. `marker` is
+/// the ready line the Rust `FsSimWindow` waits for.
+let ddrServe (top: ModuleDef) (registers: (string * RegEntry) list) (arenaBytes: int) (dataBytes: int) (marker: string) =
+    let sim = Sim top
 
-    let sim = Sim t.top
-
-    // The counted top reads nothing and has no read channel, so its DDR is
-    // the write-only slave; the memory path's answers both.
-    let reads = t.top.decls |> List.exists (function Input(n, _) -> n = "m_axi_arready" | _ -> false)
+    // A top that reads nothing has no read channel, so its DDR is the
+    // write-only slave; one with both channels gets the model that answers both.
+    let reads = top.decls |> List.exists (function Input(n, _) -> n = "m_axi_arready" | _ -> false)
 
     let cycle, ddrMemory =
         if reads then
-            let ddr = SimAxiDdr(sim, memory.arenaBytes, dataBytes = memory.width / 8)
+            let ddr = SimAxiDdr(sim, arenaBytes, dataBytes = dataBytes)
             ddr.Cycle, ddr.Memory
         else
-            let ddr = SimAxiWriteSlave(sim, memory.arenaBytes, dataBytes = memory.width / 8)
+            let ddr = SimAxiWriteSlave(sim, arenaBytes, dataBytes = dataBytes)
             ddr.Cycle, ddr.Memory
 
     let axi = SimAxi.clientWith sim cycle
     let out = System.Console.Out
-    out.WriteLine "BATCHSERVE"
+    out.WriteLine marker
     out.Flush()
 
     let mutable line = System.Console.In.ReadLine()
@@ -2625,8 +2865,20 @@ let batchServe (t: BoardTop) =
 
              out.WriteLine "OK"
          | [| "M" |] ->
-             out.WriteLine(t.registers |> List.map (fun (n, e) -> sprintf "%s:%x" n e.offset) |> String.concat " ")
+             out.WriteLine(registers |> List.map (fun (n, e) -> sprintf "%s:%x" n e.offset) |> String.concat " ")
          | _ -> out.WriteLine "ERR")
 
         out.Flush()
         line <- System.Console.In.ReadLine()
+
+/// The F# half of the batch bridge: the host-memory top in the Sim, its
+/// DDR the behavioural model — `ddrServe` with the board's memory and the
+/// `BATCHSERVE` marker. The same Rust driver then runs against this before
+/// any bitstream exists.
+let batchServe (t: BoardTop) =
+    let memory =
+        match t.batch, t.board.hostMemory with
+        | Some _, Some m -> m
+        | _ -> failwith $"{t.name}: the batch bridge serves a host-memory top"
+
+    ddrServe t.top t.registers memory.arenaBytes (memory.width / 8) "BATCHSERVE"

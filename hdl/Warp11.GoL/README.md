@@ -62,11 +62,14 @@ between pulls ever seen — which is the same conflation with the host's pull
 as the pace. `-- build life.icepi.json out/` builds it at the largest world
 the part holds — 32×32 on the Icepi, 64×64 on the KV260 — or at the
 `world` the mapping names (`"sizes": { "world": 16 }`); the Go Board is
-refused by number, 8×8 being more than its 1 280 cells;
+refused by number, 8×8 being more than its 1 280 cells; `life.kv260.json`
+builds it for the KV260 with the world in the same triple buffer `GolAxi`
+uses (`Life64x64Batch`: 32 beats a snapshot, 512-byte slots), the seed rows
+in through the batch contract;
 `warp11_snapshot --serial … --layout out/life64x64_link_layout.rs --seed
 glider.txt --set run=1 --pull 10 --every 100` seeds it, runs it and prints
-what it pulled. The KV260 keeps `GolAxi` until the host-memory path carries a
-surface.
+what it pulled. The KV260 keeps `GolAxi` as its live app until the daemon
+and the view drive the generated top.
 
 ## Running it
 
@@ -152,8 +155,9 @@ obvious:
 Emit and deploy:
 
 ```sh
-dotnet run -c Release --project Warp11.GoL.App -- hardware <repo-root>
-# then build_golfs_axi.tcl, the gol-fs app, and the gol-daemon on the board
+dotnet run -c Release --project Warp11.GoL.App -- build out/   # the KV260 directory: block design, overlay, packaging, the seam
+cd out && ./build.sh                                           # Vivado, the gate, the gol-axi app
+# then gol-daemon on the board (hardware/board/README.md)
 ```
 
 ## A hardware lesson this example paid for

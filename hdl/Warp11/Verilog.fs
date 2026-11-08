@@ -354,6 +354,10 @@ type Target =
     | Ice40
     /// Lattice ECP5 through yosys.
     | Ecp5
+    /// Intel MAX 10 through Quartus, which reads `ramstyle` where the others
+    /// read `ram_style`: `"M9K"` for a block, `"logic"` for what would have
+    /// been LUT RAM — MAX 10 has no MLAB.
+    | Max10
 
 /// One module's Verilog. Instances are emitted as instantiations, not inlined,
 /// so the emitted hierarchy is the elaborated one.
@@ -484,6 +488,12 @@ let internal emitVerilogFor (target: Target) m =
                   let attribute =
                       match target, style with
                       | _, Unspecified -> ""
+                      // Quartus's spelling, and its names for the two kinds.
+                      | Max10, Block -> "(* ramstyle = \"M9K\" *) "
+                      | Max10, Distributed -> "(* ramstyle = \"logic\" *) "
+                      | Max10, Ultra ->
+                          failwith
+                              $"memory '{n}' in '{m.name}' is an ultraMem, which is Xilinx UltraRAM and has no MAX 10 counterpart. Declare it blockMem — an M9K is 9 kbit"
                       // `block` is portable: yosys honours it too, so it is
                       // emitted whatever the target.
                       | _, Block -> "(* ram_style = \"block\" *) "
