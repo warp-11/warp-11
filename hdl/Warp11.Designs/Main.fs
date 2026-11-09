@@ -65,6 +65,8 @@ let private diffDesignsAtDefault () =
       sumWhollyOnChip.def
       Hello.helloOnIceBreaker
       Hello.helloOnKv260
+      Tally.tallyOnKv260
+      Tally.tallyOnIceBreaker
       assertedSaturate.def
       cmdProcessor.def
       unionRoundTrip.def

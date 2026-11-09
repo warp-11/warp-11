@@ -162,6 +162,34 @@ let tests =
               Expect.equal (readAt 12) 0x1234UL "…at the entry it wrote it to"
               Expect.equal (readAt 6) 0x106UL "and the entries around it are untouched"
 
+          testCase "a pulse the host fires is one cycle wide: one write is one count, however long it sits" <| fun _ ->
+              let top = BoardTop.boardTop kv260 viaRegisters Warp11.Designs.Tally.tally
+              let sim = Sim top.top
+              let axi = SimAxi.client sim
+              let bump = registerOf top "bump"
+              let clear = registerOf top "clear"
+              let count = registerOf top "count"
+
+              Expect.equal (axi.read32 count.offset) 0UL "nothing has fired"
+              axi.write32 bump.offset 1UL
+
+              for _ in 1..20 do
+                  sim.Tick()
+
+              Expect.equal (axi.read32 count.offset) 1UL "one write is one count, and twenty idle cycles add nothing"
+              axi.write32 bump.offset 1UL
+              axi.write32 bump.offset 1UL
+              Expect.equal (axi.read32 count.offset) 3UL "each write is one more"
+              axi.write32 bump.offset 0UL
+              Expect.equal (axi.read32 count.offset) 3UL "a write of zero fires nothing"
+              axi.write32 clear.offset 1UL
+              Expect.equal (axi.read32 count.offset) 0UL "and the other pulse is its own"
+
+              let seam = String.concat "\n" (BoardTop.seamLines top)
+              Expect.stringContains seam "pub const BUMP_OFFSET" "the seam names the pulse's word"
+              Expect.stringContains seam "pub const BUMP_BIT" "and its bit"
+              Expect.notEqual bump.offset clear.offset "each pulse has a word of its own"
+
           testCase "a design declared as handles is the design written against its boundary" <| fun _ ->
               let starting = [ for k in 0UL .. 15UL -> 0x100UL + k ]
               let byHand = BoardTop.boardTop kv260 viaHostMemory (tableDesign starting)

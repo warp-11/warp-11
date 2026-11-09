@@ -36,7 +36,7 @@ let private multibandDemo =
 let catalog =
     embeddedFrom
         (System.Reflection.Assembly.GetExecutingAssembly())
-        [ "MemoryDesigns.fs"; "BusDesigns.fs"; "Designs.fs"; "Hello.fs" ]
+        [ "MemoryDesigns.fs"; "BusDesigns.fs"; "Designs.fs"; "Hello.fs"; "Tally.fs" ]
         [ entry "Hello on the iCEBreaker" (nameof helloOnIceBreaker) (fun () -> helloOnIceBreaker)
           entry "Hello on the KV260" (nameof helloOnKv260) (fun () -> helloOnKv260)
           entry "Counter" (nameof onCounter) (fun () -> onCounter.def)

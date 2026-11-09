@@ -11,6 +11,7 @@
         <Compile Include="Designs.fs"/>
         <Compile Include="BusDesigns.fs"/>
         <Compile Include="Hello.fs"/>
+        <Compile Include="Tally.fs"/>
         <Compile Include="Registry.fs"/>
         <Compile Include="Main.fs"/>
     </ItemGroup>

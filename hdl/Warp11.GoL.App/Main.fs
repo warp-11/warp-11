@@ -7,13 +7,11 @@ open Warp11
 open Warp11.GoL.Board
 open Warp11.GoL.Core
 open Warp11.GoL.Twin
-open Warp11.GoL.Wrapper
 open Warp11.GoL
 
 let private diffDesigns () =
     [ (golHarness 8 8).def
-      (golLiveHarness 8 8).def
-      golAxiScaled.def ]
+      (golLiveHarness 8 8).def ]
 
 /// Drive the harness and the twin through the same generations and demand
 /// row-for-row, population-for-population equality every cycle. An unrolled
@@ -113,19 +111,29 @@ let private demoChecks () =
             uart.Send(SerialFrame.play row)
 
         drain (8 * 6 * 10 * cyclesPerBit * 2)
+        // A free-running burst, stopped from the host.
         link.write32 (offset "intervalCycles") 3UL
-        link.write32 (offset "run") 1UL
+        link.write32 (offset "tickCount") 0UL
+        link.write32 (offset "tick") 1UL
         drain 5_000
-        link.write32 (offset "run") 0UL
+        let runningOk = link.read32 (offset "ticking") = 1UL
+        link.write32 (offset "stop") 1UL
         let generation = int (link.read32 (offset "generation"))
+        // Then a counted one: exactly seven more, and the burst ends itself.
+        link.write32 (offset "tickCount") 7UL
+        link.write32 (offset "tick") 1UL
+        drain 200
+        let afterBurst = int (link.read32 (offset "generation"))
+        let burstOk = afterBurst = generation + 7 && link.read32 (offset "ticking") = 0UL
+        let generation = afterBurst
         uart.TakeReceived() |> ignore
         link.write32 (offset "worldLinkPull") 1UL
         drain (8 * 7 * 10 * cyclesPerBit * 2)
         let world, _ = SerialFrame.streamedWords (uart.TakeReceived())
         let expected = [ 1 .. generation ] |> List.fold (fun g _ -> step 8 8 g) glider |> List.ofArray
         let populationOk = link.read32 (offset "population") = uint64 (population (Array.ofList expected))
-        printfn $"life over the link ({top.name}): %d{generation} generations, world %b{world = expected}, population %b{populationOk}"
-        world = expected && populationOk && generation > 0
+        printfn $"life over the link ({top.name}): %d{generation} generations, world %b{world = expected}, population %b{populationOk}, ticking while free %b{runningOk}, counted burst of 7 %b{burstOk}"
+        world = expected && populationOk && generation > 0 && runningOk && burstOk
 
     printfn $"life over the link vs twin:   %b{linkOk}"
 
@@ -278,251 +286,6 @@ let private benchTwin () =
     measure "bitboard (F#)         " stepBitboard
     0
 
-/// The silicon rehearsal: every host action a real five-channel AXI-Lite
-/// transaction, the frame read back from the fake DDR — the same sequence
-/// the Rust driver runs on the board. Parameterized so it runs both at the
-/// scaled config (fast, the inner loop) and at the full 64×64 silicon config
-/// (32 beats per frame — the multi-beat write path the scaled config's two
-/// beats cannot exercise; the +16-row DDR rotation hid exactly there).
-let private axiRehearsalAt
-    design
-    (gensPerCycle: int)
-    (gridWidth: int)
-    (gridHeight: int)
-    (awEvery: int)
-    (wEvery: int)
-    (bDelay: int)
-    (jitter: int option)
-    =
-    let m, _ = golMap gridWidth gridHeight
-    let sim = Sim(design)
-    let fbBase = 0x80
-    let slotStride = 1 <<< golSlotShift gridWidth gridHeight
-
-    let ddr =
-        SimAxiWriteSlave(
-            sim,
-            fbBase + 3 * slotStride,
-            dataBytes = 16,
-            awEvery = awEvery,
-            wEvery = wEvery,
-            bDelay = bDelay,
-            ?jitter = jitter
-        )
-    let cycle () = ddr.Cycle()
-
-    // The handshakes live in `SimAxi` — six copies of them used to live
-    // in the projects, this one included.
-    let axi = SimAxi.clientWith sim (cycle)
-    let read32, write32 = axi.read32, axi.write32
-
-    let idOk = read32 m.id.offset = golIdMagic
-    printfn $"ID reads back:                %b{idOk}"
-
-    write32 m.fbBaseAddr.offset (uint64 fbBase)
-
-    // The soup goes in through the load window, low word of each row first.
-    let rand = System.Random 5
-
-    let soup =
-        [| for _ in 1..gridHeight ->
-               if gridWidth = 64 then
-                   uint64 (rand.NextInt64())
-               else
-                   uint64 (rand.NextInt64()) &&& ((1UL <<< gridWidth) - 1UL) |]
-
-    for y in 0 .. gridHeight - 1 do
-        for k in 0 .. m.wordsPerRow - 1 do
-            write32
-                (m.loadRow.offset + uint64 ((y * m.wordsPerRow + k) * 4))
-                ((soup[y] >>> (32 * k)) &&& 0xFFFFFFFFUL)
-
-    write32 0x000UL 1UL // load pulse
-
-    for _ in 1 .. m.windowWords + 6 do
-        cycle () // the prefetch walk
-
-    let status = read32 m.busy.offset
-    let loadOk = status = (uint64 (population soup) <<< 1) // busy 0, population packed above it
-    printfn $"load via window + prefetch:   %b{loadOk}"
-
-    // A 5-generation burst at 3 cycles per generation, polled to completion.
-    write32 m.tickCount.offset 5UL
-    write32 m.intervalCycles.offset 3UL
-    write32 0x000UL 2UL // tick pulse
-
-    let mutable guard = 0
-
-    while read32 m.busy.offset &&& 1UL = 1UL && guard < 100 do
-        guard <- guard + 1
-
-    // Five fires; the grid advances gensPerCycle generations per fire and
-    // the generation register counts true generations.
-    let after5 =
-        (soup, [ 1 .. 5 * gensPerCycle ])
-        ||> List.fold (fun g _ -> step gridWidth gridHeight g)
-
-    let burstOk =
-        read32 m.generation.offset = uint64 (5 * gensPerCycle)
-        && read32 m.busy.offset = (uint64 (population after5) <<< 1)
-
-    printfn $"burst of 5 (interval 3):      %b{burstOk}"
-
-    // Capture, read the slot straight out of DDR, compare against the twin.
-    // Conflate grants the latest COMPLETED frame, which can lag the grid by
-    // one frame latency — a driver that wants the settled post-burst state
-    // idles one frame period after busy clears before capturing (the live
-    // UI streams continuously and never cares). The idle scales with the
-    // frame period: beats × pacing, plus latch/drain/publish slack.
-    let beatCount = gridWidth * gridHeight / 128
-
-    for _ in 1 .. 3 * beatCount * (max awEvery wEvery + bDelay) + 200 do
-        cycle ()
-
-    write32 m.snapCapture.offset 1UL
-    let mutable snapGuard = 0
-
-    while read32 m.snapReady.offset &&& 1UL = 0UL && snapGuard < 3000 do
-        snapGuard <- snapGuard + 1
-
-    if read32 m.snapReady.offset &&& 1UL = 0UL then
-        for signal in
-            [ "snap_copying"
-              "snap_index"
-              "conflate_draining"
-              "conflate_write_idx"
-              "conflate_done_idx"
-              "conflate_read_idx"
-              "conflate_capture_queued"
-              "enq_ptr"
-              "aw_ptr"
-              "w_ptr"
-              "b_ptr"
-              "writer_idle"
-              "writer_armed" ] do
-            printfn $"  {signal} = %d{sim.Peek signal}"
-
-        failwith "snapshot capture never granted — frame period exceeds the poll budget"
-
-    let snapStatus = read32 m.snapReady.offset
-    let slot = int (snapStatus >>> 16) &&& 3
-    let overrunClear = (snapStatus >>> 8) &&& 0xFFUL = 0UL
-    let rowsPerBeat = 128 / gridWidth
-
-    let frameRows =
-        [| for y in 0 .. gridHeight - 1 ->
-               let beat = y / rowsPerBeat
-               let byteBase = fbBase + slot * slotStride + beat * 16 + (y % rowsPerBeat) * (gridWidth / 8)
-
-               (0UL, [ 0 .. gridWidth / 8 - 1 ])
-               ||> List.fold (fun acc k -> acc ||| (uint64 ddr.Memory[byteBase + k] <<< (8 * k))) |]
-
-    let frameOk = frameRows = after5 && overrunClear
-    printfn $"DDR frame matches the twin:   %b{frameOk}"
-
-    if not frameOk then
-        // Which generation (and at which row offset) does the frame hold?
-        let twins =
-            (soup, [ 1 .. 5 * gensPerCycle ])
-            ||> List.scan (fun g _ -> step gridWidth gridHeight g)
-
-        printfn $"  granted slot %d{slot}; per-slot content:"
-
-        for s in 0..2 do
-            let rowsAt =
-                [| for y in 0 .. gridHeight - 1 ->
-                       let beat = y / rowsPerBeat
-                       let byteBase = fbBase + s * slotStride + beat * 16 + (y % rowsPerBeat) * (gridWidth / 8)
-
-                       (0UL, [ 0 .. gridWidth / 8 - 1 ])
-                       ||> List.fold (fun acc k -> acc ||| (uint64 ddr.Memory[byteBase + k] <<< (8 * k))) |]
-
-            let zero = rowsAt |> Array.filter ((=) 0UL) |> Array.length
-
-            let genHits =
-                [ for g, twin in List.indexed twins ->
-                      g, (Array.indexed rowsAt |> Array.filter (fun (y, r) -> r = twin[y]) |> Array.length) ]
-                |> List.filter (fun (_, hits) -> hits > gridHeight / 4)
-                |> List.map (fun (g, hits) -> $"gen%d{g}:%d{hits}")
-                |> String.concat " "
-
-            printfn $"    slot %d{s}: %d{zero} zero rows; strong matches: {genHits}"
-
-    // Both interrupt bits should be pending (burst done + snapshot granted);
-    // w1c clears them and drops the irq line.
-    let irqPending = read32 m.burstIrq.offset = 3UL && sim.Peek "irq" = 1UL
-    write32 m.burstIrq.offset 3UL
-    let irqCleared = read32 m.burstIrq.offset = 0UL && sim.Peek "irq" = 0UL
-    printfn $"w1c irq set then cleared:     %b{irqPending && irqCleared}"
-
-    write32 m.snapRelease.offset 1UL
-    cycle ()
-    let releaseOk = read32 m.snapReady.offset &&& 1UL = 0UL
-
-    write32 0x000UL 4UL // reset pulse
-    cycle ()
-    cycle ()
-    let resetOk = read32 m.busy.offset = 0UL && read32 m.generation.offset = 0UL
-    printfn $"release + reset:              %b{releaseOk && resetOk}"
-    0
-
-/// The seam: the silicon config's Verilog plus the generated Rust layout —
-/// offsets and bit positions from the same map the slave elaborates.
-/// The accelerator as the generator takes it: the complete AXI top, its map,
-/// and the constants the daemon compiles against. `build` writes the KV260
-/// directory from this; `hardware` writes the same seam where the runtime
-/// keeps its committed copy, so the two cannot differ.
-let private golTop () : BoardTop.BoardTop =
-    let gridWidth, gridHeight = 64, 64
-    let _, mMap = golMap gridWidth gridHeight
-
-    { board = board
-      name = "GolAxi"
-      top = golAxiFull.Value.def
-      registers = []
-      batch = None
-      map = mMap
-      target = BoardTop.targetOf board.part
-      seamExtras =
-        [ $"pub const GENS_PER_CYCLE: usize = 1;"
-          $"pub const GRID_WIDTH: usize = %d{gridWidth};"
-          $"pub const GRID_HEIGHT: usize = %d{gridHeight};"
-          $"pub const ROWS_PER_BEAT: usize = %d{128 / gridWidth};"
-          $"pub const BEAT_COUNT: usize = %d{golBeatCount gridWidth gridHeight};"
-          $"pub const FRAME_BYTES: usize = %d{golBeatCount gridWidth gridHeight * 16};"
-          $"pub const SLOT_STRIDE_BYTES: usize = %d{1 <<< golSlotShift gridWidth gridHeight};"
-          "pub const SLOT_COUNT: usize = 3;"
-          ""
-          "// The clock the app's overlay programs, from the board this design was"
-          "// built for. Every wall-clock figure a host quotes divides by it, and"
-          "// a host that wrote it down separately could disagree with the fabric"
-          "// about how fast the fabric is."
-          $"pub const FABRIC_HZ: u64 = %d{board.fabricHz};" ] }
-
-let private writeHardware (repoRoot: string) =
-    let buildDir = System.IO.Path.Combine(repoRoot, "hardware", "build")
-    let runtimeSrc = System.IO.Path.Combine(repoRoot, "runtime", "core", "src")
-    System.IO.Directory.CreateDirectory buildDir |> ignore
-    let t = golTop ()
-    let verilogPath = System.IO.Path.Combine(buildDir, "GolAxi.v")
-    let layoutPath = System.IO.Path.Combine(runtimeSrc, "gol_layout.rs")
-    System.IO.File.WriteAllText(verilogPath, emitDesign t.top + "\n")
-    System.IO.File.WriteAllText(layoutPath, String.concat "\n" (BoardTop.seamLines t) + "\n")
-    printfn $"wrote {verilogPath}"
-    printfn $"wrote {layoutPath}"
-    0
-
-/// The directory the KV260's toolchain builds from — block design,
-/// constraints, overlay, packaging — and its `build.sh`.
-let private writeBuild (dir: string) =
-    let out = Warp11.Build.write dir (golTop ())
-
-    for file in out.files do
-        printfn $"wrote {file}"
-
-    printfn $"build with: {out.run}"
-    0
-
 [<EntryPoint>]
 let main argv =
     match argv with
@@ -531,36 +294,13 @@ let main argv =
         0
     | [| "perf" |] -> perfProbe ()
     | [| "bench" |] -> benchTwin ()
-    | [| "axi" |] -> axiRehearsalAt golAxiScaled.def 1 16 16 1 1 0 None
-    // The same rehearsal with the DDR answering after a random 0-3 cycle delay
-    // and stalling AW and W independently. A design whose frame depends on when
-    // memory answered passes the always-ready model and corrupts on a board.
-    | [| "axi-jitter" |] ->
-        [ 1..6 ]
-        |> List.map (fun seed -> axiRehearsalAt golAxiScaled.def 1 16 16 1 1 0 (Some seed) = 0)
-        |> List.forall id
-        |> fun ok ->
-            printfn $"axi rehearsal under random memory timing (6 seeds): %b{ok}"
-            if ok then 0 else 1
-    | [| "axi-full"; awEvery; wEvery; bDelay |] ->
-        axiRehearsalAt golAxiFull.Value.def 1 64 64 (int awEvery) (int wEvery) (int bDelay) None
-    | [| "axi-full" |] ->
-        // The pacing matrix: always-ready, then each channel throttled
-        // against the other, then both with a lagging B — the skews a real
-        // interconnect applies and the always-ready slave cannot.
-        [ 1, 1, 0; 2, 1, 0; 1, 2, 0; 3, 1, 6; 1, 3, 6 ]
-        |> List.map (fun (awEvery, wEvery, bDelay) ->
-            printfn $"--- pacing aw/%d{awEvery} w/%d{wEvery} b+%d{bDelay} ---"
-            axiRehearsalAt golAxiFull.Value.def 1 64 64 awEvery wEvery bDelay None)
-        |> List.max
-    | [| "hardware"; repoRoot |] -> writeHardware repoRoot
-    | [| "build"; dir |] -> writeBuild dir
-    // The world as a design, for the project's board — `Board.board`, one
-    // line to change: `life out/`. The world's side is `World.side`, a
-    // design parameter stated in its own line.
-    // On a board with one wire the world comes out as snapshots over it; on
-    // the KV260 it is the host-memory top, beside the hand top `build <dir>`
-    // writes for the same board. `mapping` prints the mapping the world gets.
+    // The world for the project's board — `Board.board`, one line to
+    // change: `life out/` writes the directory its toolchain builds from.
+    // The world's side is `World.side`, a design parameter stated in its
+    // own line. On a board with one wire the world comes out as snapshots
+    // over it; on the KV260 it is the host-memory top, the triple buffer
+    // in DDR that `gol-daemon` serves. `mapping` prints the mapping the
+    // world gets.
     | [| "mapping" |] ->
         printfn "%s" (Warp11.Mapping.write World.mapping)
         0

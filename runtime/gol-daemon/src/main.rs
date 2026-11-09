@@ -1,82 +1,239 @@
-//! The GoL board daemon: the accelerator's live face on the Zenoh mesh.
-//! Runs on the KV260 after `xmutil loadapp gol-axi`, listens as a Zenoh peer,
-//! and speaks two key spaces:
+//! The GoL board daemon: the world's live face on the Zenoh mesh.
+//! Runs on the KV260 after the world's app is loaded (`xmutil loadapp
+//! life64x64-batch`), listens as a Zenoh peer, and speaks the two key spaces
+//! the view has always known:
 //!
 //!   warp11/gol/frame            published at ~30 Hz, CongestionControl::Drop
 //!                               (keep-latest on the wire — the same policy
-//!                               the fabric's conflate triple-buffer applies):
+//!                               the fabric's triple buffer applies):
 //!                               [generation u32 LE][population u32 LE]
-//!                               [512 bytes: 64 rows of u64 LE, bit x = cell x]
-//!   warp11/gol/ctl/load         payload = 512 bytes of rows; loads the grid
-//!   warp11/gol/ctl/run          payload = [gens_per_sec u32 LE]; continuous
-//!                               ticking, paced IN FABRIC by intervalCycles
+//!                               [rows × 8 bytes: each row a u64 LE, bit x = cell x]
+//!   warp11/gol/ctl/load         payload = rows × 8 bytes; seeds the world
+//!   warp11/gol/ctl/run          payload = [gens_per_sec u32 LE]; a burst that
+//!                               runs until `stop`, paced IN FABRIC
 //!   warp11/gol/ctl/burst        payload = [count u32 LE][gens_per_sec u32 LE]
 //!   warp11/gol/ctl/stop         no payload
-//!   warp11/gol/ctl/reset        no payload; clears the grid and generation
+//!   warp11/gol/ctl/reset        no payload; empties the world, zeroes the generation
 //!
-//! The pacing lives in the fabric's burst/interval FSM (the Kotlin GoL
-//! model — evenly spaced generations regardless of host jitter); the daemon
-//! only captures, publishes and forwards control writes.
+//! It stands on the generated design's own contract and nothing hand-written.
+//! The seam the build directory wrote (`--layout`) names every register and
+//! the world's shape; the batch contract (`BatchDevice`) carries the seed rows
+//! through the arena the app's overlay made; the surface's snapshot registers
+//! hand over the triple buffer's slots. The pacing lives in the fabric —
+//! `tick`, `tickCount`, `intervalCycles`, `stop` — so the daemon only
+//! forwards control writes, captures and publishes.
+//!
+//!   gol-daemon --board life64x64_batch --layout life64x64_batch_layout.rs [--listen tcp/0.0.0.0:7447]
+//!   gol-daemon --board … --layout … disarm
+//!
+//! `disarm` stops the world and points its write master at nothing, which is
+//! the step before `xmutil unloadapp`: tearing down a bitstream with writes in
+//! flight permanently skews the PS-side HP0 AW/W pairing, cured only by a
+//! reboot.
 
 use std::fs::OpenOptions;
 use std::os::unix::fs::OpenOptionsExt;
+use std::path::{Path, PathBuf};
 use std::process::exit;
 use std::sync::mpsc;
 use std::time::Duration;
 use warp11_host::mmap::{MmapWindow, O_SYNC};
-use warp11_runtime::gol_layout as layout;
+use warp11_host::seam::{read_const, read_layout, resolve};
+use warp11_host::udmabuf::{find_uio, Udmabuf};
+use warp11_runtime::batch::{BatchDevice, BatchError};
 use warp11_runtime::RegisterWindow;
 use zenoh::qos::CongestionControl;
 use zenoh::Wait;
 
-// From the generated seam. This constant was 166_666_667 where the overlay
-// programs 166_666_672 — five hertz, invisible in any output anyone reads, and
-// unreachable by every check here because it only shows up in a *time*.
-const PL_CLOCK_HZ: u64 = layout::FABRIC_HZ;
 const FRAME_PERIOD: Duration = Duration::from_millis(33);
+/// The host memory bus's beat, in bytes: the KV260's HP port is 128 bits wide,
+/// and the generated top packs rows into beats of it.
+const BEAT_BYTES: usize = 16;
+/// A lane is one 32-bit word of a row.
+const LANE_BYTES: usize = 4;
+/// The triple buffer: three slots, as the surface's snapshot path builds it.
+const SLOTS: usize = 3;
 
-fn find_uio(name: &str) -> Option<String> {
-    for entry in std::fs::read_dir("/sys/class/uio").ok()?.flatten() {
-        if let Ok(n) = std::fs::read_to_string(entry.path().join("name")) {
-            if n.trim() == name {
-                return Some(format!("/dev/{}", entry.file_name().to_string_lossy()));
-            }
+fn fail(message: impl std::fmt::Display) -> ! {
+    eprintln!("{message}");
+    exit(1)
+}
+
+fn usage() -> ! {
+    fail("usage: gol-daemon --board <uio name> --layout <seam.rs> [--listen tcp/0.0.0.0:7447] [disarm]")
+}
+
+struct Args {
+    board: String,
+    layout: PathBuf,
+    listen: String,
+    disarm: bool,
+}
+
+fn parse_args() -> Args {
+    let mut board = None;
+    let mut layout = None;
+    let mut listen = "tcp/0.0.0.0:7447".to_string();
+    let mut disarm = false;
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--board" => board = args.next(),
+            "--layout" => layout = args.next().map(PathBuf::from),
+            "--listen" => listen = args.next().unwrap_or_else(|| usage()),
+            "disarm" => disarm = true,
+            _ => usage(),
         }
     }
-    None
+    Args {
+        board: board.unwrap_or_else(|| usage()),
+        layout: layout.unwrap_or_else(|| usage()),
+        listen,
+        disarm,
+    }
 }
 
-fn udmabuf_attr(name: &str, value: &str) -> std::io::Result<()> {
-    std::fs::write(format!("/sys/class/u-dma-buf/udmabuf0/{name}"), value)
+/// The world's registers, resolved from the seam once: the design's own
+/// controls by the names `World.fs` declares, and the surface's snapshot
+/// registers by the surface's name plus the carrier's suffix.
+struct Regs {
+    tick: usize,
+    tick_bit: u32,
+    tick_count: usize,
+    interval_cycles: usize,
+    stop: usize,
+    stop_bit: u32,
+    reset: usize,
+    reset_bit: u32,
+    generation: usize,
+    population: usize,
+    population_shift: u32,
+    population_mask: u32,
+    mem_status: usize,
+    ready_mask: u32,
+    slot_shift: u32,
+    slot_mask: u32,
+    mem_base: usize,
+    mem_capture: usize,
+    capture_bit: u32,
+    mem_release: usize,
+    release_bit: u32,
 }
 
-fn udmabuf_phys_addr() -> Option<u64> {
-    let text = std::fs::read_to_string("/sys/class/u-dma-buf/udmabuf0/phys_addr").ok()?;
-    u64::from_str_radix(text.trim().trim_start_matches("0x"), 16).ok()
+/// The world's shape, from the seam: rows, words a row, and how the generated
+/// top lays rows in beats — a row padded to a power of two lanes, rows tiling
+/// a beat evenly — so the daemon reads a slot the way the fabric wrote it.
+struct World {
+    rows: usize,
+    width: usize,
+    rows_per_beat: usize,
+    bytes_per_row: usize,
+    frame_bytes: usize,
+    slot_bytes: usize,
+    fabric_hz: u64,
 }
 
-fn rd(w: &mut MmapWindow, offset: usize) -> u32 {
-    w.read32(offset).unwrap()
+impl World {
+    /// Where row `y` sits in a frame of beats.
+    fn row_offset(&self, y: usize) -> usize {
+        (y / self.rows_per_beat) * BEAT_BYTES + (y % self.rows_per_beat) * self.bytes_per_row
+    }
+
+    fn row_mask(&self) -> u64 {
+        if self.width >= 64 {
+            u64::MAX
+        } else {
+            (1u64 << self.width) - 1
+        }
+    }
 }
 
-fn wr(w: &mut MmapWindow, offset: usize, value: u32) {
-    w.write32(offset, value).unwrap()
+fn constant(layout: &Path, name: &str) -> u32 {
+    match read_const(layout, name) {
+        Ok(Some(v)) => v,
+        Ok(None) => fail(format!("{}: no constant {name} — not a world's seam?", layout.display())),
+        Err(e) => fail(e),
+    }
 }
 
-/// gens/second → the fabric interval that paces them. The interval paces
-/// FIRES and every fire advances GENS_PER_CYCLE generations, so the
-/// requested rate divides by that. 0 caps at one fire per cycle.
-fn interval_for(gens_per_sec: u32) -> u32 {
+fn constant_or(layout: &Path, name: &str, default: u32) -> u32 {
+    match read_const(layout, name) {
+        Ok(Some(v)) => v,
+        Ok(None) => default,
+        Err(e) => fail(e),
+    }
+}
+
+/// The seam read into the registers and the shape. The surface is whichever
+/// need has snapshot registers — the one ending in `_MEM_CAPTURE` — so the
+/// daemon serves a world by any name.
+fn read_seam(layout: &Path) -> (Regs, World, Option<u32>) {
+    let (registers, hash) = read_layout(layout).unwrap_or_else(|e| fail(e));
+    let offset = |name: &str| resolve(name, &registers).unwrap_or_else(|e| fail(e));
+    let surface = registers
+        .iter()
+        .find_map(|(r, _)| r.strip_suffix("_MEM_CAPTURE").map(str::to_string))
+        .unwrap_or_else(|| fail(format!("{}: no surface in host memory — the world's top is `Life…Batch`", layout.display())));
+    let s = |suffix: &str| format!("{surface}{suffix}");
+
+    let regs = Regs {
+        tick: offset("tick"),
+        tick_bit: constant_or(layout, "TICK_BIT", 0),
+        tick_count: offset("tickCount"),
+        interval_cycles: offset("intervalCycles"),
+        stop: offset("stop"),
+        stop_bit: constant_or(layout, "STOP_BIT", 0),
+        reset: offset("reset"),
+        reset_bit: constant_or(layout, "RESET_BIT", 0),
+        generation: offset("generation"),
+        population: offset("population"),
+        population_shift: constant_or(layout, "POPULATION_SHIFT", 0),
+        population_mask: constant_or(layout, "POPULATION_MASK", u32::MAX),
+        mem_status: offset(&s("_MEM_READY")),
+        ready_mask: constant(layout, &s("_MEM_READY_MASK")),
+        slot_shift: constant(layout, &s("_MEM_SLOT_SHIFT")),
+        slot_mask: constant(layout, &s("_MEM_SLOT_MASK")),
+        mem_base: offset(&s("_MEM_BASE")),
+        mem_capture: offset(&s("_MEM_CAPTURE")),
+        capture_bit: constant_or(layout, &s("_MEM_CAPTURE_BIT"), 0),
+        mem_release: offset(&s("_MEM_RELEASE")),
+        release_bit: constant_or(layout, &s("_MEM_RELEASE_BIT"), 0),
+    };
+
+    let rows = constant(layout, &s("_ROWS")) as usize;
+    let words = constant(layout, &s("_WORDS")) as usize;
+    let beats = constant(layout, &s("_MEM_BEATS")) as usize;
+    let slot_bytes = constant(layout, &s("_MEM_SLOT_BYTES")) as usize;
+    let fabric_hz = u64::from(constant(layout, "FABRIC_HZ"));
+    if words > 2 {
+        fail(format!("a row of {words} words does not fit the u64 a frame carries a row in"));
+    }
+    let lanes_per_beat = BEAT_BYTES / LANE_BYTES;
+    let lanes_per_row = words.next_power_of_two();
+    let world = World {
+        rows,
+        width: words * 32,
+        rows_per_beat: lanes_per_beat / lanes_per_row,
+        bytes_per_row: lanes_per_row * LANE_BYTES,
+        frame_bytes: beats * BEAT_BYTES,
+        slot_bytes,
+        fabric_hz,
+    };
+    (regs, world, hash)
+}
+
+/// gens/second → the fabric interval that paces them. 0 means as fast as the
+/// fabric goes: one generation a cycle.
+fn interval_for(world: &World, gens_per_sec: u32) -> u32 {
     if gens_per_sec == 0 {
         1
     } else {
-        (PL_CLOCK_HZ * layout::GENS_PER_CYCLE as u64 / u64::from(gens_per_sec))
-            .clamp(1, u64::from(u32::MAX)) as u32
+        (world.fabric_hz / u64::from(gens_per_sec)).clamp(1, u64::from(u32::MAX)) as u32
     }
 }
 
 enum Control {
-    Load([u8; layout::FRAME_BYTES]),
+    Load(Vec<u64>),
     Run { gens_per_sec: u32 },
     Burst { count: u32, gens_per_sec: u32 },
     Stop,
@@ -84,204 +241,296 @@ enum Control {
 }
 
 /// B3/S23 with a dead border — the canary's software twin (the same
-/// carry-save network as gol-engine).
-fn life_step(rows: &[u64; 64]) -> [u64; 64] {
+/// carry-save network as gol-engine), at the world's width.
+fn life_step(world: &World, rows: &[u64]) -> Vec<u64> {
     let ha = |a: u64, b: u64| (a ^ b, a & b);
     let fa = |a: u64, b: u64, c: u64| {
         let s = a ^ b;
         (s ^ c, (a & b) | (c & s))
     };
-    let mut next = [0u64; 64];
-    for y in 0..64 {
-        let u = if y > 0 { rows[y - 1] } else { 0 };
-        let s = rows[y];
-        let d = if y < 63 { rows[y + 1] } else { 0 };
-        let (us, uc) = fa(u << 1, u, u >> 1);
-        let (ds, dc) = fa(d << 1, d, d >> 1);
-        let (ss, sc) = ha(s << 1, s >> 1);
-        let (n0, c1) = fa(us, ds, ss);
-        let (t, c2) = fa(uc, dc, sc);
-        let (n1, c2b) = ha(t, c1);
-        let (n2, n3) = ha(c2, c2b);
-        next[y] = !n2 & !n3 & n1 & (n0 | s);
-    }
-    next
-}
-
-/// The skew canary: a known soup round-tripped through the whole write path
-/// before any client is served. Tearing down a bitstream with writes in
-/// flight permanently skews the PS-side HP0 AW/W pairing — every frame then
-/// arrives rotated by the in-flight burst count, reload-proof, cured only by
-/// reboot. The canary turns that silent corruption into a loud refusal at
-/// the earliest possible moment.
-fn skew_canary(regs: &mut MmapWindow, fb: &MmapWindow) -> Result<(), String> {
-    let mut seed = 0x9E37_79B9_7F4A_7C15u64;
-    let mut soup = [0u64; 64];
-    for row in soup.iter_mut() {
-        seed ^= seed << 13;
-        seed ^= seed >> 7;
-        seed ^= seed << 17;
-        *row = seed;
-    }
-
-    wr(regs, layout::STOP_OFFSET, 1 << layout::STOP_BIT);
-    for (y, row) in soup.iter().enumerate() {
-        wr(regs, layout::LOAD_ROW_OFFSET + y * 8, *row as u32);
-        wr(regs, layout::LOAD_ROW_OFFSET + y * 8 + 4, (*row >> 32) as u32);
-    }
-    wr(regs, layout::LOAD_OFFSET, 1 << layout::LOAD_BIT);
-    std::thread::sleep(Duration::from_millis(2));
-
-    let fires = 96 / layout::GENS_PER_CYCLE as u32;
-    wr(regs, layout::TICK_COUNT_OFFSET, fires);
-    wr(regs, layout::INTERVAL_CYCLES_OFFSET, 1);
-    wr(regs, layout::TICK_OFFSET, 1 << layout::TICK_BIT);
-    std::thread::sleep(Duration::from_millis(2)); // burst + one settled frame
-
-    wr(regs, layout::SNAP_CAPTURE_OFFSET, 1 << layout::SNAP_CAPTURE_BIT);
-    let mut guard = 0;
-    while rd(regs, layout::SNAP_READY_OFFSET) & layout::SNAP_READY_MASK == 0 && guard < 1_000_000 {
-        guard += 1;
-    }
-    if rd(regs, layout::SNAP_READY_OFFSET) & layout::SNAP_READY_MASK == 0 {
-        return Err("snapshot capture never granted".into());
-    }
-    let snap = rd(regs, layout::SNAP_READY_OFFSET);
-    let slot = ((snap & layout::SNAP_SLOT_MASK) >> layout::SNAP_SLOT_SHIFT) as usize;
-    let slot_offset = slot * layout::SLOT_STRIDE_BYTES;
-    udmabuf_attr("sync_offset", &slot_offset.to_string()).map_err(|e| e.to_string())?;
-    udmabuf_attr("sync_size", &layout::FRAME_BYTES.to_string()).map_err(|e| e.to_string())?;
-    udmabuf_attr("sync_for_cpu", "1").map_err(|e| e.to_string())?;
-    let frame = &fb.bytes()[slot_offset..slot_offset + layout::FRAME_BYTES];
-
-    let mut twin = soup;
-    for _ in 0..96 {
-        twin = life_step(&twin);
-    }
-    let mismatches = twin
-        .iter()
-        .enumerate()
-        .filter(|(y, row)| {
-            let base = (y / layout::ROWS_PER_BEAT) * 16 + (y % layout::ROWS_PER_BEAT) * 8;
-            u64::from_le_bytes(frame[base..base + 8].try_into().unwrap()) != **row
+    let mask = world.row_mask();
+    let n = rows.len();
+    (0..n)
+        .map(|y| {
+            let u = if y > 0 { rows[y - 1] } else { 0 };
+            let s = rows[y];
+            let d = if y + 1 < n { rows[y + 1] } else { 0 };
+            let (us, uc) = fa((u << 1) & mask, u, u >> 1);
+            let (ds, dc) = fa((d << 1) & mask, d, d >> 1);
+            let (ss, sc) = ha((s << 1) & mask, s >> 1);
+            let (n0, c1) = fa(us, ds, ss);
+            let (t, c2) = fa(uc, dc, sc);
+            let (n1, c2b) = ha(t, c1);
+            let (n2, n3) = ha(c2, c2b);
+            !n2 & !n3 & n1 & (n0 | s) & mask
         })
-        .count();
-    wr(regs, layout::SNAP_RELEASE_OFFSET, 1 << layout::SNAP_RELEASE_BIT);
+        .collect()
+}
 
-    // Leave a clean grid for the first client.
-    wr(regs, layout::STOP_OFFSET, 1 << layout::STOP_BIT);
-    wr(regs, layout::RESET_OFFSET, 1 << layout::RESET_BIT);
-    wr(regs, layout::BURST_IRQ_OFFSET, 0x3);
+/// The accelerator as the daemon holds it: the batch device over the
+/// registers, the arena the rows and the slots live in, and where each is.
+struct Fabric {
+    device: BatchDevice<MmapWindow>,
+    arena: Udmabuf,
+    arena_map: MmapWindow,
+    /// The seed rows' half of the arena, at its start.
+    seed_bytes: usize,
+    /// The slots' half, where the fabric writes snapshots.
+    slots_at: usize,
+    regs: Regs,
+    world: World,
+}
 
-    if mismatches != 0 {
-        Err(format!(
-            "{mismatches}/64 rows wrong (rotated frame): the HP write path is skewed — a \
-             previous session was torn down with writes in flight. REBOOT the board; then \
-             always stop + `gol-disarm` before `xmutil unloadapp`."
-        ))
-    } else {
-        Ok(())
+impl Fabric {
+    fn rd(&mut self, offset: usize) -> u32 {
+        self.device.window_mut().read32(offset).unwrap_or_else(|e| fail(format!("register read at 0x{offset:x}: {e:?}")))
+    }
+
+    fn wr(&mut self, offset: usize, value: u32) {
+        self.device.window_mut().write32(offset, value).unwrap_or_else(|e| fail(format!("register write at 0x{offset:x}: {e:?}")))
+    }
+
+    fn pulse(&mut self, offset: usize, bit: u32) {
+        self.wr(offset, 1 << bit)
+    }
+
+    fn stop(&mut self) {
+        let (o, b) = (self.regs.stop, self.regs.stop_bit);
+        self.pulse(o, b)
+    }
+
+    /// The seed through the batch contract: rows into the arena the way the
+    /// fabric reads them, then one batch of them. The contract reads whole
+    /// bursts, so a world shorter than a burst is sent repeated — every copy
+    /// loads the same world, and the last one is what stands.
+    fn load(&mut self, rows: &[u64]) {
+        self.stop();
+        let rows_per_burst = self.world.rows_per_beat * 16;
+        let sent = rows.len().div_ceil(rows_per_burst) * rows_per_burst;
+        let bytes = sent.div_ceil(self.world.rows_per_beat) * BEAT_BYTES;
+        if bytes > self.seed_bytes {
+            fail(format!("{sent} seed rows need {bytes} bytes; the arena's half is {}", self.seed_bytes));
+        }
+        let region = &mut self.arena_map.bytes_mut()[..bytes];
+        region.fill(0);
+        for y in 0..sent {
+            let at = self.world.row_offset(y);
+            let row = rows[y % rows.len()] & self.world.row_mask();
+            region[at..at + 8].copy_from_slice(&row.to_le_bytes());
+        }
+        self.arena.sync_for_device(0, bytes).unwrap_or_else(|e| fail(format!("sync_for_device: {e}")));
+        let src = self.arena.phys_addr as u32;
+        self.device.start(src, src, sent as u32).unwrap_or_else(|e| fail(format!("start: {e:?}")));
+        if let Err(e) = self.device.wait_done(10_000_000, |_| Ok(())) {
+            fail(format!("the seed never landed: {}", describe(e)));
+        }
+        self.device.acknowledge().unwrap_or_else(|e| fail(format!("acknowledge: {e:?}")));
+    }
+
+    fn burst(&mut self, count: u32, gens_per_sec: u32) {
+        self.stop();
+        let interval = interval_for(&self.world, gens_per_sec);
+        let (ic, tc, tick, bit) = (self.regs.interval_cycles, self.regs.tick_count, self.regs.tick, self.regs.tick_bit);
+        self.wr(ic, interval);
+        self.wr(tc, count);
+        self.pulse(tick, bit);
+    }
+
+    fn reset(&mut self) {
+        self.stop();
+        let (o, b) = (self.regs.reset, self.regs.reset_bit);
+        self.pulse(o, b)
+    }
+
+    /// The freshest completed frame, if the fabric grants one within the
+    /// poll bound: the rows, the generation and the population it belongs
+    /// to. The slot is released once read.
+    fn capture(&mut self) -> Option<(Vec<u64>, u32, u32)> {
+        let (cap, cap_bit) = (self.regs.mem_capture, self.regs.capture_bit);
+        self.pulse(cap, cap_bit);
+        let status_at = self.regs.mem_status;
+        let mut status = 0;
+        for _ in 0..100_000 {
+            status = self.rd(status_at);
+            if status & self.regs.ready_mask != 0 {
+                break;
+            }
+        }
+        if status & self.regs.ready_mask == 0 {
+            return None;
+        }
+        let slot = ((status & self.regs.slot_mask) >> self.regs.slot_shift) as usize;
+        let at = self.slots_at + slot * self.world.slot_bytes;
+        self.arena
+            .sync_for_cpu(at, self.world.frame_bytes)
+            .unwrap_or_else(|e| fail(format!("sync_for_cpu: {e}")));
+        let frame = &self.arena_map.bytes()[at..at + self.world.frame_bytes];
+        let rows: Vec<u64> = (0..self.world.rows)
+            .map(|y| {
+                let o = self.world.row_offset(y);
+                u64::from_le_bytes(frame[o..o + 8].try_into().unwrap()) & self.world.row_mask()
+            })
+            .collect();
+        let generation = self.rd(self.regs.generation);
+        let population = (self.rd(self.regs.population) & self.regs.population_mask) >> self.regs.population_shift;
+        let (rel, rel_bit) = (self.regs.mem_release, self.regs.release_bit);
+        self.pulse(rel, rel_bit);
+        Some((rows, generation, population))
+    }
+
+    /// A known soup round-tripped through the whole write path before any
+    /// client is served. Tearing down a bitstream with writes in flight
+    /// permanently skews the PS-side HP0 AW/W pairing — every frame then
+    /// arrives rotated by the in-flight burst count, reload-proof, cured only
+    /// by reboot. The canary turns that silent corruption into a loud refusal
+    /// at the earliest possible moment.
+    fn skew_canary(&mut self) -> Result<(), String> {
+        let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+        let soup: Vec<u64> = (0..self.world.rows)
+            .map(|_| {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                seed & self.world.row_mask()
+            })
+            .collect();
+        self.load(&soup);
+        self.burst(96, 0);
+        std::thread::sleep(Duration::from_millis(2)); // 96 generations at a cycle each, and a settled frame
+
+        let (rows, generation, _) = self.capture().ok_or("snapshot capture never granted")?;
+        let twin = (0..96).fold(soup, |g, _| life_step(&self.world, &g));
+        let mismatches = twin.iter().zip(&rows).filter(|(a, b)| a != b).count();
+
+        // Leave an empty world for the first client.
+        self.reset();
+
+        if generation != 96 {
+            Err(format!("the burst ran {generation} generations, not 96"))
+        } else if mismatches != 0 {
+            Err(format!(
+                "{mismatches}/{} rows wrong (rotated frame): the HP write path is skewed — a \
+                 previous session was torn down with writes in flight. REBOOT the board; then \
+                 always `gol-daemon … disarm` before `xmutil unloadapp`.",
+                self.world.rows
+            ))
+        } else {
+            Ok(())
+        }
     }
 }
 
-fn main() {
-    let listen = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| "tcp/0.0.0.0:7447".into());
+fn describe<E: std::fmt::Debug>(e: BatchError<E>) -> String {
+    match e {
+        BatchError::WrongId { found } => format!("not a batch top: ID reads 0x{found:08X} — wrong bitstream?"),
+        BatchError::WrongLayout { found, expected } => {
+            format!("layout mismatch: the fabric says 0x{found:04X}, the seam 0x{expected:04X} — rebuild the bitstream or copy the seam the build wrote")
+        }
+        BatchError::NeverFinished => "busy never cleared".into(),
+        BatchError::Window(e) => format!("{e:?}"),
+    }
+}
 
-    // ---- the accelerator ----
-    let uio = find_uio("gol_axi").unwrap_or_else(|| {
-        eprintln!("no uio node named 'gol_axi' — is the gol-axi app loaded?");
-        exit(1);
-    });
-    let reg_file = OpenOptions::new()
+fn open_fabric(args: &Args) -> Fabric {
+    let (regs, world, hash) = read_seam(&args.layout);
+
+    let uio = find_uio(&args.board)
+        .unwrap_or_else(|e| fail(e))
+        .unwrap_or_else(|| fail(format!("no uio device called '{}' — is the app loaded?", args.board)));
+    let arena_name = format!("udmabuf-{}", args.board.replace('_', "-"));
+    let arena = Udmabuf::find(&arena_name)
+        .unwrap_or_else(|e| fail(e))
+        .unwrap_or_else(|| fail(format!("no u-dma-buf called '{arena_name}' — is the app loaded?")));
+
+    let regs_file = OpenOptions::new()
         .read(true)
         .write(true)
         .custom_flags(O_SYNC)
         .open(&uio)
-        .unwrap_or_else(|e| {
-            eprintln!("cannot open {uio}: {e}");
-            exit(1);
-        });
-    let mut regs = MmapWindow::open(&reg_file, 0, layout::APERTURE_BYTES).unwrap_or_else(|e| {
-        eprintln!("register mmap failed: {e:?}");
-        exit(1);
-    });
+        .unwrap_or_else(|e| fail(format!("{}: {e}", uio.display())));
+    let window = MmapWindow::open(&regs_file, 0, 0x1000).unwrap_or_else(|e| fail(format!("register mmap: {e:?}")));
+    let device = BatchDevice::open(window, hash).unwrap_or_else(|e| fail(describe(e)));
 
-    let id = rd(&mut regs, layout::ID_OFFSET);
-    if id != layout::ID_VALUE {
-        eprintln!("ID mismatch: 0x{id:08X} — wrong bitstream?");
-        exit(1);
-    }
-
-    // Right design, wrong revision of its map: every offset this daemon holds
-    // would be stale, and every read and write would still succeed. Worth
-    // stopping on, because this process writes.
-    let hash = rd(&mut regs, layout::LAYOUT_HASH_OFFSET);
-    if hash != layout::LAYOUT_HASH_VALUE {
-        eprintln!(
-            "layout mismatch: 0x{hash:04X} != 0x{:04X} — rebuild the bitstream or the daemon",
-            layout::LAYOUT_HASH_VALUE
-        );
-        exit(1);
-    }
-
-    let fb_base = udmabuf_phys_addr().unwrap_or_else(|| {
-        eprintln!("no udmabuf0 phys_addr — is u-dma-buf loaded?");
-        exit(1);
-    });
-    wr(&mut regs, layout::FB_BASE_ADDR_OFFSET, fb_base as u32);
-
-    let fb_file = OpenOptions::new()
+    let arena_file = OpenOptions::new()
         .read(true)
         .write(true)
-        .open("/dev/udmabuf0")
-        .expect("open /dev/udmabuf0");
-    let fb = MmapWindow::open(&fb_file, 0, 3 * layout::SLOT_STRIDE_BYTES).expect("fb mmap");
-    udmabuf_attr("sync_direction", "2").expect("sync_direction (udev rule installed?)");
+        .open(&arena.dev_path)
+        .unwrap_or_else(|e| fail(format!("{}: {e}", arena.dev_path.display())));
+    let arena_map = MmapWindow::open(&arena_file, 0, arena.size).unwrap_or_else(|e| fail(format!("arena mmap: {e:?}")));
 
-    if let Err(reason) = skew_canary(&mut regs, &fb) {
-        eprintln!("skew canary FAILED: {reason}");
-        exit(1);
+    let half = arena.size / 2;
+    if SLOTS * world.slot_bytes > half {
+        fail(format!("{SLOTS} slots of {} bytes do not fit the arena's half of {half}", world.slot_bytes));
     }
-    println!("skew canary ok: known soup round-tripped bit-exact through DDR");
+    if arena.phys_addr + arena.size as u64 > u64::from(u32::MAX) {
+        fail("the arena sits above 4 GB, which a 32-bit master cannot reach");
+    }
+
+    Fabric {
+        device,
+        arena,
+        arena_map,
+        seed_bytes: half,
+        slots_at: half,
+        regs,
+        world,
+    }
+}
+
+fn main() {
+    let args = parse_args();
+    let mut fabric = open_fabric(&args);
+    let slots_phys = (fabric.arena.phys_addr + fabric.slots_at as u64) as u32;
+
+    if args.disarm {
+        fabric.stop();
+        let base = fabric.regs.mem_base;
+        fabric.wr(base, 0);
+        println!("disarmed: the world stopped, its master pointed at nothing — safe to `xmutil unloadapp`");
+        return;
+    }
+
+    // Arm the surface's write master at the slots. From here until `disarm`
+    // the fabric may write DDR whenever a snapshot is captured.
+    let base = fabric.regs.mem_base;
+    fabric.wr(base, slots_phys);
+
+    if let Err(reason) = fabric.skew_canary() {
+        fail(format!("skew canary FAILED: {reason}"));
+    }
+    println!(
+        "skew canary ok: a {}×{} soup round-tripped bit-exact through DDR at {} Hz",
+        fabric.world.width, fabric.world.rows, fabric.world.fabric_hz
+    );
 
     // ---- the mesh ----
     let mut config = zenoh::Config::default();
     config
-        .insert_json5("listen/endpoints", &format!("[\"{listen}\"]"))
+        .insert_json5("listen/endpoints", &format!("[\"{}\"]", args.listen))
         .expect("listen endpoint");
-    let session = zenoh::open(config).wait().unwrap_or_else(|e| {
-        eprintln!("zenoh open failed: {e}");
-        exit(1);
-    });
+    let session = zenoh::open(config).wait().unwrap_or_else(|e| fail(format!("zenoh open failed: {e}")));
     let frames = session
         .declare_publisher("warp11/gol/frame")
         .congestion_control(CongestionControl::Drop)
         .wait()
         .expect("frame publisher");
 
-    // Control arrives on a Zenoh thread; the register file stays owned by the
-    // main loop, so commands cross over a channel.
+    // Control arrives on a Zenoh thread; the fabric stays owned by the main
+    // loop, so commands cross over a channel.
+    let row_bytes = fabric.world.rows * 8;
     let (control_send, control_recv) = mpsc::channel::<Control>();
     let _ctl = session
         .declare_subscriber("warp11/gol/ctl/*")
         .callback(move |sample| {
             let key = sample.key_expr().as_str().to_string();
             let payload = sample.payload().to_bytes().into_owned();
+            let word = |at: usize| u32::from_le_bytes(payload[at..at + 4].try_into().unwrap());
             let parsed = match key.rsplit('/').next() {
-                Some("load") if payload.len() == layout::FRAME_BYTES => {
-                    let mut rows = [0u8; layout::FRAME_BYTES];
-                    rows.copy_from_slice(&payload);
-                    Some(Control::Load(rows))
-                }
-                Some("run") if payload.len() >= 4 => Some(Control::Run {
-                    gens_per_sec: u32::from_le_bytes(payload[0..4].try_into().unwrap()),
-                }),
-                Some("burst") if payload.len() >= 8 => Some(Control::Burst {
-                    count: u32::from_le_bytes(payload[0..4].try_into().unwrap()),
-                    gens_per_sec: u32::from_le_bytes(payload[4..8].try_into().unwrap()),
-                }),
+                Some("load") if payload.len() == row_bytes => Some(Control::Load(
+                    payload.chunks_exact(8).map(|c| u64::from_le_bytes(c.try_into().unwrap())).collect(),
+                )),
+                Some("run") if payload.len() >= 4 => Some(Control::Run { gens_per_sec: word(0) }),
+                Some("burst") if payload.len() >= 8 => Some(Control::Burst { count: word(0), gens_per_sec: word(4) }),
                 Some("stop") => Some(Control::Stop),
                 Some("reset") => Some(Control::Reset),
                 _ => None,
@@ -297,77 +546,39 @@ fn main() {
         .expect("control subscriber");
 
     println!(
-        "gol-daemon up: id 0x{id:08X}, fb 0x{fb_base:08X}, listening on {listen}"
+        "gol-daemon up: {} on {}, slots at 0x{slots_phys:08X}, listening on {}",
+        args.board,
+        uio_name(&args.layout),
+        args.listen
     );
 
     // ---- the loop: apply control, capture, publish ----
     loop {
         while let Ok(control) = control_recv.try_recv() {
             match control {
-                Control::Load(rows) => {
-                    wr(&mut regs, layout::STOP_OFFSET, 1 << layout::STOP_BIT);
-                    for word in 0..layout::LOAD_ROW_WORDS {
-                        let value =
-                            u32::from_le_bytes(rows[word * 4..word * 4 + 4].try_into().unwrap());
-                        wr(&mut regs, layout::LOAD_ROW_OFFSET + word * 4, value);
-                    }
-                    wr(&mut regs, layout::LOAD_OFFSET, 1 << layout::LOAD_BIT);
-                }
-                Control::Run { gens_per_sec } => {
-                    wr(&mut regs, layout::STOP_OFFSET, 1 << layout::STOP_BIT);
-                    wr(&mut regs, layout::INTERVAL_CYCLES_OFFSET, interval_for(gens_per_sec));
-                    wr(&mut regs, layout::TICK_COUNT_OFFSET, 0); // continuous
-                    wr(&mut regs, layout::TICK_OFFSET, 1 << layout::TICK_BIT);
-                }
-                Control::Burst { count, gens_per_sec } => {
-                    wr(&mut regs, layout::STOP_OFFSET, 1 << layout::STOP_BIT);
-                    wr(&mut regs, layout::INTERVAL_CYCLES_OFFSET, interval_for(gens_per_sec));
-                    wr(&mut regs, layout::TICK_COUNT_OFFSET, count);
-                    wr(&mut regs, layout::TICK_OFFSET, 1 << layout::TICK_BIT);
-                }
-                Control::Stop => wr(&mut regs, layout::STOP_OFFSET, 1 << layout::STOP_BIT),
-                Control::Reset => {
-                    wr(&mut regs, layout::STOP_OFFSET, 1 << layout::STOP_BIT);
-                    wr(&mut regs, layout::RESET_OFFSET, 1 << layout::RESET_BIT);
-                }
+                Control::Load(rows) => fabric.load(&rows),
+                Control::Run { gens_per_sec } => fabric.burst(0, gens_per_sec),
+                Control::Burst { count, gens_per_sec } => fabric.burst(count, gens_per_sec),
+                Control::Stop => fabric.stop(),
+                Control::Reset => fabric.reset(),
             }
         }
 
-        // Capture the freshest completed frame; skip the beat if the fabric
-        // has nothing new to grant within the poll bound (it always does).
-        wr(&mut regs, layout::SNAP_CAPTURE_OFFSET, 1 << layout::SNAP_CAPTURE_BIT);
-        let mut guard = 0;
-        while rd(&mut regs, layout::SNAP_READY_OFFSET) & layout::SNAP_READY_MASK == 0
-            && guard < 100_000
-        {
-            guard += 1;
-        }
-        if rd(&mut regs, layout::SNAP_READY_OFFSET) & layout::SNAP_READY_MASK != 0 {
-            let snap = rd(&mut regs, layout::SNAP_READY_OFFSET);
-            let slot =
-                ((snap & layout::SNAP_SLOT_MASK) >> layout::SNAP_SLOT_SHIFT) as usize;
-            let slot_offset = slot * layout::SLOT_STRIDE_BYTES;
-
-            udmabuf_attr("sync_offset", &slot_offset.to_string()).expect("sync_offset");
-            udmabuf_attr("sync_size", &layout::FRAME_BYTES.to_string()).expect("sync_size");
-            udmabuf_attr("sync_for_cpu", "1").expect("sync_for_cpu");
-            let raw = &fb.bytes()[slot_offset..slot_offset + layout::FRAME_BYTES];
-
-            // Beat i carries rows 2i (low 8 bytes) and 2i+1 (high 8): already
-            // row-major bytes, so the frame ships as-is after the header.
-            let generation = rd(&mut regs, layout::GENERATION_OFFSET);
-            let status = rd(&mut regs, layout::BUSY_OFFSET);
-            let population = (status & layout::POPULATION_MASK) >> layout::POPULATION_SHIFT;
-
-            let mut payload = Vec::with_capacity(8 + layout::FRAME_BYTES);
+        if let Some((rows, generation, population)) = fabric.capture() {
+            let mut payload = Vec::with_capacity(8 + rows.len() * 8);
             payload.extend_from_slice(&generation.to_le_bytes());
             payload.extend_from_slice(&population.to_le_bytes());
-            payload.extend_from_slice(raw);
-            wr(&mut regs, layout::SNAP_RELEASE_OFFSET, 1 << layout::SNAP_RELEASE_BIT);
-
+            for row in rows {
+                payload.extend_from_slice(&row.to_le_bytes());
+            }
             let _ = frames.put(payload).wait();
         }
 
         std::thread::sleep(FRAME_PERIOD);
     }
+}
+
+/// The seam's file name, for the greeting.
+fn uio_name(layout: &Path) -> String {
+    layout.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default()
 }

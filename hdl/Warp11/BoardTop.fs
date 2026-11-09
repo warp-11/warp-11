@@ -66,6 +66,12 @@ type Need =
     | StreamOut of name: string * fields: (string * NumberFormat) list
     /// A value the host sets and the design reads, and where it starts.
     | ValueIn of name: string * format: NumberFormat * starting: uint64
+    /// An action the host fires: a bit the host writes that the design sees
+    /// high for one cycle and never has to clear — a start, a load, a stop.
+    /// A value is a level the host leaves; a pulse is an event the host
+    /// sends, and a design that polled a level for an edge would be
+    /// restating what the register map already does.
+    | PulseIn of name: string
     /// A value the design reports and the host reads — telemetry. The design
     /// drives it; nobody writes it.
     | ValueOut of name: string * format: NumberFormat
@@ -95,6 +101,9 @@ let valueIn name format = ValueIn(name, format, 0UL)
 /// A value the host sets, starting where the design says.
 let valueFrom name format starting = ValueIn(name, format, starting)
 
+/// An action the host fires.
+let pulseIn name = PulseIn name
+
 /// A value the design reports.
 let valueOut name format = ValueOut(name, format)
 
@@ -116,6 +125,9 @@ type Boundary =
       /// What a `ValueIn` need holds: a register, or its starting value baked
       /// in where nothing can write it.
       valueIn: string -> Expr
+      /// A `PulseIn` need as the design sees it: high for the one cycle after
+      /// the host fires it, or never where nothing can.
+      pulseIn: string -> Expr
       /// Report a `ValueOut` need.
       valueOut: string -> Expr -> unit
       /// A `TableIn` need's read port: hand it the index, once.
@@ -245,6 +257,14 @@ type Needs internal (fit: Fit, boundary: Boundary option) =
         | Some b -> b.valueIn name
         | None -> lit 0UL format.totalWidth
 
+    /// An action the host fires: high for one cycle when it does.
+    member _.pulseIn(name: string) : Expr =
+        declared.Add(PulseIn name)
+
+        match boundary with
+        | Some b -> b.pulseIn name
+        | None -> lit 0UL 1
+
     /// A value the design reports: hand it the value, once.
     member _.valueOut(name: string, format: NumberFormat) : Expr -> unit =
         declared.Add(ValueOut(name, format))
@@ -327,6 +347,7 @@ let private carrierOfNeed (path: DataPath) (need: Need) =
     | StreamIn(name, _) -> carrierFor path EveryStreamIn name
     | StreamOut(name, _) -> carrierFor path EveryStreamOut name
     | ValueIn(name, _, _) -> carrierFor path EveryValueIn name
+    | PulseIn name -> carrierFor path EveryValueIn name
     | ValueOut(name, _) -> carrierFor path EveryValueIn name
     | TableIn(name, _, _, _, _) -> carrierFor path EveryValueIn name
     // A surface leaves the design the way its rows out do.
@@ -338,6 +359,7 @@ let internal carriersOfNeed (path: DataPath) (need: Need) =
     | StreamIn(name, _) -> carriersFor path EveryStreamIn name
     | StreamOut(name, _) -> carriersFor path EveryStreamOut name
     | ValueIn(name, _, _) -> carriersFor path EveryValueIn name
+    | PulseIn name -> carriersFor path EveryValueIn name
     | ValueOut(name, _) -> carriersFor path EveryValueIn name
     | TableIn(name, _, _, _, _) -> carriersFor path EveryValueIn name
     | SurfaceOut(name, _, _) -> carriersFor path EveryStreamOut name
@@ -384,6 +406,13 @@ let controlsOf (d: Design) =
     d.needs
     |> List.choose (function
         | ValueIn(name, format, _) -> Some(name, format)
+        | _ -> None)
+
+/// The actions the host fires, in declaration order.
+let pulsesOf (d: Design) =
+    d.needs
+    |> List.choose (function
+        | PulseIn name -> Some name
         | _ -> None)
 
 /// The values the design reports, in declaration order.
@@ -472,6 +501,7 @@ let private onPins
     (d: Design)
     (path: DataPath)
     (values: string -> Expr)
+    (pulses: string -> Expr)
     (report: string -> Expr -> unit)
     (tables: string -> Expr -> HostArrayPort)
     (record: (Stream<Expr list> -> Expr -> unit) option)
@@ -520,6 +550,7 @@ let private onPins
                 sink fork.branches[0] fork.dropped[0]
             | carriers, _ -> failwith $"{d.name}: nothing builds '{name}' carried by %A{carriers} on the converter top"
       valueIn = values
+      pulseIn = pulses
       valueOut = report
       tableIn = tables
       surfaceOut = fun name _ -> failwith $"{d.name}: '{name}' is a surface, and the converter top carries none — bind it to the host link" }
@@ -810,6 +841,7 @@ let private registersFor
                 [ for need in d.needs do
                       match need with
                       | ValueIn(name, f, starting) -> yield name, r.RwReg(name, f.totalWidth, starting)
+                      | PulseIn name -> yield name, r.Word(fun w -> w.Pulse name)
                       | ValueOut(name, f) when List.contains InRegisterMap (carriersOfNeed path need) -> yield name, r.RoField(name, f.totalWidth)
                       | _ -> () ]
 
@@ -1645,6 +1677,11 @@ let private valuesOf (entries: (string * RegEntry) list) (regs: SlaveRegs) =
     let byName = Map.ofList entries
     fun (name: string) -> regs.value byName[name]
 
+/// The design's pulses, by need name.
+let private pulsesInOf (entries: (string * RegEntry) list) (regs: SlaveRegs) =
+    let byName = Map.ofList entries
+    fun (name: string) -> regs.pulse byName[name]
+
 /// The design's tables' read ports, by need name.
 let private tablesInOf (entries: (string * RegEntry) list) (regs: SlaveRegs) =
     let byName = Map.ofList entries
@@ -1682,6 +1719,9 @@ let private pinsTop (board: Board) (path: DataPath) (d: Design) : BoardTop =
     let rate = int (round d.sampleRate)
 
     let fromRegisters (regs: SlaveRegs) = valuesOf entries regs
+    let pulsesFrom (regs: SlaveRegs) = pulsesInOf entries regs
+    /// With no host nothing fires: a pulse that never comes.
+    let unfired (_: string) = lit 0UL 1
 
     let pinned = pinnedOutputs d path
     let pinOuts (p: Ports) = pinOutsOf pinned p
@@ -1762,7 +1802,7 @@ let private pinsTop (board: Board) (path: DataPath) (d: Design) : BoardTop =
                                 Some(recordInto regs arm ringAddr ringBeats written dropped m (axiWriteBusOf busPorts) (recordedFields ()))
                             | _ -> None
 
-                        d.body (onPins d path (fromRegisters regs) (toRegisters regs outs) (tablesIn regs) sink None i2s))
+                        d.body (onPins d path (fromRegisters regs) (pulsesFrom regs) (toRegisters regs outs) (tablesIn regs) sink None i2s))
 
             name, top.def, recorderEntries @ playerEntries @ entries
         | UartAt baud ->
@@ -1824,10 +1864,10 @@ let private pinsTop (board: Board) (path: DataPath) (d: Design) : BoardTop =
                                 | Some name, Some p, Some words -> Some(name, playInto board.part regs p words (playedFields ()))
                                 | _ -> None
 
-                            d.body (onPins d path (fromRegisters regs) (toRegisters regs outs) (tablesIn regs) sink play i2s)
+                            d.body (onPins d path (fromRegisters regs) (pulsesFrom regs) (toRegisters regs outs) (tablesIn regs) sink play i2s)
                         | _ ->
                             let regs = serialRegMapSlave "host" board.fabricHz baud uart map
-                            d.body (onPins d path (fromRegisters regs) (toRegisters regs outs) (tablesIn regs) None None i2s))
+                            d.body (onPins d path (fromRegisters regs) (pulsesFrom regs) (toRegisters regs outs) (tablesIn regs) None None i2s))
 
             name, top.def, recorderEntries @ playerEntries @ entries
         | NoHost ->
@@ -1839,7 +1879,7 @@ let private pinsTop (board: Board) (path: DataPath) (d: Design) : BoardTop =
                     (fun p -> converterPins board p, pinOuts p)
                     (fun (pins, outs) ->
                         let i2s = converterLink board pins rate
-                        d.body (onPins d path baked (reporter None outs) unwritable None None i2s))
+                        d.body (onPins d path baked unfired (reporter None outs) unwritable None None i2s))
 
             name, top.def, []
 
@@ -2037,6 +2077,7 @@ let private linkTop (board: Board) (path: DataPath) (d: Design) : BoardTop =
                             rows
                       streamOut = streamOut
                       valueIn = valuesOf contributed.designEntries regs
+                      pulseIn = pulsesInOf contributed.designEntries regs
                       valueOut = reporterFor board d path contributed.designEntries (Some regs) outs
                       tableIn = tablesInOf contributed.designEntries regs
                       surfaceOut = surfaceOut }
@@ -2149,6 +2190,7 @@ let private countedLinkTop (board: Board) (path: DataPath) (d: Design) : BoardTo
                             (produced.valid &&& produced.ready) ==> rowTaken
                             streamOut n produced
                       valueIn = valuesOf contributed.designEntries regs
+                      pulseIn = pulsesInOf contributed.designEntries regs
                       valueOut = reporterFor board d path contributed.designEntries (Some regs) outs
                       tableIn = tablesInOf contributed.designEntries regs
                       surfaceOut = surfaceOut }
@@ -2533,6 +2575,7 @@ let private hostMemoryTop (board: Board) (path: DataPath) (d: Design) : BoardTop
                     { streamIn = rowsIn
                       streamOut = rowsOut
                       valueIn = fun name -> regs.value byName[name]
+                      pulseIn = fun name -> regs.pulse byName[name]
                       valueOut = fun name value -> regs.drive byName[name] value
                       tableIn = fun name index -> regs.readArray byName[name] index
                       surfaceOut = surfaceOut }
@@ -2650,6 +2693,10 @@ let private registersTop (board: Board) (path: DataPath) (d: Design) : BoardTop 
                 match regs with
                 | Some regs -> valuesOf entries regs
                 | None -> fun name -> lit starting[name] formats[name].totalWidth
+              pulseIn =
+                match regs with
+                | Some regs -> pulsesInOf entries regs
+                | None -> fun _ -> lit 0UL 1
               valueOut = reporterFor board d path entries regs outs
               tableIn =
                 match regs with
@@ -2761,6 +2808,12 @@ let seamLines (t: BoardTop) : string list =
       "//! Generated from the design's own register map. Do not edit by hand."
       "" ]
     @ regMapRsLines t.map
+    // The clock the design was built for, from the board. Every wall-clock
+    // figure a host quotes divides by it — a pace in cycles from one in
+    // generations a second — and a host that wrote it down separately could
+    // disagree with the fabric about how fast the fabric is (it did, by five
+    // hertz, for the hand GoL top).
+    @ [ ""; $"pub const FABRIC_HZ: u64 = %d{t.board.fabricHz};" ]
     @ (if List.isEmpty t.seamExtras then [] else "" :: t.seamExtras)
 
 /// The top's Verilog and its seam, written into `dir`: `{Name}.v` and

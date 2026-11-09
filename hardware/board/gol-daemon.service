@@ -1,14 +1,18 @@
 # ~/.config/systemd/user/gol-daemon.service
 #
 # Game of Life's control plane: runtime/gol-daemon, a Zenoh peer serving
-# warp11/gol/frame + ctl/{load,run,burst,stop,reset} to Warp11.GolView.
+# warp11/gol/frame + ctl/{load,run,burst,stop,reset} to Warp11.GolView, over
+# the generated `Life64x64Batch` top (`Warp11.GoL.App -- life out/`). It reads
+# the seam that build wrote, so the seam travels with the binary.
 # Replaces the JVM gol-server (Ktor WS on 8080), retired 2026-08-13 with the
-# rest of the Kotlin stack.
+# rest of the Kotlin stack; the hand GolAxi top it first drove was retired
+# 2026-11-08.
 #
 # Install (one-time), and the deploy loop afterwards:
 #   cd runtime
 #   cargo build --release --target aarch64-unknown-linux-musl -p gol-daemon
 #   scp target/aarch64-unknown-linux-musl/release/gol-daemon \
+#       <the build directory>/life64x64_batch_layout.rs \
 #       ubuntu@192.168.1.172:warp11-driver/
 #   scp hardware/board/gol-daemon.service \
 #       ubuntu@192.168.1.172:.config/systemd/user/
@@ -21,8 +25,8 @@ After=network-online.target
 Wants=network-online.target
 
 # Every startup failure this daemon has is a real refusal, not a transient:
-# no 'golfs' uio node, a bitstream whose ID does not match, no udmabuf0, or a
-# skew canary that came back rotated. Retrying those forever buys nothing and
+# no 'life64x64_batch' uio node, a bitstream whose ID or layout hash does not
+# match the seam, no arena, or a skew canary that came back rotated. Retrying those forever buys nothing and
 # costs a core, so give up after 3 tries in a minute and leave the reason in
 # the journal — the same shape as mandel-daemon, and a direct answer to the
 # JVM units' restart storms the board README records.
@@ -30,11 +34,11 @@ StartLimitIntervalSec=60
 StartLimitBurst=3
 
 [Service]
-# The argument is the Zenoh listen endpoint, and matches the binary's own
-# default; 7447 keeps it clear of mandel-daemon's 7448, so the two units never
-# fight over a port even though only one of their bitstreams can be loaded at
-# a time.
-ExecStart=%h/warp11-driver/gol-daemon tcp/0.0.0.0:7447
+# The uio device and the seam name the app; the listen endpoint matches the
+# binary's own default; 7447 keeps it clear of mandel-daemon's 7448, so the
+# two units never fight over a port even though only one of their bitstreams
+# can be loaded at a time.
+ExecStart=%h/warp11-driver/gol-daemon --board life64x64_batch --layout %h/warp11-driver/life64x64_batch_layout.rs --listen tcp/0.0.0.0:7447
 Restart=on-failure
 RestartSec=2
 
@@ -42,10 +46,12 @@ RestartSec=2
 #
 # Prerequisites, none of which a --user unit can order against (all are
 # system-level, and systemd --user cannot express After= on them):
-#   - the gol-fs app loaded (warp11-loadapp.service, or xmutil by hand) —
-#     the daemon looks for the uio node named 'golfs'
-#   - u-dma-buf loaded (udmabuf.service) — frames land in udmabuf0, whose
-#     phys_addr the daemon programs into fbBaseAddr, arming the write master
+#   - the life64x64-batch app loaded (warp11-loadapp.service, or xmutil by
+#     hand) — the daemon looks for the uio node named 'life64x64_batch' and
+#     the arena 'udmabuf-life64x64-batch' its overlay makes; the seed rows go
+#     through the arena's first half and the snapshot slots land in its
+#     second, whose address the daemon programs into the surface's base
+#     register, arming the write master
 # The UIO node is opened directly; the 99-uio.rules udev rule
 # (MODE=0660 OWNER=ubuntu) is what makes that work without root.
 #
@@ -55,10 +61,10 @@ RestartSec=2
 # skew that survives every app reload and clears only on reboot. So:
 #
 #     systemctl --user stop gol-daemon
-#     cd warp11-driver && ./gol_disarm
+#     cd warp11-driver && ./gol-daemon --board life64x64_batch --layout life64x64_batch_layout.rs disarm
 #     sudo xmutil unloadapp
 #
-# ExecStopPost= deliberately does NOT run gol_disarm: it would fire on the
+# ExecStopPost= deliberately does NOT run the disarm: it would fire on the
 # restart path too, and disarming a master the next start is about to re-arm
 # is a race worth not having. Disarm is a step in the unload sequence, not a
 # property of the service. The skew canary at startup is the backstop — it

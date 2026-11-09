@@ -2,11 +2,11 @@
 /// the seed rows the host sends, the pace a register. Nothing in it names
 /// a bus or a wire — the mapping says how the world reaches the host: on a
 /// board whose only connection is a UART, snapshots as frames on it, pulled
-/// by the host; on the KV260, the keep-latest triple buffer in its DDR that
-/// `Wrapper.fs`'s hand top always had, now the host-memory top's to build
-/// (`-- life out/`). The board is the project's one board, `Board.board`,
-/// which the hand top builds for too. The hand top stays until the daemon
-/// and the view drive this one.
+/// by the host; on the KV260, the keep-latest triple buffer in its DDR
+/// (`-- life out/`), which `runtime/gol-daemon` serves to the live view. The
+/// board is the project's one board, `Board.board`. The hand-written
+/// `GolAxi` top this grew out of was retired 2026-11-08, once this design
+/// carried its control surface: a counted burst, a stop, a reset.
 module Warp11.GoL.World
 
 open Warp11
@@ -28,12 +28,21 @@ type WorldIo =
       seed: BoardTop.Incoming<Expr list>
       /// The world as it is, taken when the host asks.
       world: Expr list list -> unit
-      /// Generations advance while set.
-      run: Expr
-      /// Cycles between generations while running; 0 and 1 both mean every
+      /// Start a burst of `tickCount` generations. Ignored while one runs.
+      tick: Expr
+      /// Generations a burst runs; 0 runs until `stop`.
+      tickCount: Expr
+      /// Cycles between generations inside a burst; 0 and 1 both mean every
       /// cycle.
       intervalCycles: Expr
-      /// Generations since the last seed.
+      /// End the burst now. Wins over everything.
+      stop: Expr
+      /// The world to empty and the generation to zero. A burst in progress
+      /// goes on, over the empty world.
+      reset: Expr
+      /// A burst is in progress.
+      ticking: Expr -> unit
+      /// Generations since the last seed or reset.
       generation: Expr -> unit
       /// Live cells.
       population: Expr -> unit }
@@ -49,8 +58,12 @@ let lifeAt (gridWidth: int) (gridHeight: int) : BoardTop.Design =
         (fun n ->
             { seed = n.streamIn ("seed", layout)
               world = n.surfaceOut ("world", layout, gridHeight)
-              run = n.valueIn ("run", unsignedInt 1)
+              tick = n.pulseIn "tick"
+              tickCount = n.valueIn ("tickCount", unsignedInt 32, 1UL)
               intervalCycles = n.valueIn ("intervalCycles", unsignedInt 32, 1UL)
+              stop = n.pulseIn "stop"
+              reset = n.pulseIn "reset"
+              ticking = n.valueOut ("ticking", unsignedInt 1)
               generation = n.valueOut ("generation", unsignedInt 32)
               population = n.valueOut ("population", unsignedInt populationWidth) })
         (fun io ->
@@ -77,32 +90,72 @@ let lifeAt (gridWidth: int) (gridHeight: int) : BoardTop.Design =
 
                 mux lastRow (lit 0UL rowIndexWidth) (landing + lit 1UL rowIndexWidth) ==> landing)
 
-            let load = regBit "seed_load"
-            (arrived &&& lastRow) ==> load
+            let seedLoad = regBit "seed_load"
+            (arrived &&& lastRow) ==> seedLoad
+
+            // ---- reset: the world emptied and the generation zeroed, through
+            // the same load the seed takes. Registered first, because it fans
+            // out to every cell and a decode straight off the host's write
+            // was the hand top's worst path at 166 MHz.
+            let resetQ = regBit "reset_q"
+            io.reset ==> resetQ
+            let load = wireBit "grid_load"
+            (seedLoad ||| resetQ) ==> load
 
             let loadRows =
                 [ for y in 0 .. gridHeight - 1 ->
                       let row = wire $"seed_row_%d{y}" gridWidth
 
                       match List.item y staging with
-                      | low :: rest -> List.fold (fun acc w -> cat w acc) low rest ==> row
+                      | low :: rest -> mux resetQ (lit 0UL gridWidth) (List.fold (fun acc w -> cat w acc) low rest) ==> row
                       | [] -> failwith "unreachable: a row has a word"
 
                       row ]
 
-            // ---- the pace: a generation every `intervalCycles` while running.
+            // ---- the pace: `tick` starts a burst of `tickCount` generations
+            // (0: until `stop`), one every `intervalCycles`; `stop` ends it
+            // now. A tick during a burst is ignored, so the host cannot
+            // double-count by writing twice.
+            let running = regBit "burst_running"
+            let continuous = regBit "burst_continuous"
+            let remaining = reg "burst_remaining" 32
             let countdown = reg "pace_countdown" 32
             let due = eq countdown (lit 0UL 32)
-            let tick = wireBit "tick"
-            (io.run &&& due) ==> tick
+            let intervalSeed = mux (eq io.intervalCycles (lit 0UL 32)) (lit 0UL 32) (io.intervalCycles - lit 1UL 32)
+            let fire = wireBit "generation_fire"
+            (running &&& due &&& bnot io.stop) ==> fire
 
             ifElse
-                [ (bnot io.run, fun () -> lit 0UL 32 ==> countdown)
-                  (due, fun () -> mux (eq io.intervalCycles (lit 0UL 32)) (lit 0UL 32) (io.intervalCycles - lit 1UL 32) ==> countdown)
+                [ (io.stop,
+                   fun () ->
+                       lit 0UL 1 ==> running
+                       lit 0UL 1 ==> continuous
+                       lit 0UL 32 ==> remaining
+                       lit 0UL 32 ==> countdown)
+                  (bnot running,
+                   fun () ->
+                       If io.tick (fun () ->
+                           lit 1UL 1 ==> running
+                           eq io.tickCount (lit 0UL 32) ==> continuous
+                           io.tickCount ==> remaining
+                           intervalSeed ==> countdown))
+                  (due,
+                   fun () ->
+                       intervalSeed ==> countdown
+
+                       If (bnot continuous) (fun () ->
+                           ifElse
+                               [ (eq remaining (lit 1UL 32),
+                                  fun () ->
+                                      lit 0UL 1 ==> running
+                                      lit 0UL 32 ==> remaining)
+                                 (otherwise, fun () -> remaining - lit 1UL 32 ==> remaining) ]))
                   (otherwise, fun () -> countdown - lit 1UL 32 ==> countdown) ]
 
+            io.ticking running
+
             // ---- the grid, and its rows named so they can be sliced.
-            let grid = gameOfLifeGrid gridWidth gridHeight { load = load; tick = tick } loadRows
+            let grid = gameOfLifeGrid gridWidth gridHeight { load = load; tick = fire } loadRows
 
             let rows =
                 [ for y, row in List.indexed grid.rows ->
@@ -116,7 +169,7 @@ let lifeAt (gridWidth: int) (gridHeight: int) : BoardTop.Design =
 
             ifElse
                 [ (load, fun () -> lit 0UL 32 ==> generation)
-                  (otherwise, fun () -> If tick (fun () -> generation + lit 1UL 32 ==> generation)) ]
+                  (otherwise, fun () -> If fire (fun () -> generation + lit 1UL 32 ==> generation)) ]
 
             io.generation generation
 

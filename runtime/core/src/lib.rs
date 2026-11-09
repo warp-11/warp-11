@@ -28,7 +28,6 @@ pub mod audio_gain_layout;
 pub mod audio_passthru_layout;
 pub mod audio_tone_layout;
 pub mod gep_layout;
-pub mod gol_layout;
 pub mod mandel_frame_layout;
 pub mod mandel_layout;
 
