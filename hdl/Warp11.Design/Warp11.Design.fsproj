@@ -21,6 +21,7 @@
         <Compile Include="Graph.fs"/>
         <Compile Include="Edit.fs"/>
         <Compile Include="DesignFile.fs"/>
+        <Compile Include="Boards.fs"/>
         <Compile Include="Elaborate.fs"/>
         <Compile Include="Export.fs"/>
         <Compile Include="Devices.fs"/>

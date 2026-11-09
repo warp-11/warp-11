@@ -113,14 +113,18 @@ beat ──▶ coords ──cx0 cy dx──▶ mandelChunk x 104 ──pixels─
   --set cxOrigin=... ` drives it on the board and, through the bridge, in
   the Sim.
 - `Chunked.fs` is the design, and `-- bitstream <dir> [lanes]` writes the
-  directory the KV260's toolchain builds from — block design, overlay,
-  flow and the Rust seam, all derived from the design itself. `-- bitstream
-  <mapping.json> <dir>` does the same for any board from its mapping, with
-  the lanes the part's multipliers hold at twelve a lane — 104 on the
-  KV260, 2 on the Icepi, refused by number on a part with fewer than
-  twelve — unless the mapping names `lanes`: `mandelbrot.kv260.json` is the frame into DDR, and
-  `mandelbrot.icepi.json` (`"path": "countlink"`) is the frame over the
-  board's UART — the same count, the pixels back as streamed frames, which
+  directory its board's toolchain builds from — block design, overlay,
+  flow and the Rust seam, all derived from the design itself. The board
+  is `Chunked.board`, one line (`kv260At fabricHz`); change it and the
+  same verb builds for another, with the lanes that part holds — its
+  multipliers at twelve a lane, or its logic at the lane's measured cost,
+  whichever binds first: 104 on the KV260, 2 on the Icepi, 10 on the
+  DE10-Lite (whose lanes keep their per-thread state in block RAM, having
+  no LUT RAM), refused by number on a part with less than a lane's worth
+  — unless the line gives the count.
+  `Chunked.mapping` is the mapping, counted in on every board: on the
+  KV260 the frame into DDR, on a board with one wire the frame over its
+  UART — the same count, the pixels back as streamed frames, which
   `warp11_batch frame:320x200 out.pgm --serial /dev/ttyUSB1 --layout
   out/mandelbrot_link_layout.rs --chunk 128 --set …` reads.
 

@@ -100,10 +100,11 @@ let pages =
       page "Guides" "Runtime and host drivers" "guides/runtime" "runtime/README.md"
       page "Guides" "Streams" "guides/streams" "docs/streams.md"
       page "Guides" "Boards" "guides/boards" "docs/boards.md"
+      page "Guides" "Hello on every board" "guides/hello-on-every-board" "docs/hello-on-every-board.md"
       page "Guides" "How to add a new board" "guides/add-a-board" "docs/add-a-board.md"
       page "Guides" "How to add a new toolchain" "guides/add-a-toolchain" "docs/add-a-toolchain.md"
       page "Guides" "Hardware workflow" "guides/dev-workflow" "docs/dev-workflow.md"
-      page "Guides" "The design canvas" "guides/design-canvas" "docs/design-canvas.md"
+      page "Guides" "The design canvas (experimental)" "guides/design-canvas" "docs/design-canvas.md"
       page "Guides" "Comparison to other HDLs" "guides/comparison" "docs/HDL_COMPARISON.md" ]
 
 /// Sidebar order, which is not the order the page list is written in.

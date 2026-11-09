@@ -202,7 +202,22 @@ let stepTwin (fracBits: int) (zx: uint64) (zy: uint64) (cx: uint64) (cy: uint64)
 let laneIterWidth maxIter =
     bitsToHold (max (maxIter - 1) 1 + 1) |> max 1
 
-let mandelBarrelLaneDef (maxIter: int) (fracBits: int) (nThreads: int) (addrWidth: int) =
+/// A storage's mark in a module's name, so a lane whose register files are
+/// block RAM and one whose are LUT RAM are two modules rather than one
+/// name with two bodies.
+let storageTag (storage: RamStyle) =
+    match storage with
+    | Block -> "_blk"
+    | _ -> ""
+
+/// The lane with its register files in `storage` — LUT RAM where
+/// the part has it, block RAM where it does not. The barrel reads a slot's
+/// state through `memReadPort` at the **next** slot's index, so the word
+/// lands as that slot comes round whatever the storage's latency: the
+/// schedule does not know which it is on, which is the point. `nThreads >
+/// mandelStepLatency + 1` is the invariant that makes the read-ahead safe:
+/// a writeback lands at least a slot before its thread is read again.
+let mandelBarrelLaneDefOn (storage: RamStyle) (maxIter: int) (fracBits: int) (nThreads: int) (addrWidth: int) =
     if maxIter < 1 || maxIter > 256 then
         failwith $"maxIter must fit an 8-bit iter range, got %d{maxIter}"
 
@@ -219,7 +234,7 @@ let mandelBarrelLaneDef (maxIter: int) (fracBits: int) (nThreads: int) (addrWidt
     let step = mandelStep fracBits
 
     defModule
-        $"MandelBarrelLane_max%d{maxIter}_n%d{nThreads}_a%d{addrWidth}"
+        $"MandelBarrelLane_max%d{maxIter}_n%d{nThreads}_a%d{addrWidth}{storageTag storage}"
         (fun p ->
             (streamInputPorts p "px" (layout3 ("cx", 32) ("cy", 32) ("addr", addrWidth)),
              streamOutputPorts p "res" (layout2 ("addr", addrWidth) ("iter", iterWidth)),
@@ -227,36 +242,53 @@ let mandelBarrelLaneDef (maxIter: int) (fracBits: int) (nThreads: int) (addrWidt
         (fun (pxPorts, resPorts, allIdle) ->
             let px = streamSource pxPorts
             let pxCx, pxCy, pxAddr = px.payload
-            // ---- per-thread slot state: async-read register files ----
+            // ---- per-thread slot state ----
+            // The four wide fields are register files in whatever storage the
+            // part gives, read through the port a slot ahead; `iter` and
+            // `addr` are a register a slot, since the result emission reads
+            // them by an arbitrated index in the cycle it is decided.
             // Single write site each: cx/cy/addr written at issue, zx/zy only
             // on continue, iter on every valid writeback (continue: +1, done:
             // the escaped iteration) — so an immediate escaper reports right
             // with no reset write; the step-input mux injects 0 for a fresh
             // pixel and the first writeback populates the slot before the
-            // next issue reads it (nThreads > latency).
-            let cxMem = distributedMem "cxRegFile" threadWidth 32
-            let cyMem = distributedMem "cyRegFile" threadWidth 32
-            let addrMem = distributedMem "addrRegFile" threadWidth addrWidth
-            let zxMem = distributedMem "zxRegFile" threadWidth 32
-            let zyMem = distributedMem "zyRegFile" threadWidth 32
-            let iterMem = distributedMem "iterRegFile" threadWidth iterWidth
+            // next issue reads it (nThreads > latency + 1).
+            if nThreads <= mandelStepLatency + 1 then
+                failwith $"a barrel lane reads its state a slot ahead, so it needs more than %d{mandelStepLatency + 1} threads, not %d{nThreads}"
+
+            let regFileMem (name: string) (w: int) =
+                match storage with
+                | Block -> blockMem name threadWidth w
+                | Distributed -> distributedMem name threadWidth w
+                | other -> failwith $"a lane's register file is LUT RAM or block RAM, not %A{other}"
+
+            let cxMem = regFileMem "cxRegFile" 32
+            let cyMem = regFileMem "cyRegFile" 32
+            let zxMem = regFileMem "zxRegFile" 32
+            let zyMem = regFileMem "zyRegFile" 32
+            let addrRegs = [ for t in 0 .. nThreads - 1 -> reg $"addr%d{t}" addrWidth ]
+            let iterRegs = [ for t in 0 .. nThreads - 1 -> reg $"iter%d{t}" iterWidth ]
             let active = [ for t in 0 .. nThreads - 1 -> regBit $"active%d{t}" ] // COMPUTING
             let pend = [ for t in 0 .. nThreads - 1 -> regBit $"pend%d{t}" ] // DONE-PENDING
 
             // ---- schedule ----
             let turn = reg "turn" threadWidth
             turn + lit 1UL threadWidth ==> turn // wraps mod nThreads
+            // The slot after this one: what the register files are asked for
+            // now, so the word is there when its slot comes round.
+            let nextTurn = wire "nextTurn" threadWidth
+            turn + lit 1UL threadWidth ==> nextTurn
 
             let curZx = wire "curZx" 32
-            memRead zxMem turn ==> curZx
+            (memReadPort zxMem nextTurn).data ==> curZx
             let curZy = wire "curZy" 32
-            memRead zyMem turn ==> curZy
+            (memReadPort zyMem nextTurn).data ==> curZy
             let curIter = wire "curIter" iterWidth
-            memRead iterMem turn ==> curIter
+            selectIndexed turn iterRegs ==> curIter
             let curCx = wire "curCx" 32
-            memRead cxMem turn ==> curCx
+            (memReadPort cxMem nextTurn).data ==> curCx
             let curCy = wire "curCy" 32
-            memRead cyMem turn ==> curCy
+            (memReadPort cyMem nextTurn).data ==> curCy
             let curActive = wireBit "curActive"
             selectIndexed turn active ==> curActive
             let curPend = wireBit "curPend"
@@ -305,6 +337,7 @@ let mandelBarrelLaneDef (maxIter: int) (fracBits: int) (nThreads: int) (addrWidt
             // flight and is not issued — one writer per reg per cycle.
             for t in 0 .. nThreads - 1 do
                 let issueLoad = eq turn (lit (uint64 t) threadWidth) &&& pull
+                let writebackT = eq writebackTurn (lit (uint64 t) threadWidth) &&& writebackValid
                 let writebackDoneT = eq writebackTurn (lit (uint64 t) threadWidth) &&& writebackDone
                 let emitAccept = emitSel[t] &&& resPorts.ready
 
@@ -315,13 +348,16 @@ let mandelBarrelLaneDef (maxIter: int) (fracBits: int) (nThreads: int) (addrWidt
                     (writebackDoneT, fun () -> lit 1UL 1 ==> pend[t])
                     (otherwise, fun () -> If emitAccept (fun () -> lit 0UL 1 ==> pend[t])) ]
 
+                // The per-slot registers: the pixel's address at issue, the
+                // iteration at every valid writeback.
+                If issueLoad (fun () -> pxAddr ==> addrRegs[t])
+                If writebackT (fun () -> mux writebackDone writebackIter (writebackIter + lit 1UL iterWidth) ==> iterRegs[t])
+
             // ---- register-file writes (each mem one write site) ----
             memWrite cxMem turn pxCx pull
             memWrite cyMem turn pxCy pull
-            memWrite addrMem turn pxAddr pull
             memWrite zxMem writebackTurn writebackZxN writebackContinue
             memWrite zyMem writebackTurn writebackZyN writebackContinue
-            memWrite iterMem writebackTurn (mux writebackDone writebackIter (writebackIter + lit 1UL iterWidth)) writebackValid
 
             // ---- outputs: the winning pending slot ----
             let emitIndex = wire "emitIndex" threadWidth
@@ -334,7 +370,7 @@ let mandelBarrelLaneDef (maxIter: int) (fracBits: int) (nThreads: int) (addrWidt
 
             let pendAny = wireBit "pendAny"
             List.reduce (|||) pend ==> pendAny
-            streamDrive resPorts pendAny (memRead addrMem emitIndex, memRead iterMem emitIndex)
+            streamDrive resPorts pendAny (selectIndexed emitIndex addrRegs, selectIndexed emitIndex iterRegs)
 
             let anyBusy = wireBit "anyBusy"
             List.reduce (|||) (List.map2 (|||) active pend) ==> anyBusy
@@ -342,9 +378,9 @@ let mandelBarrelLaneDef (maxIter: int) (fracBits: int) (nThreads: int) (addrWidt
 
 /// One lane instance under `instName`, called as a stage: the pixel stream
 /// in, the (result stream, all_idle) pair out.
-let mandelBarrelLane (maxIter: int) (fracBits: int) (nThreads: int) (addrWidth: int) instName (px: Stream<Expr * Expr * Expr>) =
+let mandelBarrelLaneOn (storage: RamStyle) (maxIter: int) (fracBits: int) (nThreads: int) (addrWidth: int) instName (px: Stream<Expr * Expr * Expr>) =
     let pxPorts, resPorts, allIdle =
-        (mandelBarrelLaneDef maxIter fracBits nThreads addrWidth).NewNamed instName
+        (mandelBarrelLaneDefOn storage maxIter fracBits nThreads addrWidth).NewNamed instName
 
     streamToInputPorts pxPorts px
     streamOfOutputPorts resPorts, allIdle
@@ -431,6 +467,14 @@ let pixelBits = 8
 let pixelsPerBeat = beatBits / pixelBits
 
 let private beatColBits = bitsToHold pixelsPerBeat
+
+/// The lane with LUT-RAM register files: what every caller before the
+/// storage became a choice meant, and what a part with LUT RAM still gets.
+let mandelBarrelLaneDef (maxIter: int) (fracBits: int) (nThreads: int) (addrWidth: int) =
+    mandelBarrelLaneDefOn Distributed maxIter fracBits nThreads addrWidth
+
+let mandelBarrelLane (maxIter: int) (fracBits: int) (nThreads: int) (addrWidth: int) instName (px: Stream<Expr * Expr * Expr>) =
+    mandelBarrelLaneOn Distributed maxIter fracBits nThreads addrWidth instName px
 
 let mandelRowCoalescerDef (widthPadded: int) (addrWidth: int) =
     if widthPadded % pixelsPerBeat <> 0 || widthPadded < pixelsPerBeat then
@@ -731,7 +775,7 @@ let mandelCoordGen (width: int) (height: int) instName (run: Stream<Expr>) (rowG
 
     px, rowBasePort
 
-let mandelLanePodDef (width: int) (height: int) (maxIter: int) (fracBits: int) (nThreads: int) =
+let mandelLanePodDefOn (storage: RamStyle) (width: int) (height: int) (maxIter: int) (fracBits: int) (nThreads: int) =
     if width < 1 || height < 1 then
         failwith $"width/height must be >= 1, got %d{width}x%d{height}"
 
@@ -741,11 +785,11 @@ let mandelLanePodDef (width: int) (height: int) (maxIter: int) (fracBits: int) (
     let iterWidth = laneIterWidth maxIter
     let runWidth = lanePodRunWidth width height
     let coordGen = mandelCoordGen width height
-    let lane = mandelBarrelLane maxIter fracBits nThreads colWidth // px addr carries the COLUMN
+    let lane = mandelBarrelLaneOn storage maxIter fracBits nThreads colWidth // px addr carries the COLUMN
     let coalescer = mandelRowCoalescer widthPadded addrWidth
 
     defModule
-        $"MandelLanePod_%d{width}x%d{height}_max%d{maxIter}_n%d{nThreads}"
+        $"MandelLanePod_%d{width}x%d{height}_max%d{maxIter}_n%d{nThreads}{storageTag storage}"
         (fun p ->
             (streamInputPorts p "run" (layout1 ("data", runWidth)),
              streamOutputPorts p "res" (layout2 ("addr", addrWidth) ("beat", 128))))
@@ -777,12 +821,20 @@ let mandelLanePodDef (width: int) (height: int) (maxIter: int) (fracBits: int) (
 
 /// One pod instance under `instName`, as a stage: the row-run stream in, the
 /// (addr, beat) result stream out.
-let mandelLanePod (width: int) (height: int) (maxIter: int) (fracBits: int) (nThreads: int) instName (run: Stream<Expr>) =
-    let runPorts, resPorts = (mandelLanePodDef width height maxIter fracBits nThreads).NewNamed instName
+let mandelLanePodOn (storage: RamStyle) (width: int) (height: int) (maxIter: int) (fracBits: int) (nThreads: int) instName (run: Stream<Expr>) =
+    let runPorts, resPorts = (mandelLanePodDefOn storage width height maxIter fracBits nThreads).NewNamed instName
 
     streamToInputPorts runPorts run
     streamOfOutputPorts resPorts
 
+
+/// The pod with LUT-RAM register files, as every caller before the storage
+/// became a choice meant.
+let mandelLanePodDef (width: int) (height: int) (maxIter: int) (fracBits: int) (nThreads: int) =
+    mandelLanePodDefOn Distributed width height maxIter fracBits nThreads
+
+let mandelLanePod (width: int) (height: int) (maxIter: int) (fracBits: int) (nThreads: int) instName (run: Stream<Expr>) =
+    mandelLanePodOn Distributed width height maxIter fracBits nThreads instName run
 // ---------------------------------------------------------------------------
 // The lane as the canvas places it
 
@@ -817,7 +869,7 @@ let chunkedWidth (pixels: int) (width: int) =
 /// `dx` rides in the beat rather than as a control on purpose: a control on a
 /// box spent 104 times is a net across the die, the path the frame design
 /// took out of its dispatch tree by carrying `dx` in the run.
-let mandelChunk (pixels: int) (maxIter: int) (fracBits: int) (threads: int) : Fu<Expr * Expr * Expr, Expr> =
+let mandelChunkOn (storage: RamStyle) (pixels: int) (maxIter: int) (fracBits: int) (threads: int) : Fu<Expr * Expr * Expr, Expr> =
     if pixels % pixelsPerBeat <> 0 then
         failwith $"mandelChunk: a chunk is whole beats of %d{pixelsPerBeat} pixels, not %d{pixels}"
 
@@ -825,7 +877,7 @@ let mandelChunk (pixels: int) (maxIter: int) (fracBits: int) (threads: int) : Fu
     let run = lanePodRunTransporter pixels 1
 
     moduleUnit
-        "mandelChunk"
+        $"mandelChunk{storageTag storage}"
         (pins3 ("cx0", view) ("cy", view) ("dx", view))
         (pins1 ("pixels", pixelsFormat))
         []
@@ -834,9 +886,13 @@ let mandelChunk (pixels: int) (maxIter: int) (fracBits: int) (threads: int) : Fu
                 s
                 |> streamMapTo (layout1 ("data", run.width)) (fun (cx0, cy, dx) -> run.dematerialize (lit 0UL (lanePodAddrWidth pixels 1), asUInt cy, asUInt cx0, asUInt dx))
 
-            mandelLanePod pixels 1 maxIter fracBits threads instance runs
+            mandelLanePodOn storage pixels 1 maxIter fracBits threads instance runs
             |> streamMapTo (layout1 ("pixels", beatBits)) snd)
     |> answering (pixels / pixelsPerBeat)
+
+/// The chunk with LUT-RAM register files, as the canvas and the KV260 take it.
+let mandelChunk (pixels: int) (maxIter: int) (fracBits: int) (threads: int) : Fu<Expr * Expr * Expr, Expr> =
+    mandelChunkOn Distributed pixels maxIter fracBits threads
 
 /// The same chunk, **addressed**: the pod's beats leave carrying where they
 /// go — the beat's offset within its own chunk, which the design turns into
@@ -975,9 +1031,9 @@ let viewControls (fracBits: int) =
 /// The frame as the canvas draws it, in typed form: beats in, `coords`, the
 /// lane spent `lanes` times, pixels out — the four boxes, so the drawn design
 /// and this meet at the bytes.
-let mandelChunksDef (name: string) (width: int) (pixels: int) (maxIter: int) (fracBits: int) (threads: int) (lanes: int) =
+let mandelChunksDefOn (storage: RamStyle) (name: string) (width: int) (pixels: int) (maxIter: int) (fracBits: int) (threads: int) (lanes: int) =
     let coords = coords width pixels fracBits
-    let lane = copies lanes (mandelChunk pixels maxIter fracBits threads)
+    let lane = copies lanes (mandelChunkOn storage pixels maxIter fracBits threads)
     let view = viewFormat fracBits
 
     defModule
@@ -994,6 +1050,10 @@ let mandelChunksDef (name: string) (width: int) (pixels: int) (maxIter: int) (fr
             |> fuStagesWith [ cxOrigin; cyOrigin; dx; dy ] coords "coords" (pins3 ("cx0", view) ("cy", view) ("dx", view)) id (fun r _ -> r)
             |> fuStagesWith [] lane "mandelChunk" (pins1 pixelsPin) id (fun r _ -> r)
             |> List.iter2 streamSink [ out1 ])
+
+/// The frame with LUT-RAM register files, as the KV260 takes it.
+let mandelChunksDef (name: string) (width: int) (pixels: int) (maxIter: int) (fracBits: int) (threads: int) (lanes: int) =
+    mandelChunksDefOn Distributed name width pixels maxIter fracBits threads lanes
 
 /// The frame as **scattered** chunk beats: the same `coords` and the same
 /// lane pod, farmed with nothing keeping order, every beat carrying the index

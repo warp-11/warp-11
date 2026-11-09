@@ -39,7 +39,7 @@ let gain (rate: float) : Graph =
 
 /// The gain example's mapping: the KV260 preset, the boundary in the
 /// host's memory — a WAV in, the design, a WAV out, no codec needed.
-let gainMapping: Warp11.Mapping.Mapping = { board = kv260; path = viaHostMemory; plugged = []; sizes = [] }
+let gainMapping: Warp11.Mapping.Mapping = { board = kv260; path = viaHostMemory; plugged = [] }
 
 /// M2's design: three `eq` sections with creation arguments — a low shelf,
 /// a peaking cut, a high shelf — designed for the rate.
@@ -163,7 +163,7 @@ let all (rate: float) : (string * Graph) list =
 /// the KV260's memory, sixteen words of a link — and both carry it. The
 /// gain example's `gain.kv260.json` is the one its design file names.
 let mappings: (string * Warp11.Mapping.Mapping) list =
-    let on (board: Board) (path: DataPath) : Warp11.Mapping.Mapping = { board = board; path = path; plugged = []; sizes = [] }
+    let on (board: Board) (path: DataPath) : Warp11.Mapping.Mapping = { board = board; path = path; plugged = [] }
     let link = [ "icebreaker", on (iceBreakerAt 24_000_000) viaLink; "icepi", on icepi viaLink; "goboard", on goBoard viaLink; "de10lite", on de10Lite viaLink ]
     let memory = [ "kv260", gainMapping ]
 

@@ -101,9 +101,9 @@ let run (argv: string[]) : int option =
             with e ->
                 eprintfn $"{e.Message}"
                 Some 1
-    // The batch bridge: `batchserve design.json <preset>` serves the design's
+    // The batch bridge: `batchserve design.json <board>` serves the design's
     // host-memory top in the Sim to a Rust driver on stdin.
-    // A preset alone is the host-memory path; `<preset> count` the counted one;
+    // A board alone is the host-memory path; `<board> count` the counted one;
     // the design's own mapping says which when nothing is named.
     | [| "batchserve"; path |]
     | [| "batchserve"; path; _ |]
@@ -115,7 +115,7 @@ let run (argv: string[]) : int option =
             match which with
             | None -> Warp11.Mapping.defaultFor path g.mapping
             | Some w when w.EndsWith ".json" -> Warp11.Mapping.load w
-            | Some w -> Warp11.Mapping.ofBoard w dataPath
+            | Some w -> Warp11.Boards.mappingOn w dataPath
 
         match Warp11.DesignFile.load path with
         | Error why ->
@@ -172,12 +172,12 @@ let run (argv: string[]) : int option =
                 with e ->
                     eprintfn $"{e.Message}"
                     Some 1
-    // ...or for a preset and a path named on the line.
+    // ...or for a board and a path named on the line.
     | [| "build"; path; which; way; dir |] ->
         let dataPath = Warp11.Mapping.pathNamed way
 
-        // `which` is a preset's name or a board file's path.
-        match Warp11.DesignFile.load path, dataPath |> Result.bind (Warp11.Mapping.ofBoard which) with
+        // `which` is a board's name (`Boards.boards`) or a board file's path.
+        match Warp11.DesignFile.load path, dataPath |> Result.bind (Warp11.Boards.mappingOn which) with
         | Error why, _ ->
             eprintfn $"{path}: {why}"
             Some 1
@@ -200,10 +200,10 @@ let run (argv: string[]) : int option =
             with e ->
                 eprintfn $"{e.Message}"
                 Some 1
-    // A saved design on a board: `board design.json <preset> <dir>` writes
-    // the top's Verilog and the Rust seam for one of the preset boards.
+    // A saved design on a board: `board design.json <board> <dir>` writes
+    // the top's Verilog and the Rust seam for a board by name or file.
     | [| "board"; path; which; dir |] ->
-        match Warp11.DesignFile.load path, preset which with
+        match Warp11.DesignFile.load path, Warp11.Boards.named which with
         | Error why, _ ->
             eprintfn $"{path}: {why}"
             Some 1

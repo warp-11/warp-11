@@ -2,8 +2,9 @@
 /// axis, and which way its boundary gets there. A file beside the design
 /// (`gain.kv260.json`), so one design carries as many as it has boards; the
 /// design names its default. A board alone is a file too (`*.board.json`),
-/// which is how a custom target saved from the dialog becomes a preset
-/// other designs pick.
+/// which is how a custom target saved from the dialog becomes a board
+/// other designs pick. A typed design needs none of this: its board is a
+/// value in its code, and its mapping a record beside the design.
 ///
 /// The JSON is the record, field for field, so a person can read what a
 /// build was made with and a diff shows exactly which axis moved.
@@ -16,19 +17,11 @@ type Mapping =
     { board: Board
       path: DataPath
       /// Each harness and the socket it is plugged into.
-      plugged: (Harness * string) list
-      /// Sizes the mapping names in place of what the design would derive
-      /// from the part — `world`, `lanes` — by the name the design asks
-      /// for. Empty, and every size is derived.
-      sizes: (string * int) list }
+      plugged: (Harness * string) list }
 
 /// The board a mapping builds for: its board with every harness plugged in.
 let boardOf (m: Mapping) : Board =
     m.plugged |> List.fold (fun board (harness, socket) -> plug harness socket board) m.board
-
-/// The preset a board equals, if any: the provenance a dialog shows.
-let presetOf (board: Board) : string option =
-    presets |> List.tryFind (fun (_, b) -> b = board) |> Option.map fst
 
 // ---------------------------------------------------------------------------
 // The board as JSON.
@@ -575,14 +568,6 @@ let write (m: Mapping) : string =
 
         o["bind"] <- bind
 
-    if not m.sizes.IsEmpty then
-        let sizes = JsonObject()
-
-        for name, value in m.sizes do
-            sizes[name] <- num value
-
-        o["sizes"] <- sizes
-
     if not m.plugged.IsEmpty then
         o["plugged"] <-
             JsonArray(
@@ -639,22 +624,6 @@ let private readPlugged (root: JsonNode) : Result<(Harness * string) list, strin
             (Ok [])
     | Some _ -> Error "'plugged': expected an array"
 
-let private readSizes (root: JsonNode) : Result<(string * int) list, string> =
-    match optional root "sizes" with
-    | None -> Ok []
-    | Some(:? JsonObject as sizes) ->
-        sizes
-        |> List.ofSeq
-        |> List.fold
-            (fun acc (KeyValue(name, value)) ->
-                acc
-                |> Result.bind (fun named ->
-                    match value with
-                    | :? JsonValue as v when v.TryGetValue<int>() |> fst -> Ok(named @ [ name, v.GetValue<int>() ])
-                    | _ -> Error $"'sizes.{name}': expected a whole number"))
-            (Ok [])
-    | Some _ -> Error "'sizes': expected an object keyed by what the design sizes"
-
 let parse (text: string) : Result<Mapping, string> =
     try
         let root = JsonNode.Parse text
@@ -668,13 +637,10 @@ let parse (text: string) : Result<Mapping, string> =
                 readBind root
                 |> Result.bind (fun named ->
                     readPlugged root
-                    |> Result.bind (fun plugged ->
-                        readSizes root
-                        |> Result.map (fun sizes ->
-                            { board = board
-                              path = { path with bindings = path.bindings @ named }
-                              plugged = plugged
-                              sizes = sizes })))))
+                    |> Result.map (fun plugged ->
+                        { board = board
+                          path = { path with bindings = path.bindings @ named }
+                          plugged = plugged }))))
         |> Result.bind (fun m -> checkBoard m.board; Ok m)
     with e ->
         Error e.Message
@@ -687,13 +653,6 @@ let load (path: string) : Result<Mapping, string> =
     else
         Error $"{path}: no such file"
 
-/// A mapping from a preset by name, or a board file's path.
-let ofBoard (nameOrFile: string) (path: DataPath) : Result<Mapping, string> =
-    match preset nameOrFile with
-    | Ok b -> Ok { board = b; path = path; plugged = []; sizes = [] }
-    | Error _ when System.IO.File.Exists nameOrFile -> loadBoard nameOrFile |> Result.map (fun b -> { board = b; path = path; plugged = []; sizes = [] })
-    | Error why -> Error why
-
 /// Where a design's mapping for a board lives: `gain.json` on the `kv260`
 /// → `gain.kv260.json`, beside it.
 let fileFor (designPath: string) (boardName: string) : string =
@@ -705,7 +664,7 @@ let fileFor (designPath: string) (boardName: string) : string =
 /// file.
 let defaultFor (designPath: string) (mappingName: string option) : Result<Mapping, string> =
     match mappingName with
-    | None -> Error $"{designPath}: the design names no mapping — it maps to the simulator only; `-- build design.json <preset> pins|memory <dir>` builds it for a board"
+    | None -> Error $"{designPath}: the design names no mapping — it maps to the simulator only; `-- build design.json <board> pins|memory <dir>` builds it for a board"
     | Some name -> load (System.IO.Path.Combine(System.IO.Path.GetDirectoryName designPath, name))
 
 // ---------------------------------------------------------------------------

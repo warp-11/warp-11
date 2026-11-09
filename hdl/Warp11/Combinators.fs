@@ -34,18 +34,24 @@ let delayChain (name: string) (width: int) (stages: int) (source: Expr) =
 /// by something slower than a block, and everything that asks will follow.
 let memReadDepth (_: Mem) = 1
 
-/// What `memReadPort` hands back: the word, how late it is, and a way to
-/// carry anything else across the same distance.
-type MemReadPort =
-    { /// The word, `depth` cycles after the address was presented.
-      data: Expr
-      /// How many cycles late `data` is. Read it rather than assuming one —
-      /// that is what makes this a port rather than a value.
-      depth: int
-      /// Carry a signal across the read so it arrives beside `data`. The
-      /// registers are named by the caller, so a waveform still reads the way
-      /// it did.
-      through: string -> Expr -> Expr }
+/// What `memReadPort` hands back: the word, and a way to carry anything
+/// else across the same distance — the read's latency is the port's own,
+/// and does not leave it as a number. A consumer with a fixed schedule asks
+/// `answersWithin`; one on a stream reaches for `memReadStream`.
+type MemReadPort internal (data: Expr, depth: int, through: string -> Expr -> Expr) =
+    /// The word, as many cycles after the address as the storage takes.
+    member _.data = data
+
+    /// Carry a signal across the read so it arrives beside `data`. The
+    /// registers are named by the caller, so a waveform still reads the way
+    /// it did.
+    member _.through (name: string) (signal: Expr) = through name signal
+
+    /// Whether the word is there within `cycles` of the address — what a
+    /// channel that samples on a schedule asks, instead of the number.
+    member _.answersWithin (cycles: int) = depth <= cycles
+
+    member internal _.Depth = depth
 
 /// A memory read that **owns its own latency**, and carries whatever the read
 /// was about through it.
@@ -76,9 +82,7 @@ let memReadPort (m: Mem) (addr: Expr) : MemReadPort =
     let data = memReadNextCycle m addr
     let depth = memReadDepth m
 
-    { data = data
-      depth = depth
-      through = fun name signal -> delayChain name (width signal) depth signal }
+    MemReadPort(data, depth, fun name signal -> delayChain name (width signal) depth signal)
 
 /// Select from a list by index — a mux network over live values, which is what
 /// a row of per-slot registers wants (a mem would add a read cycle and a write

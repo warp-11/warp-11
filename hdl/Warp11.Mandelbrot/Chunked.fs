@@ -13,8 +13,8 @@ open Warp11.Fu
 open Warp11.Mandelbrot.Lane
 
 /// The design as a board top takes it.
-let mandelChunks (name: string) (width: int) (pixels: int) (maxIter: int) (fracBits: int) (threads: int) (lanes: int) : BoardTop.Design =
-    let def = mandelChunksDef name width pixels maxIter fracBits threads lanes
+let mandelChunksOn (storage: RamStyle) (name: string) (width: int) (pixels: int) (maxIter: int) (fracBits: int) (threads: int) (lanes: int) : BoardTop.Design =
+    let def = mandelChunksDefOn storage name width pixels maxIter fracBits threads lanes
 
     let needs =
         [ yield BoardTop.streamIn "beats" [ beatPin ]
@@ -39,6 +39,10 @@ let mandelChunks (name: string) (width: int) (pixels: int) (maxIter: int) (fracB
                     |> streamMapTo (layoutOfList [ pixelsPin ]) List.singleton
               ports = [ "cxOrigin", cxOrigin; "cyOrigin", cyOrigin; "dx", dx; "dy", dy ]
               readbacks = [] }) }
+
+/// The frame with LUT-RAM register files, as the KV260 takes it.
+let mandelChunks (name: string) (width: int) (pixels: int) (maxIter: int) (fracBits: int) (threads: int) (lanes: int) : BoardTop.Design =
+    mandelChunksOn Distributed name width pixels maxIter fracBits threads lanes
 
 /// A frame through the design in the Sim: beats `0 .. height × chunks - 1`
 /// offered as fast as they are taken, the pixels collected in the order
@@ -251,48 +255,39 @@ let laneThreads = 8
 
 let fabricHz = 166_666_672
 
-/// What a lane takes of a part's multipliers: three 32×32 products, four
-/// of a 16- or 18-bit multiplier each — twelve, on every part so far.
-let multipliersPerLane = 12
-
-/// The lanes a part holds: its multipliers at twelve a lane. None when it
-/// has fewer than a lane's worth — a lane in LUTs would be the whole part.
-let lanesFor (part: Part) : int option =
-    let lanes = part.facts.multipliers / multipliersPerLane
-    if lanes >= 1 then Some lanes else None
-
-/// Every lane the KV260's part holds: 104, from its 1 248 DSPs.
-let siliconLanes = (lanesFor kv260.part).Value
-
-/// The frame sized for its board: lanes from the part's multipliers, or the
-/// mapping's `lanes`.
-let mandelChunksSized (name: string) (width: int) (pixels: int) (maxIter: int) (fracBits: int) (threads: int) : BoardTop.Design =
+/// The frame on a part: the lanes given, and the register files in the
+/// storage the part has — LUT RAM where it has it, block RAM where it does
+/// not — the lane reading them the same way. The storage is the part's
+/// business; the count is the design's.
+let mandelChunksFor (lanes: int) (name: string) (width: int) (pixels: int) (maxIter: int) (fracBits: int) (threads: int) : BoardTop.Design =
     BoardTop.sized name (fun fit ->
-        let derived =
-            match lanesFor fit.part with
-            | Some lanes -> lanes
-            | None ->
-                failwith
-                    $"{name}: a lane takes %d{multipliersPerLane} multipliers and the {fit.part.device} has %d{fit.part.facts.multipliers} — impossible on this part"
+        let storage = if fit.part.facts.lutRam then Distributed else Block
+        mandelChunksOn storage name width pixels maxIter fracBits threads lanes)
 
-        mandelChunks name width pixels maxIter fracBits threads (fit.size ("lanes", derived)))
+/// The board the frame is built for: the KV260 at the lanes' clock. Moving
+/// the frame to another board is this line.
+let board = kv260At fabricHz
 
-/// The example on the KV260 as the directory its toolchain builds from,
-/// straight from the typed design: the counted path, so the host asks for a
-/// count of beats and the frame lands in its memory. There is no design file
-/// in the way — this is the whole path from the code to the bitstream.
-let buildDirectory (dir: string) (lanes: int) =
-    mandelChunks "Mandelbrot" frameWidth chunkPixels maxIterations viewFracBits laneThreads lanes
-    |> BoardTop.boardTop (kv260At fabricHz) viaCount
-    |> Warp11.Build.write dir
+/// Mandelbrot's mapping: the frame counted in, the rows into the host's
+/// memory or as frames on its link, as the board has.
+let mapping: Warp11.Mapping.Mapping =
+    { board = board; path = viaCountHost board; plugged = [] }
 
-/// The example on any board, from its mapping: the design is the same, the
-/// lanes are the part's (or the mapping's `lanes`), and the board top is
-/// whatever the path says — the frame into the host's memory on a board
-/// with one, or over its link.
-let buildFor (m: Warp11.Mapping.Mapping) (dir: string) =
-    mandelChunksSized "Mandelbrot" frameWidth chunkPixels maxIterations viewFracBits laneThreads
-    |> BoardTop.boardTopFor m
+/// The lanes the frame is built with: a design parameter, stated here and
+/// nothing to do with the board. 104 is every lane the KV260's 1 248 DSPs
+/// hold at twelve a lane; the Icepi holds 2, the DE10-Lite 10 (measured
+/// 2026-11-08, 39 093 of 49 760 logic elements). The board's gate says
+/// whether what is stated fits. `bitstream <dir> <lanes>` overrides it for
+/// a sweep.
+let lanes = 104
+
+/// The example as the directory its board's toolchain builds from, straight
+/// from the typed design: the counted path, at `lanes` unless the line gives
+/// a count. There is no design file in the way — this is the whole path from
+/// the code to the bitstream.
+let buildDirectory (dir: string) (lanesGiven: int option) =
+    mandelChunksFor (defaultArg lanesGiven lanes) "Mandelbrot" frameWidth chunkPixels maxIterations viewFracBits laneThreads
+    |> BoardTop.boardTopFor mapping
     |> Warp11.Build.write dir
 
 /// The same, on the **scatter** path: every beat carrying where it goes, so

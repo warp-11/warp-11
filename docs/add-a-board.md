@@ -100,7 +100,7 @@ to be keyed by, and a role exists when a design declares a need for it.
 
 ## 2. Build for it
 
-Name the file where a preset's name would go, with the path the board can
+Name the file where a board's name would go, with the path the board can
 carry — `link` on a board whose connection is a UART:
 
 ```sh
@@ -152,10 +152,11 @@ A board on a known tool, with roles that exist, is never source.
 ## 4. How this repository keeps its own boards
 
 The boards built here are F# values in `hdl/Warp11/Board.fs` — the same
-record the file is read into — because the tests and the examples want them
-by name, and `presets` is the list a mapping file or the canvas looks a name
-up in. A part is a value too, so a second board on the same part starts from
-it:
+record the file is read into — because a typed design binds its board in
+one line of code (`let board = icepi`), and a value is what a line names. A
+board of your own is the same record in your own project; the file form is
+for the canvas, whose menu of boards by name is `Warp11.Design/Boards.fs`.
+A part is a value too, so a second board on the same part starts from it:
 
 ```fsharp
 let goBoard =
@@ -206,14 +207,19 @@ line per LED, binding the bit of that name to the pin of that name:
   "bind": { "led1": ["OnPin:led1"], "led2": ["OnPin:led2"], "led3": ["OnPin:led3"], "led4": ["OnPin:led4"] } }
 ```
 
+That mapping is `Hello.mappingFor`, a function of the board, and
+`-- mapping` prints it. Bind the board: write it as a value (§4 — in
+`Board.fs`, or beside your own design) and point `Hello.board` at it, `let
+board = goBoard`. Then:
+
 ```sh
-dotnet run --project Warp11.Designs -- hello hello.goboard.json out/
+dotnet run --project Warp11.Designs -- hello out/
 cd out && PROG=1 ./build.sh
 warp11_regs --serial /dev/ttyUSB1 --baud 115200 --layout hello_uart_layout.rs --set pattern=5
 ```
 
-`hello.{kv260,icebreaker,icepi,goboard}.json` beside `Warp11.Designs` are
-the four here; the Go Board's, measured, is in the boards table.
+[Hello on every board](hello-on-every-board.md) walks the five here; the
+Go Board's, measured, is in the boards table.
 
 A board is added when `hello` is on it and its `report.json` — cells and
 block RAMs against the part, the achieved clock against `fabricHz` — is in

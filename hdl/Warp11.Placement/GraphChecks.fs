@@ -694,7 +694,7 @@ let exportIsTheDesign () : bool =
     // build function are compiled too.
     let mappingFor (g: Graph) : Warp11.Mapping.Mapping option =
         if g.name = Warp11.Graph.gainGraph.name then
-            Some { board = kv260; path = viaHostMemory; plugged = []; sizes = [] }
+            Some { board = kv260; path = viaHostMemory; plugged = [] }
         else
             None
 
@@ -1335,7 +1335,7 @@ let buildDirectoryOpenFlow () : bool =
         && wrapper.Contains "module gain_ice_uart_top ("
         && wrapper.Contains ".DIVF(7'b0111111)"
         && wrapper.Contains ".PACKAGEPIN(clk12)"
-        && wrapper.Contains "GainIceUart design ("
+        && wrapper.Contains "GainIceUart inner ("
         && wrapper.Contains ".host_rx(host_rx)"
         && pins.Contains "set_io clk12 35"
         && pins.Contains "set_io host_rx 6"
@@ -1372,28 +1372,28 @@ let mappingIsAFile () : bool =
     let carried = Warp11.DesignFile.parse (Warp11.DesignFile.write g)
 
     let exported =
-        match Warp11.Export.exportWith (Some { board = kv260; path = viaHostMemory; plugged = []; sizes = [] }) g with
+        match Warp11.Export.exportWith (Some { board = kv260; path = viaHostMemory; plugged = [] }) g with
         | Ok text -> text
         | Error why -> failwith why
 
     let refused =
-        match Warp11.Mapping.parse (Warp11.Mapping.write { board = { ice with host = AxiLiteAt 0UL }; path = viaPins; plugged = []; sizes = [] }) with
+        match Warp11.Mapping.parse (Warp11.Mapping.write { board = { ice with host = AxiLiteAt 0UL }; path = viaPins; plugged = [] }) with
         | Error why -> why.Contains "no processing system"
         | Ok _ -> false
 
-    roundTrips { board = kv260; path = viaHostMemory; plugged = []; sizes = [] }
-    && roundTrips { board = kv260; path = viaPins; plugged = []; sizes = [] }
-    && roundTrips { board = ice; path = viaPins; plugged = []; sizes = [] }
-    && roundTrips { board = custom; path = viaHostMemory; plugged = []; sizes = [] }
+    roundTrips { board = kv260; path = viaHostMemory; plugged = [] }
+    && roundTrips { board = kv260; path = viaPins; plugged = [] }
+    && roundTrips { board = ice; path = viaPins; plugged = [] }
+    && roundTrips { board = custom; path = viaHostMemory; plugged = [] }
     && boardRoundTrips kv260
     && boardRoundTrips ice
     && boardRoundTrips { ice with connectors = [ { role = I2sSharedBus; pins = [ "bclk", { pin = "43"; standard = None; activeLow = false } ] } ] }
-    && Warp11.Mapping.presetOf kv260 = Some "kv260"
-    && Warp11.Mapping.presetOf custom = None
+    && Warp11.Boards.nameOf kv260 = Some "kv260"
+    && Warp11.Boards.nameOf custom = None
     && (match carried with
         | Ok g' -> g'.mapping = Some "gain.kv260.json"
         | Error _ -> false)
-    && exported.Contains "/// The target: the `kv260` preset"
+    && exported.Contains "/// The target: the `kv260` board"
     && exported.Contains "let board ="
     && exported.Contains "let path = viaHostMemory"
     && exported.Contains "let build (dir: string) = Warp11.Build.write dir (Warp11.BoardTop.boardTop board path design)"

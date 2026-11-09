@@ -800,6 +800,46 @@ let withContext
     : Stream<'b * 'c> =
     withContextExpanding 1 name depth operands results context stage s
 
+/// A memory read as a stream stage: addresses in, words out, the storage's
+/// latency inside. Whatever the storage — LUT RAM, block RAM, UltraRAM —
+/// the stage is one register deep from the consumer's side and the storage
+/// is a property of the memory alone, which is what lets a design move to a
+/// part whose memories are all one kind without reading differently.
+///
+/// While the word waits for a consumer the address is held and re-read, so
+/// the stage holds the word the way a register would; a write to that
+/// address meanwhile is seen, as it is in any RAM.
+let memReadStage (name: string) (m: Mem) (addresses: Stream<Expr>) : Stream<Expr> =
+    let outValid = regBit $"{name}_valid"
+    let outReady = wireBit $"{name}_ready"
+    registerStreamReady outReady
+    let accept = wireBit $"{name}_accept"
+    (bnot outValid ||| outReady) ==> accept
+    accept ==> addresses.ready
+    let held = reg $"{name}_addr" (width addresses.payload)
+    If accept (fun () -> addresses.payload ==> held)
+    let addr = wire $"{name}_rd_addr" (width addresses.payload)
+    mux accept addresses.payload held ==> addr
+    let port = memReadPort m addr
+    If accept (fun () -> addresses.valid ==> outValid)
+
+    { payload = port.data
+      valid = outValid
+      ready = outReady
+      layout = layout1 ("data", m.memWidth) }
+
+/// The same with the beat's context carried beside the word: a stream of
+/// (address, context) in, (word, context) out — `withContext` over
+/// `memReadStage`, so the read owns its cycle and the consumer never
+/// re-aligns anything.
+let memReadStream
+    (name: string)
+    (m: Mem)
+    (context: Layout<'c>)
+    (addresses: Stream<Expr * 'c>)
+    : Stream<Expr * 'c> =
+    withContext name 2 (layout1 ("addr", m.addrWidth)) (layout1 ("data", m.memWidth)) context (memReadStage name m) addresses
+
 /// What a branch of a fork does when it cannot keep up.
 type ForkPolicy =
     /// The branch back-pressures the source — and so, through it, every other

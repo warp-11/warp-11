@@ -839,19 +839,15 @@ let plug (harness: Harness) (socketName: string) (board: Board) : Board =
 
     { board with connectors = kept @ given }
 
-/// The presets by name, for a verb or a dialog: the boards this repository
-/// is built for, at the clocks their designs use.
-let presets: (string * Board) list =
-    [ "kv260", kv260
-      "icebreaker", iceBreakerAt 24_000_000
-      "icepi", icepi
-      "goboard", goBoard
-      "de10lite", de10Lite ]
+/// Rows through the host, the way this board's host reaches the design:
+/// through its memory where the board has a processing system, over its
+/// link where the board's one connection is a UART. A typed design's
+/// mapping states the shape once and the board decides the carrier, so the
+/// decision cannot drift from the board's facts.
+let viaHost (board: Board) : DataPath =
+    if board.part.facts.processingSystem then viaHostMemory else viaLink
 
-/// A preset by name, or the names there are.
-let preset (name: string) : Result<Board, string> =
-    match presets |> List.tryFind (fun (n, _) -> n = name) with
-    | Some(_, b) -> Ok b
-    | None ->
-        let names = presets |> List.map fst |> String.concat ", "
-        Error $"no board '{name}' — one of: {names}"
+/// Counted in and rows out through the host the same way: a frame the
+/// design draws, into the host's memory or as frames on its link.
+let viaCountHost (board: Board) : DataPath =
+    if board.part.facts.processingSystem then viaCount else viaCountLink

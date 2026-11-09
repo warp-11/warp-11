@@ -4,8 +4,9 @@
 /// board whose only connection is a UART, snapshots as frames on it, pulled
 /// by the host; on the KV260, the keep-latest triple buffer in its DDR that
 /// `Wrapper.fs`'s hand top always had, now the host-memory top's to build
-/// (`life.kv260.json`). The hand top stays until the daemon and the view
-/// drive this one.
+/// (`-- life out/`). The board is the project's one board, `Board.board`,
+/// which the hand top builds for too. The hand top stays until the daemon
+/// and the view drive this one.
 module Warp11.GoL.World
 
 open Warp11
@@ -134,39 +135,22 @@ let lifeAt (gridWidth: int) (gridHeight: int) : BoardTop.Design =
             reduceTree (+) [ for c in rowCounts -> cat (lit 0UL (populationWidth - rowCountWidth)) c ] ==> population
             io.population population)
 
-/// What a cell costs on a part, in the cells the toolchain counts — the
-/// rule, the snapshot's shadow, the seed's staging and their muxes —
-/// measured 2026-11-07 through the open flow: 18.3 a cell on the ECP5
-/// (64×64 at 75 109, 32×32 at 18 697) and ~19 on the HX1K (16×16 at
-/// 5 575), plus what the link and the counters take on their own. Stated
-/// a little high, so a derived world builds first time.
-let cellsPerCell = 20
+/// The world's side: a design parameter, stated here and nothing to do
+/// with the board. 64 is what the KV260's app and daemon are built around;
+/// the Icepi holds 32 (a cell is about 20 of the toolchain's cells, so
+/// 32×32 placed at 18 697 of its 24 288), the DE10-Lite 40. The board's
+/// gate says whether what is stated fits.
+let side = 64
 
-/// What the world's surroundings take: the link, the seed's landing, the
-/// generation and population counters.
-let cellsBesideTheWorld = 700
-
-/// The share of a part a derived world may take: the rest is routing.
-let partShare = 0.9
-
-/// The largest world a part holds — a square, a multiple of eight on a
-/// side, 64 at most — or none, when the smallest (8×8) does not fit.
-let largestWorld (part: Part) : int option =
-    let budget = int (float part.facts.cells * partShare) - cellsBesideTheWorld
-    let side = int (sqrt (float (max 0 budget) / float cellsPerCell)) / 8 * 8 |> min 64
-    if side >= 8 then Some side else None
-
-/// The world sized for the board it is built on: the largest square the
-/// part holds, or the mapping's `world`. The name says the size, so the
+/// The world the project builds, at `side`. The name says the size, so the
 /// top and the app do.
-let life: BoardTop.Design =
-    BoardTop.sized "Life" (fun fit ->
-        let derived =
-            match largestWorld fit.part with
-            | Some side -> side
-            | None ->
-                failwith
-                    $"Life: the smallest world, 8×8, takes about %d{8 * 8 * cellsPerCell + cellsBesideTheWorld} of the {fit.part.device}'s %d{fit.part.facts.cells} cells — impossible on this part"
+let design = lifeAt side side
 
-        let side = fit.size ("world", derived)
-        lifeAt side side)
+/// Life's mapping for a board: the world through the host's memory or over
+/// its link, as the board has. Where the design is code, so is its mapping.
+let mappingFor (board: Board) : Mapping.Mapping =
+    { board = board; path = viaHost board; plugged = [] }
+
+/// Life's mapping: the project's board (`Board.board`, the one line that
+/// moves the project), the world through its host.
+let mapping = mappingFor Board.board

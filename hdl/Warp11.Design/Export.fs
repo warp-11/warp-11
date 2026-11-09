@@ -247,7 +247,7 @@ let exportWith (mapping: Warp11.Mapping.Mapping option) (g: Graph) : Result<stri
         | Some m ->
             let path =
                 match m.path with
-                // The exported F# names the preset, which is what a person
+                // The exported F# names the board, which is what a person
                 // would have written; a path that is not one prints as its
                 // bindings.
                 | p ->
@@ -264,8 +264,8 @@ let exportWith (mapping: Warp11.Mapping.Mapping option) (g: Graph) : Result<stri
                         $"""{{ bindings = [ {String.concat "; " (List.map binding p.bindings)} ] }}"""
 
             let provenance =
-                match Warp11.Mapping.presetOf m.board with
-                | Some name -> $"/// The target: the `{name}` preset, every axis spelled out."
+                match Warp11.Boards.nameOf m.board with
+                | Some name -> $"/// The target: the `{name}` board, every axis spelled out."
                 | None -> "/// The target, every axis spelled out."
 
             let ins, outs, controls = ioNames g

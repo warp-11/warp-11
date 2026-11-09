@@ -720,7 +720,7 @@ let regMapSlaveOn (ch: AxiLiteChannel) (m: RegMap) : SlaveRegs =
 
                 let designAddr = wire $"{name}_design_addr" aw
                 let port = memReadPort backing (mux hostTurn (slice (aw - 1) 0 readWord) designAddr)
-                requireSourceFits ch.answersAfter $"window '{name}'" port.depth
+                requireSourceFits ch.answersAfter $"window '{name}'" port.Depth
 
                 windowPorts[name] <-
                     {| designAddr = designAddr
@@ -735,7 +735,7 @@ let regMapSlaveOn (ch: AxiLiteChannel) (m: RegMap) : SlaveRegs =
                 // The held read word is the only address this port ever sees,
                 // so the data holds while RVALID waits, like any other source.
                 let port = memReadPort backing (slice (aw - 1) 0 readWord)
-                requireSourceFits ch.answersAfter $"window '{name}'" port.depth
+                requireSourceFits ch.answersAfter $"window '{name}'" port.Depth
 
                 mux windowHit (zeroExtend32 port.data) below
             | _ -> below)

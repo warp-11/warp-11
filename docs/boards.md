@@ -7,7 +7,7 @@ clock, how the host reaches the design, how a bitstream is loaded, which pins
 carry which role. The same design file builds for every board below by
 changing one file, and the ones that cannot say why by number.
 
-This page is the four boards that have run, what each is, and what you do to
+This page is the five boards that have built, what each is, and what you do to
 put something on one. [How to add a new board](add-a-board.md) is the page
 for a board that is not here; [How to add a new toolchain](add-a-toolchain.md)
 for a part whose tools are not.
@@ -27,9 +27,10 @@ oscillator straight in and no USB-UART of its own, so the host link is a
 3.3 V USB-serial cable on two GPIO header pins (`host_rx` on GPIO_0, `host_tx`
 on GPIO_1, ground on pin 12), loaded over the USB-Blaster by `quartus_pgm`.
 Its preset `de10lite`, the `Quartus` flow and its gate are in the
-repository; Quartus itself was not on the machine that wrote them, so the
-first compile on the bench is what checks the pins against the maker's
-`DE10_LITE_golden_top.qsf` and the gate against a real `.fit.summary`.
+repository, and hello has been through Quartus 25.1std: the gate read the
+real `.fit.summary` and the board's three facts agreed with it. The pins
+still want checking against the maker's `DE10_LITE_golden_top.qsf` before
+the first load (`hardware/de10lite/README.md`).
 
 Every number in the table is the part's, stated in `hdl/Warp11/Board.fs` as
 `PartFacts`, and the post-build gate confirms it from the toolchain's own
@@ -83,8 +84,9 @@ facts unless the mapping names it: `"sizes": { "world": 16 }`.
   board side — `ssh` without passwords, `xmutil`, the kernel modules.
 - **Quartus Prime Lite** (DE10-Lite): installed under `~/tools/intelFPGA_lite`,
   which a generated `build.sh` looks for (or `QUARTUS_BIN`), with the
-  USB-Blaster II udev rule. The flow is `quartus_sh --flow compile`, the load
-  `quartus_pgm -m jtag`, SRAM only.
+  USB-Blaster II udev rule from `hardware/de10lite/`. The flow is
+  `quartus_sh --flow compile`, the load `quartus_pgm -m jtag`, SRAM only.
+  `hardware/de10lite/README.md` has the cable and the pins to check first.
 
 `iceprog` wants a udev rule on the iCEBreaker and the Go Board:
 `hardware/icebreaker/README.md` has it and the two traps that cost a morning
@@ -95,11 +97,12 @@ with no headers fitted).
 
 `hello`: the LEDs showing a register the host writes over the board's link.
 It needs nothing but the board and its USB, and it proves the clock, the link
-and the LEDs together. Its mapping files are beside `hdl/Warp11.Designs`:
+and the LEDs together. Its board is one line in `hdl/Warp11.Designs/Hello.fs`
+— `let board = goBoard` — and the verb takes only the directory:
 
 ```sh
 cd hdl
-dotnet run --project Warp11.Designs -- hello Warp11.Designs/hello.goboard.json out/
+dotnet run --project Warp11.Designs -- hello out/
 cd out && PROG=1 ./build.sh
 warp11_regs --serial /dev/ttyUSB1 --baud 115200 --layout hello_uart_layout.rs --set pattern=5
 ```
@@ -114,22 +117,38 @@ part's, and the clock achieved against the target. Measured:
 | Icepi | `HelloUart` | 143 / 24 288 | 212 MHz / 25 |
 | Go Board | `HelloUart` | 199 / 1 280 | 166.6 MHz / 25 |
 | KV260 | `HelloAxi` | directory written; Vivado run is the bench's | |
-| DE10-Lite | `HelloUart` | directory written; Quartus run is the bench's | |
+| DE10-Lite | `HelloUart` | 216 / 49 760 | 218 MHz / 50 |
+
+[Hello on every board](hello-on-every-board.md) is this section as a
+walkthrough: the design, the mapping, the build on one board, then the same
+three commands on the other four.
 
 Then the identity — `passthru` — over the same link, which proves the batch
 path with nothing in it, then whatever you came for.
 
 ## Building anything for a board
 
-Every design project answers the same verb with a mapping file:
+A typed design binds its board in its code, one line beside the design —
+`Hello.board`, `Rungs.board`, GoL's `Board.board`, `Chunked.board` — and its
+verb takes only the directory:
 
 ```sh
+dotnet run --project Warp11.Effects    -- build tone out/      # the rung, on Rungs.board
+dotnet run --project Warp11.GoL.App    -- life out/            # the world, on GoL's Board.board
+dotnet run --project Warp11.Mandelbrot -- bitstream out/ 8     # the frame, on Chunked.board, eight lanes
 dotnet run --project Warp11.Placement  -- build examples/gain.json examples/gain.icepi.json out/   # a drawn design
-dotnet run --project Warp11.Effects    -- build tone Warp11.Effects/tone.goboard.json out/        # a typed one
-dotnet run --project Warp11.GoL.App    -- build Warp11.GoL/life.icepi.json out/
-dotnet run --project Warp11.Mandelbrot -- bitstream Warp11.Mandelbrot/mandelbrot.icepi.json out/
 cd out && ./build.sh
 ```
+
+Moving a design to another board is changing that line. The five boards
+here are values in `hdl/Warp11/Board.fs` — `kv260`, `iceBreakerAt
+24_000_000`, `icepi`, `goBoard`, `de10Lite` — and a board of your own is
+the same record, written in your project ([How to add a new
+board](add-a-board.md)). `-- mapping` prints the mapping the design gets.
+A drawn design has no code, so its mapping is a file the canvas writes
+beside it (`gain.icepi.json`); that is the one place a mapping file exists,
+and the canvas's menu of boards by name is its own
+(`hdl/Warp11.Design/Boards.fs`), not the library's.
 
 The directory is the same shape for every board on the same tool — the top's
 Verilog, the constraints, the flow, the Rust seam the host tools read — and
@@ -147,16 +166,16 @@ in the Sim**.
 
 The gate's numbers for this release's examples, through the real toolchains:
 
-| design | iCEBreaker (5 280) | Icepi (24 288) | Go Board (1 280) |
-|---|---|---|---|
-| passthru, tone | 656 (tone) | fits | 837 passthru, 629 tone |
-| gain | 953, 3 of 30 block RAMs | fits | ✗ 2 096 cells |
-| adder | fits | fits | 916 |
-| three-band EQ | ✗ 5 489 | fits | ✗ |
-| twice | ✗ 8 825 | fits | ✗ |
-| blur (a 64-pixel row) | ✗ 11 364, 32 of 30 block RAMs | fits | ✗ |
-| Life | 8×8 derived | 32×32: 18 697, 49 MHz; 64×64 refused at 75 109 | ✗ 8×8 is ~1 980 |
-| Mandelbrot | ✗ a lane takes 12 multipliers | 2 lanes: 3 812 cells, 24 multipliers, 62 MHz | ✗ no multipliers |
+| design | iCEBreaker (5 280) | Icepi (24 288) | Go Board (1 280) | DE10-Lite (49 760) |
+|---|---|---|---|---|
+| passthru, tone | 656 (tone) | fits | 837 passthru, 629 tone | 652 passthru, 11 M9Ks, 82 MHz |
+| gain | 953, 3 of 30 block RAMs | fits | ✗ 2 096 cells | fits |
+| adder | fits | fits | 916 | fits |
+| three-band EQ | ✗ 5 489 | fits | ✗ | fits |
+| twice | ✗ 8 825 | fits | ✗ | fits |
+| blur (a 64-pixel row) | ✗ 11 364, 32 of 30 block RAMs | fits | ✗ | fits |
+| Life | 8×8 derived | 32×32: 18 697, 49 MHz; 64×64 refused at 75 109 | ✗ 8×8 is ~1 980 | 40×40 derived: 23 738, 15 M9Ks, 67 MHz |
+| Mandelbrot | ✗ a lane takes 12 multipliers | 2 lanes: 4 075 cells, 24 multipliers, 67 MHz | ✗ no multipliers | 10 lanes derived: 39 093, 120 multipliers, register files in M9K, 65 MHz |
 
 A ✗ is the gate's or the sizing rule's refusal, with its number; nothing on
 this page was estimated. The KV260 holds all of them, and GEP runs there

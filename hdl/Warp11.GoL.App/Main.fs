@@ -555,24 +555,23 @@ let main argv =
         |> List.max
     | [| "hardware"; repoRoot |] -> writeHardware repoRoot
     | [| "build"; dir |] -> writeBuild dir
-    // The world as a design, for any board, from its mapping file: `build
-    // <mapping.json> <dir>`. The world is the largest the part holds unless
-    // the mapping names `world`. On a board with one wire the world comes
-    // out as snapshots over it; the KV260's own top is `build <dir>` above
-    // until the host-memory path carries a surface.
-    | [| "build"; mapping; dir |] ->
-        match Warp11.Mapping.load mapping with
-        | Error why ->
-            eprintfn $"{mapping}: {why}"
-            1
-        | Ok m ->
-            let out = Warp11.Build.write dir (BoardTop.boardTopFor m World.life)
+    // The world as a design, for the project's board — `Board.board`, one
+    // line to change: `life out/`. The world's side is `World.side`, a
+    // design parameter stated in its own line.
+    // On a board with one wire the world comes out as snapshots over it; on
+    // the KV260 it is the host-memory top, beside the hand top `build <dir>`
+    // writes for the same board. `mapping` prints the mapping the world gets.
+    | [| "mapping" |] ->
+        printfn "%s" (Warp11.Mapping.write World.mapping)
+        0
+    | [| "life"; dir |] ->
+        let out = Warp11.Build.write dir (BoardTop.boardTopFor World.mapping World.design)
 
-            for file in out.files do
-                printfn $"wrote {file}"
+        for file in out.files do
+            printfn $"wrote {file}"
 
-            printfn $"build with: {out.run}"
-            0
+        printfn $"build with: {out.run}"
+        0
     | [| "emit"; gridWidth; gridHeight; path |] ->
         System.IO.File.WriteAllText(path, emitDesign (golHarness (int gridWidth) (int gridHeight)).def + "\n")
         printfn $"wrote {path}"

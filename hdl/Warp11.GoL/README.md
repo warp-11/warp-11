@@ -59,11 +59,12 @@ and `run`, `intervalCycles`, `generation` and `population` are values. On a
 board whose only connection is a UART the surface comes out as snapshots over
 it — latched in one cycle when the host pulls, sent a row at a time, nothing
 between pulls ever seen — which is the same conflation with the host's pull
-as the pace. `-- build life.icepi.json out/` builds it at the largest world
-the part holds — 32×32 on the Icepi, 64×64 on the KV260 — or at the
-`world` the mapping names (`"sizes": { "world": 16 }`); the Go Board is
-refused by number, 8×8 being more than its 1 280 cells; `life.kv260.json`
-builds it for the KV260 with the world in the same triple buffer `GolAxi`
+as the pace. `-- life out/` builds it for the project's board,
+`Board.board` in `Board.fs` — the KV260 at 166.67 MHz, one line to change
+for another board — at the largest world the part holds, 64×64 on the
+KV260, 32×32 on the Icepi; the Go Board is refused by number, 8×8 being
+more than its 1 280 cells. On the KV260 it
+builds with the world in the same triple buffer `GolAxi`
 uses (`Life64x64Batch`: 32 beats a snapshot, 512-byte slots), the seed rows
 in through the batch contract;
 `warp11_snapshot --serial … --layout out/life64x64_link_layout.rs --seed

@@ -85,3 +85,30 @@ let passthru: BoardTop.Design =
             { input = n.streamIn ("in", stereo)
               out = n.streamOut ("out", stereo) })
         (fun io -> io.input.stream |> io.out)
+
+/// A rung by the name a verb takes, with its mapping for a board: the tone
+/// is a frame the design draws, so it is counted in; the passthru is rows
+/// both ways. Either reaches the host through its memory or over its link,
+/// as the board has.
+type Rung =
+    { name: string
+      design: BoardTop.Design
+      mapping: Mapping.Mapping }
+
+/// The board the ladder is built for. Moving it to another board is this line.
+let board = iceBreakerAt 24_000_000
+
+let private mappingOn (path: Board -> DataPath) : Mapping.Mapping =
+    { board = board; path = path board; plugged = [] }
+
+let rungs: Rung list =
+    [ { name = "tone"; design = tone; mapping = mappingOn viaCountHost }
+      { name = "passthru"; design = passthru; mapping = mappingOn viaHost } ]
+
+/// A rung by name, or the names there are.
+let rungNamed (name: string) : Result<Rung, string> =
+    match rungs |> List.tryFind (fun r -> r.name = name) with
+    | Some r -> Ok r
+    | None ->
+        let names = rungs |> List.map (fun r -> r.name) |> String.concat " or "
+        Error $"a rung is {names}, not '{name}'"

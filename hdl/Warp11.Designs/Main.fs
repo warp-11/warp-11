@@ -2578,21 +2578,21 @@ let main argv =
         printfn $"out: {output.FrameCount} frames, peaks {inL}/{inR} -> {outL}/{outR}"
         printfn $"wrote {outPath}"
         0
-    // Hello for a board, from its mapping file: `hello hello.goboard.json
-    // out/`, then `out/build.sh`, then `warp11_regs … --set pattern=5`.
-    | [| "hello"; mapping; dir |] ->
-        match Warp11.Mapping.load mapping with
-        | Error why ->
-            eprintfn $"{mapping}: {why}"
-            1
-        | Ok m ->
-            let out = Warp11.Build.write dir (BoardTop.boardTopFor m Hello.hello)
+    // Hello for its board — `Hello.board`, one line to change — as the
+    // directory the board's toolchain builds from: `hello out/`, then
+    // `out/build.sh`, then `warp11_regs … --set pattern=5`; `mapping` prints
+    // the mapping it gets.
+    | [| "mapping" |] ->
+        printfn "%s" (Warp11.Mapping.write Hello.mapping)
+        0
+    | [| "hello"; dir |] ->
+        let out = Warp11.Build.write dir (BoardTop.boardTopFor Hello.mapping Hello.hello)
 
-            for file in out.files do
-                printfn $"wrote {file}"
+        for file in out.files do
+            printfn $"wrote {file}"
 
-            printfn $"build with: {out.run}"
-            0
+        printfn $"build with: {out.run}"
+        0
     | [| "diff"; outDir |] ->
         writeDiffWith (diffDesigns ()) outDir
         0

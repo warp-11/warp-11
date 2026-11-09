@@ -286,9 +286,16 @@ The read is synchronous, so it arrives through a port that owns the delay:
 ```fsharp
 let m = blockMem "tile" 12 32
 let port = memReadPort m addr
-port.data                              // the word, `port.depth` cycles later
+port.data                              // the word, as late as the storage makes it
 port.through "tag" myTag               // carry anything else across the same gap
+port.answersWithin 1                   // the question a scheduled channel asks, not the number
 ```
+
+On a stream, the read is a stage — `memReadStream` takes (address, context)
+beats in and hands (word, context) beats out, the storage's latency inside —
+so a consumer written as `|>` never re-aligns anything, and the memory can
+change from LUT RAM to block RAM without the consumer reading differently.
+That is what lets a design move to a part whose memories are all one kind.
 
 `through` is the point: a hand-written `reg` states the delay, so it is wrong the
 first time the storage changes. `through` delays by *the port's* depth, whatever
@@ -445,7 +452,7 @@ Combinational. Right when the storage is small, local, and settled.
 
 ```fsharp
 let port = memReadPort m addr
-port.data, port.depth, port.through
+port.data, port.through, port.answersWithin
 ```
 
 A **value that is late**, with the delay owned by the port. No handshake, one

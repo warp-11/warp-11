@@ -253,19 +253,19 @@ anything differently.
 
 Nothing above needed hardware, and the step to a board is not a rewrite. A
 design declares what it needs — rows in and out, a value the host sets, a
-bit it reports — and a **mapping file** beside it names a board and how those
-needs are carried: through the host's memory on a KV260, as frames on a UART
+bit it reports — and a **mapping** beside it, in code, names a board and how
+those needs are carried: through the host's memory on a KV260, as frames on a UART
 on an iCEBreaker, an Icepi or a Go Board. The build directory the mapping
 produces runs the board's toolchain, ends with a gate that reads the tool's
 own report, and writes the seam the host tools read, so `warp11_regs` and
 `warp11_batch` need telling nothing but which file.
 
 ```sh
-dotnet run --project Warp11.Designs -- hello hello.icebreaker.json out/   # the first design on any board
+dotnet run --project Warp11.Designs -- hello out/   # the first design, on the board Hello.fs names
 cd out && PROG=1 ./build.sh
 ```
 
-[Boards](boards.md) is the page: the four boards, what a mapping is, what
+[Boards](boards.md) is the page: the five boards, what a mapping is, what
 fits where. [How to add a new board](add-a-board.md) is the page for one
 that is not there, and it is a file rather than source.
 

@@ -130,33 +130,17 @@ type Clocking =
     { rate: float
       cyclesPerBeat: int }
 
-/// What a board makes of a design before it is built: its clocking, the
-/// part it is for — whose facts a design that scales reads its size from —
-/// and the sizes the mapping named instead. A size is **derived by default
-/// and named only when chosen** (the release plan's fork 8): a design asks
-/// `size ("world", derived)` and gets the mapping's word where there is
-/// one. What was asked is remembered, so a mapping naming a size nobody
-/// reads is refused rather than ignored.
-type Fit internal (clocking: Clocking, board: Board, sizes: (string * int) list) =
-    let asked = ResizeArray<string>()
-
+/// What a board makes of a design before it is built: its clocking, and
+/// the part it is for — whose facts a design that scales reads its size
+/// from. A size the application states instead is a value in its code,
+/// beside the board (`lifeAt 32 32` in place of `life`), not a word in the
+/// mapping: the board says what fits, the application says what it wants.
+type Fit internal (clocking: Clocking, board: Board) =
     member _.clocking = clocking
     /// The board the design is being built for: what it has — LEDs, a link.
     member _.board = board
     /// Its part: what it holds.
     member _.part = board.part
-
-    /// The size called `name`: the mapping's where it names one, else
-    /// `derived` — what the design makes of the part's facts.
-    member _.size(name: string, derived: int) : int =
-        asked.Add name
-
-        match sizes |> List.tryFind (fun (n, _) -> n = name) with
-        | Some(_, chosen) -> chosen
-        | None -> derived
-
-    member internal _.Asked = List.ofSeq asked
-    member internal _.Named = sizes
 
 type Design =
     { name: string
@@ -231,10 +215,6 @@ type Needs internal (fit: Fit, boundary: Boundary option) =
 
     /// The part the design is being built for: its facts size what scales.
     member _.part = fit.part
-
-    /// A size: the mapping's where it names one, else what the design
-    /// derives from the part.
-    member _.size(name: string, derived: int) = fit.size (name, derived)
 
     /// Rows in, typed by their layout.
     member _.streamIn(name: string, layout: Layout<'p>) : Incoming<'p> =
@@ -2712,9 +2692,8 @@ let private registersTop (board: Board) (path: DataPath) (d: Design) : BoardTop 
       target = targetOf board.part
       seamExtras = [] }
 
-/// The design on a board, the way the path says, at the sizes the mapping
-/// named — `boardTop` with sizes.
-let boardTopSized (board: Board) (path: DataPath) (sizes: (string * int) list) (d: Design) : BoardTop =
+/// The design on a board, the way the path says.
+let boardTop (board: Board) (path: DataPath) (d: Design) : BoardTop =
     checkBoard board
 
     // The rate the design is made for: the converter's where a converter
@@ -2724,24 +2703,13 @@ let boardTopSized (board: Board) (path: DataPath) (sizes: (string * int) list) (
     // for the 48 kHz WAV the host actually sends.
     let d =
         match d.atClocking with
-        | None ->
-            match sizes with
-            | [] -> d
-            | (name, _) :: _ -> failwith $"{d.name}: the mapping names a size '{name}', and the design is the same on every board"
+        | None -> d
         | Some resolve ->
             // Asked of the path rather than the design's needs, which are
             // not known until it has been handed its clocking.
             let onConverter = path.bindings |> List.exists (fun b -> b.carrier = OnPins)
             let rate = if onConverter then boardRate board nominalRate else nominalRate
-            let fit = Fit({ rate = rate; cyclesPerBeat = int (float board.fabricHz / rate) }, board, sizes)
-            let resolved = resolve fit
-
-            for name, _ in fit.Named do
-                if not (List.contains name fit.Asked) then
-                    failwith
-                        $"""{resolved.name}: the mapping names a size '{name}', and the design sizes nothing by that name — it asks for [{fit.Asked |> List.distinct |> String.concat "; "}]"""
-
-            resolved
+            resolve (Fit({ rate = rate; cyclesPerBeat = int (float board.fabricHz / rate) }, board))
 
     let carriesRows =
         d.needs
@@ -2783,12 +2751,9 @@ let boardTopSized (board: Board) (path: DataPath) (sizes: (string * int) list) (
 
 /// The design on a board, the way the path says: the converter on the pins,
 /// or the host's memory, or its link. Sizes derived, none named.
-let boardTop (board: Board) (path: DataPath) (d: Design) : BoardTop = boardTopSized board path [] d
-
 /// The design as a mapping says: its board with every harness plugged in,
-/// its path, the sizes it names.
-let boardTopFor (m: Mapping.Mapping) (d: Design) : BoardTop =
-    boardTopSized (Mapping.boardOf m) m.path m.sizes d
+/// its path.
+let boardTopFor (m: Mapping.Mapping) (d: Design) : BoardTop = boardTop (Mapping.boardOf m) m.path d
 
 /// The register map as the Rust seam prints it, headed for the top it serves.
 let seamLines (t: BoardTop) : string list =

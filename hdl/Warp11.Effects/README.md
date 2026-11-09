@@ -224,8 +224,9 @@ reach the host:
 | `link` / `countlink` (iCEBreaker, Icepi, Go Board) | played words in, streamed frames out, on the UART beside the register map | `warp11_batch … --serial` |
 | `pins` | the I2S converter on the board's header, the Pmod I2S2 | nothing: it is heard |
 
-`-- build tone tone.icepi.json out/` writes the directory; the eight mapping
-files beside the project cover the four boards. The converter path is where
+`-- build tone out/` writes the directory for `Rungs.board` — one line to
+change for another of the five boards; `Rungs.rungs` carries each rung's
+mapping. The converter path is where
 these started (the iCEBreaker's hand tops in `hardware/ice40/`, retired
 2026-11-07), and the living checks still frame the passthru through the
 iCEBreaker's I2S and count the ratios off its pins:
@@ -371,7 +372,7 @@ ssh ubuntu@<board> 'cd warp11-driver && ./audio_batch_first_light in.wav out.wav
 
 That is the hand-written path the first bitstream took. The same rows
 through DDR are what any design built from a mapping gets — `-- build
-passthru passthru.kv260.json out/`, then `out/build.sh` — and
+passthru kv260 out/`, then `out/build.sh` — and
 `warp11_batch in.wav out.wav --board passthru_batch --layout
 out/passthru_batch_layout.rs` drives it with no first-light binary of its own.
 

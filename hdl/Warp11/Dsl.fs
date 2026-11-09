@@ -513,8 +513,14 @@ type Builder internal (name: string, ?clockSpec: ClockSpec, ?domain: ClockDomain
         asserts.Add(conds |> Seq.fold (fun claim active -> Or(Not active, claim)) cond, message)
 
     /// A read that answers next cycle, as a register holding the word.
+    // The read's register carries no reset: it means nothing until an
+    // address has been presented, and a reset on it is what stops Quartus
+    // inferring a block RAM's output register (measured 2026-11-08 — the
+    // same memory went to flip-flops with the reset and to an M9K without).
+    // Vivado and yosys infer either way, so their output is a reset branch
+    // shorter and otherwise the same.
     member internal this.SyncRead(mem: Mem, addr) =
-        let r = this.Reg(this.NextName $"{mem.memName}_rd", mem.memWidth, 0UL)
+        let r = this.RegNoReset(this.NextName $"{mem.memName}_rd", UInt mem.memWidth)
         this.Assign(r, MemRead(mem.memName, addr, mem.memWidth))
         r
 

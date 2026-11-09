@@ -531,7 +531,7 @@ let axiLiteSlaveFullOn
                         aboveBase &&& lt readWord (lit (baseWord + size) wordWidth)
 
                 let read = memReadPort m memIndex
-                requireSourceFits ch.answersAfter $"the window '{m.memName}' at 0x%x{base_}" read.depth
+                requireSourceFits ch.answersAfter $"the window '{m.memName}' at 0x%x{base_}" read.Depth
 
                 mux inWindow (zeroExtend32 read.data) below)
             regData

@@ -1312,24 +1312,25 @@ let main argv =
     | [| "hardware"; repoRoot |] ->
         writeHardware repoRoot
         0
-    // A rung for any board, from its mapping file: `build tone
-    // tone.icepi.json out/` — the path in the mapping says whether the rows
-    // go through the board's memory, over its link, or through a converter
-    // on its pins.
-    | [| "build"; rung; mapping; dir |] ->
-        let design =
-            match rung with
-            | "tone" -> Ok tone
-            | "passthru" -> Ok passthru
-            | other -> Error $"a rung is tone or passthru, not '{other}'"
-
-        match design, Warp11.Mapping.load mapping with
-        | Error why, _
-        | _, Error why ->
+    // A rung for the ladder's board — `Rungs.board`, one line to change:
+    // `build tone out/`, with the rung's own mapping saying whether the
+    // rows go through the board's memory or over its link; `mapping tone`
+    // prints it.
+    | [| "mapping"; rung |] ->
+        match rungNamed rung with
+        | Error why ->
             eprintfn $"{why}"
             1
-        | Ok d, Ok m ->
-            let out = Warp11.Build.write dir (BoardTop.boardTopFor m d)
+        | Ok r ->
+            printfn "%s" (Warp11.Mapping.write r.mapping)
+            0
+    | [| "build"; rung; dir |] ->
+        match rungNamed rung with
+        | Error why ->
+            eprintfn $"{why}"
+            1
+        | Ok r ->
+            let out = Warp11.Build.write dir (BoardTop.boardTopFor r.mapping r.design)
 
             for file in out.files do
                 printfn $"wrote {file}"

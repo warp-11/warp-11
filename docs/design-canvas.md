@@ -1,5 +1,10 @@
 # The design canvas and the build tool
 
+> **Experimental.** The canvas works as described here, but it needs a lot
+> more work before it is useful for real designs. The typed F# path is the
+> one to build on; the canvas is a preview of a direction, not a tool to
+> depend on yet.
+
 *Rough draft, 2026-09-17. Everything here is a day or two old and will move;
 `notes/DESIGN_EDITOR.md` and `notes/BUILD.md` are the plans it was built
 from, with the findings.*
@@ -152,7 +157,7 @@ have several, and the design names its default.
 With nothing selected, the design panel ends in **target**:
 
 ```
- preset      [ kv260 ▾ ]     kv260 · icebreaker · icepi · goboard · de10lite · custom · simulator only
+ board       [ kv260 ▾ ]     kv260 · icebreaker · icepi · goboard · de10lite · custom · simulator only
  part        xck26-sfvc784-2LV-c (xilinx.com:kv260_som:part0:1.4)
  build tool  Vivado
  clock       PS clock 71   [ 100000000 ] Hz
@@ -165,7 +170,7 @@ With nothing selected, the design panel ends in **target**:
  mapping file  gain.kv260.json
 ```
 
-A **preset** fills every row. Any row edited makes it custom, and a
+A **board** picked from the menu fills every row. Any row edited makes it custom, and a
 combination the part cannot honour — host memory on a part with no
 processing system, a PS clock on an iCE40 — is refused in the status line
 by name. The rows:
@@ -194,25 +199,25 @@ shell:
 ```sh
 dotnet run --project Warp11.Placement -- build my.json out/                 # the design's default mapping
 dotnet run --project Warp11.Placement -- build my.json my.kv260.json out/   # a named mapping
-dotnet run --project Warp11.Placement -- build my.json kv260 memory out/    # a preset (or a board file) and a path
+dotnet run --project Warp11.Placement -- build my.json kv260 memory out/    # a board by name (or a board file) and a path
 ```
 
 What lands in the directory depends on the build tool:
 
-**Vivado** (the KV260 preset):
+**Vivado** (the KV260):
 
 | file | what |
 |---|---|
 | `{Name}.v` | the top: the design's instance between the register slave and the boundary |
 | `{name}_layout.rs` | the register map as Rust constants — the seam a driver reads |
-| `{name}_bd.tcl` | the block design: the processing system from the board preset, the top as a module reference, the aperture at the base; with host memory, the PS slave port and the master's DDR segment |
+| `{name}_bd.tcl` | the block design: the processing system from the board, the top as a module reference, the aperture at the base; with host memory, the PS slave port and the master's DDR segment |
 | `{name}_pins.xdc` | the constraints from the connector table (pins path only) |
 | `build.tcl`, `check_timing.tcl` | the flow, and the gate that refuses a timing-failing bitstream |
 | `{name}.dts` | the overlay: firmware name, the uio node, the clock pinned at the rate the design was elaborated for, the DMA arena |
 | `{name}.bif`, `shell.json` | the packaging |
 | `build.sh` | Vivado, bootgen, dtc → `app/`, then the deploy commands |
 
-**The open flow** (the iCEBreaker, Go Board and Icepi presets — the
+**The open flow** (the iCEBreaker, Go Board and Icepi — the
 Icepi's files are the ECP5's, `.lpf` for `.pcf`, `openFPGALoader` for
 `iceprog`):
 

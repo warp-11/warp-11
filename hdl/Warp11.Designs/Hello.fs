@@ -42,8 +42,13 @@ let hello: BoardTop.Design =
 let mappingFor (board: Board) : Mapping.Mapping =
     { board = board
       path = { viaRegisters with bindings = viaRegisters.bindings @ [ for led in ledsOf board -> { need = ByName led; carrier = OnPin led } ] }
-      plugged = []
-      sizes = [] }
+      plugged = [] }
+
+/// The board hello is built for. Moving hello to another board is this line.
+let board = iceBreakerAt 24_000_000
+
+/// Hello's mapping: the board above, through `mappingFor`.
+let mapping = mappingFor board
 
 /// Hello on the iCEBreaker: over the UART, three LEDs.
 let helloOnIceBreaker = (BoardTop.boardTopFor (mappingFor (iceBreakerAt 24_000_000)) hello).top

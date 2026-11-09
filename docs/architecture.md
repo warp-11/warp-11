@@ -198,7 +198,7 @@ happy with output our simulator also considered correct.
 - [**Counter**](../hdl/Warp11.Tutorial/doc/counter.md) and the rest of the tutorial — the mechanisms, one small design per
   page, each steppable in the browser.
 - [**Streams**](streams.md) — the connection layer most real designs are built out of.
-- [**Boards**](boards.md) — the four boards, what a mapping is, and the first
+- [**Boards**](boards.md) — the five boards, what a mapping is, and the first
   design to put on any of them.
 - [**Hardware workflow**](dev-workflow.md) — synthesis, the board, and the hardware-only gotchas.
 - [**Comparison to other HDLs**](HDL_COMPARISON.md) — how this relates to Chisel, SpinalHDL,

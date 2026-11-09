@@ -80,11 +80,11 @@ directory's own script runs the flow, packages the app and ends with the gate
 that reads Vivado's reports back:
 
 ```sh
-dotnet run -c Release --project Warp11.Mandelbrot -- bitstream Warp11.Mandelbrot/mandelbrot.kv260.json out/
+dotnet run -c Release --project Warp11.Mandelbrot -- bitstream out/
 cd out && ./build.sh
 ```
 
-(`Warp11.GoL.App -- build life.kv260.json out/`, `Warp11.Gep -- build out/`
+(`Warp11.GoL.App -- build out/`, `Warp11.Gep -- build out/`
 and `Warp11.Placement -- build my.json my.kv260.json out/` are the same shape.
 The hand-written `hardware/vivado/*.tcl` scripts the first accelerators were
 built with are retired as each regenerated bitstream is run bit-exact.)

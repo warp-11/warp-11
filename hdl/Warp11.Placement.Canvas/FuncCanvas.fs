@@ -1307,7 +1307,7 @@ let view (opening: Opening) : Control =
 
         let build () =
             match mapping.Current with
-            | None -> message.Set "no target: pick a preset in the design panel"
+            | None -> message.Set "no target: pick a board in the design panel"
             | Some m ->
                 pickFolder "Build into" (fun dir ->
                     try
@@ -1552,16 +1552,16 @@ let view (opening: Opening) : Control =
             TextBlock.create [ TextBlock.text text; TextBlock.fontWeight FontWeight.Bold; TextBlock.margin (Thickness(0.0, 8.0, 0.0, 2.0)) ]
             :> Types.IView
 
-        // The target section: a preset fills every row; any row edited makes
+        // The target section: a board fills every row; any row edited makes
         // it custom; what the part cannot honour is refused in the status
         // line by name.
         let targetRows () : Types.IView list =
-            let presetNames = (presets |> List.map fst) @ [ "custom"; "simulator only" ]
+            let boardNames = (Warp11.Boards.boards |> List.map fst) @ [ "custom"; "simulator only" ]
 
             let current =
                 match mapping.Current with
                 | None -> "simulator only"
-                | Some m -> Warp11.Mapping.presetOf m.board |> Option.defaultValue "custom"
+                | Some m -> Warp11.Boards.nameOf m.board |> Option.defaultValue "custom"
 
             let combo (items: string list) (selected: string) (onPick: string -> unit) =
                 ComboBox.create
@@ -1588,7 +1588,7 @@ let view (opening: Opening) : Control =
 
                     try
                         checkBoard next.board
-                        useMapping (Some { next with board = { next.board with name = (Warp11.Mapping.presetOf next.board |> Option.defaultValue "custom") } })
+                        useMapping (Some { next with board = { next.board with name = (Warp11.Boards.nameOf next.board |> Option.defaultValue "custom") } })
                     with e ->
                         message.Set $"refused: {e.Message}"
                 | None -> ()
@@ -1598,7 +1598,7 @@ let view (opening: Opening) : Control =
                 | "simulator only" -> useMapping None
                 | "custom" -> ()
                 | name ->
-                    match preset name with
+                    match Warp11.Boards.named name with
                     | Ok b ->
                         // A board with host memory keeps the path it had; one
                         // whose only connection is a UART starts on the link,
@@ -1609,10 +1609,10 @@ let view (opening: Opening) : Control =
                             | _, UartAt _ -> viaLink
                             | _ -> viaPins
 
-                        useMapping (Some { board = b; path = path; plugged = []; sizes = [] })
+                        useMapping (Some { board = b; path = path; plugged = [] })
                     | Error why -> message.Set why
 
-            [ heading "target"; line [ label "preset"; combo presetNames current pick ] ]
+            [ heading "target"; line [ label "board"; combo boardNames current pick ] ]
             @ (match mapping.Current with
                | None -> [ row ("mapping", "none — the design runs in the simulator only") ]
                | Some m ->

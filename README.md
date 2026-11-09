@@ -44,7 +44,7 @@ since been removed; the design now runs one generation per 166.67 MHz cycle,
 
 > **Status: 0.1.0.** Everything described here runs today. Four packages on
 > NuGet — `Warp11`, `Warp11.SimView`, `Warp11.SimView.Desktop`, `Warp11.Host`
-> — and four boards. See [what is not built](#what-is-not-built).
+> — and five boards. See [what is not built](#what-is-not-built).
 
 ## Try it without installing anything
 
@@ -112,7 +112,7 @@ twin it is checked against bit-for-bit, and the numbers are measured on the
 board.
 
 **And the same designs build for boards with no processing system at all** —
-an iCEBreaker, a Go Board, an Icepi Zero — from one mapping file each, the
+an iCEBreaker, a Go Board, an Icepi Zero, a DE10-Lite — by naming the board, the
 host reaching them over a UART instead of AXI, a WAV or an image through the
 design coming back byte-identical to the simulator. The receipts, from each
 board's own toolchain report:
@@ -123,6 +123,7 @@ board's own toolchain report:
 | Icepi Zero | ECP5-25F, 24 k cells | 143 cells, 212 MHz | Mandelbrot at 2 lanes, Life at 32×32, every audio and table example |
 | iCEBreaker | iCE40 UP5K, 5 280 cells | 192 cells, 60 MHz | gain, adder, passthru, tone, Life at 8×8 |
 | Go Board | iCE40 HX1K, 1 280 cells | 199 cells, 167 MHz | passthru, tone, adder |
+| DE10-Lite | MAX 10 10M50, 49 760 LEs, 144 multipliers | 216 LEs, 218 MHz | Mandelbrot at 10 lanes, Life at 40×40, every audio and table example |
 
 Every ✗ in the full matrix is a refusal with its number, not a guess —
 [Boards](https://warp11.org/guides/boards) has the whole table.
@@ -192,8 +193,10 @@ the IR did not invent its own semantics gets measured.
   [Game of Life](https://warp11.org/examples/game-of-life), each with its own write-up.
 - **[Runtime and host drivers](https://warp11.org/guides/runtime)** — the crates, cross-compiling
   for the board without a cross-gcc, and the first-light binaries.
-- **[Boards](https://warp11.org/guides/boards)** — the four boards, the mapping file
+- **[Boards](https://warp11.org/guides/boards)** — the five boards, the mapping
   that puts a design on one, and [how to add your own](https://warp11.org/guides/add-a-board).
+  [Hello on every board](https://warp11.org/guides/hello-on-every-board) walks the
+  first design onto each of them, and shows that switching boards is switching one file.
 - **[Hardware workflow](https://warp11.org/guides/dev-workflow)** — getting a bitstream onto a
   KV260 and driving it.
 
@@ -204,9 +207,10 @@ Being clear about this is cheaper than letting you find out:
 - **The API is pre-1.0.** 0.1.0 is the first release whose public surface was
   audited rather than accreted; things will still move between minor versions,
   and the package notes say what did.
-- **Four boards, two toolchains.** A Xilinx KV260 through Vivado, and three
-  Lattice boards through the open flow. Intel's Quartus is the next toolchain
-  and is not in this release. What a design can plug into is short: AXI4-Lite
+- **Five boards, three toolchains.** A Xilinx KV260 through Vivado, three
+  Lattice boards through the open flow, and a Terasic DE10-Lite through
+  Quartus, the newest and the least exercised. What a design can plug into
+  is short: AXI4-Lite
   from a register map, AXI4 master read and write, a UART register link, I2S
   and PDM in and out — where the established libraries ship half a dozen bus
   families and a shelf of controllers.

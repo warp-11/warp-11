@@ -310,8 +310,7 @@ let tests =
                               @ [ { need = ByName "record"; carrier = InHostRows }
                                   { need = ByName "limit"; carrier = OnPin "led" }
                                   { need = ByName "limit"; carrier = InRegisterMap } ] }
-                    plugged = [ frontEnd, "J2" ]
-                    sizes = [] }
+                    plugged = [ frontEnd, "J2" ] }
 
               let text = Mapping.write m
 
@@ -321,7 +320,7 @@ let tests =
                   Expect.equal (Mapping.write back) text "and writes the same bytes again"
               | Error why -> failtest why
 
-              let presetOnly: Mapping.Mapping = { board = kv260; path = viaPins; plugged = []; sizes = [] }
+              let presetOnly: Mapping.Mapping = { board = kv260; path = viaPins; plugged = [] }
               Expect.isFalse ((Mapping.write presetOnly).Contains "bind") "a preset-only mapping reads as it always did"
 
           testCase "a reported bit lights an LED the way the board has it wired" <| fun _ ->
@@ -553,7 +552,7 @@ let tests =
               let dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"warp11-link-{System.Guid.NewGuid()}")
               let out = Warp11.Build.write dir (BoardTop.boardTop goBoard viaLink swap)
               Expect.stringContains (System.IO.File.ReadAllText out.run) "part=hx1k" "built for the part"
-              let m: Mapping.Mapping = { board = goBoard; path = viaLink; plugged = []; sizes = [] }
+              let m: Mapping.Mapping = { board = goBoard; path = viaLink; plugged = [] }
               Expect.stringContains (Mapping.write m) "\"link\"" "and the mapping file names the path"
 
           testCase "the DE10-Lite: the oscillator straight in, Quartus's files from the board file, the gate on its reports" <| fun _ ->
@@ -648,7 +647,7 @@ let tests =
               Expect.equal (link.read32 (offset "beatsCountBusy")) 0UL "and done once the last row has gone"
               Expect.equal (link.read32 (offset "rowsLinkSent")) 15UL "the recorder counted every word"
 
-              let m: Mapping.Mapping = { board = goBoard; path = viaCountLink; plugged = []; sizes = [] }
+              let m: Mapping.Mapping = { board = goBoard; path = viaCountLink; plugged = [] }
               Expect.stringContains (Mapping.write m) "\"countlink\"" "the mapping file names the path"
               Expect.equal (Mapping.parse (Mapping.write m)) (Ok m) "and reads it back"
 
@@ -867,39 +866,34 @@ let tests =
               Expect.notEqual t1 t2 "the surface moved on between captures"
               Expect.equal (field "gridMemOverrun") 0UL "no capture landed while one was held"
 
-          testCase "a design sized for its board: derived from the part, named by the mapping, refused when nobody asks" <| fun _ ->
+          testCase "a design sized for its board: derived from the part, or stated by the application, refused when the part cannot hold it" <| fun _ ->
               // A design whose one field is as wide as the part's multiplier
-              // count lets it be sized, and refuses a part with none.
+              // count lets it be sized, and refuses a part with none. The
+              // lanes stated instead are an argument — the application's
+              // parameter, apart from the board.
+              let scaledAt (lanes: int) =
+                  BoardTop.design
+                      $"Scaled%d{lanes}"
+                      (fun n -> n.streamIn ("in", pins1 ("x", unsignedInt lanes)), n.streamOut ("out", pins1 ("y", unsignedInt lanes)))
+                      (fun (i, o) -> i.stream |> o)
+
               let scaled =
                   BoardTop.sized "Scaled" (fun fit ->
-                      let derived =
-                          if fit.part.facts.multipliers = 0 then
-                              failwith $"Scaled: a lane takes a multiplier and the {fit.part.device} has none — impossible on this part"
-                          else
-                              fit.part.facts.multipliers
-
-                      let lanes = fit.size ("lanes", derived)
-
-                      BoardTop.design
-                          $"Scaled%d{lanes}"
-                          (fun n -> n.streamIn ("in", pins1 ("x", unsignedInt lanes)), n.streamOut ("out", pins1 ("y", unsignedInt lanes)))
-                          (fun (i, o) -> i.stream |> o))
+                      if fit.part.facts.multipliers = 0 then
+                          failwith $"Scaled: a lane takes a multiplier and the {fit.part.device} has none — impossible on this part"
+                      else
+                          scaledAt fit.part.facts.multipliers)
 
               Expect.equal (BoardTop.boardTop icepi viaLink scaled).name "Scaled28Link" "derived from the Icepi's 28 multipliers"
-              Expect.equal (BoardTop.boardTopSized icepi viaLink [ "lanes", 4 ] scaled).name "Scaled4Link" "or the mapping's word"
-
-              Expect.throwsC
-                  (fun () -> BoardTop.boardTopSized icepi viaLink [ "world", 4 ] scaled |> ignore)
-                  (fun e -> Expect.stringContains e.Message "names a size 'world', and the design sizes nothing by that name" "a size nobody reads is refused")
+              Expect.equal (BoardTop.boardTop icepi viaLink (scaledAt 4)).name "Scaled4Link" "or the application's number"
 
               Expect.throwsC
                   (fun () -> BoardTop.boardTop goBoard viaLink scaled |> ignore)
                   (fun e -> Expect.stringContains e.Message "the hx1k has none — impossible" "and a part that cannot hold the smallest is refused by number")
 
-              let m: Mapping.Mapping = { board = icepi; path = viaLink; plugged = []; sizes = [ "lanes", 4 ] }
-              Expect.stringContains (Mapping.write m) "\"sizes\"" "the mapping file names the size"
-              Expect.equal (Mapping.parse (Mapping.write m)) (Ok m) "and reads it back"
-              Expect.equal (BoardTop.boardTopFor m scaled).name "Scaled4Link" "the mapping builds it at that size"
+              let m: Mapping.Mapping = { board = icepi; path = viaLink; plugged = [] }
+              Expect.isFalse ((Mapping.write m).Contains "sizes") "a size is not the mapping's to name"
+              Expect.equal (BoardTop.boardTopFor m (scaledAt 4)).name "Scaled4Link" "the mapping builds the stated design"
 
           testCase "on ECP5 a LUT RAM stays distributed and a LUT ROM becomes logic, as measured" <| fun _ ->
               let verilog = emitDesignFor Target.Ecp5 lutMemories.def

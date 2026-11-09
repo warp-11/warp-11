@@ -433,36 +433,27 @@ let main argv =
     | [| "hardware"; repoRoot |] ->
         Seam.writeHardware repoRoot
         0
-    // The example as the directory the KV260's toolchain builds from, from
-    // the typed design: `bitstream <dir> [lanes]`. Named for what comes out
-    // of it — the directory's own `build.sh` runs Vivado and packages the
-    // app. Fewer lanes than the part holds builds faster and renders the
-    // same picture, so the count is a dial rather than a constant.
-    // The example for any board, from its mapping file: `bitstream
-    // <mapping.json> <dir>`. A mapping whose path is `countlink` is the
-    // frame over the board's host link, which is every board but the KV260;
-    // `count` is the KV260's frame into its memory. The lanes are the
-    // part's multipliers' worth unless the mapping names `lanes`.
-    | [| "bitstream"; mapping; dir |] when mapping.EndsWith ".json" ->
-        match Warp11.Mapping.load mapping with
-        | Error why ->
-            eprintfn $"{mapping}: {why}"
-            1
-        | Ok m ->
-            let out = Chunked.buildFor m dir
-
-            for file in out.files do
-                printfn $"wrote {file}"
-
-            printfn $"build with: {out.run}"
-            0
+    // The frame as the directory its board's toolchain builds from, from the
+    // typed design: `bitstream <dir> [lanes]`, the board `Chunked.board` and
+    // the lanes `Chunked.lanes` — a line each to change. Named for what
+    // comes out of it — the directory's own `build.sh` runs the tool and
+    // packages the app. Fewer lanes builds faster and renders the same
+    // picture, so the count on the line is a dial for a sweep. `mapping`
+    // prints the mapping the frame gets.
+    | [| "mapping" |] ->
+        printfn "%s" (Warp11.Mapping.write Chunked.mapping)
+        0
     | [| "bitstream"; dir |]
     | [| "bitstream"; dir; _ |]
     | [| "bitstream-scatter"; dir |]
     | [| "bitstream-scatter"; dir; _ |] ->
-        let lanes = if argv.Length = 3 then int argv[2] else Chunked.siliconLanes
-        let scattered = argv[0] = "bitstream-scatter"
-        let out = (if scattered then Chunked.buildScatterDirectory else Chunked.buildDirectory) dir lanes
+        let lanes = if argv.Length = 3 then Some(int argv[2]) else None
+
+        let out =
+            if argv[0] = "bitstream-scatter" then
+                Chunked.buildScatterDirectory dir (defaultArg lanes Chunked.lanes)
+            else
+                Chunked.buildDirectory dir lanes
 
         for file in out.files do
             printfn $"wrote {file}"

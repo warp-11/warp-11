@@ -875,7 +875,7 @@ module {top} (
 
     wire rst = (por != 4'd15);
 
-    {t.name} design (
+    {t.name} inner (
 {connections}
     );
 
@@ -1193,7 +1193,7 @@ module {top} (
 
     wire rst = (por != 4'd15);
 {audioReset}
-    {t.name} design (
+    {t.name} inner (
 {connections}
     );
 
@@ -1482,7 +1482,7 @@ module {top} (
 
     wire rst = (por != 4'd15);
 
-    {t.name} design (
+    {t.name} inner (
 {connections}
     );
 
@@ -1502,6 +1502,12 @@ let private qsf (t: BoardTop) (top: string) (sources: string list) (pinned: Pinn
       yield "set_global_assignment -name MIN_CORE_JUNCTION_TEMP 0"
       yield "set_global_assignment -name MAX_CORE_JUNCTION_TEMP 85"
       yield "set_global_assignment -name ERROR_CHECK_FREQUENCY_DIVISOR 256"
+      yield "set_global_assignment -name NUM_PARALLEL_PROCESSORS ALL"
+      // A memory declared block is block whatever its size: Quartus otherwise
+      // keeps anything under its own threshold in logic, which on a part with
+      // no LUT RAM is flip-flops — a barrel's eight-entry register file,
+      // measured 2026-11-08 at 1 160 of them a lane.
+      yield "set_global_assignment -name ALLOW_ANY_RAM_SIZE_FOR_RECOGNITION ON"
       yield "set_global_assignment -name RESERVE_ALL_UNUSED_PINS_WEAK_PULLUP \"AS INPUT TRI-STATED WITH WEAK PULL-UP\""
       for source in sources do
           yield $"set_global_assignment -name VERILOG_FILE {source}"

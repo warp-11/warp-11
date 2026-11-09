@@ -40,14 +40,15 @@ same driver, the same bytes out:
 warp11_batch in.wav out.wav --board my_batch --layout out/my_batch_layout.rs --set volume=512
 ```
 
-The board object is a preset's name filled in — `Warp11.Mapping.ofBoard
-"icepi" viaLink` writes one, and the canvas's **Target** panel saves one —
-or a file of your own ([How to add a new board](../add-a-board.md)).
+The board object is the board record written out — `Warp11.Mapping.write
+{ board = icepi; path = viaLink; plugged = []; sizes = [] }` prints one, and
+the canvas's **Target** panel saves one — or a file of your own ([How to add
+a new board](../add-a-board.md)).
 
 ## The path: how each need is carried
 
 A design declares needs — rows in, rows out, values, tables, a surface — and
-the mapping's `path` says what carries them. The presets:
+the mapping's `path` says what carries them. The named paths:
 
 | `"path"` | rows in | rows out | for |
 |---|---|---|---|
@@ -59,7 +60,7 @@ the mapping's `path` says what carries them. The presets:
 | `"registers"` | — | — | a design with no stream |
 
 Values travel in the register map on every path. A need may be rebound by
-name, over the preset:
+name, over the path:
 
 ```json
 { "board": { … }, "path": "pins",
@@ -132,7 +133,7 @@ they need telling nothing but which file.
 
 ## See also
 
-- [Boards](../boards.md) — the four boards, what each carries, what fits.
+- [Boards](../boards.md) — the five boards, what each carries, what fits.
 - [How to add a new board](../add-a-board.md) — the board file.
 - [Create a register map](register-map.md) — the values' half.
 - [The design canvas](../design-canvas.md) — the same mapping from the
