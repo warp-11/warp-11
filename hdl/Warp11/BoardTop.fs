@@ -206,6 +206,14 @@ type Incoming<'p> =
       /// against.
       cyclesPerBeat: int }
 
+/// A surface the host sends a row at a time, as the design sees it: the
+/// rows as they last landed, top row first, and the one cycle the last of
+/// them did — when the design takes the surface whole. Rows are never
+/// refused: one that lands while the design is busy lands all the same.
+type Landing<'p> =
+    { rows: 'p list
+      landed: Expr }
+
 /// What a design declares its boundary with. Each call records a need and
 /// hands back its handle; the design's own record of handles is then its io,
 /// and its body reads `aid.attack` and writes `processed |> aid.earphones`
@@ -289,6 +297,41 @@ type Needs internal (fit: Fit, boundary: Boundary option) =
         match boundary with
         | Some b -> fun surface -> surface |> List.map layout.pack |> b.surfaceOut name
         | None -> fun _ -> failwith $"'{name}': a needs factory declares its surfaces, and does not hand them over"
+
+    /// A surface the host sends a row at a time, top row first — `rows` rows
+    /// of the layout — and the design takes whole once the last has landed:
+    /// `surfaceOut`'s dual. On the wire it is rows in, so any carrier that
+    /// delivers a stream carries it; the landing is the design's side. Rows
+    /// shift in at the bottom, so the first to arrive is at the top when the
+    /// last arrives, and no row is ever refused.
+    member this.surfaceIn(name: string, layout: Layout<'p>, rows: int) : Landing<'p> =
+        if rows < 1 then
+            failwith $"'{name}': a surface has at least one row, got %d{rows}"
+
+        let incoming = this.streamIn(name, layout)
+
+        match boundary with
+        | Some _ ->
+            let stream = incoming.stream
+            1UL ==> stream.ready
+
+            let staging =
+                [ for y in 0 .. rows - 1 -> [ for field in layout.fields -> reg $"{name}_{y}_{fst field}" (fieldWidth field) ] ]
+
+            let arriving = layout.pack stream.payload
+            let count = counter $"{name}_landing" rows stream.valid
+
+            If stream.valid (fun () ->
+                for below, above in List.pairwise staging do
+                    for b, a in List.zip below above do
+                        a ==> b
+
+                for last, word in List.zip (List.last staging) arriving do
+                    word ==> last)
+
+            { rows = staging |> List.map layout.unpack
+              landed = count.wrap }
+        | None -> { rows = []; landed = lit 0UL 1 }
 
 /// The converter's rate when nothing says otherwise: a board frames at the
 /// nearest rate its clock divides to from here — 46 875 Hz at 24 MHz,

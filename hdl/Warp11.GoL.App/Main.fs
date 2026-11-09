@@ -11,7 +11,9 @@ open Warp11.GoL
 
 let private diffDesigns () =
     [ (golHarness 8 8).def
-      (golLiveHarness 8 8).def ]
+      (golLiveHarness 8 8).def
+      (BoardTop.boardTopFor World.mapping World.design).top
+      (BoardTop.boardTop icepi viaLink (World.lifeAt 8 8)).top ]
 
 /// Drive the harness and the twin through the same generations and demand
 /// row-for-row, population-for-population equality every cycle. An unrolled

@@ -25,16 +25,6 @@ let private nextCell (grid: Expr list list) (y: int) (x: int) : Expr =
     eq neighbors (lit 3UL 4)
     ||| (List.item x (List.item y grid) &&& eq neighbors (lit 2UL 4))
 
-/// The grid, elaborated inline in the current module (the `axiLiteSlave`
-/// pattern): declares the cell registers, returns the packed rows (bit x of
-/// row y = cell (y, x)) and the live-cell count. The caller owns the boundary
-/// — a harness lands rows on ports, the AXI wrapper feeds them to
-/// `snapshotSource` — so the 64×64 config never pays for 8k bits of module
-/// ports it would not use.
-///
-/// `loadEnable` wins over `tickEnable` (a load must land regardless of the
-/// pacing FSM); with neither high every cell holds. `loadRows` must be
-/// declared signals (ports or regs) — `slice` takes named operands.
 /// What the grid is told to do this cycle. A record rather than two positional
 /// one-bit arguments: `load` and `tick` are the same type, sit next to each
 /// other, and a call that swapped them would elaborate, pass every width
@@ -45,6 +35,16 @@ type GridControl = { load: Expr; tick: Expr }
 /// The grid and what it is worth watching: the packed rows, and the live count.
 type Grid = { rows: Expr list; population: Expr }
 
+/// The grid, elaborated inline in the current module (the `axiLiteSlave`
+/// pattern): declares the cell registers, returns the packed rows (bit x of
+/// row y = cell (y, x)) and the live-cell count. The caller owns the boundary
+/// — a harness lands rows on ports, the world's top takes them from its
+/// seed — so the 64×64 config never pays for 8k bits of module ports it
+/// would not use.
+///
+/// `load` wins over `tick` (a load must land regardless of the pacing
+/// machine); with neither high every cell holds. `loadRows` must be
+/// declared signals (ports or regs) — `slice` takes named operands.
 let gameOfLifeGrid (gridWidth: int) (gridHeight: int) (control: GridControl) (loadRows: Expr list) : Grid =
     if gridWidth < 3 || gridWidth > 64 || gridHeight < 3 || gridHeight > 64 then
         failwith $"gameOfLifeGrid: width/height must be 3..64, got %d{gridWidth}x%d{gridHeight}"

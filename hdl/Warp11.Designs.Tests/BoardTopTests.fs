@@ -58,6 +58,43 @@ let private probe (starting: uint64 list) =
             p.seen seen
             p.rows.stream |> p.out)
 
+/// A three-row surface sent over the link, each row reported back, a count
+/// of the surfaces that have landed whole, and a beat out per landing — the
+/// top row — since every path carries a stream each way.
+type private LandingProbe =
+    { seed: BoardTop.Landing<Expr>
+      tops: Stream<Expr> -> unit
+      top: Expr -> unit
+      middle: Expr -> unit
+      bottom: Expr -> unit
+      landings: Expr -> unit }
+
+let private landingProbe =
+    let row = pins1 ("cells", unsignedInt 32)
+    let topRow = pins1 ("topCells", unsignedInt 32)
+
+    BoardTop.design
+        "LandingProbe"
+        (fun n ->
+            { seed = n.surfaceIn ("seed", row, 3)
+              tops = n.streamOut ("tops", topRow)
+              top = n.valueOut ("top", unsignedInt 32)
+              middle = n.valueOut ("middle", unsignedInt 32)
+              bottom = n.valueOut ("bottom", unsignedInt 32)
+              landings = n.valueOut ("landings", unsignedInt 8) })
+        (fun p ->
+            match p.seed.rows with
+            | [ top; middle; bottom ] ->
+                p.top top
+                p.middle middle
+                p.bottom bottom
+                { payload = top; valid = p.seed.landed; layout = topRow } |> flowToStream |> fst |> p.tops
+            | rows -> failwith $"three rows declared, %d{List.length rows} landed"
+
+            let landed = reg "landed_count" 8
+            If p.seed.landed (fun () -> landed + 1UL ==> landed)
+            p.landings landed)
+
 type private Heard =
     { mics: BoardTop.Incoming<Expr * Expr>
       earphones: Stream<Expr * Expr> -> unit
@@ -189,6 +226,38 @@ let tests =
               Expect.stringContains seam "pub const BUMP_OFFSET" "the seam names the pulse's word"
               Expect.stringContains seam "pub const BUMP_BIT" "and its bit"
               Expect.notEqual bump.offset clear.offset "each pulse has a word of its own"
+
+          testCase "a surface the host sends a row at a time lands top row first, and says when the last has" <| fun _ ->
+              let top = BoardTop.boardTop icepi viaLink landingProbe
+              let sim = Sim top.top
+              let cyclesPerBit = uartCyclesPerBit icepi.fabricHz 1_000_000
+              let link, uart = serialClientForMap top.map sim (uartSimPins "host") cyclesPerBit
+              let device = uart :> ISimDevice
+              let read name = link.read32 (registerOf top name).offset
+
+              let drain cycles =
+                  for _ in 1..cycles do
+                      device.Drive()
+                      sim.Tick()
+                      device.Sample()
+
+              let play (rows: uint64 list) =
+                  for row in rows do
+                      uart.Send(SerialFrame.play row)
+
+                  drain (rows.Length * 6 * 10 * cyclesPerBit * 2)
+
+              link.write32 (registerOf top "seedLinkArm").offset 1UL
+              Expect.equal (read "landings") 0UL "nothing has landed"
+              play [ 0x100UL; 0x200UL ]
+              Expect.equal (read "landings") 0UL "two rows of three is not a surface"
+              play [ 0x300UL ]
+              Expect.equal (read "landings") 1UL "the third lands it"
+              Expect.equal (read "top", read "middle", read "bottom") (0x100UL, 0x200UL, 0x300UL) "top row first"
+              play [ 0x400UL; 0x500UL; 0x600UL ]
+              Expect.equal (read "landings") 2UL "the next three land again"
+              Expect.equal (read "top", read "middle", read "bottom") (0x400UL, 0x500UL, 0x600UL) "and replace the first"
+              Expect.stringContains (emitDesign top.top) "seed_0_cells" "the staging is named by the need and the field"
 
           testCase "a design declared as handles is the design written against its boundary" <| fun _ ->
               let starting = [ for k in 0UL .. 15UL -> 0x100UL + k ]
