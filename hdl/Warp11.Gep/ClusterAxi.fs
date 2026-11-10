@@ -447,9 +447,8 @@ let clusterSeamExtras (shape: GepClusterShape) =
       "pub const RECORD_SYMBOLS: usize = 1; // 4 symbols per word"
       "pub const RECORD_CONSTANTS: usize = 10;" ]
 
-/// What the cluster is built for: the KV260 at the clock `gep-cluster-fs`'s
-/// overlay pins, mastering DDR through the preset's HPC0 — the port the hand
-/// block design used.
+/// What the cluster is built for: the KV260 at the clock its overlay pins,
+/// mastering DDR through the preset's HPC0.
 let clusterBoard = kv260At 99_999_001
 
 /// The cluster as the generator takes it: the complete AXI top, its map, and

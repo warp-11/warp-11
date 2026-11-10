@@ -14,7 +14,7 @@
 set -euo pipefail
 
 # SUBSYSTEM, not KERNEL=="udmabuf[0-9]*": a buffer declared by an app's own
-# device-tree overlay gets its device-name as the node name (udmabuf-gep-cluster-fs),
+# device-tree overlay gets its device-name as the node name (udmabuf-gep-cluster-axi),
 # which never matched the numbered pattern — so exactly the buffers an app
 # declares for itself stayed root-only while the boot-time ones were open.
 RULE=/etc/udev/rules.d/99-udmabuf.rules

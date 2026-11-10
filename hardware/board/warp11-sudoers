@@ -27,7 +27,7 @@ ubuntu ALL=(root) NOPASSWD: /usr/bin/install
 #
 # This used to be two lines per app, naming `gol`, `mandel`, `audio-tone` and
 # five more — every one of them a Kotlin-era app, and none of the F# apps that
-# replaced them. So `gol-fs`, `mandel-frame`, `gep-cluster-fs` and `audio-batch`
+# replaced them. So `gol-fs`, `mandel-frame`, `gep-cluster-axi` and `audio-batch`
 # could all be *installed* (via the unrestricted `install` above) and never
 # cleaned, which is how a stale Kotlin bitstream survived in
 # /lib/firmware/xilinx/audio-batch/ and got loaded in preference to the F# one:
@@ -47,7 +47,7 @@ ubuntu ALL=(root) NOPASSWD: /usr/bin/mkdir -p /lib/firmware/xilinx/*
 # transfer — see the note in hardware/xmutil/audio-batch/audio-batch.dts.
 #
 # By wildcard for the same reason as above: the per-app udmabuf nodes
-# (udmabuf-gep-cluster-fs, udmabuf-audio-batch) arrive with their app's dtbo,
+# (udmabuf-gep-cluster-axi, udmabuf-audio-batch) arrive with their app's dtbo,
 # and naming udmabuf0 alone missed every one of them.
 ubuntu ALL=(root) NOPASSWD: /usr/bin/chmod 0666 /sys/class/u-dma-buf/*/sync_for_device
 ubuntu ALL=(root) NOPASSWD: /usr/bin/chmod 0666 /sys/class/u-dma-buf/*/sync_for_cpu
