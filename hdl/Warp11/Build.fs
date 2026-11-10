@@ -443,21 +443,32 @@ if not os.path.exists(util):
     sys.exit(status or 1)
 text = open(util).read()
 
+# A count may be fractional: Vivado counts a RAMB18 as half a block RAM
+# tile, so 105 of them is 52.5. A row that is not there is a report this
+# gate cannot read, said as that rather than read as an empty part.
 def usage(row):
-    m = re.search(r"^\| " + re.escape(row) + r"\s*\|\s*(\d+)\s*\|\s*\d+\s*\|\s*\d+\s*\|\s*(\d+)\s*\|", text, re.M)
-    return (int(m.group(1)), int(m.group(2))) if m else (0, 0)
+    m = re.search(r"^\| " + re.escape(row) + r"\s*\|\s*([\d.]+)\s*\|\s*[\d.]+\s*\|\s*[\d.]+\s*\|\s*(\d+)\s*\|", text, re.M)
+    if not m:
+        return None
+    used = float(m.group(1))
+    return (int(used) if used.is_integer() else used, int(m.group(2)))
 
 board = dict(cells=@CELLS@, blockRams=@BRAMS@, multipliers=@MULTS@)
-tool = dict(cells=usage("CLB LUTs"), blockRams=usage("Block RAM Tile"), multipliers=usage("DSPs"))
+rows = dict(cells="CLB LUTs", blockRams="Block RAM Tile", multipliers="DSPs")
+tool = {name: usage(row) for name, row in rows.items()}
 failed = []
 
 for name in ("cells", "blockRams", "multipliers"):
+    if tool[name] is None:
+        failed.append("no '%s' row in the utilisation report - cannot read %s" % (rows[name], name))
+        tool[name] = (None, None)
+        continue
     used, total = tool[name]
-    print("  %-12s %6d / %6d" % (name, used, total))
+    print("  %-12s %6g / %6d" % (name, used, total))
     if total != board[name]:
         failed.append("the board says the part has %d %s; Vivado says %d - a fact in the board is wrong" % (board[name], name, total))
     if used > total:
-        failed.append("%s: %d used of %d - the design does not fit the part" % (name, used, total))
+        failed.append("%s: %g used of %d - the design does not fit the part" % (name, used, total))
 
 wns = None
 if os.path.exists(timing):

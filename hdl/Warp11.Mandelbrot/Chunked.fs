@@ -1,10 +1,9 @@
-/// The frame as the canvas draws it: the raster as a stream of chunk beats,
-/// `coords` minting each chunk's view and `mandel16` spent `lanes` times
-/// over them — the typed twin of the four-box design, assembled with the
-/// same placement the canvas uses, so the two meet at the bytes. The
-/// boundary is the batch contract's: the host asks for `height × chunks`
-/// beats and reads the frame back in raster order, no addresses on the
-/// beats and no window.
+/// The frame: the raster as a stream of chunk beats, `coords` minting each
+/// chunk's view and the addressed lane pod spent `lanes` times over them in
+/// no order, every beat of pixels carrying the place it belongs. The
+/// boundary is the batch contract's counted path: the host asks for
+/// `height × chunks` beats and each lands at its place — in the host's
+/// memory by address, or placed by the host from the index on a link.
 module Warp11.Mandelbrot.Chunked
 
 open System.Numerics
@@ -12,71 +11,15 @@ open Warp11
 open Warp11.Fu
 open Warp11.Mandelbrot.Lane
 
-/// The design as a board top takes it.
-let mandelChunksOn (storage: RamStyle) (name: string) (width: int) (pixels: int) (maxIter: int) (fracBits: int) (threads: int) (lanes: int) : BoardTop.Design =
-    let def = mandelChunksDefOn storage name width pixels maxIter fracBits threads lanes
-
-    let needs =
-        [ yield BoardTop.streamIn "beats" [ beatPin ]
-          yield BoardTop.streamOut "pixels" [ pixelsPin ]
-          for name, format in viewControls fracBits -> BoardTop.valueIn name format ]
-
-    { name = name
-      sampleRate = 0.0
-      streams = 1
-      needs = needs
-      answers = pixels / pixelsPerBeat
-      atClocking = None
-      body =
-        BoardTop.rigged needs (fun instance ->
-            let in1, out1, cxOrigin, cyOrigin, dx, dy = def.NewNamed instance
-
-            { through =
-                fun s ->
-                    s
-                    |> streamMapTo (pins1 beatPin) List.head
-                    |> streamThroughInstance in1 out1
-                    |> streamMapTo (layoutOfList [ pixelsPin ]) List.singleton
-              ports = [ "cxOrigin", cxOrigin; "cyOrigin", cyOrigin; "dx", dx; "dy", dy ]
-              readbacks = [] }) }
-
-/// The frame with LUT-RAM register files, as the KV260 takes it.
-let mandelChunks (name: string) (width: int) (pixels: int) (maxIter: int) (fracBits: int) (threads: int) (lanes: int) : BoardTop.Design =
-    mandelChunksOn Distributed name width pixels maxIter fracBits threads lanes
-
-/// A frame through the design in the Sim: beats `0 .. height × chunks - 1`
-/// offered as fast as they are taken, the pixels collected in the order
-/// they leave — the raster, if the farm keeps order — as one byte a pixel.
-let renderInSim (width: int) (height: int) (pixels: int) (maxIter: int) (fracBits: int) (threads: int) (lanes: int) (view: uint64 * uint64 * uint64 * uint64) (cycleLimit: int) =
-    let sim = Sim (mandelChunksDef "MandelChunksSim" width pixels maxIter fracBits threads lanes).def
-    let chunks = chunkedWidth pixels width / pixels
-    let beats = height * chunks
-    let cxOrigin, cyOrigin, dx, dy = view
-    sim.Poke("cxOrigin", cxOrigin)
-    sim.Poke("cyOrigin", cyOrigin)
-    sim.Poke("dx", dx)
-    sim.Poke("dy", dy)
-    sim.Poke("out1_ready", 1UL)
-    let pixelsOut = ResizeArray<byte>()
-    let mutable offered = 0
-    let mutable cycles = 0
-
-    while pixelsOut.Count < beats * pixels && cycles < cycleLimit do
-        sim.Poke("in1_valid", (if offered < beats then 1UL else 0UL))
-        sim.Poke("in1_beat", uint64 offered)
-        let accepted = offered < beats && sim.Peek "in1_ready" = 1UL
-
-        if sim.Peek "out1_valid" = 1UL then
-            let beat = sim.PeekWide "out1_pixels"
-
-            for j in 0 .. pixelsPerBeat - 1 do
-                pixelsOut.Add(byte ((beat >>> (j * 8)) &&& BigInteger 255))
-
-        sim.Tick()
-        cycles <- cycles + 1
-        if accepted then offered <- offered + 1
-
-    pixelsOut.ToArray(), cycles
+/// What a host driving the frame has to agree with the fabric about: how
+/// wide a row is, how wide a chunk, where an escape count saturates, and the
+/// fraction bits of the view it writes. Stated where the fabric is built
+/// from them, and read from the seam.
+let private frameFacts (width: int) (pixels: int) (maxIter: int) (fracBits: int) =
+    [ BoardTop.fact "frameWidth" (uint64 width)
+      BoardTop.fact "chunkPixels" (uint64 pixels)
+      BoardTop.fact "maxIterations" (uint64 maxIter)
+      BoardTop.fact "fractionBits" (uint64 fracBits) ]
 
 /// The same frame from the whole-pixel twin, pixel by pixel.
 let renderTwin (width: int) (height: int) (pixels: int) (maxIter: int) (fracBits: int) (view: uint64 * uint64 * uint64 * uint64) =
@@ -89,102 +32,19 @@ let renderTwin (width: int) (height: int) (pixels: int) (maxIter: int) (fracBits
                let cy = (cyOrigin + uint64 r * dy) &&& 0xFFFFFFFFUL
                byte (laneTwin fracBits maxIter cx cy) |]
 
-/// The same frame through the counted board top in the Sim: the batch
-/// registers written as the host would — the count, the view, where the
-/// frame goes — start pulsed, busy polled, the frame read out of the
-/// behavioural DDR. What the driver does on the KV260, against the top the
-/// generator builds, before any bitstream exists.
-let renderThroughBoardTop (width: int) (height: int) (pixels: int) (maxIter: int) (fracBits: int) (threads: int) (lanes: int) (view: uint64 * uint64 * uint64 * uint64) =
-    let design = mandelChunks "MandelChunks" width pixels maxIter fracBits threads lanes
-    let top = BoardTop.boardTop kv260 viaCount design
-    let batch = top.batch.Value
-    let sim = Sim top.top
-    // Write-only: the counted top reads nothing, so it has no read channel.
-    let chunks = chunkedWidth pixels width / pixels
-    let beats = height * chunks
-    let dst = 0x8000
-    // The behavioural DDR is sized from the frame rather than fixed, so a
-    // full-size render does not run off the end of it.
-    let ddr = SimAxiWriteSlave(sim, dst + beats * pixels + 0x1000, dataBytes = 16, awEvery = 3, bDelay = 6)
-    let axi = SimAxi.clientWith sim ddr.Cycle
-    let cxOrigin, cyOrigin, dx, dy = view
-    let register (name: string) = top.registers |> List.find (fun (n, _) -> n = name) |> snd
-
-    for name, value in [ "cxOrigin", cxOrigin; "cyOrigin", cyOrigin; "dx", dx; "dy", dy ] do
-        axi.write32 (register name).offset value
-
-    axi.write32 batch.dstAddr.offset (uint64 dst)
-    axi.write32 batch.frameCount.offset (uint64 beats)
-    axi.write32 batch.start.offset 1UL
-    let mutable spins = 0
-
-    while axi.read32 batch.busy.offset <> 0UL && spins < 400_000 do
-        ddr.Cycle()
-        spins <- spins + 1
-
-    let frame = ddr.Memory[dst .. dst + beats * pixels - 1]
-    frame, spins, top
-
-/// The same frame over a board's host link, in the Sim: the counted path
-/// with the link as the carrier, which is how a board with no host memory
-/// draws one. The view and the count written over the serial client, the
-/// recorder armed, start pulsed, and the pixels read back as streamed
-/// frames — four a word, low byte first — until the count's worth has
-/// come. What `warp11_batch --serial frame:…` does on the Icepi.
-let renderThroughLink (width: int) (height: int) (pixels: int) (maxIter: int) (fracBits: int) (threads: int) (lanes: int) (view: uint64 * uint64 * uint64 * uint64) =
-    let design = mandelChunks "MandelChunks" width pixels maxIter fracBits threads lanes
-    let top = BoardTop.boardTop icepi viaCountLink design
-    let sim = Sim top.top
-    let cyclesPerBit = uartCyclesPerBit icepi.fabricHz 1_000_000
-    let link, uart = serialClientForMap top.map sim (uartSimPins "host") cyclesPerBit
-    let device = uart :> ISimDevice
-    let offset name = (top.registers |> List.find (fun (n, _) -> n = name) |> snd).offset
-    let chunks = chunkedWidth pixels width / pixels
-    let beats = height * chunks
-    let wordsPerRow = beatBits / 32
-    let words = beats * design.answers * wordsPerRow
-    let cxOrigin, cyOrigin, dx, dy = view
-
-    for name, value in [ "cxOrigin", cxOrigin; "cyOrigin", cyOrigin; "dx", dx; "dy", dy ] do
-        link.write32 (offset name) value
-
-    link.write32 (offset "pixelsLinkArm") 1UL
-    link.write32 (offset "beatsCountTotal") (uint64 beats)
-    link.write32 (offset "beatsCountStart") 1UL
-    let budget = words * 7 * 10 * cyclesPerBit * 2 + 200_000
-    let mutable cycles = 0
-    let mutable received = []
-
-    while received.Length < words && cycles < budget do
-        device.Drive()
-        sim.Tick()
-        device.Sample()
-        cycles <- cycles + 1
-
-        if cycles % 1000 = 0 then
-            received <- fst (SerialFrame.streamedWords uart.Received)
-
-    received <- fst (SerialFrame.streamedWords uart.Received)
-    let busy = link.read32 (offset "beatsCountBusy")
-
-    let frame =
-        [| for w in received do
-               for j in 0..3 -> byte ((w >>> (8 * j)) &&& 255UL) |]
-
-    frame, cycles, busy, top
-
-/// The scattered design as a board top takes it: the same boundary as
-/// `mandelChunks` with one field added — the beat's destination — which is
-/// what lets everything under it run in no order.
-let mandelScatter (name: string) (width: int) (pixels: int) (maxIter: int) (fracBits: int) (threads: int) (lanes: int) : BoardTop.Design =
-    let def = mandelScatterDef name width pixels maxIter fracBits threads lanes
+/// The design as a board top takes it: the beats in, and each beat of
+/// pixels out at the head of its row the place it belongs, which is what
+/// lets everything under it run in no order.
+let mandelScatterOn (storage: RamStyle) (name: string) (width: int) (pixels: int) (maxIter: int) (fracBits: int) (threads: int) (lanes: int) : BoardTop.Design =
+    let def = mandelScatterDefOn storage name width pixels maxIter fracBits threads lanes
 
     let needs =
         [ yield BoardTop.streamIn "beats" [ beatPin ]
           // The destination rides at the head of the output row: the scatter
           // sink reads it there and the rest is the payload.
           yield BoardTop.streamOut "pixels" [ indexPin; pixelsPin ]
-          for name, format in viewControls fracBits -> BoardTop.valueIn name format ]
+          for name, format in viewControls fracBits -> BoardTop.valueIn name format
+          yield! frameFacts width pixels maxIter fracBits ]
 
     { name = name
       sampleRate = 0.0
@@ -205,11 +65,16 @@ let mandelScatter (name: string) (width: int) (pixels: int) (maxIter: int) (frac
               ports = [ "cxOrigin", cxOrigin; "cyOrigin", cyOrigin; "dx", dx; "dy", dy ]
               readbacks = [] }) }
 
-/// A frame through the **scattered** counted top in the Sim, driven exactly
-/// as `renderThroughBoardTop` drives the ordered one — same registers, same
-/// behavioural DDR, same paced write slave — so the two are comparable at the
-/// cycle.
-let renderThroughScatterTop (width: int) (height: int) (pixels: int) (maxIter: int) (fracBits: int) (threads: int) (lanes: int) (view: uint64 * uint64 * uint64 * uint64) =
+/// The scattered design with LUT-RAM register files.
+let mandelScatter (name: string) (width: int) (pixels: int) (maxIter: int) (fracBits: int) (threads: int) (lanes: int) : BoardTop.Design =
+    mandelScatterOn Distributed name width pixels maxIter fracBits threads lanes
+
+/// A frame through the counted top on the KV260 in the Sim: the batch
+/// registers written as the host would — the count, the view, where the
+/// frame goes — start pulsed, busy polled, the frame read out of a
+/// behavioural DDR with a paced write slave. What the driver does on the
+/// board, against the top the generator builds, before any bitstream exists.
+let renderThroughBoardTop (width: int) (height: int) (pixels: int) (maxIter: int) (fracBits: int) (threads: int) (lanes: int) (view: uint64 * uint64 * uint64 * uint64) =
     let design = mandelScatter "MandelScatter" width pixels maxIter fracBits threads lanes
     let top = BoardTop.boardTop kv260 viaScatter design
     let batch = top.batch.Value
@@ -236,13 +101,73 @@ let renderThroughScatterTop (width: int) (height: int) (pixels: int) (maxIter: i
         ddr.Cycle()
         spins <- spins + 1
 
+    // The fabric's own count, as the board reports it — not the polls,
+    // each of which is an AXI read that advances the Sim several cycles.
+    let cycles = int (axi.read32 batch.cycles.offset)
     let frame = ddr.Memory[dst .. dst + beats * pixels - 1]
-    frame, spins, top
+    frame, cycles, top
+
+/// The frame over a board's host link, in the Sim: the count written over
+/// the UART, each beat back as a frame of its index then its pixels, and
+/// placed by the index rather than by when it came — what `warp11_batch
+/// --serial frame:…` does on the Icepi.
+let renderThroughLink (width: int) (height: int) (pixels: int) (maxIter: int) (fracBits: int) (threads: int) (lanes: int) (view: uint64 * uint64 * uint64 * uint64) =
+    let design = mandelScatter "MandelScatter" width pixels maxIter fracBits threads lanes
+    let top = BoardTop.boardTop icepi viaCountLink design
+    let sim = Sim top.top
+    let cyclesPerBit = uartCyclesPerBit icepi.fabricHz 1_000_000
+    let link, uart = serialClientForMap top.map sim (uartSimPins "host") cyclesPerBit
+    let device = uart :> ISimDevice
+    let offset name = (top.registers |> List.find (fun (n, _) -> n = name) |> snd).offset
+    let chunks = chunkedWidth pixels width / pixels
+    let count = height * chunks
+    let beats = count * design.answers
+    // A beat on the link: the index word, then the pixels low word first.
+    let wordsPerBeat = 1 + beatBits / 32
+    let words = beats * wordsPerBeat
+    let cxOrigin, cyOrigin, dx, dy = view
+
+    for name, value in [ "cxOrigin", cxOrigin; "cyOrigin", cyOrigin; "dx", dx; "dy", dy ] do
+        link.write32 (offset name) value
+
+    link.write32 (offset "pixelsLinkArm") 1UL
+    link.write32 (offset "beatsCountTotal") (uint64 count)
+    link.write32 (offset "beatsCountStart") 1UL
+    let budget = words * 7 * 10 * cyclesPerBit * 2 + 200_000
+    let mutable cycles = 0
+    let mutable received = []
+
+    while received.Length < words && cycles < budget do
+        device.Drive()
+        sim.Tick()
+        device.Sample()
+        cycles <- cycles + 1
+
+        if cycles % 1000 = 0 then
+            received <- fst (SerialFrame.streamedWords uart.Received)
+
+    received <- fst (SerialFrame.streamedWords uart.Received)
+    let busy = link.read32 (offset "beatsCountBusy")
+    let frame = Array.zeroCreate<byte> (beats * pixelsPerBeat)
+
+    for beat in List.chunkBySize wordsPerBeat received do
+        match beat with
+        | index :: pixelWords when pixelWords.Length = wordsPerBeat - 1 ->
+            pixelWords
+            |> List.iteri (fun k w ->
+                for j in 0..3 do
+                    frame[int index * pixelsPerBeat + 4 * k + j] <- byte ((w >>> (8 * j)) &&& 255UL))
+        | _ -> ()
+
+    frame, cycles, busy, top
 
 /// The example's silicon shape, said once. The frame is the README's; the
-/// chunk is the width the farm was measured at (128 px is −6% cycles against
-/// the row design, 16 px is +39%); the clock is the one the frame design
-/// proved at 104 lanes with timing to spare. `lanes` is the only dial.
+/// chunk is the width the farm was measured at (128 px; 16 px is +39%
+/// against the row design, the barrel draining its tail every chunk); the
+/// clock is the one the frame design proved at 104 lanes with timing to
+/// spare. `lanes` is the only dial. On silicon the ordered farm costs +41.5%
+/// against the row design at 256 iterations and the scattered one +1.2% —
+/// the README's table.
 let frameWidth = 1400
 
 let chunkPixels = 128
@@ -259,19 +184,20 @@ let fabricHz = 166_666_672
 /// storage the part has — LUT RAM where it has it, block RAM where it does
 /// not — the lane reading them the same way. The storage is the part's
 /// business; the count is the design's.
-let mandelChunksFor (lanes: int) (name: string) (width: int) (pixels: int) (maxIter: int) (fracBits: int) (threads: int) : BoardTop.Design =
+let mandelFrameFor (lanes: int) (name: string) (width: int) (pixels: int) (maxIter: int) (fracBits: int) (threads: int) : BoardTop.Design =
     BoardTop.sized name (fun fit ->
         let storage = if fit.part.facts.lutRam then Distributed else Block
-        mandelChunksOn storage name width pixels maxIter fracBits threads lanes)
+        mandelScatterOn storage name width pixels maxIter fracBits threads lanes)
 
 /// The board the frame is built for: the KV260 at the lanes' clock. Moving
 /// the frame to another board is this line.
 let board = kv260At fabricHz
 
-/// Mandelbrot's mapping: the frame counted in, the rows into the host's
-/// memory or as frames on its link, as the board has.
+/// Mandelbrot's mapping: the frame counted in, each beat out carrying
+/// where it goes — written there in the host's memory, or sent as a frame
+/// on its link for the host to place — as the board has.
 let mapping: Warp11.Mapping.Mapping =
-    { board = board; path = viaCountHost board; plugged = [] }
+    { board = board; path = viaScatterHost board; plugged = [] }
 
 /// The lanes the frame is built with: a design parameter, stated here and
 /// nothing to do with the board. 104 is every lane the KV260's 1 248 DSPs
@@ -282,22 +208,10 @@ let mapping: Warp11.Mapping.Mapping =
 let lanes = 104
 
 /// The example as the directory its board's toolchain builds from, straight
-/// from the typed design: the counted path, at `lanes` unless the line gives
-/// a count. There is no design file in the way — this is the whole path from
-/// the code to the bitstream.
+/// from the typed design, at `lanes` unless the line gives a count. There is
+/// no design file in the way — this is the whole path from the code to the
+/// bitstream.
 let buildDirectory (dir: string) (lanesGiven: int option) =
-    mandelChunksFor (defaultArg lanesGiven lanes) "Mandelbrot" frameWidth chunkPixels maxIterations viewFracBits laneThreads
+    mandelFrameFor (defaultArg lanesGiven lanes) "Mandelbrot" frameWidth chunkPixels maxIterations viewFracBits laneThreads
     |> BoardTop.boardTopFor mapping
-    |> Warp11.Build.write dir
-
-/// The same, on the **scatter** path: every beat carrying where it goes, so
-/// the lanes run in no order. Same board, same registers, same driver — the
-/// frame comes back the same way, because where a beat lands is the design's
-/// business rather than the host's.
-/// Named apart from the counted design on purpose: the two then package as
-/// separate apps, so a board can hold both and the A/B is a `loadapp` rather
-/// than a rebuild.
-let buildScatterDirectory (dir: string) (lanes: int) =
-    mandelScatter "MandelbrotScatter" frameWidth chunkPixels maxIterations viewFracBits laneThreads lanes
-    |> BoardTop.boardTop (kv260At fabricHz) viaScatter
     |> Warp11.Build.write dir

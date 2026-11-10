@@ -4,7 +4,6 @@ pub mod udmabuf;
 pub mod wav;
 pub mod pgm;
 pub mod mandel_frame_twin;
-pub mod mandel_twin;
 pub mod mmap;
 pub mod seam;
 pub mod serial_window;

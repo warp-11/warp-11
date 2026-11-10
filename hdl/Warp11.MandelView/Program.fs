@@ -11,12 +11,14 @@ open Avalonia.FuncUI.Hosts
 open Avalonia.Themes.Fluent
 open Warp11.MandelView.Bus
 
-/// The frame the `mandel-frame` bitstream renders. The daemon reports these
-/// in every frame header, but the window needs them before the first one
-/// arrives — and the twin needs them to render at all.
-let frameWidth = 1400
+/// The frame the `mandelbrot-batch` bitstream renders. The daemon reports
+/// these in every frame header, but the window needs them before the first
+/// one arrives — and the twin needs them to render at all. The width and the
+/// cap are the design's; the height is the daemon's default, since the
+/// fabric only counts chunks.
+let frameWidth = Warp11.Mandelbrot.Chunked.frameWidth
 let frameHeight = 800
-let maxIter = 256
+let maxIter = Warp11.Mandelbrot.Chunked.maxIterations
 
 type MainWindow(bus: IMandelBus) as this =
     inherit HostWindow()

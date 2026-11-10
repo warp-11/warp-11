@@ -1,6 +1,6 @@
 # Warp11.MandelView — the Mandelbrot live view
 
-The Avalonia FuncUI host app for the `mandel-frame` accelerator: asks the
+The Avalonia FuncUI host app for the Mandelbrot frame (`mandelbrot-batch`): asks the
 fabric for a frame and shows it, with the fabric's own cycle count beside the
 round trip. The comms sit behind `IMandelBus` (`Bus.fs`) with two
 implementations — which one a window gets is the composition root's choice,
@@ -16,7 +16,7 @@ invisible to the view:
   (`runtime/mandel-daemon`, key space documented there).
 
 The view is fixed — no pan or zoom. Both were built and measured first, and
-removed because `MAX_ITER` is 256 in the elaborated pod: a few notches toward
+removed because `maxIterations` is 256 in the elaborated design: a few notches toward
 the boundary and every pixel hits the cap and the frame goes black. The limit
 is the iteration count, not the Q4.28 format. The backlog has the
 measurements and what would earn them back.
@@ -40,33 +40,37 @@ its bitstream loaded, but the ports do not have to be swapped too).
 The bitstream first — only one app is loaded at a time:
 
 ```sh
-ssh ubuntu@<board> 'sudo xmutil unloadapp && sudo xmutil loadapp mandel-frame'
+ssh ubuntu@<board> 'sudo xmutil unloadapp && sudo xmutil loadapp mandelbrot-batch'
 ```
 
-Then the daemon. The cross build needs no cross-gcc; `runtime/.cargo/config.toml`
-carries the two settings that make it a plain command:
+Then the daemon, with the seam the bitstream's build directory wrote — it
+reads the registers and the frame's shape from there. The cross build needs
+no cross-gcc; `runtime/.cargo/config.toml` carries the two settings that make
+it a plain command:
 
 ```sh
 cd runtime
 cargo build --release --target aarch64-unknown-linux-musl -p mandel-daemon
-scp target/aarch64-unknown-linux-musl/release/mandel-daemon ubuntu@<board>:warp11-driver/
-ssh ubuntu@<board> 'cd warp11-driver && nohup ./mandel-daemon > mandel-daemon.log 2>&1 &'
+scp target/aarch64-unknown-linux-musl/release/mandel-daemon \
+    <build dir>/mandelbrot_batch_layout.rs ubuntu@<board>:warp11-driver/
+ssh ubuntu@<board> 'cd warp11-driver && nohup ./mandel-daemon --board mandelbrot_batch \
+    --layout mandelbrot_batch_layout.rs > mandel-daemon.log 2>&1 &'
 ```
 
-It renders once at startup and refuses to serve if `frameDone` never rises, so
-the log says whether the fabric is clocked and reaching DDR before any client
-connects:
+It renders once at startup and refuses to serve if the render never finishes,
+so the log says whether the fabric is clocked and reaching DDR before any
+client connects:
 
 ```
-render: 715938 cycles = 4.296 ms fabric (7.164 ms wall)
+render: 723389 cycles = 4.340 ms fabric (4.341 ms wall)
 startup render ok: the fabric is clocked and reaching DDR
-mandel-daemon up: fb 0x36100000, listening on tcp/0.0.0.0:7448
+mandel-daemon up: 1400x800 frame, arena 0x37200000, listening on tcp/0.0.0.0:7448
 ```
 
 ## Unloading
 
 Lighter than GoL's protocol, because this accelerator is demand-driven: the
-write master moves only between `start` and `frameDone`, and the daemon blocks
+write master moves only between `start` and done, and the daemon blocks
 between renders, so an idle daemon has nothing in flight. There is no `disarm`
 step and none is needed — but the rule that matters still holds, so stop the
 daemon before unloading rather than unloading underneath a render:
@@ -84,8 +88,8 @@ the RTL.
 
 | | |
 |---|---|
-| fabric | **715,938 cycles = 4.30 ms**, 261 Mpx/s at 166.67 MHz |
-| round trip, warm | **44 ms** (139 ms on the first frame — connection setup) |
+| fabric | **about 723,500 cycles = 4.34 ms**, 258 Mpx/s at 166.67 MHz |
+| round trip | **53–75 ms** over eight renders (2026-11-09; it moves with the network) |
 | frame on the wire | 1,120,000 bytes, cropped from the fabric's padded 1408 stride |
 | correctness | pixel-identical to the software twin |
 

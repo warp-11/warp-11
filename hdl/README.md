@@ -103,10 +103,11 @@ it.
 - **`Warp11.Designs/`** — the toy and evidence designs (the oracle's test
   inputs), and the demo dump with its living checks
   plus the `diff` writer for its 75 designs.
-- **`Warp11.Mandelbrot/`** — the mini pod (`Pod.fs`, § The pod) and the
-  **full-scale 104-lane accelerator** (`Step.fs` → `FrameAxi.fs` — see
-  [its own README](Warp11.Mandelbrot/README.md)), with the register-map seams
-  (`Seam.fs`) and the host sides (`Host.fs`, `FrameHost.fs`).
+- **`Warp11.Mandelbrot/`** — the **full-scale 104-lane frame** (`Mandel.fs` →
+  `Chunked.fs`, generated to a bitstream by `-- bitstream` — see
+  [its own README](Warp11.Mandelbrot/README.md)), plus the mini pod and the
+  row-sweeping frame pod (`Pod.fs`, `FramePod.fs`) kept as oracle inputs, with
+  their Sim renders (`Host.fs`, `FrameHost.fs`).
 - **`Warp11.GoL/`** — Game of Life, the tutorial's reference implementation,
   through to a bitstream and the Zenoh-fed live view.
 - **`Warp11.SimView/`** — the step-through debugger (Avalonia + FuncUI):

@@ -6,8 +6,7 @@
 module Warp11.MandelView.Bus
 
 /// A rectangle of the complex plane in the fabric's own Q4.28 bit patterns —
-/// origin and per-pixel step, the four registers `mandelFrameAxi` latches on
-/// start. The view thinks in floats and converts here, so the wire carries
+/// origin and per-pixel step, the four controls the frame reads. The view thinks in floats and converts here, so the wire carries
 /// exactly what the hardware consumes and nothing re-derives it.
 type MandelView =
     { cxOrigin: uint32

@@ -23,11 +23,11 @@ let private keyed (name: string) =
 /// while every pixel stayed right. They did disagree: the Game of Life daemon
 /// next door had 166_666_667 where the overlay programs 166_666_672. A number
 /// that only shows up in a *time* is exactly the kind that drifts unnoticed,
-/// so it now comes from `Warp11.Mandelbrot.Board.frameBoard` — the app the
-/// daemon serves — and the generated seam
-/// carries the same value to the Rust side.
+/// so it now comes from `Warp11.Mandelbrot.Chunked.board` — the board the
+/// daemon's app is built for — and the generated seam carries the same value
+/// to the Rust side.
 
-let PlClockHz = float Warp11.Mandelbrot.Board.frameBoard.fabricHz
+let PlClockHz = float Warp11.Mandelbrot.Chunked.board.fabricHz
 
 type ZenohBus(endpoint: string) =
     let frameReceived = Event<MandelFrame>()

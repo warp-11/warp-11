@@ -5,10 +5,7 @@ module Warp11.Effects.Main
 open Warp11
 
 let private designs =
-    [ "AudioToneAxi", audioToneAxi.def
-      "AudioPassthruAxi", audioPassthruAxi.def
-      "AudioGainAxi", audioGainAxi.def
-      "AudioEffectsAxi", audioEffectsAxi.def
+    [ "AudioEffectsAxi", audioEffectsAxi.def
       "AudioBatchAxi", Batch.audioBatchAxi.def ]
 
 /// The two rungs as designs, built for the iCEBreaker's converter: what the
@@ -41,17 +38,14 @@ let private defaultsArePassthrough () : bool =
     && isUnity effectsRegs.compThreshold ((1UL <<< sampleWidth) - 1UL)
     && isUnity effectsRegs.limitThreshold ((1UL <<< (sampleWidth - 1)) - 1UL)
 
-/// The four slaves must not collide with each other's conventions or with
+/// The slaves must not collide with each other's conventions or with
 /// themselves: every entry word-aligned and inside its aperture, and no two
 /// entries of one map sharing a word unless they are bit fields. `RegMap`'s own
 /// validation runs at elaboration, so reaching here already proves most of it —
 /// this pins the part that is a *convention* rather than a rule.
 let private mapsAreWellFormed () : bool =
     let maps =
-        [ "tone", toneMap
-          "passthru", passthruMap
-          "gain", gainMap
-          "effects", effectsMap ]
+        [ "effects", effectsMap ]
 
     maps
     |> List.forall (fun (_, m) ->
@@ -631,8 +625,14 @@ let private passthruOverTheLink () : bool =
     let words, _ = SerialFrame.streamedWords uart.Received
     let back = words |> List.map (fun w -> int64 (int32 (uint32 w)))
     let ok = back = (rows |> List.collect (fun (l, r) -> [ l; r ])) && link.read32 (offset "inLinkDropped") = 0UL
-    printfn $"      passthru link ({top.name}): %d{rows.Length} rows in, %d{back.Length / 2} back, exact %b{ok}"
-    ok
+
+    // The bring-up readings: every row counted, the last one's left sample
+    // held — what says the input is clocking and carrying something.
+    let lastLeft = fst (List.last rows)
+    let readings = link.read32 (offset "receivedCount") = uint64 rows.Length && link.read32 (offset "lastLeft") = (word lastLeft &&& ((1UL <<< sampleWidth) - 1UL))
+
+    printfn $"      passthru link ({top.name}): %d{rows.Length} rows in, %d{back.Length / 2} back, exact %b{ok}, readings %b{readings}"
+    ok && readings
 
 /// The tone over the counted link: the host asks for a count and the samples
 /// come back as frames — the generator's own, as a Sim of it alone produces
@@ -712,16 +712,28 @@ let private writeHardware (repoRoot: string) =
         @ regMapRsLines m
 
     let layouts =
-        [ "audio_tone_layout.rs", "AudioToneAxi", toneMap
-          "audio_passthru_layout.rs", "AudioPassthruAxi", passthruMap
-          "audio_gain_layout.rs", "AudioGainAxi", gainMap
-          "audio_effects_layout.rs", "AudioEffectsAxi", effectsMap
+        [ "audio_effects_layout.rs", "AudioEffectsAxi", effectsMap
           "audio_batch_layout.rs", "AudioBatchAxi", Batch.batchMap ]
 
     for file, title, m in layouts do
         let path = System.IO.Path.Combine(runtimeSrc, file)
         System.IO.File.WriteAllText(path, String.concat "\n" (layoutFor title m) + "\n")
         printfn $"wrote {path}"
+
+/// A rung on a mapping, written as its build directory — or why not.
+let private buildRung (dir: string) (chosen: Result<BoardTop.Design * Mapping.Mapping, string>) : int =
+    match chosen with
+    | Error why ->
+        eprintfn $"{why}"
+        1
+    | Ok(design, mapping) ->
+        let out = Warp11.Build.write dir (BoardTop.boardTopFor mapping design)
+
+        for file in out.files do
+            printfn $"wrote {file}"
+
+        printfn $"build with: {out.run}"
+        0
 
 /// The sample recording that ships beside these designs, and the code that made
 /// it — so `in.wav` in this project is a build product rather than a blob
@@ -1324,19 +1336,19 @@ let main argv =
         | Ok r ->
             printfn "%s" (Warp11.Mapping.write r.mapping)
             0
+    // A rung as the directory its board's toolchain builds from: on the
+    // rung's own mapping, `build <rung> <dir>`, or on a board and a path
+    // named on the line, `build <rung> <board> <path> <dir>` — `build tone
+    // kv260 pins out/` is the tone out of the KV260's Pmod I2S2.
     | [| "build"; rung; dir |] ->
-        match rungNamed rung with
-        | Error why ->
-            eprintfn $"{why}"
-            1
-        | Ok r ->
-            let out = Warp11.Build.write dir (BoardTop.boardTopFor r.mapping r.design)
-
-            for file in out.files do
-                printfn $"wrote {file}"
-
-            printfn $"build with: {out.run}"
-            0
+        rungNamed rung |> Result.map (fun r -> r.design, r.mapping) |> buildRung dir
+    | [| "build"; rung; board; path; dir |] ->
+        rungNamed rung
+        |> Result.bind (fun r ->
+            Warp11.Mapping.pathNamed path
+            |> Result.bind (Warp11.Boards.mappingOn board)
+            |> Result.map (fun m -> r.design, m))
+        |> buildRung dir
     | [| "diff"; outDir |] ->
         writeDiff (List.map snd designs) outDir
         0

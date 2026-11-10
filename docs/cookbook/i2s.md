@@ -170,6 +170,9 @@ It is the same split as the register map — a declarer for the io factory, a
 builder for the body:
 
 ```fsharp
+let (volume, mute), gainMap =
+    buildRegMapPinned 8 (fun r -> r.RwReg("volume", 16, gainUnity), r.RwReg("mute", 1, 0UL))
+
 defModuleClocked
     axiClock
     "AudioGainShared"
@@ -179,7 +182,7 @@ defModuleClocked
         let i2s = i2sLink "i2s" pins kv260.fabricHz 48_828 32
 
         i2s.input
-        |> audioGain "AudioGain" "gain" (regs.value gainRegs.volume) (regs.value gainRegs.mute)
+        |> audioGain "AudioGain" "gain" (regs.value volume) (regs.value mute)
         |> i2s.send)
 ```
 

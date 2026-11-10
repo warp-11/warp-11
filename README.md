@@ -99,8 +99,8 @@ creates four ports leaves four ports, not a loop.
 Three accelerators run end to end on a Xilinx KV260 — F# elaborator → emitted
 Verilog → Vivado bitstream → Rust driver over AXI:
 
-- **Mandelbrot** — 1400×800 at 256 iterations in **4.30 ms of fabric time**
-  (261 Mpx/s; 5.21 ms end to end), across 104 barrel-threaded lanes filling
+- **Mandelbrot** — 1400×800 at 256 iterations in **4.34 ms of fabric time**
+  (258 Mpx/s; 5.35 ms end to end), across 104 barrel-threaded lanes filling
   **100% of the board's 1,248 DSPs** at 166.67 MHz.
 - **GEP** — a genetic-programming generation loop entirely in fabric,
   bit-exact against a software twin, **0.85 µs per offspring**.

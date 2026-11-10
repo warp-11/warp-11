@@ -8,7 +8,6 @@ open System.Numerics
 open Warp11
 open Warp11.Mandelbrot.Lane
 open Warp11.Mandelbrot.FramePod
-open Warp11.Mandelbrot.FrameAxi
 
 let frameWidth = 64
 let frameHeight = 48
@@ -101,136 +100,6 @@ let renderFrame (outPath: string) =
 
     if not (List.isEmpty mismatches) then
         failwith "the fabric and the software twin disagree"
-
-/// `dotnet run -- frameaxi <out.ppm>`: the silicon rehearsal. The scaled
-/// wrapper driven exactly as the Rust driver will drive the board — every
-/// control action a real five-channel AXI-Lite transaction, the framebuffer
-/// landing in the fake DDR through the AXI master — then verified bit-exact
-/// and reported. Every handshake step is asserted, so a protocol bug is a
-/// failure here, not a hang on silicon.
-let runFrameAxiWith (jitter: int option) (outPath: string) =
-    let sim = Sim mandelFrameAxiScaled.def
-    let fbBase = 0x100
-    // Paced for the same reason as `renderFrame`'s: an always-ready slave never
-    // leaves a write in the ring, so it cannot tell a correct done from a
-    // hopeful one. `jitter`, where the caller supplies it, takes over AW and W.
-    let ddr =
-        SimAxiWriteSlave(sim, fbBase + frameWidth * frameHeight, awEvery = 3, bDelay = 6, ?jitter = jitter)
-    let cycle () = ddr.Cycle()
-    let axi = SimAxi.clientWith sim cycle
-    let read32, write32 = axi.read32, axi.write32
-
-    let toQ (v: float) = uint64 (int64 (v * 268435456.0)) &&& 0xFFFFFFFFUL
-    let stepQ = toQ (3.0 / 64.0)
-    let cx0 = toQ (-2.25)
-    let cy0 = toQ (-1.125)
-
-    let idValue = read32 frameRegs.start.offset
-
-    if idValue <> frameIdMagic then
-        failwith $"ID read 0x%08x{idValue}, expected 0x%08x{frameIdMagic}"
-
-    write32 frameRegs.cxOrigin.offset cx0
-    write32 frameRegs.cyOrigin.offset cy0
-    write32 frameRegs.dx.offset stepQ
-    write32 frameRegs.dy.offset stepQ
-    write32 frameRegs.fbBaseAddr.offset (uint64 fbBase)
-    write32 frameRegs.start.offset 1UL
-
-    // Poll done through real reads, with free-run gaps between polls so the
-    // pod is not transaction-paced.
-    let mutable polls = 0
-
-    while read32 frameRegs.doneSticky.offset <> 1UL && polls < 2000 do
-        for _ in 1..50 do
-            cycle ()
-
-        polls <- polls + 1
-
-    if read32 frameRegs.doneSticky.offset <> 1UL then
-        failwith "frameDone never rose"
-
-    // No flush, as in `renderFrame`: the done register is gated on the
-    // framebuffer window's `idle`, so reading it as 1 is the statement that
-    // every word is in DDR.
-    let lastFrameCycles = read32 frameRegs.cycles.offset
-    let busyNow = read32 frameRegs.busy.offset
-
-    let expected r c =
-        let cx = (cx0 + uint64 c * stepQ) &&& 0xFFFFFFFFUL
-        let cy = (cy0 + uint64 r * stepQ) &&& 0xFFFFFFFFUL
-        byte (laneTwin 28 frameMaxIter cx cy)
-
-    let mismatches =
-        [ for r in 0 .. frameHeight - 1 do
-              for c in 0 .. frameWidth - 1 do
-                  if ddr.Memory[fbBase + r * frameWidth + c] <> expected r c then yield r, c ]
-
-    let shade (v: byte) = if int v >= frameMaxIter - 1 then 0 else int v
-
-    let rows =
-        [ for r in 0 .. frameHeight - 1 ->
-              String.concat
-                  " "
-                  [ for c in 0 .. frameWidth - 1 -> string (shade ddr.Memory[fbBase + r * frameWidth + c]) ] ]
-
-    System.IO.File.WriteAllText(
-        outPath,
-        $"P2\n%d{frameWidth} %d{frameHeight}\n%d{frameMaxIter}\n" + String.concat "\n" rows + "\n"
-    )
-
-    printfn $"MandelFrameAxiScaled: ID ok, busy=%d{busyNow}, lastFrameCycles=%d{lastFrameCycles} -> {outPath}"
-    printfn $"twin mismatches:              %d{List.length mismatches} of %d{frameWidth * frameHeight} pixels"
-
-    for name, blocked, starved in streamReport sim.Peek mandelFrameAxiScaled.def do
-        printfn $"stream '{name}': blocked %d{blocked} starved %d{starved}"
-
-    if not (List.isEmpty mismatches) then
-        failwith "the fabric and the software twin disagree"
-
-/// `dotnet run -- frameserve`: the frame half of the FsSimWindow bridge — the
-/// Rust `MandelFrameDevice` drives the scaled wrapper in the Sim before any
-/// silicon exists. `R`/`W` are AXI-Lite transactions (the fake DDR serviced on
-/// every tick), `C <hexn>` runs free cycles, `D <hexoff> <hexlen>` dumps DDR
-/// bytes as hex — the framebuffer readback the register aperture cannot carry,
-/// standing in for the board's mmap of PS DDR.
-let frameserve () =
-    let sim = Sim mandelFrameAxiScaled.def
-    let ddr = SimAxiWriteSlave(sim, 65536)
-    let cycle () = ddr.Cycle()
-    let axi = SimAxi.clientWith sim cycle
-    let read32, write32 = axi.read32, axi.write32
-
-    let out = System.Console.Out
-    out.WriteLine "FRAMESERVE"
-    out.Flush()
-
-    let mutable line = System.Console.In.ReadLine()
-
-    while line <> null do
-        (match line.Split(' ') with
-         | [| "R"; off |] -> out.WriteLine(sprintf "%08x" (read32 (System.Convert.ToUInt64(off, 16))))
-         | [| "W"; off; value |] ->
-             write32 (System.Convert.ToUInt64(off, 16)) (System.Convert.ToUInt64(value, 16))
-             out.WriteLine "OK"
-         | [| "C"; n |] ->
-             for _ in 1 .. int (System.Convert.ToUInt64(n, 16)) do
-                 cycle ()
-
-             out.WriteLine "OK"
-         | [| "D"; off; len |] ->
-             let start = int (System.Convert.ToUInt64(off, 16))
-             let count = int (System.Convert.ToUInt64(len, 16))
-
-             out.WriteLine(
-                 ddr.Memory[start .. start + count - 1]
-                 |> Array.map (sprintf "%02x")
-                 |> String.concat ""
-             )
-         | _ -> out.WriteLine "ERR")
-
-        out.Flush()
-        line <- System.Console.In.ReadLine()
 
 /// `dotnet run -- cyclesweep`: the scaling-axes sweep, mirroring the original
 /// CycleGapProbeTest — used to localize the full-scale cycle finding (F#
@@ -378,15 +247,3 @@ let laneScale (configs: (int * int * int * int) list) =
 
     for c in configs do
         run c
-
-
-/// The same render with the DDR answering after a random 0-3 cycle delay and
-/// stalling AW and W independently. The picture must be identical: a frame that
-/// depends on when memory answered is a frame that will be right in this suite
-/// and wrong on a board, which is exactly how the first render came out sheared.
-let runFrameAxi (outPath: string) = runFrameAxiWith None outPath
-
-let frameIsIndifferentToMemoryTiming () =
-    let tmp = System.IO.Path.GetTempFileName()
-    let baseline = runFrameAxiWith None tmp
-    [ 1..4 ] |> List.forall (fun seed -> runFrameAxiWith (Some seed) tmp = baseline)

@@ -2104,8 +2104,7 @@ type I2sClockPins =
       lrclkPins: Output list }
 
 /// The pins of a transmit-only link — a design with a DAC and nothing to
-/// listen to. `audioToneAxi` is the shape: four pins, and its `.xdc` binds
-/// four.
+/// listen to: four pins, where a link that also receives has eight.
 type I2sTxPins =
     { txClocks: I2sClockPins
       dataOut: Output }

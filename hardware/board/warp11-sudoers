@@ -61,7 +61,7 @@ ubuntu ALL=(root) NOPASSWD: /usr/sbin/reboot
 
 # GONE, with the Kotlin stack (2026-08-13): the gol-driver, counter-driver and
 # gep-hw binaries this file used to name. Nothing builds them. The F# stack's
-# board binaries — gol_first_light, mandel_frame_first_light,
+# board binaries — gol_first_light, mandel-daemon,
 # gep_cluster_first_light, audio_batch_first_light, gol_disarm — reach their
 # accelerator through /dev/uioN, which the 99-uio.rules udev rule makes
 # ubuntu-owned, so they need no sudo at all. Add an entry here only for a

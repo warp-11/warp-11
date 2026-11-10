@@ -24,9 +24,8 @@ fn ideal_cycles_for_the_benchmark_view() {
         frame.len(), total_issues, ideal_104
     );
     println!(
-        "vs measured: F# 715,938 ({:.1}% of ideal)   Kotlin 548,809 ({:.1}%)",
-        ideal_104 as f64 / 715_938.0 * 100.0,
-        ideal_104 as f64 / 548_809.0 * 100.0
+        "vs measured: 723,470 ({:.1}% of ideal)",
+        ideal_104 as f64 / 723_470.0 * 100.0
     );
 }
 

@@ -903,7 +903,7 @@ let mandelChunk (pixels: int) (maxIter: int) (fracBits: int) (threads: int) : Fu
 /// That one extra field is what buys the unordered farm: a lane that draws an
 /// interior chunk and runs the full `maxIter` holds nothing up, because no
 /// consumer is waiting to learn where its beats belong.
-let mandelChunkAddressed (pixels: int) (maxIter: int) (fracBits: int) (threads: int) : Fu<Expr * Expr * Expr, Expr * Expr> =
+let mandelChunkAddressedOn (storage: RamStyle) (pixels: int) (maxIter: int) (fracBits: int) (threads: int) : Fu<Expr * Expr * Expr, Expr * Expr> =
     if pixels % pixelsPerBeat <> 0 then
         failwith $"mandelChunkAddressed: a chunk is whole beats of %d{pixelsPerBeat} pixels, not %d{pixels}"
 
@@ -914,7 +914,7 @@ let mandelChunkAddressed (pixels: int) (maxIter: int) (fracBits: int) (threads: 
     let localBits = max 1 (ceilLog2 (pixels / pixelsPerBeat))
 
     moduleUnit
-        "mandelChunkAddressed"
+        $"mandelChunkAddressed{storageTag storage}"
         (pins3 ("cx0", view) ("cy", view) ("dx", view))
         (pins2 ("local", unsignedInt localBits) ("pixels", pixelsFormat))
         []
@@ -923,10 +923,14 @@ let mandelChunkAddressed (pixels: int) (maxIter: int) (fracBits: int) (threads: 
                 s
                 |> streamMapTo (layout1 ("data", run.width)) (fun (cx0, cy, dx) -> run.dematerialize (lit 0UL (lanePodAddrWidth pixels 1), asUInt cy, asUInt cx0, asUInt dx))
 
-            mandelLanePod pixels 1 maxIter fracBits threads instance runs
+            mandelLanePodOn storage pixels 1 maxIter fracBits threads instance runs
             |> streamMapTo (layout2 ("local", localBits) ("pixels", beatBits)) (fun (addr, beat) ->
                 slice (localBits + beatShift - 1) beatShift addr, beat))
     |> answering (pixels / pixelsPerBeat)
+
+/// The addressed chunk with LUT-RAM register files.
+let mandelChunkAddressed (pixels: int) (maxIter: int) (fracBits: int) (threads: int) : Fu<Expr * Expr * Expr, Expr * Expr> =
+    mandelChunkAddressedOn Distributed pixels maxIter fracBits threads
 
 /// The raster as chunk views: beat `k` of the frame becomes the view of its
 /// chunk — `cx0` steps by `pixels` `dx` a beat and returns to `cxOrigin` at
@@ -1028,53 +1032,23 @@ let viewControls (fracBits: int) =
     let view = viewFormat fracBits
     [ "cxOrigin", view; "cyOrigin", view; "dx", view; "dy", view ]
 
-/// The frame as the canvas draws it, in typed form: beats in, `coords`, the
-/// lane spent `lanes` times, pixels out — the four boxes, so the drawn design
-/// and this meet at the bytes.
-let mandelChunksDefOn (storage: RamStyle) (name: string) (width: int) (pixels: int) (maxIter: int) (fracBits: int) (threads: int) (lanes: int) =
-    let coords = coords width pixels fracBits
-    let lane = copies lanes (mandelChunkOn storage pixels maxIter fracBits threads)
-    let view = viewFormat fracBits
-
-    defModule
-        name
-        (fun p ->
-            streamInputPorts p "in1" (pins1 beatPin),
-            streamOutputPorts p "out1" (pins1 pixelsPin),
-            p.inPort "cxOrigin" 32,
-            p.inPort "cyOrigin" 32,
-            p.inPort "dx" 32,
-            p.inPort "dy" 32)
-        (fun (in1, out1, cxOrigin, cyOrigin, dx, dy) ->
-            [ streamSource in1 ]
-            |> fuStagesWith [ cxOrigin; cyOrigin; dx; dy ] coords "coords" (pins3 ("cx0", view) ("cy", view) ("dx", view)) id (fun r _ -> r)
-            |> fuStagesWith [] lane "mandelChunk" (pins1 pixelsPin) id (fun r _ -> r)
-            |> List.iter2 streamSink [ out1 ])
-
-/// The frame with LUT-RAM register files, as the KV260 takes it.
-let mandelChunksDef (name: string) (width: int) (pixels: int) (maxIter: int) (fracBits: int) (threads: int) (lanes: int) =
-    mandelChunksDefOn Distributed name width pixels maxIter fracBits threads lanes
-
-/// The frame as **scattered** chunk beats: the same `coords` and the same
-/// lane pod, farmed with nothing keeping order, every beat carrying the index
-/// of the word it belongs in.
+/// The frame as chunk beats: `coords` minting each chunk's view, the lane pod
+/// farmed with nothing keeping order, every beat carrying the index of the
+/// word it belongs in.
 ///
-/// The only structural difference from `mandelChunksDef` is where position
-/// comes from. There, a beat's place is where it lands in the output stream,
-/// so the farm has to hold the raster together — a queue of lane indices, and
-/// a merge that waits on the lane owning the oldest beat while lanes with
-/// finished work sit behind it. Here the beat says where it goes, so a lane
-/// that drew an interior chunk and ran the full `maxIter` delays only itself.
-/// That is the whole of it: one field, and the ordering machinery is not
-/// needed rather than made faster.
-let mandelScatterDef (name: string) (width: int) (pixels: int) (maxIter: int) (fracBits: int) (threads: int) (lanes: int) =
+/// Position travels with the beat rather than being where it lands in the
+/// output stream, so nothing has to hold the raster together: a lane that
+/// drew an interior chunk and ran the full `maxIter` delays only itself.
+/// Keeping order instead — a merge that waits on the lane owning the oldest
+/// beat — cost 41.5% at 104 lanes and 256 iterations, measured on silicon.
+let mandelScatterDefOn (storage: RamStyle) (name: string) (width: int) (pixels: int) (maxIter: int) (fracBits: int) (threads: int) (lanes: int) =
     let beatsPerChunk = pixels / pixelsPerBeat
 
     if beatsPerChunk < 2 then
         failwith $"mandelScatterDef: a chunk is at least two beats of %d{pixelsPerBeat} pixels, not %d{pixels}"
 
     let coordsUnit = coords width pixels fracBits
-    let lane = copies lanes (mandelChunkAddressed pixels maxIter fracBits threads)
+    let lane = copies lanes (mandelChunkAddressedOn storage pixels maxIter fracBits threads)
     let view = viewFormat fracBits
 
     defModule
@@ -1117,3 +1091,7 @@ let mandelScatterDef (name: string) (width: int) (pixels: int) (maxIter: int) (f
                     beat ==> chunk
                     timesConstant beatsPerChunk chunk + pad 32 local, px)
             |> List.iter2 streamSink [ out1 ])
+
+/// The scattered frame with LUT-RAM register files.
+let mandelScatterDef (name: string) (width: int) (pixels: int) (maxIter: int) (fracBits: int) (threads: int) (lanes: int) =
+    mandelScatterDefOn Distributed name width pixels maxIter fracBits threads lanes

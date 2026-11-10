@@ -88,6 +88,11 @@ type Need =
     /// never seen, which is the conflation the snapshot path has always
     /// meant.
     | SurfaceOut of name: string * fields: (string * NumberFormat) list * rows: int
+    /// A number the design was built with that a host has to agree with — a
+    /// frame's width, an iteration cap. No wire and no register: it reaches
+    /// the host as a constant in the seam, so a driver reads it rather than
+    /// writing it down a second time.
+    | Fact of name: string * value: uint64
 
 /// Rows into the design, under a name.
 let streamIn name fields = StreamIn(name, fields)
@@ -103,6 +108,9 @@ let valueFrom name format starting = ValueIn(name, format, starting)
 
 /// An action the host fires.
 let pulseIn name = PulseIn name
+
+/// A number the host must agree with.
+let fact name value = Fact(name, value)
 
 /// A value the design reports.
 let valueOut name format = ValueOut(name, format)
@@ -273,6 +281,10 @@ type Needs internal (fit: Fit, boundary: Boundary option) =
         | Some b -> b.pulseIn name
         | None -> lit 0UL 1
 
+    /// A number the host must agree with, stated once here and read from the
+    /// seam there.
+    member _.fact(name: string, value: uint64) : unit = declared.Add(Fact(name, value))
+
     /// A value the design reports: hand it the value, once.
     member _.valueOut(name: string, format: NumberFormat) : Expr -> unit =
         declared.Add(ValueOut(name, format))
@@ -395,6 +407,8 @@ let private carrierOfNeed (path: DataPath) (need: Need) =
     | TableIn(name, _, _, _, _) -> carrierFor path EveryValueIn name
     // A surface leaves the design the way its rows out do.
     | SurfaceOut(name, _, _) -> carrierFor path EveryStreamOut name
+    // Nothing carries a fact; the seam states it.
+    | Fact _ -> None
 
 /// Every carrier bound to a need, in binding order.
 let internal carriersOfNeed (path: DataPath) (need: Need) =
@@ -406,6 +420,7 @@ let internal carriersOfNeed (path: DataPath) (need: Need) =
     | ValueOut(name, _) -> carriersFor path EveryValueIn name
     | TableIn(name, _, _, _, _) -> carriersFor path EveryValueIn name
     | SurfaceOut(name, _, _) -> carriersFor path EveryStreamOut name
+    | Fact _ -> []
 
 let internal carrierOfInput (path: DataPath) (d: Design) =
     d.needs
@@ -456,6 +471,13 @@ let pulsesOf (d: Design) =
     d.needs
     |> List.choose (function
         | PulseIn name -> Some name
+        | _ -> None)
+
+/// The numbers the host must agree with, in declaration order.
+let factsOf (d: Design) =
+    d.needs
+    |> List.choose (function
+        | Fact(name, value) -> Some(name, value)
         | _ -> None)
 
 /// The values the design reports, in declaration order.
@@ -1491,7 +1513,7 @@ let private playInto
         payload =
             List.zip pins beats.payload
             |> List.map (fun ((name, f), e) ->
-                let field = wire $"play_{name}" f.totalWidth
+                let field = wire $"play_field_{name}" f.totalWidth
                 mux armed (widened f) e ==> field
                 field) }
 
@@ -1575,13 +1597,13 @@ let private playRows
         |> List.fold
             (fun (fields, remaining: Expr list) (name, f) ->
                 let lanes, rest = List.splitAt (lanesOf f) remaining
-                let field = wire $"play_{name}" f.totalWidth
+                let field = wire $"play_field_{name}" f.totalWidth
 
                 let joined =
                     match lanes with
                     | [ one ] -> one
                     | several ->
-                        let all = wire $"play_{name}_lanes" (laneWidth * several.Length)
+                        let all = wire $"play_field_{name}_lanes" (laneWidth * several.Length)
                         (several |> List.rev |> List.reduce cat) ==> all
                         all
 
@@ -2782,10 +2804,9 @@ let private registersTop (board: Board) (path: DataPath) (d: Design) : BoardTop 
       target = targetOf board.part
       seamExtras = [] }
 
-/// The design on a board, the way the path says.
-let boardTop (board: Board) (path: DataPath) (d: Design) : BoardTop =
-    checkBoard board
-
+/// The design handed its clocking on this board and path, where it asks
+/// for one.
+let private clocked (board: Board) (path: DataPath) (d: Design) : Design =
     // The rate the design is made for: the converter's where a converter
     // paces the rows, and the nominal one where the host does — rows in a
     // file or on a link carry no rate of their own, and a coefficient
@@ -2801,6 +2822,10 @@ let boardTop (board: Board) (path: DataPath) (d: Design) : BoardTop =
             let rate = if onConverter then boardRate board nominalRate else nominalRate
             resolve (Fit({ rate = rate; cyclesPerBeat = int (float board.fabricHz / rate) }, board))
 
+    d
+
+/// The top that carries a clocked design's needs.
+let private placed (board: Board) (path: DataPath) (d: Design) : BoardTop =
     let carriesRows =
         d.needs
         |> List.exists (function
@@ -2838,6 +2863,18 @@ let boardTop (board: Board) (path: DataPath) (d: Design) : BoardTop =
             $"{d.name}: rows in and addressed beats out is not built yet — the read side and the scatter side are each built, and nothing has yet wanted both"
     | Some inCarrier, Some outCarrier ->
         failwith $"{d.name}: nothing builds {inCarrier} in and {outCarrier} out"
+
+/// The design on a board, the way the path says. Its facts join the seam
+/// here, whichever top carries it, so every path states them the same way.
+let boardTop (board: Board) (path: DataPath) (d: Design) : BoardTop =
+    checkBoard board
+    let d = clocked board path d
+    let top = placed board path d
+
+    { top with
+        seamExtras =
+            top.seamExtras
+            @ [ for name, value in factsOf d -> $"pub const {upperSnake name}: u64 = %d{value};" ] }
 
 /// The design on a board, the way the path says: the converter on the pins,
 /// or the host's memory, or its link. Sizes derived, none named.

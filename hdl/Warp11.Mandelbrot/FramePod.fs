@@ -238,9 +238,8 @@ let mandelFramePodHarness1 =
             gathered.frameDone ==> doneOut
             streamSink beatPorts gathered.beats)
 
-/// The near-silicon composition: the frame pod behind the AXI master with the
-/// egress link probed — everything `MandelFrameAxi` will be, minus the control
-/// slave (ports where the registers will go). 64×48 at maxIter 48, FOUR lanes,
+/// The frame pod behind the AXI master with the egress link probed, its
+/// controls as ports. 64×48 at maxIter 48, FOUR lanes,
 /// so the clustered dispatch/merge trees run with their register nodes live
 /// (2 clusters of 2).
 let mandelFrameDdr =
@@ -259,7 +258,7 @@ let mandelFrameDdr =
         (fun (start, cxOrigin, cyOrigin, dx, dy, fbBaseAddr, writeBusPorts, busyOut, doneOut) ->
         let addrWidth = lanePodAddrWidth 64 48
 
-        // The framebuffer as a window, as in `FrameAxi`. The index is the
+        // The framebuffer as a window. The index is the
         // beat's byte offset with its low four bits dropped — a 128-bit beat is
         // sixteen bytes and the window shifts them straight back — so where the
         // buffer starts and how far apart beats are stay the window's business.
@@ -274,9 +273,8 @@ let mandelFrameDdr =
 
         gathered.busy ==> busyOut
 
-        // The same completion as `FrameAxi`'s, because this design is that one
-        // minus the control slave — a `frameDone` meaning something weaker here
-        // would make the rehearsal rehearse the wrong thing. It is a level, not
+        // A `frameDone` that means every word landed, not merely that the last
+        // beat left the gatherer. It is a level, not
         // the gatherer's pulse: sticky from the last beat gathered, cleared on
         // `start`, and held low until the framebuffer says every word landed.
         let allGathered = regBit "all_gathered"

@@ -193,24 +193,27 @@ DDR path work" stay a separate question from "did the compressor work".
 `audioBatchAxi` is the one above: a block of frames in DDR, through the 8-band
 compressor, back to DDR. No codec, no real time, and a result you can diff.
 
-The other four are a live I2S chain over a Pmod I2S2, and they form a bring-up
+The rest are a live I2S chain over a Pmod I2S2, and they form a bring-up
 ladder — the order to build them in, if you have the hardware:
 
 | app | what it proves |
 |---|---|
-| `audioToneAxi` | the DAC works. A tone generator into the transmitter, playing 440 Hz on load — the smallest thing that makes a sound. |
-| `audioPassthruAxi` | the ADC works. Line in to line out, plus two diagnostic taps. |
-| `audioGainAxi` | the DSP seam works. One stage between receiver and transmitter. |
+| `tone` | the DAC works. A tone generator into the transmitter, playing 440 Hz on load — the smallest thing that makes a sound. |
+| `passthru` | the ADC works. Line in to line out, plus two readings. |
+| `gain` | the DSP seam works. One stage between receiver and transmitter. |
 | `audioEffectsAxi` | the whole chain: volume → EQ → compressor → limiter. |
 
-The passthru's taps exist because **"no sound" has two completely different
-causes** — a silent ADC and a dead transmitter — and on a board you cannot see
-which. `receivedCount` moving proves the ADC is clocking; `lastLeft` carrying
-something other than zero proves it is hearing.
+The first two are designs in `Rungs.fs`, built for the KV260 by
+`-- build tone kv260 pins out/` (below). The gain is the drawn design in
+`Warp11.Placement.Canvas/examples/gain.json`, built the same way by
+`Warp11.Placement -- build …/gain.json kv260 pins out/`; its `volume`
+starts at 0, so set it before expecting sound — unity is
+`warp11_regs --uio gain_patch_axi --layout gain_patch_axi_layout.rs --set volume=256`.
 
-Only `audioBatchAxi` and `audioToneAxi` have a working bitstream path today;
-the two that *receive* audio do not, for one specific reason — see
-[To the board](#to-the-board).
+The passthru's readings exist because **"no sound" has two completely
+different causes** — a silent ADC and a dead transmitter — and on a board you
+cannot see which. `receivedCount` moving proves the ADC is clocking;
+`lastLeft` carrying something other than zero proves it is hearing.
 
 ### The same two rungs as designs, for any board
 
@@ -224,9 +227,12 @@ reach the host:
 | `link` / `countlink` (iCEBreaker, Icepi, Go Board) | played words in, streamed frames out, on the UART beside the register map | `warp11_batch … --serial` |
 | `pins` | the I2S converter on the board's header, the Pmod I2S2 | nothing: it is heard |
 
-`-- build tone out/` writes the directory for `Rungs.board` — one line to
-change for another of the five boards; `Rungs.rungs` carries each rung's
-mapping. The converter path is where
+`-- build tone out/` writes the directory for the rung's own mapping
+(`Rungs.rungs`, the iCEBreaker); `-- build <rung> <board> <path> out/` names
+both on the line — `build tone kv260 pins out/` is the tone out of the
+KV260's Pmod I2S2, `build passthru kv260 memory out/` a WAV through its DDR.
+A board is one of `kv260`, `icebreaker`, `icepi`, `goboard`, `de10lite` or a
+board file; a path is `pins`, `memory`, `count`, `link` or `countlink`. The converter path is where
 these started (the iCEBreaker's hand tops in `hardware/ice40/`, retired
 2026-11-07), and the living checks still frame the passthru through the
 iCEBreaker's I2S and count the ratios off its pins:
@@ -390,28 +396,25 @@ coherence would turn `sync_for_cpu`/`sync_for_device` into no-ops and the host
 would read stale audio out of its own cache — silently, and only sometimes. The
 driver does the syncs for real instead.
 
-### `audio-tone` — builds, needs a codec to hear
-
-Retargeted 2026-08-19. The scaffolding had been written against the hand-written
-Kotlin wrapper, so the TCL sourced `../build/AudioTone_axi.v` and the block
-design referenced a module of that name; both now name `AudioToneAxi`, which is
-what this project emits. The BD's pin loop was already `{mclk lrclk sclk sdin}`
-— exactly the four ports the emitted top drives and the four the XDC constrains
-— so nothing structural needed changing.
+### `tone` and `passthru` — generated
 
 ```sh
-cd hardware/vivado && vivado -stack 2000 -mode batch -source build_audio_tone_axi.tcl
-cd ../xmutil && ./package_audio_tone.sh
+dotnet run --project Warp11.Effects -- build tone kv260 pins out/
+out/build.sh
 ```
+
+The directory carries the block design, the pin constraints, the overlay and
+the packaging, all derived from the design and the board — the hand TCL and
+xmutil apps (`audio-tone`, `audio-passthru`) went with the hand tops.
 
 ### The receiving designs — fixed 2026-09-06
 
-`audioPassthruAxi`, `audioGainAxi` and `audioEffectsAxi` did not build, and it
-was **not** a filename this time.
+The receiving designs did not build, and it was **not** a filename this
+time.
 
 **The ADC side was unclocked.** The Pmod I2S2's converters are separate chips on
 separate connector rows with separate clock inputs — the DAC on J2.1-4, the ADC
-on J2.7-10 — so `audio_gain_pins.xdc` / `audio_passthru_pins.xdc` bind eight
+on J2.7-10 — so the receiving designs' pin constraints bind eight
 pins, including `mclk2` / `sclk2` / `lrclk2` for the ADC. `codecPorts` declared
 only the DAC's four plus `sdout` as an input, leaving the ADC's three clocks
 undriven and the constraint files referring to ports that did not exist.
@@ -435,12 +438,12 @@ here either. What moved in the emitted Verilog is internal instance names
 (`rx` → `audio_rx`) and the order the clock assigns are written; the top-level
 port lists, the module set and the generated Rust seams are byte-identical.
 
-There is also no `audio-effects` xmutil app — only `audio-tone`, `audio-gain`
-and `audio-passthru` exist, and they predate this code.
+There is no `audio-effects` xmutil app.
 
 ## Files
 
-- `Wrappers.fs` — the four register maps and the four designs
+- `Wrappers.fs` — the effects register map and its design
+- `Rungs.fs` — the tone and the passthru as designs, for any board
 - `Ice.fs` — the same front end on an iCEBreaker: no slave, LEDs for the taps
 - `Main.fs` — the checks, `diff`, and `hardware`
 - `../Warp11/Audio.fs` — the stdlib tier all of this is assembled from

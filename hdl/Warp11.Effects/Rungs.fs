@@ -68,23 +68,47 @@ let tone: BoardTop.Design =
             generated.ready ==> beats.ready
             io.out generated)
 
-/// What the passthru asks of the world: rows in, the same rows out.
+/// What the passthru asks of the world: rows in, the same rows out, and two
+/// readings of what arrived.
 type PassthruIo =
     { input: BoardTop.Incoming<Expr * Expr>
-      out: Stream<Expr * Expr> -> unit }
+      out: Stream<Expr * Expr> -> unit
+      /// Rows taken in since load. Moving says the input is clocking.
+      receivedCount: Expr -> unit
+      /// The left sample of the last row taken. Not zero says it carries
+      /// something other than silence.
+      lastLeft: Expr -> unit }
 
 /// Line in to line out, or a WAV to the same WAV: the receiver's stream
-/// handed straight to the transmitter. The body is one line long, which is
-/// the whole claim — the `Stream` carries its own handshake, so passing
+/// handed straight to the transmitter. The pipeline is one line long, which
+/// is the whole claim — the `Stream` carries its own handshake, so passing
 /// audio through is `input` into `out` with nothing in between, and adding
 /// a stage later is adding a line.
+///
+/// The two readings are the bring-up's: "no sound" has two causes that look
+/// the same from a speaker — an input that never clocks and an output that
+/// never sends — and these say which, from the host, on any board.
 let passthru: BoardTop.Design =
     BoardTop.design
         "Passthru"
         (fun n ->
             { input = n.streamIn ("in", stereo)
-              out = n.streamOut ("out", stereo) })
-        (fun io -> io.input.stream |> io.out)
+              out = n.streamOut ("out", stereo)
+              receivedCount = n.valueOut ("receivedCount", unsignedInt 32)
+              lastLeft = n.valueOut ("lastLeft", signedInt sampleWidth) })
+        (fun io ->
+            let received = io.input.stream
+            let left, _ = received.payload
+            let count = reg "received_count" 32
+            let lastLeft = reg "last_left" (width left)
+
+            If (received.valid &&& received.ready) (fun () ->
+                count + lit 1UL 32 ==> count
+                left ==> lastLeft)
+
+            io.receivedCount count
+            io.lastLeft lastLeft
+            received |> io.out)
 
 /// A rung by the name a verb takes, with its mapping for a board: the tone
 /// is a frame the design draws, so it is counted in; the passthru is rows

@@ -52,6 +52,7 @@ use warp11_runtime::RegisterWindow;
 use warp11_host::udmabuf::{find_uio, Udmabuf};
 use warp11_host::wav::{from_sample, read_wav, to_sample, write_wav};
 use warp11_runtime::batch::{BatchDevice, BatchError};
+use warp11_runtime::frame::{FrameShape, BEATS_PER_BURST, PIXELS_PER_BEAT};
 use warp11_host::pgm::{read_pgm, write_pgm};
 
 /// Rows a burst holds for a stereo boundary: what `frameCount` must be a
@@ -60,10 +61,6 @@ const FRAMES_PER_BURST: usize = 32;
 const BYTES_PER_FRAME: usize = 8;
 /// Where the rows start in the bridge's fake DDR.
 const SIM_SRC: usize = 0x1000;
-/// Pixels a beat of a drawn frame carries, and the beats a burst holds —
-/// what the count must be a multiple of.
-const PIXELS_PER_BEAT: usize = 16;
-const BEATS_PER_BURST: usize = 16;
 /// Words played before their replies are read back: well inside the
 /// fabric's played buffer (4 096 words) and inside a tty's input buffer at
 /// seven bytes a streamed frame.
@@ -211,41 +208,10 @@ fn unstage(bytes: &[u8], frames: usize) -> Vec<(i16, i16)> {
         .collect()
 }
 
-/// A frame's shape: the width rounded up to whole chunks; the chunks the
-/// fabric is asked for, padded to whole bursts — the rows past the frame
-/// are drawn and dropped, as a recording's padding is; and the beats that
-/// come back, a chunk's worth each.
-struct FrameShape {
-    padded_width: usize,
-    chunks: usize,
-    padded_chunks: usize,
-    beats_per_chunk: usize,
-}
-
-impl FrameShape {
-    fn beats(&self) -> usize {
-        self.chunks * self.beats_per_chunk
-    }
-
-    fn bytes_back(&self) -> usize {
-        self.padded_chunks * self.beats_per_chunk * PIXELS_PER_BEAT
-    }
-}
-
-fn frame_shape(width: usize, height: usize, chunk: usize) -> FrameShape {
-    let padded_width = width.div_ceil(chunk) * chunk;
-    let chunks = height * padded_width / chunk;
-    let padded_chunks = chunks.div_ceil(BEATS_PER_BURST) * BEATS_PER_BURST;
-    FrameShape { padded_width, chunks, padded_chunks, beats_per_chunk: chunk / PIXELS_PER_BEAT }
-}
-
-/// The frame out of the bytes the fabric wrote: rows of the padded width,
-/// cropped to the width asked for.
-fn crop(bytes: &[u8], width: usize, height: usize, padded_width: usize) -> Vec<u8> {
-    let mut pixels = Vec::with_capacity(width * height);
-    for r in 0..height {
-        pixels.extend_from_slice(&bytes[r * padded_width..r * padded_width + width]);
-    }
+/// The frame out of the bytes the fabric wrote.
+fn crop(bytes: &[u8], shape: &FrameShape) -> Vec<u8> {
+    let mut pixels = vec![0u8; shape.pixels()];
+    shape.crop_into(bytes, &mut pixels);
     pixels
 }
 
@@ -305,7 +271,7 @@ fn staged(args: &Args, frames: &[(i16, i16)]) -> (Vec<u8>, usize, usize) {
             (bytes, padded, out_len)
         }
         Source::Frame { width, height } => {
-            let shape = frame_shape(*width, *height, args.chunk);
+            let shape = FrameShape::new(*width, *height, args.chunk);
             (Vec::new(), shape.padded_chunks, shape.bytes_back())
         }
         // Padded to whole bursts as a recording is; the rows past the count
@@ -330,8 +296,8 @@ fn unstaged(args: &Args, frames: &[(i16, i16)], bytes: &[u8]) -> Output {
     match &args.input {
         Source::Wav(_) => Output::Frames(unstage(bytes, frames.len())),
         Source::Frame { width, height } => {
-            let shape = frame_shape(*width, *height, args.chunk);
-            Output::Pixels(crop(&bytes[..shape.beats() * PIXELS_PER_BEAT], *width, *height, shape.padded_width))
+            let shape = FrameShape::new(*width, *height, args.chunk);
+            Output::Pixels(crop(bytes, &shape))
         }
         Source::Count(n) => Output::Frames(unstage(bytes, *n)),
         Source::Pgm(_) => {
@@ -475,7 +441,8 @@ fn run_serial(args: &Args, frames: &[(i16, i16)]) -> Result<Output, String> {
     }
 
     if let Source::Frame { width, height } = args.input {
-        return draw_over_link(args, &mut window, &registers, width, height, record_arm, sent, record_dropped);
+        let beat_words = seam::read_const(layout, &format!("{}_WORDS", seam::screaming(&recorder)))?;
+        return draw_over_link(args, &mut window, &registers, width, height, beat_words, record_arm, sent, record_dropped);
     }
     if let Source::Count(n) = args.input {
         let words = count_over_link(args, &mut window, &registers, n, 2 * n, record_arm, sent, record_dropped)?;
@@ -635,21 +602,59 @@ fn count_over_link(
 /// `…CountStart`, `…CountBusy`, named for the input need — and the pixels
 /// come back as streamed frames, four a word, low byte first, a chunk's
 /// beats in order. No burst padding: the link takes rows one at a time.
+/// A frame drawn over the link. A beat comes back as its pixels — in
+/// raster order, the order the design kept — or as the index of the beat it
+/// belongs in and then its pixels, in whatever order the lanes finished, for
+/// the host to place. The seam's words a beat says which: one more than the
+/// pixels' words is the index.
 fn draw_over_link(
     args: &Args,
     window: &mut SerialWindow,
     registers: &[(String, usize)],
     width: usize,
     height: usize,
+    beat_words: Option<u32>,
     record_arm: usize,
     sent: usize,
     record_dropped: usize,
 ) -> Result<Output, String> {
-    let shape = frame_shape(width, height, args.chunk);
-    let words = shape.beats() * (PIXELS_PER_BEAT / 4);
+    let shape = FrameShape::new(width, height, args.chunk);
+    let pixel_words = PIXELS_PER_BEAT / 4;
+    let per_beat = beat_words.map_or(pixel_words, |w| w as usize);
+    let indexed = match per_beat - pixel_words {
+        0 => false,
+        1 => true,
+        _ => return Err(format!("a beat of {per_beat} words is neither {pixel_words} words of pixels nor an index and them")),
+    };
+    let words = shape.beats() * per_beat;
     let back = count_over_link(args, window, registers, shape.chunks, words, record_arm, sent, record_dropped)?;
-    let bytes: Vec<u8> = back.iter().flat_map(|w| w.to_le_bytes()).collect();
-    Ok(Output::Pixels(crop(&bytes, width, height, shape.padded_width)))
+    let bytes = if indexed { place_by_index(&back, shape.beats())? } else { back.iter().flat_map(|w| w.to_le_bytes()).collect() };
+    Ok(Output::Pixels(crop(&bytes, &shape)))
+}
+
+/// Beats that each name where they go, as the frame they make: an index
+/// word, then the pixels low word first. Every place filled exactly once, or
+/// it says which was not.
+fn place_by_index(words: &[u32], beats: usize) -> Result<Vec<u8>, String> {
+    let per_beat = 1 + PIXELS_PER_BEAT / 4;
+    let mut frame = vec![0u8; beats * PIXELS_PER_BEAT];
+    let mut filled = vec![false; beats];
+    for beat in words.chunks_exact(per_beat) {
+        let index = beat[0] as usize;
+        if index >= beats {
+            return Err(format!("a beat names place {index}, past the frame's {beats}"));
+        }
+        if std::mem::replace(&mut filled[index], true) {
+            return Err(format!("two beats name place {index}"));
+        }
+        for (k, w) in beat[1..].iter().enumerate() {
+            frame[index * PIXELS_PER_BEAT + 4 * k..][..4].copy_from_slice(&w.to_le_bytes());
+        }
+    }
+    match filled.iter().position(|f| !f) {
+        Some(missing) => Err(format!("no beat came for place {missing}")),
+        None => Ok(frame),
+    }
 }
 
 fn main() {
@@ -696,5 +701,35 @@ fn main() {
             eprintln!("{e}");
             std::process::exit(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A beat for place `i`: the index, then four words whose bytes all say `i`.
+    fn beat(i: u32) -> Vec<u32> {
+        let w = u32::from_le_bytes([i as u8; 4]);
+        vec![i, w, w, w, w]
+    }
+
+    #[test]
+    fn beats_land_where_they_say_whatever_order_they_came_in() {
+        let words: Vec<u32> = [2, 0, 3, 1].iter().flat_map(|&i| beat(i)).collect();
+        let frame = place_by_index(&words, 4).unwrap();
+        for i in 0..4 {
+            assert!(frame[i * PIXELS_PER_BEAT..(i + 1) * PIXELS_PER_BEAT].iter().all(|&b| b == i as u8), "place {i}");
+        }
+    }
+
+    #[test]
+    fn a_place_filled_twice_or_never_is_said() {
+        let twice: Vec<u32> = [0, 1, 1].iter().flat_map(|&i| beat(i)).collect();
+        assert_eq!(place_by_index(&twice, 3).unwrap_err(), "two beats name place 1");
+        let missing: Vec<u32> = [0, 2].iter().flat_map(|&i| beat(i)).collect();
+        assert_eq!(place_by_index(&missing, 3).unwrap_err(), "no beat came for place 1");
+        let past: Vec<u32> = beat(5);
+        assert_eq!(place_by_index(&past, 3).unwrap_err(), "a beat names place 5, past the frame's 3");
     }
 }

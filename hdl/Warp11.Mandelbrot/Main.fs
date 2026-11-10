@@ -1,5 +1,5 @@
-/// Dispatch: the pod render, the seam emit, the sim server, and the
-/// differential-oracle writer for the pod designs.
+/// Dispatch: the living checks, the frame's build directory, the Sim renders
+/// and probes, and the differential-oracle writer for the designs here.
 module Warp11.Mandelbrot.Main
 
 open System.Numerics
@@ -8,11 +8,9 @@ open Warp11.Mandelbrot.Lane
 open Warp11.Mandelbrot.Harness
 open Warp11.Mandelbrot.Pod
 open Warp11.Mandelbrot.FramePod
-open Warp11.Mandelbrot.FrameAxi
 
 let private designs () =
     [ mandelPod.def
-      mandelPodAxi.def
       mandelStepHarness.def
       mandelLaneHarness.def
       mandelCoalescerHarness.def
@@ -20,8 +18,24 @@ let private designs () =
       mandelLanePodHarness.def
       mandelFramePodHarness.def
       mandelFramePodHarness1.def
-      mandelFrameDdr.def
-      mandelFrameAxiScaled.def ]
+      mandelFrameDdr.def ]
+
+/// What the oracle runs: the designs above at the default length, and the
+/// frame that is built, small — a flat farm and the clustered one above
+/// `fanFlatMax` — plus the KV260 top the generator puts around it.
+///
+/// A frame beat takes a few hundred cycles to come back out, so the frames
+/// run 800: under the random stimulus that is ~56 beats out of the flat farm
+/// and ~600 out of the clustered one, where 50 cycles asserted an empty
+/// pipeline. The top stays at the default, because no length helps it:
+/// random AXI-Lite stimulus never completes the handshakes that set a count
+/// and start a batch, so what it checks is the slave, the registers and an
+/// idle master — the frame inside is the two above.
+let private diffDesigns () =
+    [ for d in designs () -> d, diffCycles ]
+    @ [ (mandelScatterDef "MandelFrame3" 64 32 48 28 8 3).def, 800
+        (mandelScatterDef "MandelFrame20" 64 32 48 28 8 20).def, 800
+        (BoardTop.boardTop kv260 viaScatter (Chunked.mandelScatter "MandelFrame" 64 32 48 28 8 2)).top, diffCycles ]
 
 let private mainDemo () =
     for d in designs () do
@@ -278,37 +292,22 @@ let private mainDemo () =
     let frame1Ok = done1 && frame1Fb = frameFb
     printfn $"frame pod (1 lane) matches:   %b{frame1Ok} (%d{frame1Cycles} cycles)"
 
-    // The chunked design — the canvas's four boxes in typed form: 32×4 at
-    // maxIter 48, over one lane and then three, every pixel bit-exact
-    // against the twin and in raster order, which is the farm keeping order.
-    let chunkView = (cx0Q, cyQ 0, dxQ, (toQ -0.25))
-    let chunkTwin = Chunked.renderTwin 32 4 16 48 28 chunkView
+    // The frame as chunk beats, on the KV260's counted top against the
+    // behavioural DDR: one lane, three, and twenty — above `fanFlatMax`,
+    // where the farm clusters — every pixel at its place. A chunk is at
+    // least two beats, so 32-pixel chunks over a 64×8 frame.
+    let chunkView = (cx0Q, cyQ 0, toQ 0.125, toQ -0.25)
+    let chunkTwin = Chunked.renderTwin 64 8 32 48 28 chunkView
 
-    for lanes in [ 1; 3 ] do
-        let pixels, cycles = Chunked.renderInSim 32 4 16 48 28 8 lanes chunkView 20000
-        let ok = pixels = chunkTwin
-        printfn $"chunked design (%d{lanes} lanes) vs twin: %b{ok} (%d{cycles} cycles)"
+    for lanes in [ 1; 3; 20 ] do
+        let pixels, cycles, top = Chunked.renderThroughBoardTop 64 8 32 48 28 8 lanes chunkView
+        printfn $"frame top vs twin ({top.name}, %d{lanes} lanes): %b{pixels = chunkTwin} (%d{cycles} cycles)"
 
-    // Above `fanFlatMax` the farm clusters: twenty lanes over a 64×8 frame,
-    // the order kept through two levels of queue and a register each way.
-    let wideTwin = Chunked.renderTwin 64 8 16 48 28 chunkView
-    let widePixels, wideCycles = Chunked.renderInSim 64 8 16 48 28 8 20 chunkView 40000
-    let wideOk = widePixels = wideTwin
-    printfn $"chunked design (20 lanes, clustered) vs twin: %b{wideOk} (%d{wideCycles} cycles)"
-
-    // The same design on the KV260's counted path, in the Sim against the
-    // behavioural DDR: the host writes a count and a view, the frame lands.
-    // 32×8: sixteen beats, the burst the write side's rows must fill.
-    let boardTwin = Chunked.renderTwin 32 8 16 48 28 chunkView
-    let boardPixels, boardCycles, boardTop = Chunked.renderThroughBoardTop 32 8 16 48 28 8 2 chunkView
-    let boardOk = boardPixels = boardTwin
-    printfn $"counted board top vs twin ({boardTop.name}, 2 lanes): %b{boardOk} (%d{boardCycles} cycles)"
-
-    // The same design over the Icepi's host link: the count written over the
-    // UART, the pixels back as streamed frames, the frame the twin's.
-    let linkPixels, linkCycles, linkBusy, linkTop = Chunked.renderThroughLink 32 8 16 48 28 8 2 chunkView
-    let linkOk = linkPixels = boardTwin && linkBusy = 0UL
-    printfn $"counted link top vs twin ({linkTop.name}, 2 lanes): %b{linkOk} (%d{linkCycles} cycles)"
+    // The same over the Icepi's host link: each beat back with its index,
+    // placed by it.
+    let linkPixels, linkCycles, linkBusy, linkTop = Chunked.renderThroughLink 64 8 32 48 28 8 2 chunkView
+    let linkOk = linkPixels = chunkTwin && linkBusy = 0UL
+    printfn $"frame link top vs twin, placed by index ({linkTop.name}, 2 lanes): %b{linkOk} (%d{linkCycles} cycles)"
 
     0
 
@@ -342,7 +341,7 @@ let main argv =
             printfn "try: %s" (String.concat ", " (List.map fst debuggable))
             1
     | [| "diff"; outDir |] ->
-        writeDiff (designs ()) outDir
+        writeDiffWith (diffDesigns ()) outDir
         0
     | [| "mandel"; outPath |] ->
         Host.runMandel outPath
@@ -350,23 +349,13 @@ let main argv =
     | [| "frame"; outPath |] ->
         FrameHost.renderFrame outPath
         0
-    | [| "frameaxi"; outPath |] ->
-        FrameHost.runFrameAxi outPath
-        0
-    // The same render under random memory timing. The picture must not change:
-    // a frame that depends on when DDR answered is one that will be right here
-    // and wrong on a board — which is how the first render came out sheared.
-    | [| "frameaxi-jitter" |] ->
-        let ok = FrameHost.frameIsIndifferentToMemoryTiming ()
-        printfn $"frame is indifferent to memory timing (4 seeds): %b{ok}"
-        if ok then 0 else 1
     | [| "lanescale" |] ->
         FrameHost.laneScale [ (64, 208, 48, 26); (64, 208, 48, 52); (64, 208, 48, 104) ]
         0
     | [| "lanescale"; w; h; mi; l |] ->
         FrameHost.laneScale [ (int w, int h, int mi, int l) ]
         0
-    // The same through the counted board top and the write-only DDR model.
+    // The frame through the counted board top and the behavioural DDR.
     | [| "boardscale"; w; h; px; mi; l |] ->
         let w, h, pixels, maxIter, lanes = int w, int h, int px, int mi, int l
         let toQ (v: float) = uint64 (int64 (v * 268435456.0)) &&& 0xFFFFFFFFUL
@@ -375,42 +364,10 @@ let main argv =
         let ok = frame = Chunked.renderTwin w h pixels maxIter 28 view
         printfn $"[BoardScale] {top.name} %d{w}x%d{h}/px%d{pixels}/m%d{maxIter}/l%d{lanes}: %d{cycles} cycles | bit-exact %b{ok}"
         0
-    // The chunked design at the same view as `lanescale`, for the two to be
-    // set beside each other: cycles a frame, and the Sim's speed over it.
-    | [| "chunkscale"; w; h; px; mi; l |] ->
-        let w, h, pixels, maxIter, lanes = int w, int h, int px, int mi, int l
-        let toQ (v: float) = uint64 (int64 (v * 268435456.0)) &&& 0xFFFFFFFFUL
-        let view = (toQ -2.25, toQ -1.125, toQ (3.0 / float w), toQ (2.25 / float h))
-        let sw = System.Diagnostics.Stopwatch.StartNew()
-        let frame, cycles = Chunked.renderInSim w h pixels maxIter 28 8 lanes view 4_000_000
-        sw.Stop()
-        let ok = frame = Chunked.renderTwin w h pixels maxIter 28 view
-        printfn $"[ChunkScale] %d{w}x%d{h}/px%d{pixels}/m%d{maxIter}/l%d{lanes}: %d{cycles} cycles | bit-exact %b{ok} | %d{sw.ElapsedMilliseconds} ms (%.0f{float cycles / float sw.ElapsedMilliseconds * 1000.0} cyc/s)"
-        0
     | [| "cyclesweep" |] ->
         FrameHost.cycleSweep ()
         0
-    | [| "frameserve" |] ->
-        FrameHost.frameserve ()
-        0
-    // The ordered counted path beside the scattered one, same configuration,
-    // same behavioural DDR: `scatterscale w h px maxIter lanes`.
-    | [| "scatterscale"; w; h; px; mi; l |] ->
-        let w, h, pixels, maxIter, lanes = int w, int h, int px, int mi, int l
-        let toQ (v: float) = uint64 (int64 (v * 268435456.0)) &&& 0xFFFFFFFFUL
-        let view = (toQ -2.25, toQ -1.125, toQ (3.0 / float w), toQ (2.25 / float h))
-        let twin = Chunked.renderTwin w h pixels maxIter 28 view
-        let ordered, orderedCycles, _ = Chunked.renderThroughBoardTop w h pixels maxIter 28 8 lanes view
-        let scattered, scatterCycles, top = Chunked.renderThroughScatterTop w h pixels maxIter 28 8 lanes view
-        printfn $"[viaScatter] %d{w}x%d{h}/px%d{pixels}/m%d{maxIter}/l%d{lanes} ({top.name})"
-        printfn $"  ordered   %d{orderedCycles} cycles | bit-exact %b{ordered = twin}"
-        printfn $"  scattered %d{scatterCycles} cycles | bit-exact %b{scattered = twin}"
-
-        if scatterCycles > 0 then
-            printfn $"  scattered is %.2f{float orderedCycles / float scatterCycles}x the ordered path's speed"
-
-        0
-    // The scatter path at several chunk widths: `chunksweep w h maxIter lanes`.
+    // The frame at several chunk widths: `chunksweep w h maxIter lanes`.
     // Each is checked against the twin, and the padded row is printed beside
     // the cycles because padding is pixels computed and thrown away — a wider
     // chunk that pads further can cost more than the tail it saves.
@@ -418,20 +375,17 @@ let main argv =
         let w, h, maxIter, lanes = int w, int h, int mi, int l
         let toQ (v: float) = uint64 (int64 (v * 268435456.0)) &&& 0xFFFFFFFFUL
         let view = (toQ -2.25, toQ -1.125, toQ (3.0 / float w), toQ (2.25 / float h))
-        printfn $"[ChunkSweep] %d{w}x%d{h}/m%d{maxIter}/l%d{lanes}, scatter path"
+        printfn $"[ChunkSweep] %d{w}x%d{h}/m%d{maxIter}/l%d{lanes}"
 
         for pixels in [ 128; 352; 704 ] do
             let padded = Lane.chunkedWidth pixels w
             let twin = Chunked.renderTwin w h pixels maxIter 28 view
-            let frame, cycles, _ = Chunked.renderThroughScatterTop w h pixels maxIter 28 8 lanes view
+            let frame, cycles, _ = Chunked.renderThroughBoardTop w h pixels maxIter 28 8 lanes view
             let perPixel = float cycles / float (padded * h)
 
             printfn
                 $"  chunk %4d{pixels}: %7d{cycles} cycles | padded row %d{padded} (%d{padded * h} px) | %.3f{perPixel} cyc/px | bit-exact %b{frame = twin}"
 
-        0
-    | [| "hardware"; repoRoot |] ->
-        Seam.writeHardware repoRoot
         0
     // The frame as the directory its board's toolchain builds from, from the
     // typed design: `bitstream <dir> [lanes]`, the board `Chunked.board` and
@@ -444,23 +398,13 @@ let main argv =
         printfn "%s" (Warp11.Mapping.write Chunked.mapping)
         0
     | [| "bitstream"; dir |]
-    | [| "bitstream"; dir; _ |]
-    | [| "bitstream-scatter"; dir |]
-    | [| "bitstream-scatter"; dir; _ |] ->
+    | [| "bitstream"; dir; _ |] ->
         let lanes = if argv.Length = 3 then Some(int argv[2]) else None
-
-        let out =
-            if argv[0] = "bitstream-scatter" then
-                Chunked.buildScatterDirectory dir (defaultArg lanes Chunked.lanes)
-            else
-                Chunked.buildDirectory dir lanes
+        let out = Chunked.buildDirectory dir lanes
 
         for file in out.files do
             printfn $"wrote {file}"
 
         printfn $"build with: {out.run}"
-        0
-    | [| "simserve" |] ->
-        Host.simserve ()
         0
     | _ -> mainDemo ()

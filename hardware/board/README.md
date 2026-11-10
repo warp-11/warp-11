@@ -48,7 +48,7 @@ is nothing to install on the board:
 cd runtime
 cargo build --release --target aarch64-unknown-linux-musl -p mandel-daemon
 scp target/aarch64-unknown-linux-musl/release/mandel-daemon ubuntu@192.168.1.172:warp11-driver/
-ssh ubuntu@192.168.1.172 'cd warp11-driver && ./mandel_frame_first_light'
+ssh ubuntu@192.168.1.172 'cd warp11-driver && ./mandel-daemon --board mandelbrot_batch --layout mandelbrot_batch_layout.rs check'
 ```
 
 A bitstream is the same shape. A design project writes the directory Vivado
@@ -145,7 +145,8 @@ there is no Gradle task, because there is no Gradle.
 
 cd runtime
 cargo build --release --target aarch64-unknown-linux-musl -p mandel-daemon
-scp target/aarch64-unknown-linux-musl/release/mandel-daemon ubuntu@192.168.1.172:warp11-driver/
+scp target/aarch64-unknown-linux-musl/release/mandel-daemon \
+    <build dir>/mandelbrot_batch_layout.rs ubuntu@192.168.1.172:warp11-driver/
 scp ../hardware/board/mandel-daemon.service ubuntu@192.168.1.172:.config/systemd/user/
 ssh ubuntu@192.168.1.172 'systemctl --user daemon-reload && systemctl --user restart mandel-daemon'
 ```
@@ -169,36 +170,35 @@ ssh ubuntu@192.168.1.172 'journalctl --user -u mandel-daemon -f'
 ssh ubuntu@192.168.1.172 'systemctl --user stop|start|restart mandel-daemon.service'
 ```
 
-The listen endpoint is the unit's one argument (`tcp/0.0.0.0:7448`) rather
-than an env knob. **7448, not 7447** — gol-daemon has that one, and keeping
+The unit's arguments are the uio name, the seam the bitstream's build
+directory wrote (`--layout`, the registers and the frame's shape) and the
+listen endpoint (`tcp/0.0.0.0:7448`). **7448, not 7447** — gol-daemon has that one, and keeping
 them apart means the units never fight over a port even though only one of
 their bitstreams can be loaded at a time.
 
-Prereq: the `mandel-frame` app must be loaded first (`sudo xmutil loadapp
-mandel-frame`), and `udmabuf.service` must have run. **Unlike the JVM units
+Prereq: the `mandelbrot-batch` app must be loaded first (`sudo xmutil loadapp
+mandelbrot-batch`), and `udmabuf.service` must have run. **Unlike the JVM units
 this one does not crash-loop forever** when they haven't: it exits non-zero
 with the reason, and `StartLimitBurst=3` stops systemd retrying after three
 tries in a minute. That is a direct answer to the failure §6 documents — an
 enabled server whose bitstream is missing burning a full core after a reboot
 and silently poisoning benchmarks.
 
-It also renders once at startup and refuses to serve if `frameDone` never
-rises, so the journal says whether the fabric is clocked and reaching DDR
-before any client connects:
+It also renders once at startup and refuses to serve if the render never
+finishes, so the journal says whether the fabric is clocked and reaching
+DDR before any client connects:
 
 ```
-render: 715938 cycles = 4.296 ms fabric (7.164 ms wall)
+render: 723389 cycles = 4.340 ms fabric (4.341 ms wall)
 startup render ok: the fabric is clocked and reaching DDR
-mandel-daemon up: fb 0x36100000, listening on tcp/0.0.0.0:7448
+mandel-daemon up: 1400x800 frame, arena 0x37200000, listening on tcp/0.0.0.0:7448
 ```
 
-**The framebuffer is udmabuf0, not a `memmap=` reservation.** The
-Kotlin-era instruction to append `memmap=4M$0x70000000` to
-`/boot/firmware/cmdline.txt` is obsolete and was already known not to work
-(see the udmabuf notes in §3): the frame accelerator writes to udmabuf0's
-physical address, which the daemon reads from `/sys/class/u-dma-buf/
-udmabuf0/phys_addr` and programs into `fbBaseAddr` on every render. Nothing
-needs reserving by hand.
+**The frame lands in the app's own arena**, `udmabuf-mandelbrot-batch`,
+which its overlay makes; the daemon finds it by name and programs its
+physical address as the batch's destination on every render. Nothing needs
+reserving by hand, and the Kotlin-era `memmap=` reservation in
+`/boot/firmware/cmdline.txt` is obsolete (see the udmabuf notes in §3).
 
 Unloading is lighter than GoL's protocol — this accelerator is
 demand-driven, so an idle daemon has nothing in flight and there is no
@@ -225,7 +225,7 @@ ssh ubuntu@192.168.1.172 'systemctl --user stop gol-daemon'
 ssh ubuntu@192.168.1.172 'cd warp11-driver && ./gol_disarm'
 
 # 2. Swap the bitstream (packaged from this repo; see §3 for the full recipe).
-ssh ubuntu@192.168.1.172 'sudo xmutil unloadapp && sudo xmutil loadapp mandel-frame'
+ssh ubuntu@192.168.1.172 'sudo xmutil unloadapp && sudo xmutil loadapp mandelbrot-batch'
 
 # 3. Start the incoming daemon.
 ssh ubuntu@192.168.1.172 'systemctl --user start mandel-daemon.service'

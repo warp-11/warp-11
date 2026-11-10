@@ -164,8 +164,7 @@ let mandelLane instName (baseValue: Expr) =
 /// startup and arbitration behavior, not just a idle `done`.
 /// What a boundary needs from the pod's machinery: the framebuffer for a read
 /// window, the count and done predicate for status, the merged beat for
-/// observability. Exprs, not ports — the caller decides what becomes a port
-/// (mandelPod) and what feeds a bus (mandelPodAxi).
+/// observability. Exprs, not ports — the caller decides what becomes a port.
 type private PodParts =
     { fb: Mem
       resultCount: Expr
@@ -220,40 +219,3 @@ let mandelPod =
 // The AXI wrapper and the register-map seam. The map is defined once, here,
 // and consumed twice: the slave elaboration below and the generated Rust
 // layout (a committed .rs is the F#↔Rust boundary — notes/FINDINGS.md).
-
-/// Reads as "F# pod v1" if you squint; the driver's first sanity read.
-let internal idMagic = 0xF5B0D001UL
-let internal idOffset = 0x00UL
-let internal doneOffset = 0x04UL
-let internal resultCountOffset = 0x08UL
-let internal scratchOffset = 0x0CUL
-let internal frameCyclesOffset = 0x10UL
-let internal fbOffset = 0x4000UL
-let internal apertureAddrWidth = 15
-
-/// The run-once pod behind an AXI-Lite boundary: ID, done, result count, a
-/// scratch register to smoke the write path, a frame-cycle counter that
-/// freezes at done (so fabric time is a measured number at first light), and
-/// the framebuffer as a 4096-word read window ending the aperture. The pod
-/// starts at reset release and runs once — the seam, notes/FINDINGS.md; start/soft
-/// reset is the named fast-follow.
-let mandelPodAxi =
-    defModuleClocked
-        axiClock
-        "MandelPodAxi"
-        (fun p -> axiLiteSlavePorts p apertureAddrWidth)
-        (fun slavePorts ->
-            let parts = mandelPodParts ()
-
-            let frameCycles = reg "frame_cycles" 32
-            If (bnot parts.donePredicate) (fun () -> frameCycles + lit 1UL 32 ==> frameCycles)
-
-            axiLiteSlaveOn
-                slavePorts
-                [ "scratch", scratchOffset, 32 ]
-                [ idOffset, lit idMagic 32
-                  doneOffset, parts.donePredicate
-                  resultCountOffset, parts.resultCount
-                  frameCyclesOffset, frameCycles ]
-                [ fbOffset, parts.fb ]
-            |> ignore)

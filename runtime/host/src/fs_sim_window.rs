@@ -36,9 +36,8 @@ impl FsSimWindow {
         Self::spawn_mode(fsproj, "simserve", "SIMSERVE")
     }
 
-    /// Spawn any serve mode with its ready marker — `frameserve`/`FRAMESERVE`
-    /// is the full-scale wrapper's bridge, whose protocol adds `C` (free
-    /// cycles) and `D` (DDR dump) to `R`/`W`.
+    /// Spawn any serve mode with its ready marker. A bridge to a design with a
+    /// master adds `C` (free cycles) and `D` (DDR dump) to `R`/`W`.
     pub fn spawn_mode(fsproj: &Path, mode: &str, marker: &str) -> Result<Self, FsSimError> {
         Self::spawn_with(fsproj, &[mode], marker)
     }
@@ -83,7 +82,7 @@ impl FsSimWindow {
     }
 
     /// Run the fabric `n` free cycles — so a poll loop is not
-    /// transaction-paced (frameserve only).
+    /// transaction-paced (a bridge with a master).
     pub fn free_cycles(&mut self, n: usize) -> Result<(), FsSimError> {
         let reply = self.round_trip(&format!("C {n:x}"))?;
         if reply == "OK" {
@@ -94,7 +93,7 @@ impl FsSimWindow {
     }
 
     /// Dump `len` bytes of the fake DDR — the framebuffer readback the
-    /// register aperture cannot carry (frameserve only).
+    /// register aperture cannot carry (a bridge with a master).
     pub fn read_ddr(&mut self, offset: usize, len: usize) -> Result<Vec<u8>, FsSimError> {
         let reply = self.round_trip(&format!("D {offset:x} {len:x}"))?;
         if reply.len() != len * 2 {

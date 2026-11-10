@@ -227,6 +227,38 @@ let tests =
               Expect.stringContains seam "pub const BUMP_BIT" "and its bit"
               Expect.notEqual bump.offset clear.offset "each pulse has a word of its own"
 
+          testCase "a stream's fields are named apart from the carrier's own signals" <| fun _ ->
+              // The probe's one field is `word`, which the link's played side
+              // also names a signal of its own: a field must not be able to
+              // collide with it, whatever it is called.
+              let top = BoardTop.boardTop icepi viaLink (tableDesign [])
+              let verilog = emitDesign top.top
+              Expect.stringContains verilog "play_field_word" "the field, in its own namespace"
+              Expect.stringContains verilog "play_word" "beside the carrier's word"
+
+          testCase "a fact reaches the host as a constant in the seam, and costs the fabric nothing" <| fun _ ->
+              let facts = [ BoardTop.fact "frameWidth" 1400UL; BoardTop.fact "maxIterations" 256UL ]
+
+              // Rows through the host's memory, and a design of registers
+              // alone on a link: two different tops, one way of stating it.
+              let registersOnly: BoardTop.Design =
+                  { tableDesign [] with
+                      name = "LevelProbe"
+                      needs = [ BoardTop.valueIn "level" (unsignedInt 8) ]
+                      body = fun boundary -> boundary.valueIn "level" |> ignore }
+
+              for board, path, plain in [ kv260, viaHostMemory, tableDesign []; icepi, viaLink, registersOnly ] do
+                  let stated = { plain with needs = plain.needs @ facts }
+                  let without = BoardTop.boardTop board path plain
+                  let with' = BoardTop.boardTop board path stated
+                  let seam = BoardTop.seamLines with'
+
+                  Expect.equal (emitDesign with'.top) (emitDesign without.top) $"{board.name}: no wire, no register"
+                  Expect.equal (regMapRsLines with'.map) (regMapRsLines without.map) $"{board.name}: the map is untouched"
+                  Expect.contains seam "pub const FRAME_WIDTH: u64 = 1400;" $"{board.name}: the seam states it"
+                  Expect.contains seam "pub const MAX_ITERATIONS: u64 = 256;" $"{board.name}: every one, in order"
+                  Expect.equal (BoardTop.factsOf stated) [ "frameWidth", 1400UL; "maxIterations", 256UL ] "read back in declaration order"
+
           testCase "a surface the host sends a row at a time lands top row first, and says when the last has" <| fun _ ->
               let top = BoardTop.boardTop icepi viaLink landingProbe
               let sim = Sim top.top
@@ -492,7 +524,7 @@ let tests =
               let kvDir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"warp11-kv260-gate-{System.Guid.NewGuid()}")
               let kv = Warp11.Build.write kvDir (BoardTop.boardTop kv260 viaHostMemory (tableDesign []))
               let kvSh = System.IO.File.ReadAllText kv.run
-              Expect.stringContains kvSh "usage(\"CLB LUTs\")" "the gate reads Vivado's placed utilisation"
+              Expect.stringContains kvSh "cells=\"CLB LUTs\"" "the gate reads Vivado's placed utilisation"
               Expect.stringContains kvSh "cells=117120, blockRams=144, multipliers=1248" "against the part's facts"
               Expect.stringContains kvSh "timing_summary_routed.rpt" "and the routed slack"
 
@@ -563,6 +595,64 @@ let tests =
               Expect.stringContains pcf "set_io host_tx 74" "and out"
               Expect.stringContains pcf "set_io led1 56" "LED 1"
               Expect.stringContains pcf "set_io bclk 65" "Pmod position 1"
+
+          testCase "the Vivado gate reads the report as Vivado writes it" <| fun _ ->
+              // The rows are the 104-lane Mandelbrot's own, 2026-11-09. A
+              // RAMB18 counts as half a block RAM tile, so 105 of them read
+              // 52.5 — which the gate once took for a missing row, read as a
+              // part with no block RAM, and failed a good build over.
+              let top = BoardTop.boardTop kv260 viaHostMemory (tableDesign [])
+              let dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"warp11-gate-{System.Guid.NewGuid()}")
+              let sh = System.IO.File.ReadAllText (Warp11.Build.write dir top).run
+              let opening = "<<'PY'\n"
+              let from = sh.IndexOf opening + opening.Length
+              let script = System.IO.Path.Combine(dir, "gate.py")
+              System.IO.File.WriteAllText(script, sh.Substring(from, sh.IndexOf("\nPY\n", from) - from))
+
+              let lut = "| CLB LUTs                   |  80522 |     0 |          0 |    117120 | 68.75 |"
+              let bram = "| Block RAM Tile    | 52.5 |     0 |          0 |       144 | 36.46 |"
+              let dsp = "| DSPs           | 1248 |     0 |          0 |      1248 | 100.00 |"
+
+              let timing =
+                  String.concat
+                      "\n"
+                      [ "    WNS(ns)      TNS(ns)  TNS Failing Endpoints"
+                        "    -------      -------  ---------------------"
+                        "      0.617        0.000                      0" ]
+
+              let gate (rows: string list) =
+                  let util = System.IO.Path.Combine(dir, "util.rpt")
+                  let timingFile = System.IO.Path.Combine(dir, "timing.rpt")
+                  let report = System.IO.Path.Combine(dir, "report.json")
+                  System.IO.File.WriteAllText(util, String.concat "\n" rows + "\n")
+                  System.IO.File.WriteAllText(timingFile, timing + "\n")
+
+                  let info =
+                      System.Diagnostics.ProcessStartInfo(
+                          "python3",
+                          $"\"{script}\" \"{util}\" \"{timingFile}\" \"{report}\" 166.666672 0",
+                          RedirectStandardOutput = true,
+                          RedirectStandardError = true
+                      )
+
+                  use p = System.Diagnostics.Process.Start info
+                  let out = p.StandardOutput.ReadToEnd() + p.StandardError.ReadToEnd()
+                  p.WaitForExit()
+                  p.ExitCode, out, (if System.IO.File.Exists report then System.IO.File.ReadAllText report else "")
+
+              let code, out, report = gate [ lut; bram; dsp ]
+              Expect.equal code 0 $"half tiles are a count, not a missing row:\n{out}"
+              Expect.stringContains out "52.5 /    144" "printed as Vivado counts it"
+              Expect.stringContains report "\"used\": 52.5" "and reported so"
+
+              let code, out, _ = gate [ lut; dsp ]
+              Expect.equal code 1 "a row the gate cannot find fails the gate"
+              Expect.stringContains out "no 'Block RAM Tile' row in the utilisation report" "and says it could not read it, rather than that the part is empty"
+
+              let code, out, _ = gate [ lut; bram; dsp.Replace("| 1248 |     0", "| 1300 |     0") ]
+              Expect.equal code 1 "more than the part has fails"
+              Expect.stringContains out "multipliers: 1300 used of 1248" "naming what overflowed"
+              System.IO.Directory.Delete(dir, true)
 
           testCase "a hand-written AXI top goes through the generator: its irq is wired, its constants reach the seam" <| fun _ ->
               // The shape GoL and GEP take: a complete top with a slave, a

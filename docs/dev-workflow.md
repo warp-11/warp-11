@@ -60,28 +60,26 @@ Both are DKMS-managed so they survive kernel updates. See
 
 ## The loop
 
-**1. Emit.** Each design project writes its own Verilog *and* the Rust register
-map, from one definition:
+**1. Emit.** Each design project writes the directory Vivado builds from —
+the Verilog, block design, constraints, overlay, packaging and the Rust seam —
+from its mapping, the Verilog and the seam from one definition:
 
 ```sh
 cd hdl
-dotnet run -c Release --project Warp11.Mandelbrot -- hardware <repo-root>
-# → hardware/build/MandelFrameAxi.v  and  runtime/core/src/mandel_frame_layout.rs
+dotnet run -c Release --project Warp11.Mandelbrot -- bitstream out/
+# → out/MandelbrotBatch.v, out/mandelbrot_batch_layout.rs (the seam), out/build.sh, …
 ```
 
-The layout is **committed**, because the runtime crate compiles against it —
-emit-before-compile would otherwise be circular. Commit the diff when a
-register map changes; that diff is the review.
+The seam is read at run time — the daemon takes it as `--layout` — so the
+registers, the clock and the frame's shape travel with the bitstream they were
+built for, and a stale one is refused by its layout hash.
 
-**2. Bitstream**, when the RTL changed (~20–30 min, gated on timing). Every
-design project writes the directory Vivado builds from — block design,
-constraints, overlay, packaging, the Rust seam — from its mapping, and the
+**2. Bitstream**, when the RTL changed (~20–30 min, gated on timing). The
 directory's own script runs the flow, packages the app and ends with the gate
 that reads Vivado's reports back:
 
 ```sh
-dotnet run -c Release --project Warp11.Mandelbrot -- bitstream out/
-cd out && ./build.sh
+out/build.sh
 ```
 
 (`Warp11.GoL.App -- build out/`, `Warp11.Gep -- build out/`
@@ -98,13 +96,16 @@ time to kill the build.
 ```sh
 cd runtime
 cargo build --release --target aarch64-unknown-linux-musl -p mandel-daemon
-scp target/aarch64-unknown-linux-musl/release/mandel-daemon ubuntu@<board-ip>:warp11-driver/
+scp target/aarch64-unknown-linux-musl/release/mandel-daemon \
+    ../hdl/out/mandelbrot_batch_layout.rs ubuntu@<board-ip>:warp11-driver/
 ```
 
-**4. Load and run:**
+**4. Load and run** — the app first (copied over as `build.sh` prints), then
+the bring-up check, then the daemon:
 
 ```sh
-ssh ubuntu@<board-ip> 'sudo xmutil unloadapp && sudo xmutil loadapp mandel-frame'
+ssh ubuntu@<board-ip> 'sudo xmutil unloadapp && sudo xmutil loadapp mandelbrot-batch'
+ssh ubuntu@<board-ip> 'cd warp11-driver && ./mandel-daemon --board mandelbrot_batch --layout mandelbrot_batch_layout.rs check'
 ssh ubuntu@<board-ip> 'systemctl --user restart mandel-daemon'
 ```
 
@@ -117,11 +118,11 @@ cd hdl && LD_LIBRARY_PATH=<zenohc>/lib \
 
 ## First light before trusting anything
 
-Every accelerator has a first-light binary under `runtime/host/src/bin/` that
-drives it and compares against a software twin, bit for bit:
+Every accelerator has a first-light run that drives it and compares against a
+software twin, bit for bit — for the Mandelbrot, the daemon's `check`:
 
 ```sh
-ssh ubuntu@<board-ip> 'cd warp11-driver && ./mandel_frame_first_light'
+ssh ubuntu@<board-ip> 'cd warp11-driver && ./mandel-daemon --board mandelbrot_batch --layout mandelbrot_batch_layout.rs check'
 ```
 
 Run it after any bitstream change. Sim green and timing green **still do not

@@ -1,11 +1,11 @@
 # Mandelbrot
 
 A Mandelbrot renderer that fills every DSP on a KV260. 1400×800 at 256
-iterations, **4.30 ms of fabric time** — 261 Mpx/s — with 104 lanes at
-166.67 MHz, and the framebuffer streamed straight into PS DDR.
+iterations, **4.34 ms of fabric time** — 258 Mpx/s — with 104 lanes at
+166.67 MHz, and the frame streamed straight into PS DDR.
 
-On the [sql-mandelbrot-benchmark][bench] view that is **128× a vectorized
-numpy and 262× DuckDB on an M4 Max**, end to end, from a $300 board — and
+On the [sql-mandelbrot-benchmark][bench] view that is **124× a vectorized
+numpy and 255× DuckDB on an M4 Max**, end to end, from a $300 board — and
 5.6× behind the same laptop's Metal GPU on a kernel-only best-of-N with no
 readback. [The full field, and what each timer
 wraps](#against-other-implementations-of-the-same-workload).
@@ -13,10 +13,10 @@ wraps](#against-other-implementations-of-the-same-workload).
 *Status: on silicon, bit-exact against the software twin.*
 
 *`Warp11.MandelView` showing a frame the fabric just rendered, with the fabric's
-own cycle count beside the round trip. The 106 ms is the host asking, waiting,
-and pulling 1.1 MB back over the network — the render itself is the 4.29 ms.*
+own cycle count beside the round trip. The 53 ms is the host asking, waiting,
+and pulling 1.1 MB back over the network — the render itself is the 4.34 ms.*
 
-![The Mandelbrot live view rendering a frame off a KV260 in 4.29 ms of fabric time](../../docs/images/mandel-4ms.png)
+![The Mandelbrot live view rendering a frame off a KV260 in 4.34 ms of fabric time](../../docs/images/mandel-4ms.png)
 
 ## The shape of it
 
@@ -26,27 +26,54 @@ the full 256 — so a fixed pipeline stalls on the slow ones and a naive paralle
 array idles on the fast ones.
 
 The answer here is a **barrel-threaded lane**: one arithmetic pipeline shared by
-16 pixels in flight, one advancing per cycle in rotation. The multiplier is busy
-every cycle regardless of how the pixels are behaving, because there is always
-some other pixel ready to advance. When a pixel escapes, its slot is refilled
-from the next row without disturbing the others.
+the pixels in flight, one advancing per cycle in rotation. The multiplier is
+busy every cycle regardless of how the pixels are behaving, because there is
+always some other pixel ready to advance. When a pixel escapes, its slot is
+refilled from the next without disturbing the others.
 
 That makes the design DSP-bound rather than control-bound, which is why it
 scales until the board runs out of DSPs — and it does exactly that, at 104
 lanes using all 1,248 of them.
 
+The frame is a stream of **chunk beats**: `coords` turns each into the view
+of a 128-pixel run of a row, and the run goes to whichever lane is free. A
+lane answers with eight beats of sixteen pixels, each carrying **the place
+it belongs**, so no lane waits on another — the lanes finish in any order
+and the frame still lands whole.
+
 ```
-MandelFrame            the frame walker: which rows, which pixels, when to stop
-  └── MandelPod        104 lanes plus the coalescer
-        ├── MandelBarrelLane × 104     16 pixels in flight each
-        └── MandelRowCoalescer         16 pixels per 128-bit beat
-              └── AXI master → PS DDR
+beat ──▶ coords ──cx0 cy dx──▶ mandelChunkAddressed × 104 ──index, pixels──▶ out
+  cxOrigin cyOrigin dx dy (controls = registers)       16 px a beat, and where it goes
+
+mandelChunkAddressed    one lane at one chunk wide
+  ├── MandelCoordGen          the chunk's pixels
+  ├── MandelBarrelLane        8 pixels in flight
+  └── MandelRowCoalescer      16 pixels per 128-bit beat
 ```
 
 **Coalescing is not an optimization, it is the reason the design is possible.**
 A single-beat AXI write per pixel caps out around 25 Mpx/s — an order of
 magnitude below what the lanes produce. Sixteen pixels per 128-bit beat is what
 lets the fabric keep up with itself.
+
+The boundary is the batch contract's **counted** path: nothing is read; the
+host writes the chunk count and the view, and each beat is written at its
+place — into the KV260's DDR by address. On a board whose only wire is a
+UART the beats come back as the index then the pixels, and the host places
+them (`warp11_batch frame:… --serial …`), refusing a frame with a place
+filled twice or never; the index is a fifth word every sixteen pixels.
+
+`Chunked.fs` is the design. The numbers a host has to agree with — the
+frame's width, the chunk, the iteration cap, the view's fraction bits — are
+stated there as facts and reach the host in the seam (`FRAME_WIDTH`,
+`CHUNK_PIXELS`, `MAX_ITERATIONS`, `FRACTION_BITS`), so the daemon reads
+them rather than writing them down. The board is `Chunked.board`, one line
+(`kv260At fabricHz`); change it and the same verb builds for another, with
+the lanes that part holds — its multipliers at twelve a lane, or its logic
+at the lane's measured cost, whichever binds first: 104 on the KV260, 2 on
+the Icepi, 10 on the DE10-Lite (whose lanes keep their per-thread state in
+block RAM, having no LUT RAM). `Chunked.mapping` scatters into the host's
+memory where the board has one and counts over its link where it does not.
 
 ## Running it
 
@@ -57,141 +84,86 @@ cd hdl
 dotnet run -c Release --project Warp11.Mandelbrot            # the living checks
 ```
 
-Emit the Verilog and the register map the driver uses:
+The bitstream, and the board:
 
 ```sh
-dotnet run -c Release --project Warp11.Mandelbrot -- hardware <repo-root>
+dotnet run -c Release --project Warp11.Mandelbrot -- bitstream out/   # the KV260 directory: Verilog, block design, overlay, seam
+out/build.sh                                                          # Vivado, the gate, the app in out/app
+# copy out/app to the board as build.sh prints, then on the board
+sudo xmutil unloadapp && sudo xmutil loadapp mandelbrot-batch
+./mandel-daemon --board mandelbrot_batch --layout mandelbrot_batch_layout.rs check
 ```
 
-That writes both accelerators and both seams in one pass:
-`hardware/build/MandelPodAxi.v` with `mandel_layout.rs`, and
-`hardware/build/MandelFrameAxi.v` with `mandel_frame_layout.rs`.
-**Each pair comes from the same definition** —
-the register map is not maintained by hand, which is why the host and the
-fabric cannot disagree about what offset the iteration count lives at.
-
-Then the bitstream, and the board:
-
-```sh
-dotnet run -c Release --project Warp11.Mandelbrot -- bitstream out/   # the KV260 directory for the chunked frame
-cd out && ./build.sh
-# on the board
-xmutil unloadapp && xmutil loadapp mandelbrot
-```
-
-(The pod apps below, `mandel-fs` and `mandel-frame`, were built from the hand
-scripts in `hardware/vivado/`, which retire as each regenerated bitstream is
-run bit-exact.)
-
-**Two apps, and the numbers below are the second one.** `mandel-fs` is the
-one-shot pod; `mandel-frame` is the re-renderable frame accelerator — same
-104 lanes, but it latches a view per render, so a host can ask for another
-without reloading anything. That is the one the daemon and the live view
-drive, and its first light is `mandel_frame_first_light` after
-`xmutil loadapp mandel-frame`.
+`check` is the bring-up: one render compared byte for byte against the
+software twin, and its fabric cycles; exit 0 only if every pixel matches.
+Without it the daemon serves the live view
+(`hardware/board/mandel-daemon.service`), reading the same seam. A frame
+straight to a file is `warp11_batch frame:1400x800 out.pgm --board
+mandelbrot_batch --layout mandelbrot_batch_layout.rs --chunk 128 --set
+cxOrigin=…`.
 
 See [docs/dev-workflow.md](../../docs/dev-workflow.md) for the deploy path.
 
-## The same frame, as chunk beats
-
-The lane composes a second way: instead of a pod sweeping whole rows, the
-frame becomes a stream of **chunk beats**, `coords` minting each chunk's
-view and the chunk spent once per lane, farmed.
-
-```
-beat ──▶ coords ──cx0 cy dx──▶ mandelChunk x 104 ──pixels──▶ out
-  cxOrigin cyOrigin dx dy (controls = registers)   16 px a beat, in order
-```
-
-- `coords` turns the beat index into each chunk's view; `mandelChunk` is
-  the lane pod at one chunk wide (128 pixels), answering eight beats for
-  one; the placement farms the lanes — a beat to whichever is free, out in
-  raster order, clustered above sixteen.
-- The boundary is the **counted** path: nothing read, the host writes the
-  chunk count and the view, the frame lands in DDR in raster order — the
-  batch contract, so `warp11_batch frame:1400x800 out.pgm --chunk 128
-  --set cxOrigin=... ` drives it on the board and, through the bridge, in
-  the Sim.
-- `Chunked.fs` is the design, and `-- bitstream <dir> [lanes]` writes the
-  directory its board's toolchain builds from — block design, overlay,
-  flow and the Rust seam, all derived from the design itself. The board
-  is `Chunked.board`, one line (`kv260At fabricHz`); change it and the
-  same verb builds for another, with the lanes that part holds — its
-  multipliers at twelve a lane, or its logic at the lane's measured cost,
-  whichever binds first: 104 on the KV260, 2 on the Icepi, 10 on the
-  DE10-Lite (whose lanes keep their per-thread state in block RAM, having
-  no LUT RAM), refused by number on a part with less than a lane's worth
-  — unless the line gives the count.
-  `Chunked.mapping` is the mapping, counted in on every board: on the
-  KV260 the frame into DDR, on a board with one wire the frame over its
-  UART — the same count, the pixels back as streamed frames, which
-  `warp11_batch frame:320x200 out.pgm --serial /dev/ttyUSB1 --layout
-  out/mandelbrot_link_layout.rs --chunk 128 --set …` reads.
-
-Measured against the frame design at equal configurations in the Sim
-(`-- lanescale` beside `-- chunkscale w h pixels maxIter lanes`): 16-pixel
-chunks cost 39% more cycles — the barrel drains its tail every chunk —
-64-pixel chunks 1% fewer, 128-pixel chunks 6% fewer (256x52, maxIter 48,
-13 lanes: 18 161 -> 17 157). Not yet built for silicon.
-
 ## Files
 
-- `../Warp11/Mandel.fs` (the library) — one iteration, the barrel-threaded
-  lane around it, the coalescer that packs 16 pixels into a 128-bit beat,
-  the coord-gen and the lane pod; and the pod as a canvas unit
-- `Harness.fs` — those at ports, for the oracle
-- `Pod.fs`, `FramePod.fs` — the mini pod and the decomposed frame renderer
-  the silicon build uses
-- `Chunked.fs` — the drawn frame's typed twin, its Sim render and its run
-  through the counted board top
-- `FrameAxi.fs`, `Seam.fs` — the AXI slave and the generated register map
-- `Host.fs`, `FrameHost.fs` — the software twins, the PPM renders, the
-  `simserve`/`frameserve` bridges the Rust driver runs against
-- `Main.fs` — checks, `hardware`, the simulation probes
+- `Mandel.fs` — one iteration, the barrel-threaded lane around it, the
+  coalescer that packs 16 pixels into a 128-bit beat, the coord-gen, the
+  lane pod, and the chunk as a unit
+- `Chunked.fs` — the frame: the design, its facts, its mapping, its Sim
+  runs through the KV260's top and the Icepi's link
+- `Harness.fs` — the pieces at ports, for the oracle
+- `Pod.fs`, `FramePod.fs` — the mini pod and a row-sweeping frame pod built
+  from the same lane, kept as oracle inputs; `Host.fs`, `FrameHost.fs` —
+  their Sim renders, and `lanescale`
+- `Units.fs` — the units a drawn design may name
+- `Main.fs` — the living checks, `bitstream`, the simulation probes
 
 ## Numbers, and where they come from
 
-All measured on the board, `mandel_frame_first_light` at the
-default view (the whole set, 1400×800, 256 iterations). Nothing here is
+All measured on the board on 2026-11-09 at the default view (the whole set,
+1400×800, 256 iterations), by `mandel-daemon … bench` — two renders, the
+frame read back every way below, the mappings asserted equal, the twin
+compared — and through the daemon and the live view. Nothing here is
 projected.
 
 ### The render
 
 | | |
 |---|---|
-| fabric | **715,938 cycles = 4.296 ms** — 261 Mpx/s |
-| clock | 166.67 MHz, 104 lanes, 1,248 DSPs, WNS positive after route |
-| host wall, incl. polling | 7.16 ms |
-| correctness | **0 mismatches of 1,126,400 bytes** against the software twin |
+| fabric | **723,470–725,673 cycles = 4.34–4.35 ms** — 258 Mpx/s, eighteen renders |
+| clock | 166.67 MHz, 104 lanes, 1,248 DSPs, WNS +0.422 ns after route |
+| host wall, start to done incl. polling | 4.35 ms |
+| correctness | **0 mismatches of 1,120,000 pixels** against the software twin, every render |
 
-Rendered twice in the same run, both 715,938 cycles exactly — the pod is
-re-renderable and its cost does not depend on what came before.
+The count moves by a few hundred cycles from one render to the next: the
+lanes finish in whatever order the iterations make them, and when the DDR
+port accepts a beat is not the same twice.
 
 ### Getting the frame back, three ways
 
-The framebuffer is 1.1 MB in PS DDR, and how you read it matters more than
-it looks. Same bytes, same run, three mappings:
+The frame is 1.1 MB in PS DDR, and how you read it matters more than it
+looks. Same bytes, same run, three mappings (two runs):
 
 | path | time | rate |
 |---|---|---|
-| uncached, `O_SYNC` mmap | 10.24 ms | 110 MB/s |
-| cached mmap + `sync_for_cpu`, cold | 2.47 ms | 456 MB/s |
-| cached mmap + `sync_for_cpu`, warm | **0.92 ms** | **1,230 MB/s** |
-| cached, pure read (a `u64` sum, no stores) | 0.52 ms | 2,175 MB/s |
+| uncached, `O_SYNC` mmap | 9.6–10.5 ms | 107–117 MB/s |
+| cached mmap + `sync_for_cpu`, cold | 2.1 ms | 526–531 MB/s |
+| cached mmap + `sync_for_cpu`, warm | **0.97–1.03 ms** | **1,096–1,158 MB/s** |
+| cached, pure read (a `u64` sum, no stores) | 0.47–0.51 ms | 2,204–2,389 MB/s |
 
-**The uncached path is 11× slower than the cached one**, which is why the
+**The uncached path is 10× slower than the cached one**, which is why the
 daemon uses the cached mapping and an explicit `sync_for_cpu` rather than
-the always-correct `O_SYNC` baseline. The two are asserted byte-equal in
-first light, so the fast path is checked rather than trusted. The pure-read
-row separates the mapping's bandwidth from memcpy's character: about half
-the warm copy's time is the store side, not the read.
+the always-correct `O_SYNC` baseline. `bench` asserts the two byte-equal,
+so the fast path is checked rather than trusted. The pure-read row
+separates the mapping's bandwidth from memcpy's character: about half the
+warm copy's time is the store side, not the read.
 
 So end to end, fabric plus readback:
 
 | | |
 |---|---|
-| uncached | 14.54 ms |
-| **cached + sync** | **5.21 ms** |
+| uncached | 13.9–14.8 ms |
+| **cached + sync** | **5.32–5.38 ms** |
 
 ### Live, over the network
 
@@ -199,26 +171,14 @@ Through `mandel-daemon` and `Warp11.MandelView` (§ [MandelView](../Warp11.Mande
 
 | | |
 |---|---|
-| round trip, warm | **110–114 ms** |
-| round trip, first frame | 110 ms (indistinguishable — the wire dominates either way) |
+| round trip | **53–75 ms**, eight consecutive renders |
 | on the wire | 1,120,000 bytes per frame, cropped from the padded 1408 stride |
 
-**The wire is the bottleneck, not the fabric — roughly 25×.** A 4.3 ms render
+**The wire is the bottleneck, not the fabric — over 10×.** A 4.3 ms render
 moving 1.1 MB over TCP is a network benchmark with an accelerator attached,
-which is worth knowing before anyone designs an interaction that assumes frames
-are cheap to ship.
-
-*Re-measured 2026-08-19, eight consecutive renders, 110–114 ms every time.
-This table previously read 44 ms warm and 139 ms first-frame; neither
-reproduces. The link is gigabit but measures ~13 MB/s board-to-host, and at
-that rate the 1.12 MB frame alone accounts for ~87 ms of the round trip — so
-today's number is consistent with the wire and the old one was not.*
-
-*The page was already disagreeing with itself about this: the screenshot
-caption at the top reads **106 ms**, which is what this path does. Only the
-table said 44. A number that no longer reproduces is worse than no number, and
-one that contradicts the picture directly above it should have been caught by
-reading the page.*
+which is worth knowing before anyone designs an interaction that assumes
+frames are cheap to ship. The figure moves with the network: the first frame
+the same evening took 109 ms.
 
 ### Against other implementations of the same workload
 
@@ -240,21 +200,22 @@ matches it:
 
 | | Implementation | Hardware | What's timed | Time | Warp factor † |
 |---|---|---|---|---:|---:|
-| — | **Warp 11 (this work)** | **KV260 (~$300)** | **end to end** (compute → DDR → host) | **5.21 ms** | 1× |
-| — | Warp 11 (this work) | KV260 | fabric compute (frame in DDR) | 4.296 ms | 1× |
+| — | **Warp 11 (this work)** | **KV260 (~$300)** | **end to end** (compute → DDR → host) | **5.35 ms** | 1× |
+| — | Warp 11 (this work) | KV260 | fabric compute (frame in DDR) | 4.34 ms | 1× |
 | 🏎 | Apple Metal GPU | M4 Max | GPU kernel only, best-of-N, no readback | 0.77 ms | 0.18× |
-| 1 | NumPy (vectorized) | M4 Max CPU | end to end | 665 ms | **128×** |
-| 2 | ArrowDatafusion SQL | M4 Max CPU | end to end | 797 ms | **153×** |
-| 3 | DuckDB SQL | M4 Max CPU | end to end | 1,364 ms | **262×** |
-| 6 | Pure Python | M4 Max CPU | end to end | 4,328 ms | **830×** |
-| 7 | SQLite SQL | M4 Max CPU | end to end | 44,918 ms | **8,618×** |
+| 1 | NumPy (vectorized) | M4 Max CPU | end to end | 665 ms | **124×** |
+| 2 | ArrowDatafusion SQL | M4 Max CPU | end to end | 797 ms | **149×** |
+| 3 | DuckDB SQL | M4 Max CPU | end to end | 1,364 ms | **255×** |
+| 6 | Pure Python | M4 Max CPU | end to end | 4,328 ms | **809×** |
+| 7 | SQLite SQL | M4 Max CPU | end to end | 44,918 ms | **8,396×** |
 
 † Benchmark time ÷ the *comparable* Warp 11 time — end-to-end for the
 CPU/SQL field, fabric-compute for the GPU's kernel-only figure. Above 1×
-means Warp 11 is faster.
+means Warp 11 is faster. The end-to-end figure is the middle of the two
+`bench` runs' 5.32 and 5.38 ms.
 
-**Against the fair field it wins by two orders of magnitude** — 128× numpy,
-262× DuckDB, on a $300 embedded board against a top-tier laptop. **Against
+**Against the fair field it wins by two orders of magnitude** — 124× numpy,
+255× DuckDB, on a $300 embedded board against a top-tier laptop. **Against
 the GPU's compute-only "true limit"** it is 5.6× behind, on a warm
 best-of-N kernel with no data movement, on far more die, power and price.
 
@@ -279,12 +240,14 @@ FPGA's native move, not an IEEE-FP build.
 
 ### The gap that is left
 
-The fabric time is 91.8% of the lane-limit ideal for this view. The
-remaining ~8% is a row-boundary loss — tails and gathering drains — filed
-rather than fixed.
+The fabric time is 90.8% of the lane-limit ideal for this view — 657,167
+cycles, every lane advancing a pixel-iteration every cycle, from the twin's
+own iteration count. The rest is each lane's barrel draining its tail at the
+end of every chunk, and the write port's backpressure, filed rather than
+fixed.
 
 One limit worth naming because it is not obvious from the numbers:
-**`MAX_ITER` is fixed at 256 in the elaborated pod**, so zooming toward the
+**`maxIterations` is fixed at 256 in the elaborated design**, so zooming toward the
 boundary saturates — every pixel hits the cap and the frame goes black.
 That, not the Q4.28 coordinate format, is what bounds useful zoom depth, and
 it is why the live view ships without one.

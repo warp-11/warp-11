@@ -161,8 +161,8 @@ dotnet run --project Warp11.Designs          # elaborate + run the living checks
 dotnet run --project Warp11.Tutorial.App     # the step-through debugger
 ./run_differential.sh                        # the oracle (see below)
 
-# emit for silicon: writes the Verilog *and* the generated Rust seam
-dotnet run --project Warp11.Mandelbrot -- hardware <repo-root>
+# for silicon: the directory Vivado builds from — the Verilog *and* the generated Rust seam
+dotnet run --project Warp11.Mandelbrot -- bitstream out/
 ```
 
 From there it is vendor territory: Vivado turns the Verilog into a bitstream,

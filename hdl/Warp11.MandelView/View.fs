@@ -23,8 +23,7 @@ open Avalonia.Platform
 open Avalonia.Threading
 open Warp11.MandelView.Bus
 
-/// The whole set: the rectangle `mandel_frame_first_light` and the daemon
-/// both default to. Its 1.75 aspect matches the fabric's 1400x800, so a
+/// The whole set: the rectangle the daemon defaults to. Its 1.75 aspect matches the fabric's 1400x800, so a
 /// pixel is square.
 type Rect =
     { cx: float

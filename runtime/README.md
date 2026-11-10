@@ -47,9 +47,9 @@ Don't delete the 8-byte file; the config comment explains it.
 
 ## First light
 
-Each accelerator has a binary under `host/src/bin/` that drives it on the board
-and compares against a software twin, bit for bit:
-`mandel_frame_first_light`, `mandel_first_light`, `gol_first_light`,
+Each accelerator has a first-light run that drives it on the board and
+compares against a software twin, bit for bit: `mandel-daemon … check` for
+the Mandelbrot, and under `host/src/bin/` `gol_first_light` and
 `gep_cluster_first_light`, plus `gol_disarm` and `gol_debug`.
 
 Run one after any bitstream change. Sim green and timing green still do not

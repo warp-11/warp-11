@@ -8,15 +8,12 @@
 
     <ItemGroup>
         <Compile Include="Mandel.fs"/>
-        <Compile Include="Board.fs" />
         <Compile Include="Pod.fs"/>
         <Compile Include="Harness.fs"/>
         <Compile Include="FramePod.fs"/>
-        <Compile Include="FrameAxi.fs"/>
         <Compile Include="Chunked.fs"/>
         <Compile Include="Units.fs"/>
         <Compile Include="FrameHost.fs"/>
-        <Compile Include="Seam.fs"/>
         <Compile Include="Host.fs"/>
         <Compile Include="Main.fs"/>
     </ItemGroup>

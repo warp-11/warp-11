@@ -16,20 +16,14 @@
 #![no_std]
 
 pub mod batch;
+pub mod frame;
 pub mod gep;
-pub mod mandel;
-pub mod mandel_frame;
 /// The generated register maps — emitted by hdl's `dotnet run --
 /// hardware`, committed here so the driver's diff shows layout changes. The
 /// one place the two languages agree on offsets.
 pub mod audio_batch_layout;
 pub mod audio_effects_layout;
-pub mod audio_gain_layout;
-pub mod audio_passthru_layout;
-pub mod audio_tone_layout;
 pub mod gep_layout;
-pub mod mandel_frame_layout;
-pub mod mandel_layout;
 
 /// Byte offsets of the AXI-Lite register file. Both the elaborated slave and the
 /// driver below index by these.

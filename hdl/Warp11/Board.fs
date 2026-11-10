@@ -523,8 +523,8 @@ let checkBoard (board: Board) =
 /// is created per project rather than shared.** Loading a bitstream does not
 /// program the PS clock registers — each app's dtbo pins its own PL0 — so the
 /// apps in this repository run the same board at 99.999001 MHz (the audio
-/// apps, `gol`, `mandel`, most of GEP), 166.666672 MHz (`golfs`,
-/// `mandelframe`, `mandelpod`, `gepbarrel`) and 249.997498 MHz (`gepunit`,
+/// apps, most of GEP), 166.666672 MHz (`gol-fs`, `mandelbrot-batch`,
+/// `gepbarrel`) and 249.997498 MHz (`gepunit`,
 /// `gepiorig`). A single `kv260` value would be right for one of those and
 /// silently wrong for the rest — and "silently" is the whole problem: a design
 /// that keeps its old divisors on a new clock runs at the wrong rate with
@@ -578,8 +578,8 @@ let kv260At (fabricHz: int) =
                 10, lvcmos33 "B11" ] } ] }
 
 /// The KV260 at the clock the **audio** apps' overlays program — the one
-/// binding shared by more than one project, because `audio-tone`,
-/// `audio-gain`, `audio-passthru` and the toy I2S designs are all built for
+/// binding shared by more than one project, because the effects design,
+/// the audio rungs and the toy I2S designs are all built for
 /// the same 100 MHz and derive their sample rate from it.
 ///
 /// The overlays actually say 99.999001 MHz. The round number is kept because
@@ -851,3 +851,8 @@ let viaHost (board: Board) : DataPath =
 /// design draws, into the host's memory or as frames on its link.
 let viaCountHost (board: Board) : DataPath =
     if board.part.facts.processingSystem then viaCount else viaCountLink
+
+/// Counted in and each row out carrying where it goes: into the host's
+/// memory at that place, or as frames on its link for the host to place.
+let viaScatterHost (board: Board) : DataPath =
+    if board.part.facts.processingSystem then viaScatter else viaCountLink

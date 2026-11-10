@@ -27,40 +27,6 @@ let private sampleMaxSigned = (1UL <<< (sampleWidth - 1)) - 1UL
 // Rust name each register exactly once and cannot drift apart. Offsets mirror
 // the original slaves so a host reading either stack finds the same words.
 
-type ToneRegs =
-    { enable: RegEntry
-      step: RegEntry }
-
-let toneRegs, toneMap =
-    buildRegMapPinned audioApertureAddrWidth (fun r ->
-        // enable defaults to 1: the tone plays on bitstream load, which is the
-        // whole point of a tone test — no driver required to hear something.
-        { enable = r.RwReg("enable", 1, 1UL)
-          step = r.RwReg("step", tonePhaseWidth, toneStep440) })
-
-type PassthruRegs =
-    { mute: RegEntry
-      receivedCount: RegEntry
-      lastLeft: RegEntry }
-
-let passthruRegs, passthruMap =
-    buildRegMapPinned audioApertureAddrWidth (fun r ->
-        // Bring-up diagnostics: a count that moves proves the ADC is clocking,
-        // and a last-sample tap proves it is carrying something other than
-        // silence.
-        { mute = r.RwReg("mute", 1, 0UL)
-          receivedCount = r.RoField("receivedCount", 32)
-          lastLeft = r.RoField("lastLeft", sampleWidth) })
-
-type GainRegs =
-    { volume: RegEntry
-      mute: RegEntry }
-
-let gainRegs, gainMap =
-    buildRegMapPinned audioApertureAddrWidth (fun r ->
-        { volume = r.RwReg("volume", 16, gainUnity)
-          mute = r.RwReg("mute", 1, 0UL) })
-
 type EffectsRegs =
     { volume: RegEntry
       mute: RegEntry
@@ -137,73 +103,6 @@ let effectsSettings (regs: SlaveRegs) : EffectsSettings =
 /// ADC unclocked because a top forgot the second trio.
 let private audioLink prefix pins =
     i2sLink prefix pins board.fabricHz (int stockSampleRate) stockBitsPerSlot
-
-/// Tone generator straight into the transmitter — no receiver, because there
-/// is nothing to receive. The smallest thing that makes noise on the board.
-let audioToneAxi =
-    defModuleClocked
-        axiClock
-        "AudioToneAxi"
-        (fun p -> (axiLiteSlavePorts p toneMap.apertureAddrWidth, i2sTxPins p SeparateCodecs))
-        (fun (slavePorts, pins) ->
-            let regs = regMapSlave slavePorts toneMap
-            let i2s = i2sTxLink "audio" pins board.fabricHz (int stockSampleRate) stockBitsPerSlot
-
-            toneGenerator "ToneGenerator" "tone" (regs.value toneRegs.enable) (regs.value toneRegs.step)
-            |> i2s.sendOnly)
-
-/// Line in to line out, with a mute and two bring-up taps. The taps exist
-/// because "no sound" has two very different causes — a silent ADC and a dead
-/// transmitter — and on a board you cannot see which.
-let audioPassthruAxi =
-    defModuleClocked
-        axiClock
-        "AudioPassthruAxi"
-        (fun p -> (axiLiteSlavePorts p passthruMap.apertureAddrWidth, i2sPins p SeparateCodecs))
-        (fun (slavePorts, pins) ->
-            let regs = regMapSlave slavePorts passthruMap
-            let i2s = audioLink "audio" pins
-
-            let received = i2s.input
-
-            let count = reg "received_count" 32
-            let lastLeft = reg "last_left" sampleWidth
-            let left, _right = received.payload
-
-            If received.valid (fun () ->
-                count + lit 1UL 32 ==> count
-                left ==> lastLeft)
-
-            regs.drive passthruRegs.receivedCount count
-            regs.drive passthruRegs.lastLeft lastLeft
-
-            // Mute here rather than through a gain stage: this app is the
-            // signal-path bring-up, so it stays as close to a wire as it can.
-            let muted = wireBit "muted"
-            regs.value passthruRegs.mute ==> muted
-
-            let mute (s: Stream<Expr * Expr>) =
-                let left, right = s.payload
-                let silence = lit 0UL (width left)
-
-                { s with payload = (mux muted silence left, mux muted silence right) }
-
-            received |> mute |> i2s.send)
-
-/// Line in, master volume, line out.
-let audioGainAxi =
-    defModuleClocked
-        axiClock
-        "AudioGainAxi"
-        (fun p -> (axiLiteSlavePorts p gainMap.apertureAddrWidth, i2sPins p SeparateCodecs))
-        (fun (slavePorts, pins) ->
-            let regs = regMapSlave slavePorts gainMap
-            let i2s = audioLink "audio" pins
-
-            let gain =
-                audioGain "AudioGain" "gain" (regs.value gainRegs.volume) (regs.value gainRegs.mute)
-
-            i2s.input |> gain |> i2s.send)
 
 /// The full chain: volume, one EQ band, a compressor and a brick-wall limiter,
 /// every stage host-controlled and every default a no-op.

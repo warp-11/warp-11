@@ -3,23 +3,6 @@ module Warp11.Mandelbrot.Host
 open Warp11
 open Warp11.Mandelbrot.Pod
 
-/// `dotnet run -- simserve`: the F# half of the FsSimWindow bridge. Reads
-/// `R <hexoff>` / `W <hexoff> <hexval>` lines on stdin, drives the wrapper's
-/// s_axi pins through real five-channel handshakes in the Sim, and answers
-/// with the value read / `OK`. The Rust `FsSimWindow` speaks the other end, so
-/// the same driver that will mmap /dev/mem on the board runs against the
-/// elaborated design first — the two-backends property, across the language
-/// seam. Every handshake step is asserted, so a protocol bug is a failure
-/// here, not a hang on silicon. The pod runs only while transactions tick it;
-/// it ignores the bus, so its cycle count to done is the same as standalone.
-/// `dotnet run -- simserve`: the F# half of the FsSimWindow bridge. The
-/// handshakes, the assertions and the line protocol all live in `SimAxi` now —
-/// what is left here is which design the bridge is talking to. The pod runs
-/// only while transactions tick it; it ignores the bus, so its cycle count to
-/// done is the same as standalone.
-let simserve () =
-    SimAxi.serve (SimAxi.client (Sim mandelPodAxi.def))
-
 let private litValue expr =
     match expr with
     | Lit (v, _) -> v
