@@ -290,6 +290,15 @@ type RegBuilder internal () =
         entries.Add e
         e
 
+    /// A field wider than a word: the next `ceil(width / 32)` words, low word
+    /// first — a record's field, never a register's, which the slave refuses.
+    member _.Wide(name: string, width: int) =
+        let offset = cursor
+        cursor <- cursor + 4UL * uint64 ((width + 31) / 32)
+        let e = roField name offset 0 width
+        entries.Add e
+        e
+
     /// A constant owning a whole word. To overlay one with a pulse, use `Word`.
     member this.RoConst(name: string, value: uint64) =
         let e = roConst name (this.Take()) value
@@ -786,14 +795,12 @@ let internal upperSnake (name: string) =
           yield System.Char.ToUpperInvariant c ]
     |> System.String.Concat
 
-/// The Rust half of the seam, derived from the same map: offset consts plus
-/// the per-kind extras (bit positions, field masks, window sizes). Returns
-/// lines — the app supplies its header and appends its own constants.
-let regMapRsLines (m: RegMap) : string list =
-    [ yield $"pub const APERTURE_BYTES: usize = %d{1 <<< m.apertureAddrWidth};"
-
-      for e in m.entries do
-          let s = upperSnake e.name
+/// The per-entry lines of `regMapRsLines`, each name under `prefix` — how a
+/// region's record prints its fields (`QUEUE_PARENT_A_OFFSET`) with the
+/// same constants a register map uses.
+let regEntryRsLines (prefix: string) (entries: RegEntry list) : string list =
+    [ for e in entries do
+          let s = prefix + upperSnake e.name
           yield $"pub const {s}_OFFSET: usize = 0x%03x{e.offset};"
 
           match e.kind with
@@ -805,6 +812,7 @@ let regMapRsLines (m: RegMap) : string list =
           match e.kind with
           | PulseBit b -> yield $"pub const {s}_BIT: u32 = %d{b};"
           | W1cBit b -> yield $"pub const {s}_BIT: u32 = %d{b};"
+          | RoField (_, w) when w > 32 -> yield $"pub const {s}_WORDS: usize = %d{(w + 31) / 32};"
           | RoField (bo, w) ->
               yield $"pub const {s}_SHIFT: u32 = %d{bo};"
               yield $"pub const {s}_MASK: u32 = 0x%x{((1UL <<< w) - 1UL) <<< bo};"
@@ -820,3 +828,11 @@ let regMapRsLines (m: RegMap) : string list =
               | None -> ()
           | RoArray (words, _) -> yield $"pub const {s}_WORDS: usize = %d{words};"
           | RwReg _ -> () ]
+
+/// The Rust half of the seam, derived from the same map: offset consts plus
+/// the per-kind extras (bit positions, field masks, window sizes). Returns
+/// lines — the app supplies its header and appends its own constants.
+let regMapRsLines (m: RegMap) : string list =
+    $"pub const APERTURE_BYTES: usize = %d{1 <<< m.apertureAddrWidth};"
+    :: regEntryRsLines "" m.entries
+

@@ -1277,9 +1277,18 @@ type SimAxiWriteSlave
     // A shared array makes this the write half of one DDR (see `SimAxiDdr`);
     // on its own it owns `memBytes` of its own.
     let memory = defaultArg memory (Array.zeroCreate<byte> memBytes)
-    let pendingAddr = System.Collections.Generic.Queue<uint64>()
-    let pendingData = System.Collections.Generic.Queue<BigInteger * uint64>()
-    let bDue = System.Collections.Generic.Queue<int>()
+    // A burst is AWLEN + 1 beats at consecutive addresses and one B; a bus
+    // with no `awlen` is the single-beat shape, and every beat is its own.
+    let bursts = (sim.TryWidth $"{p}_awlen").IsSome
+    let pendingAddr = System.Collections.Generic.Queue<uint64 * int>()
+    let pendingData = System.Collections.Generic.Queue<BigInteger * uint64 * bool>()
+    let mutable beatInBurst = 0
+    // A burst's beats are held until its response is shown: AXI promises a
+    // write is visible once its B returns and not before, so a master that
+    // reports one landed early reads stale memory here, as it might on the
+    // board. With no response delay the two are the same cycle.
+    let mutable burstBeats: (int * BigInteger * uint64) list = []
+    let bDue = System.Collections.Generic.Queue<int * (int * BigInteger * uint64) list>()
     let mutable cycleCount = 0
     let mutable awReadyNow = true
     let mutable wReadyNow = true
@@ -1297,31 +1306,58 @@ type SimAxiWriteSlave
     /// read/write pair can each take their phase and then tick ONCE.
     member _.Capture() =
         if awReadyNow && sim.Peek $"{p}_awvalid" = 1UL then
-            pendingAddr.Enqueue(sim.Peek $"{p}_awaddr")
+            let beats = if bursts then int (sim.Peek $"{p}_awlen") + 1 else 1
+            pendingAddr.Enqueue(sim.Peek $"{p}_awaddr", beats)
 
         if wReadyNow && sim.Peek $"{p}_wvalid" = 1UL then
             let data =
                 if lanes > 8 then sim.PeekWide $"{p}_wdata" else BigInteger(sim.Peek $"{p}_wdata")
 
-            pendingData.Enqueue(data, sim.Peek $"{p}_wstrb")
+            let last = not bursts || sim.Peek $"{p}_wlast" = 1UL
+            pendingData.Enqueue(data, sim.Peek $"{p}_wstrb", last)
 
         while pendingAddr.Count > 0 && pendingData.Count > 0 do
-            let addr = int (pendingAddr.Dequeue())
-            let data, strb = pendingData.Dequeue()
+            let start, beats = pendingAddr.Peek()
+            let addr = int start + beatInBurst * lanes
+            let data, strb, last = pendingData.Dequeue()
 
-            for lane in 0 .. lanes - 1 do
-                if (strb >>> lane) &&& 1UL = 1UL then
-                    memory[addr + lane] <- byte ((data >>> (lane * 8)) &&& BigInteger(255))
+            // WLAST is the master's claim about where the burst ends, and an
+            // interconnect believes it: a master that gets it wrong corrupts
+            // the next burst's pairing, so the model refuses it outright.
+            if bursts && last <> (beatInBurst = beats - 1) then
+                failwith
+                    $"{p}: WLAST was %b{last} on beat %d{beatInBurst + 1} of a %d{beats}-beat burst at 0x%x{start}"
 
-            bDue.Enqueue(cycleCount + bD)
+            burstBeats <- (addr, data, strb) :: burstBeats
+
+            if beatInBurst = beats - 1 then
+                pendingAddr.Dequeue() |> ignore
+                beatInBurst <- 0
+                bDue.Enqueue(cycleCount + bD, List.rev burstBeats)
+                burstBeats <- []
+            else
+                beatInBurst <- beatInBurst + 1
 
         // The B the upcoming tick sees; if the design's bready is high it is
         // consumed — decided before the poke, dequeued after, so a due
         // response is never eaten unseen.
-        let bShown = bDue.Count > 0 && bDue.Peek() <= cycleCount
+        let bShown = bDue.Count > 0 && fst (bDue.Peek()) <= cycleCount
 
-        if bShown && sim.Peek $"{p}_bready" = 1UL then
-            bDue.Dequeue() |> ignore
+        // Visible from the cycle its response is: commit once, as it shows.
+        if bShown then
+            let due, beatsHeld = bDue.Dequeue()
+
+            for addr, data, strb in beatsHeld do
+                for lane in 0 .. lanes - 1 do
+                    if (strb >>> lane) &&& 1UL = 1UL then
+                        memory[addr + lane] <- byte ((data >>> (lane * 8)) &&& BigInteger(255))
+
+            if sim.Peek $"{p}_bready" <> 1UL then
+                // Not taken: shown again next cycle, already committed.
+                let rest = List.ofSeq bDue
+                bDue.Clear()
+                bDue.Enqueue(due, [])
+                for r in rest do bDue.Enqueue r
 
         sim.Poke($"{p}_bvalid", (if bShown then 1UL else 0UL))
 
@@ -1554,3 +1590,48 @@ type SimAxiDdr
         memory[byteAddr + 1] <- byte (value >>> 8)
         memory[byteAddr + 2] <- byte (value >>> 16)
         memory[byteAddr + 3] <- byte (value >>> 24)
+
+
+/// The AXI masters a top has, by prefix: every output named `{prefix}_arvalid`
+/// or `{prefix}_awvalid` — `m_axi` on a one-port top, `m_axi_hp0` and its
+/// kind where regions spread over several.
+let axiMasterPrefixesOf (top: ModuleDef) : string list =
+    top.decls
+    |> List.choose (function
+        | Output(n, _) when n.StartsWith "m_axi" && (n.EndsWith "_arvalid" || n.EndsWith "_awvalid") ->
+            Some(n.Substring(0, n.Length - "_arvalid".Length))
+        | _ -> None)
+    |> List.distinct
+
+/// One behavioural memory behind every master a top has, on however many
+/// ports: a read slave on each prefix with a read channel, a write slave on
+/// each with a write channel, all over one array — the ports of one DDR —
+/// phased so the whole set advances the design by one tick.
+type SimAxiMemory(sim: Sim, memBytes: int, prefixes: string list, ?dataBytes: int, ?jitter: int, ?bDelay: int) =
+    let memory = Array.zeroCreate<byte> memBytes
+    let bytes = defaultArg dataBytes 16
+
+    // A seed of its own for every channel, so no two are correlated.
+    let seed (k: int) = jitter |> Option.map (fun j -> j * 31 + k)
+
+    let reads =
+        [ for k, p in List.indexed prefixes do
+              if (sim.TryWidth $"{p}_arvalid").IsSome then
+                  yield SimAxiReadSlave(sim, memBytes, prefix = p, dataBytes = bytes, memory = memory, ?jitter = seed (2 * k)) ]
+
+    let writes =
+        [ for k, p in List.indexed prefixes do
+              if (sim.TryWidth $"{p}_awvalid").IsSome then
+                  yield SimAxiWriteSlave(sim, memBytes, prefix = p, dataBytes = bytes, memory = memory, ?jitter = seed (2 * k + 1), ?bDelay = bDelay) ]
+
+    /// The backing store every port shares.
+    member _.Memory = memory
+
+    /// Present every R, capture every AW/W and AR, one edge, then re-pace.
+    member _.Cycle() =
+        for r in reads do r.BeginCycle()
+        for w in writes do w.Capture()
+        for r in reads do r.Consume()
+        sim.Tick()
+        for r in reads do r.Pace()
+        for w in writes do w.Pace()

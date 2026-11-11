@@ -71,6 +71,8 @@
         <Compile Include="SerialRegMap.fs"/>
         <Compile Include="SimUart.fs"/>
         <Compile Include="Windows.fs"/>
+        <Compile Include="Regions.fs"/>
+        <Compile Include="Sdram.fs"/>
         <Compile Include="Bands.fs"/>
         <Compile Include="Audio.fs"/>
         <Compile Include="Pdm.fs"/>

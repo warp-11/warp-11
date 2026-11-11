@@ -67,6 +67,10 @@ let private diffDesignsAtDefault () =
       Hello.helloOnKv260
       Tally.tallyOnKv260
       Tally.tallyOnIceBreaker
+      RecordCopy.recordCopyTop
+      RecordCopy.recordCopyPairOnOnePort.top
+      RecordCopy.recordCopyScratchTop
+      RecordCopy.regionInSdram.def
       assertedSaturate.def
       cmdProcessor.def
       unionRoundTrip.def
@@ -98,6 +102,7 @@ let private diffDesignsAtDefault () =
       probedPipe.def
       axiWriteMaster.def
       axiWriteMasterSingle.def
+      axiWriteMasterBurst.def
       axiReadMaster.def
       axiReadMasterSingle.def
       axiReadMasterBurst.def
@@ -147,6 +152,12 @@ let private diffDesigns () =
         // A UART frame is ten bits of 24 cycles; a few of them under random
         // pokes on `rx` is the receiver seeing every state.
         serialRegMap.def, 2_000
+        // Long enough for records to arrive, stall, be routed home and land
+        // many times over under random handshakes on every side.
+        RecordCopy.regionCarrierShared.def, 3_000
+        RecordCopy.regionOnChip.def, 1_000
+        RecordCopy.regionLinkShared.def, 3_000
+        RecordCopy.regionInSdramQuick.def, 3_000
         // A sample is a frame of bits, each four cycles here, and the first
         // five frames are the decimator warming up: a dozen frames is the
         // combs running on real history under random bits and random ready.
@@ -2096,6 +2107,477 @@ let private helloLightsWhatTheHostWrote () : bool =
     printfn $"      hello: {top.name}, %d{leds.Length} LEDs showing 0b101 the way the board wires them %b{lit}; HelloAxi reads back %b{onKv260}"
     lit && onKv260 && leds.Length > 0
 
+/// `axiMasterWriterBurstOn`'s defining property, against a slave that stalls
+/// AW and W independently and at random: every burst writes exactly its beats
+/// at consecutive addresses, nothing else is touched, WLAST falls on each
+/// burst's last beat (the slave model refuses it anywhere else), and `landed`
+/// pulses once a burst — never before that burst's last beat is in memory.
+let private burstsLandWhole () =
+    let sim = Sim(axiWriteMasterBurst.def)
+    let slave = SimAxiWriteSlave(sim, 1 <<< 16, dataBytes = 4, jitter = 7, bDelay = 5)
+    let rng = System.Random 11
+
+    // Bursts of 1..16 beats at 64-byte-aligned addresses, so none crosses
+    // 4 KB, with a word per beat that says which burst and beat it is.
+    let bursts =
+        [ for b in 0 .. 39 -> 0x100 + b * 64, rng.Next(1, 17) ]
+
+    let word b i = 0xB0000000u ||| (uint32 b <<< 8) ||| uint32 i
+    let beats = [ for b, (_, n) in List.indexed bursts do for i in 0 .. n - 1 -> word b i ]
+
+    let mutable nextBurst = 0
+    let mutable nextBeat = 0
+    let mutable landed = 0
+    let mutable early = false
+    let mutable cycles = 0
+
+    let inMemory b =
+        let addr, n = bursts[b]
+        [ 0 .. n - 1 ]
+        |> List.forall (fun i ->
+            let a = addr + i * 4
+            let m = slave.Memory
+            (uint32 m[a] ||| (uint32 m[a + 1] <<< 8) ||| (uint32 m[a + 2] <<< 16) ||| (uint32 m[a + 3] <<< 24)) = word b i)
+
+    while landed < bursts.Length && cycles < 20_000 do
+        let offerReq = nextBurst < bursts.Length && rng.Next 3 > 0
+        let offerBeat = nextBeat < beats.Length && rng.Next 3 > 0
+
+        if offerReq then
+            let addr, n = bursts[nextBurst]
+            sim.Poke("req_addr", uint64 addr)
+            sim.Poke("req_len", uint64 (n - 1))
+
+        sim.Poke("req_valid", (if offerReq then 1UL else 0UL))
+
+        if offerBeat then
+            sim.Poke("beat_data", uint64 beats[nextBeat])
+            sim.Poke("beat_strb", 0xFUL)
+
+        sim.Poke("beat_valid", (if offerBeat then 1UL else 0UL))
+
+        let reqTaken = offerReq && sim.Peek "req_ready" = 1UL
+        let beatTaken = offerBeat && sim.Peek "beat_ready" = 1UL
+
+        // `landed` this cycle is the response the slave presents now; the
+        // beats it covers were captured on earlier edges.
+        if sim.Peek "landed" = 1UL then
+            if not (inMemory landed) then early <- true
+            landed <- landed + 1
+
+        slave.Cycle()
+        cycles <- cycles + 1
+        if reqTaken then nextBurst <- nextBurst + 1
+        if beatTaken then nextBeat <- nextBeat + 1
+
+    let touched =
+        let inside = System.Collections.Generic.HashSet<int>()
+        for addr, n in bursts do
+            for a in addr .. addr + n * 4 - 1 do inside.Add a |> ignore
+        slave.Memory |> Array.indexed |> Array.forall (fun (a, v) -> inside.Contains a || v = 0uy)
+
+    landed = bursts.Length && not early && List.forall inMemory [ 0 .. bursts.Length - 1 ] && touched && sim.Peek "idle" = 1UL
+
+/// The seam's constants, as a host reads them: `NAME` to its number.
+let private seamConstants (t: BoardTop.BoardTop) =
+    BoardTop.seamLines t
+    |> List.choose (fun line ->
+        let line = line.Trim()
+
+        if line.StartsWith "pub const " then
+            match line.Substring(10).Split(':') with
+            | [| name; rest |] ->
+                let value = rest.Split('=').[1].Trim().TrimEnd(';').Trim()
+
+                let parsed =
+                    if value.StartsWith "0x" then System.Convert.ToInt64(value.Substring 2, 16) else int64 value
+
+                Some(name.Trim(), parsed)
+            | _ -> None
+        else
+            None)
+    |> Map.ofList
+
+/// What `RecordCopy`'s defining properties are checked against: a top, run
+/// against a memory whose channels stall at random, filled and read back
+/// through nothing but the seam's numbers.
+type private CopyRun =
+    { /// Every landed record was in memory, whole, the cycle it was counted.
+      landedMeansInMemory: bool
+      /// Every field came back as it went in (the weight one more), the
+      /// signed one sign-extended in its word.
+      roundTrips: bool
+      /// Nothing outside the copied region moved.
+      nothingElseWritten: bool
+      landed: int
+      /// The copied region's bytes at the end.
+      copied: byte[] }
+
+let private runRecordCopy (t: BoardTop.BoardTop) (seed: int) : CopyRun =
+    let k = seamConstants t
+    let sim = Sim(t.top)
+    let arena = 0x1000
+    let memory = SimAxiMemory(sim, (1 <<< 20) + arena, axiMasterPrefixesOf t.top, jitter = seed, bDelay = 6)
+    let axi = SimAxi.clientWith sim memory.Cycle
+    let records = RecordCopy.records
+
+    let word (at: int) =
+        let m = memory.Memory
+        uint32 m[at] ||| (uint32 m[at + 1] <<< 8) ||| (uint32 m[at + 2] <<< 16) ||| (uint32 m[at + 3] <<< 24)
+
+    let put (at: int) (v: uint32) =
+        for b in 0..3 do
+            memory.Memory[at + b] <- byte (v >>> (8 * b))
+
+    // A record's place, by the seam alone.
+    let recordAt (region: string) (i: int) =
+        arena + int k[$"{region}_REGION_OFFSET"] + i * int k[$"{region}_STRIDE_BYTES"]
+
+    let fieldAt (region: string) (field: string) (i: int) = recordAt region i + int k[$"{region}_{field}_OFFSET"]
+
+    let weightOf (i: int) = [| -1; 32767; -32768; 0 |].[i % 4] + (i / 4)
+    let keyOf (i: int) = 0xC0DE0000u + uint32 i
+    let payloadOf (i: int) = 0xA5A5000000000000UL + uint64 i * 0x100000001UL
+    let noteOf (i: int) = 0xABC000u + uint32 i
+
+    for i in 0 .. records - 1 do
+        put (fieldAt "SOURCE" "KEY" i) (keyOf i)
+        put (fieldAt "SOURCE" "PAYLOAD" i) (uint32 (payloadOf i))
+        put (fieldAt "SOURCE" "PAYLOAD" i + 4) (uint32 (payloadOf i >>> 32))
+        put (fieldAt "SOURCE" "WEIGHT" i) (uint32 (weightOf i)) // sign-extended, as a lane is
+        put (fieldAt "SOURCE" "NOTE" i) (noteOf i)
+
+    // The second copy, where the top has one: one-beat pairs, swapped.
+    let hasPairs = k.ContainsKey "PAIRS_REGION_OFFSET"
+    let leftOf (i: int) = 0x11110000u + uint32 i
+    let rightOf (i: int) = 0x22220000u + uint32 i
+
+    if hasPairs then
+        for i in 0 .. records - 1 do
+            put (fieldAt "PAIRS" "LEFT" i) (leftOf i)
+            put (fieldAt "PAIRS" "RIGHT" i) (rightOf i)
+
+    let swappedOk (i: int) =
+        word (fieldAt "SWAPPED" "LEFT" i) = rightOf i && word (fieldAt "SWAPPED" "RIGHT" i) = leftOf i
+
+    let before = Array.copy memory.Memory
+
+    let copiedOk (i: int) =
+        let expectedWeight = int16 (weightOf i + 1)
+
+        word (fieldAt "COPIED" "KEY" i) = keyOf i
+        && (uint64 (word (fieldAt "COPIED" "PAYLOAD" i)) ||| (uint64 (word (fieldAt "COPIED" "PAYLOAD" i + 4)) <<< 32)) = payloadOf i
+        && int (word (fieldAt "COPIED" "WEIGHT" i)) = int expectedWeight
+        && word (fieldAt "COPIED" "NOTE" i) = noteOf i
+
+    axi.write32 (uint64 k["REGIONS_BASE_OFFSET"]) (uint64 arena)
+    axi.write32 (uint64 k["START_OFFSET"]) 1UL
+
+    let mutable seen = 0
+    let mutable seenPairs = if hasPairs then 0 else records
+    let mutable early = false
+    let mutable cycles = 0
+
+    while (seen < records || seenPairs < records) && cycles < 40_000 do
+        let landed = int (sim.Peek "copy_landed")
+
+        for i in seen .. landed - 1 do
+            if not (copiedOk i) then early <- true
+
+        seen <- landed
+
+        if hasPairs then
+            let landed = int (sim.Peek "swap_landed")
+
+            for i in seenPairs .. landed - 1 do
+                if not (swappedOk i) then early <- true
+
+            seenPairs <- landed
+
+        memory.Cycle()
+        cycles <- cycles + 1
+
+    let written =
+        [ yield recordAt "COPIED" 0, recordAt "COPIED" records
+          if hasPairs then yield recordAt "SWAPPED" 0, recordAt "SWAPPED" records ]
+
+    let untouched =
+        Seq.forall
+            (fun a -> written |> List.exists (fun (lo, hi) -> a >= lo && a < hi) || memory.Memory[a] = before[a])
+            (seq { 0 .. memory.Memory.Length - 1 })
+
+    { landedMeansInMemory = not early && seen = records && seenPairs = records
+      roundTrips = List.forall copiedOk [ 0 .. records - 1 ] && (not hasPairs || List.forall swappedOk [ 0 .. records - 1 ])
+      nothingElseWritten = untouched
+      landed = int (axi.read32 (uint64 k["LANDED_OFFSET"]))
+      copied = memory.Memory[recordAt "COPIED" 0 .. recordAt "COPIED" records - 1] }
+
+/// A private region on the chip, then moved to the host's memory: the
+/// copied bytes must be the same, byte for byte, and right.
+let private scratchRuns () =
+    [ for seed in [ 5; 23 ] ->
+          runRecordCopy RecordCopy.recordCopyScratchOnChip seed, runRecordCopy RecordCopy.recordCopyScratchInMemory seed ]
+
+/// Both regions on one port, then the copied one moved to a port of its
+/// own by the mapping: the design does not change, and neither may the
+/// answer.
+let private recordCopyRuns () =
+    let onePort = RecordCopy.recordCopyOnKv260
+
+    let twoPorts =
+        BoardTop.boardTop
+            kv260
+            { viaHostMemory with
+                bindings = viaHostMemory.bindings @ [ { need = ByName "copied"; carrier = InHostMemoryOn "S_AXI_HP1_FPD" } ] }
+            RecordCopy.recordCopy
+
+    // Two readers and two writers: every region on one port, so each master
+    // has two clients with records of different lengths; and by default,
+    // spread a region a master.
+    let shared = RecordCopy.recordCopyPairOnOnePort
+    let spread = RecordCopy.recordCopyPairSpread
+
+    [ for t in [ onePort; twoPorts; shared; spread ] do
+          for seed in [ 3; 17 ] -> runRecordCopy t seed ]
+
+/// A host keeping `RecordCopy`'s regions over the link, as the Rust one
+/// does: streamed words are requests — a header, and a write's record after
+/// it — and the answers are played words. Every place and field from the
+/// seam; the regions are this host's own byte arrays.
+let private recordCopyOverLinkOf (t: BoardTop.BoardTop) : bool =
+    let k = seamConstants t
+    let sim = Sim(t.top)
+
+    // A chip behind the SDRAM's pins, where the top drives one.
+    let memory =
+        match sim.TryWidth "sdram_csn", icepi.boardMemory with
+        | Some _, Some chip -> Some(SimSdram(sim, chip, icepi.fabricHz))
+        | _ -> None
+
+    let cyclesPerBit =
+        match icepi.host with
+        | UartAt baud -> icepi.fabricHz / baud
+        | _ -> failwith "the Icepi's host is on a UART"
+
+    // Every cycle the chip sees too, the serial client's included.
+    let chipDevice = memory |> Option.map (fun m -> m :> ISimDevice)
+
+    let advance () =
+        chipDevice |> Option.iter (fun c -> c.Drive())
+        sim.Tick()
+        chipDevice |> Option.iter (fun c -> c.Sample())
+
+    let client, uart =
+        serialClientOn (serialAddressBytes (t.map.apertureAddrWidth - 2)) sim (uartSimPins "host") cyclesPerBit advance
+
+    let device = uart :> ISimDevice
+    let records = RecordCopy.records
+
+    // The host's regions, by the id a header names.
+    let regionNamed (name: string) = int k[$"{name}_REGION_ID"], int k[$"{name}_RECORD_BYTES"]
+    let sourceId, recordBytes = regionNamed "SOURCE"
+    let copiedId, _ = regionNamed "COPIED"
+    let store = Map.ofList [ sourceId, Array.zeroCreate<byte> (records * recordBytes); copiedId, Array.zeroCreate<byte> (records * recordBytes) ]
+    let wordsOf (bytes: int) = bytes / 4
+
+    let put (region: int) (at: int) (v: uint32) = System.BitConverter.GetBytes(v).CopyTo(store[region], at)
+    let get (region: int) (at: int) = System.BitConverter.ToUInt32(store[region], at)
+    let field (region: string) (name: string) (i: int) = i * recordBytes + int k[$"{region}_{name}_OFFSET"]
+
+    let weightOf (i: int) = [| -1; 32767; -32768; 0 |].[i % 4] + (i / 4)
+
+    for i in 0 .. records - 1 do
+        put sourceId (field "SOURCE" "KEY" i) (0xC0DE0000u + uint32 i)
+        put sourceId (field "SOURCE" "PAYLOAD" i) (uint32 i * 3u)
+        put sourceId (field "SOURCE" "PAYLOAD" i + 4) 0xA5A5u
+        put sourceId (field "SOURCE" "WEIGHT" i) (uint32 (weightOf i))
+        put sourceId (field "SOURCE" "NOTE" i) (0xABC000u + uint32 i)
+
+    let copiedOk (i: int) =
+        get copiedId (field "COPIED" "KEY" i) = 0xC0DE0000u + uint32 i
+        && get copiedId (field "COPIED" "PAYLOAD" i) = uint32 i * 3u
+        && get copiedId (field "COPIED" "PAYLOAD" i + 4) = 0xA5A5u
+        && int16 (get copiedId (field "COPIED" "WEIGHT" i)) = int16 (weightOf i + 1)
+        && get copiedId (field "COPIED" "NOTE" i) = 0xABC000u + uint32 i
+
+    // The serving side: complete streamed frames only; a partial one waits.
+    let mutable pending: byte list = []
+    let mutable writing: (int * int * uint32 list) option = None
+
+    let rec frames (bytes: byte list) =
+        match bytes with
+        | s :: status :: d0 :: d1 :: d2 :: d3 :: check :: rest when s = SerialFrame.sync && status = byte serialStreamStatus ->
+            let more, left = frames rest
+            if (status ^^^ d0 ^^^ d1 ^^^ d2 ^^^ d3) = check then
+                (uint32 d0 ||| (uint32 d1 <<< 8) ||| (uint32 d2 <<< 16) ||| (uint32 d3 <<< 24)) :: more, left
+            else
+                more, left
+        | s :: _ when s = SerialFrame.sync -> [], bytes
+        | [] -> [], []
+        | _ :: rest -> frames rest
+
+    let serve () =
+        let words, left = frames (pending @ uart.TakeReceived())
+        pending <- left
+
+        for w in words do
+            match writing with
+            | None ->
+                let op = uint64 (w >>> 28)
+                let region = int ((w >>> 24) &&& 0xFu)
+                let index = int (w &&& 0xFFFFFFu)
+
+                if op = linkRegionRead then
+                    for j in 0 .. wordsOf recordBytes - 1 do
+                        uart.Send(SerialFrame.play (uint64 (get region (index * recordBytes + 4 * j))))
+                else
+                    writing <- Some(region, index, [])
+            | Some(region, index, got) ->
+                let got = got @ [ w ]
+
+                if got.Length = wordsOf recordBytes then
+                    got |> List.iteri (fun j v -> put region (index * recordBytes + 4 * j) v)
+                    writing <- None
+                    uart.Send(SerialFrame.play 0xACUL)
+                else
+                    writing <- Some(region, index, got)
+
+    client.write32 (uint64 k["START_OFFSET"]) 1UL
+
+    let mutable seen = 0
+    let mutable early = false
+    let mutable cycles = 0
+
+    while seen < records && cycles < 4_000_000 do
+        device.Drive()
+        advance ()
+        device.Sample()
+        cycles <- cycles + 1
+
+        if cycles % 64 = 0 then
+            serve ()
+
+            let landed = int (sim.Peek "copy_landed")
+
+            for i in seen .. landed - 1 do
+                if not (copiedOk i) then early <- true
+
+            seen <- landed
+
+    printfn $"      over the link: %d{seen}/%d{records} records landed in %d{cycles} cycles"
+
+    let refused = memory |> Option.map (fun m -> m.Violations) |> Option.defaultValue []
+    for why in refused |> List.truncate 3 do printfn $"      sdram: {why}"
+
+    seen = records && not early && List.forall copiedOk [ 0 .. records - 1 ] && refused.IsEmpty
+
+let private recordCopyOverLink () = recordCopyOverLinkOf RecordCopy.recordCopyOverLink
+
+/// The SDRAM controller's defining property, against a chip model that
+/// refuses what a real chip would get wrong: every record written lands, and
+/// every one reads back as written — through the power-up sequence,
+/// refreshes, and records crossing the two words of a beat — with nothing
+/// refused. Returns what went wrong, if anything.
+let private sdramHoldsRecords () : string list =
+    let sim = Sim(RecordCopy.regionInSdram.def)
+    let chip = SimSdram(sim, sdram256Mb16, RecordCopy.sdramHz)
+    let device = chip :> ISimDevice
+    let records = RecordCopy.records
+    let mutable cycles = 0
+
+    let step () =
+        device.Drive()
+        sim.Tick()
+        device.Sample()
+        cycles <- cycles + 1
+
+    let key i = 0xC0DE0000UL + uint64 i
+    let payload i = uint64 i * 0x100000003UL + 7UL
+    let weight i = uint64 ((i * 37 - 900) &&& 0xFFFF)
+    let note i = 0x123000UL + uint64 i
+
+    sim.Poke("s_landed_ready", 1UL)
+    sim.Poke("s_record_ready", 1UL)
+
+    // Every record in, landed beats counted as they come.
+    let mutable sent = 0
+    let mutable landed = 0
+
+    while landed < records && cycles < 200_000 do
+        if sent < records then
+            sim.Poke("s_write_valid", 1UL)
+            sim.Poke("s_write_index", uint64 sent)
+            sim.Poke("s_write_key", key sent)
+            sim.Poke("s_write_payload", payload sent)
+            sim.Poke("s_write_weight", weight sent)
+            sim.Poke("s_write_note", note sent)
+        else
+            sim.Poke("s_write_valid", 0UL)
+
+        let taken = sent < records && sim.Peek "s_write_ready" = 1UL
+        if sim.Peek "s_landed_valid" = 1UL then landed <- landed + 1
+        step ()
+        if taken then sent <- sent + 1
+
+    sim.Poke("s_write_valid", 0UL)
+
+    // Every record back, in order.
+    let mutable asked = 0
+    let back = ResizeArray<uint64 * uint64 * uint64 * uint64>()
+
+    while back.Count < records && cycles < 400_000 do
+        if asked < records then
+            sim.Poke("s_index_valid", 1UL)
+            sim.Poke("s_index_index", uint64 asked)
+        else
+            sim.Poke("s_index_valid", 0UL)
+
+        let taken = asked < records && sim.Peek "s_index_ready" = 1UL
+
+        if sim.Peek "s_record_valid" = 1UL then
+            back.Add(sim.Peek "s_record_key", sim.Peek "s_record_payload", sim.Peek "s_record_weight", sim.Peek "s_record_note")
+
+        step ()
+        if taken then asked <- asked + 1
+
+    let wrong =
+        [ for i in 0 .. back.Count - 1 do
+              if back[i] <> (key i, payload i, weight i, note i) then
+                  yield $"record %d{i} came back as %A{back[i]}" ]
+
+    // Reads offered every cycle while eight writes wait: the writes must
+    // still land. A controller that always served reads first starved them
+    // here — found by the differential's random stimulus, 2026-11-10.
+    sim.Poke("s_index_valid", 1UL)
+    sim.Poke("s_index_index", 0UL)
+    let mutable rewritten = 0
+    let mutable relanded = 0
+    let started = cycles
+
+    while relanded < 8 && cycles - started < 20_000 do
+        if rewritten < 8 then
+            sim.Poke("s_write_valid", 1UL)
+            sim.Poke("s_write_index", uint64 rewritten)
+            sim.Poke("s_write_key", key rewritten + 1UL)
+        else
+            sim.Poke("s_write_valid", 0UL)
+
+        let taken = rewritten < 8 && sim.Peek "s_write_ready" = 1UL
+        if sim.Peek "s_landed_valid" = 1UL then relanded <- relanded + 1
+        step ()
+        if taken then rewritten <- rewritten + 1
+
+    sim.Poke("s_index_valid", 0UL)
+    sim.Poke("s_write_valid", 0UL)
+
+    printfn $"      sdram: %d{landed} landed, %d{back.Count} read back in %d{cycles} cycles"
+
+    [ if landed <> records then yield $"%d{landed} of %d{records} landed"
+      if back.Count <> records then yield $"%d{back.Count} of %d{records} read back"
+      if relanded < 8 then yield $"with reads always waiting, %d{relanded} of 8 writes landed"
+      yield! wrong |> List.truncate 3
+      yield! chip.Violations |> List.truncate 3 ]
+
 let private mainDemo () =
     for d in
         [ add3
@@ -2142,6 +2624,7 @@ let private mainDemo () =
           probedPipe.def
           axiWriteMaster.def
           axiWriteMasterSingle.def
+          axiWriteMasterBurst.def
           axiReadMaster.def
           axiReadMasterSingle.def
           axiReadMasterBurst.def
@@ -2253,6 +2736,7 @@ let private mainDemo () =
           probedPipe.def
           axiWriteMaster.def
           axiWriteMasterSingle.def
+          axiWriteMasterBurst.def
           axiReadMaster.def
           axiReadMasterSingle.def
           axiReadMasterBurst.def
@@ -2503,6 +2987,24 @@ let private mainDemo () =
     printfn $"fifo storage is invisible:    %b{fifoStorageIsInvisible ()}"
     printfn $"carried read pairs up:        %b{carriedReadPairsUp ()}"
     printfn $"windows answer their range:   %b{windowsAnswerTheirOwnRange ()}"
+    printfn $"bursts land whole:            %b{burstsLandWhole ()}"
+    let copies = recordCopyRuns ()
+    printfn $"landed means in memory:       %b{copies |> List.forall (fun c -> c.landedMeansInMemory && c.landed = RecordCopy.records)}"
+    printfn $"a record round-trips layout:  %b{copies |> List.forall (fun c -> c.roundTrips)}"
+    printfn $"regions write only their own: %b{copies |> List.forall (fun c -> c.nothingElseWritten)}"
+    let scratch = scratchRuns ()
+
+    let scratchOk =
+        scratch
+        |> List.forall (fun (chip, memory) ->
+            chip.landedMeansInMemory && chip.roundTrips && memory.landedMeansInMemory && memory.roundTrips && chip.copied = memory.copied)
+
+    printfn $"on chip = in memory, bytewise: %b{scratchOk}"
+    printfn $"over the link, the same copy: %b{recordCopyOverLink ()}"
+    let sdramWrong = sdramHoldsRecords ()
+    for why in sdramWrong do printfn $"      sdram: {why}"
+    printfn $"sdram holds what it was given: %b{sdramWrong.IsEmpty}"
+    printfn $"link + scratch in sdram, copy: %b{recordCopyOverLinkOf RecordCopy.recordCopyScratchOnIcepi}"
     printfn $"strobe spares other lanes:    %b{strobeSparesUntouchedLanes ()}"
     printfn $"wide strobe spares lanes:     %b{strobeSparesWideLanes ()}"
     printfn $"last write site wins:         %b{lastWriteSiteWins ()}"
@@ -2594,6 +3096,33 @@ let main argv =
             printfn $"wrote {file}"
 
         printfn $"build with: {out.run}"
+        0
+    | [| "recordcopy"; dir |] ->
+        let out = Warp11.Build.write dir RecordCopy.recordCopyOnKv260
+
+        for file in out.files do
+            printfn $"wrote {file}"
+
+        printfn $"build with: {out.run}"
+        0
+    | [| "recordcopylink"; dir |] ->
+        let out = Warp11.Build.write dir RecordCopy.recordCopyOverLink
+
+        for file in out.files do
+            printfn $"wrote {file}"
+
+        printfn $"build with: {out.run}"
+        0
+    | [| "recordcopysdram"; dir |] ->
+        let out = Warp11.Build.write dir RecordCopy.recordCopyScratchOnIcepi
+
+        for file in out.files do
+            printfn $"wrote {file}"
+
+        printfn $"build with: {out.run}"
+        0
+    | [| "regionserve"; "recordcopy" |] ->
+        BoardTop.regionServe RecordCopy.recordCopyOnKv260
         0
     | [| "diff"; outDir |] ->
         writeDiffWith (diffDesigns ()) outDir

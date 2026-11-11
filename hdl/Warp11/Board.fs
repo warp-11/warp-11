@@ -197,8 +197,11 @@ type Clock =
 /// an AXI master writes DDR through, its width, and the arena a `u-dma-buf`
 /// node reserves for a design's buffers.
 type HostMemoryFacts =
-    { /// `S_AXI_HPC0_FPD`, `S_AXI_HP0_FPD`, …
-      port: string
+    { /// The PS slave ports the fabric may master into — `S_AXI_HPC0_FPD`,
+      /// `S_AXI_HP0_FPD`, … — each an independent path into the same memory.
+      /// A top that masters one takes the first; a design's regions spread
+      /// over all of them (`notes/DEVICES.md` §13, fork 5).
+      ports: string list
       width: int
       arenaBytes: int
       /// How many single-beat writes a master keeps in flight on this port.
@@ -213,6 +216,12 @@ type HostMemoryFacts =
       /// `4` on the line above — where 4 counts bursts of 16 beats, not
       /// beats — and every hand-built design in the tree passed 8 or 16.
       writeOutstanding: int }
+
+/// The prefix a master on a PS port takes — `m_axi_hp0` for
+/// `S_AXI_HP0_FPD` — so a top with several ports names each, and the block
+/// design finds which port an interface belongs to by its name.
+let masterPrefixOf (port: string) =
+    "m_axi_" + port.Replace("S_AXI_", "").Replace("_FPD", "").ToLowerInvariant()
 
 /// What satisfies a need on a target.
 ///
@@ -242,6 +251,21 @@ type Carrier =
     /// link back-pressures, so a design that outruns the baud waits unless
     /// something in front of it is allowed to drop.
     | InLinkFrames
+    /// A region in the host's memory, on the port the board's order gives it
+    /// (`notes/DEVICES.md` §13): regions spread over the ports one direction
+    /// at a time, so a reader and a writer of their own never share a master.
+    | InHostMemory
+    /// A region in the host's memory on this PS port — the mapping placing
+    /// it by hand, both directions.
+    | InHostMemoryOn of port: string
+    /// A region in block RAM on the chip: a record a word, read a cycle
+    /// late, landed the cycle it is written. Where a private region goes on
+    /// every board, unless a mapping says otherwise.
+    | OnChip
+    /// A region in the SDRAM the board carries (`boardMemory`), behind the
+    /// controller in `Sdram.fs` — memory far larger than the chip's own,
+    /// tens of cycles a record.
+    | OnBoardMemory
     /// A one-bit value the design reports, on the package pin behind a
     /// connector port — an LED. The pin's own polarity decides whether the
     /// top inverts it, so a design never knows which way an LED is wired.
@@ -259,6 +283,10 @@ type NeedRef =
     | EveryStreamIn
     | EveryStreamOut
     | EveryValueIn
+    | EveryRegion
+    /// The regions nothing outside the design sees — on chip on every board
+    /// by default, since no host has to reach them.
+    | EveryPrivateRegion
 
 /// What carries one of a design's needs.
 type Binding = { need: NeedRef; carrier: Carrier }
@@ -278,35 +306,46 @@ let private everything inCarrier outCarrier =
     { bindings =
         [ { need = EveryStreamIn; carrier = inCarrier }
           { need = EveryStreamOut; carrier = outCarrier }
-          { need = EveryValueIn; carrier = InRegisterMap } ] }
+          { need = EveryValueIn; carrier = InRegisterMap }
+          { need = EveryPrivateRegion; carrier = OnChip } ] }
 
 /// The converter on the pins, both ways.
 let viaPins = everything OnPins OnPins
 
-/// Rows in from the host's memory, rows back out to it.
-let viaHostMemory = everything InHostRows InHostRows
+/// Regions ride whatever carries the rows: the host's memory where there is
+/// one, the link where there is not.
+let private withRegionsIn (carrier: Carrier) (p: DataPath) =
+    { bindings = p.bindings @ [ { need = EveryRegion; carrier = carrier } ] }
+
+let private withRegionsInHostMemory = withRegionsIn InHostMemory
+
+/// Rows in from the host's memory, rows back out to it, and regions there.
+let viaHostMemory = everything InHostRows InHostRows |> withRegionsInHostMemory
 
 /// Counted in, rows out in the order they leave: a frame the design draws,
 /// nothing read.
-let viaCount = everything AsBeatCount InHostRows
+let viaCount = everything AsBeatCount InHostRows |> withRegionsInHostMemory
 
 /// Counted in, and each beat written where the design says.
-let viaScatter = everything AsBeatCount InHostRowsAt
+let viaScatter = everything AsBeatCount InHostRowsAt |> withRegionsInHostMemory
 
 /// Rows in as the host's words on its link, rows back out as frames on it:
 /// the batch path of a board whose only connection is a UART. No converter
 /// is involved, so nothing paces the design but the link itself.
-let viaLink = everything InLinkFrames InLinkFrames
+let viaLink = everything InLinkFrames InLinkFrames |> withRegionsIn InLinkFrames
 
 /// Counted in, and the rows out as frames on the host link: a frame the
 /// design draws, on a board whose only connection is a UART. The count is
 /// a register the host writes, and the link's pace is the design's.
-let viaCountLink = everything AsBeatCount InLinkFrames
+let viaCountLink = everything AsBeatCount InLinkFrames |> withRegionsIn InLinkFrames
 
 /// The host's registers alone: a design with no stream in it, its values
 /// set and read over whatever link the board has, its reports on pins
 /// where the mapping binds them — `hello`.
-let viaRegisters = { bindings = [ { need = EveryValueIn; carrier = InRegisterMap } ] }
+let viaRegisters =
+    { bindings =
+        [ { need = EveryValueIn; carrier = InRegisterMap }
+          { need = EveryPrivateRegion; carrier = OnChip } ] }
 
 /// **Everything** that carries a need. A need may be bound more than once —
 /// the aid's processed audio goes to the earphones *and* to a recorder — so
@@ -351,6 +390,53 @@ type Loading =
     /// Into the SPI flash, surviving power-off (`iceprog`).
     | Flash
 
+/// An SDR SDRAM chip a board carries: its geometry and its timing, as its
+/// datasheet states them — `Sdram.fs` turns the nanoseconds into cycles at
+/// the board's clock.
+type SdramChip =
+    { /// Data bits: 16 on the boards here.
+      dataWidth: int
+      bankBits: int
+      rowBits: int
+      columnBits: int
+      /// Read latency in cycles, as the mode register sets it.
+      casLatency: int
+      /// Activate to read or write.
+      tRcdNs: float
+      /// Precharge to activate.
+      tRpNs: float
+      /// Refresh to anything.
+      tRfcNs: float
+      /// Last write data to precharge.
+      tWrNs: float
+      /// Mode register set to anything.
+      tMrdCycles: int
+      /// The average interval between refreshes: the refresh period over the
+      /// rows.
+      tRefiNs: float
+      /// Power-up to the first command.
+      initUs: float }
+
+/// A 256 Mbit, 16-bit SDR SDRAM — four banks of 8 192 rows by 512 columns,
+/// 32 MiB — at the timings a -6/-7 speed grade states. The Icepi Zero's,
+/// read off its constraints (13 address lines, 2 bank, 16 data, 2 mask).
+let sdram256Mb16 =
+    { dataWidth = 16
+      bankBits = 2
+      rowBits = 13
+      columnBits = 9
+      casLatency = 2
+      tRcdNs = 18.0
+      tRpNs = 18.0
+      tRfcNs = 66.0
+      tWrNs = 15.0
+      tMrdCycles = 2
+      tRefiNs = 7812.5
+      initUs = 200.0 }
+
+/// The SDRAM chips a board file may name.
+let sdramChips = [ "sdram256Mb16", sdram256Mb16 ]
+
 /// A device role a design's pins serve, as the bundles declare them: the
 /// connector table is keyed by role, and the role fixes the port names.
 type DeviceRole =
@@ -377,6 +463,10 @@ type DeviceRole =
     | AudioClockIn
     /// The board's LEDs, active low where the wrapper says so.
     | Leds
+    /// An SDR SDRAM's pins, bit by bit as the board's constraints name them
+    /// — `sdram_a[0]` … `sdram_dq[15]`, `sdram_clk` — which the wrapper
+    /// joins to the controller's ports, the data bus as one inout.
+    | Sdram
 
 /// One package pin, with the IO standard where the toolchain wants one, and
 /// whether what is on it is lit (or asserted) by driving it low — a fact
@@ -428,6 +518,9 @@ type Board =
       audioClockHz: int option
       /// The bulk path to the host, where the part has one.
       hostMemory: HostMemoryFacts option
+      /// A memory chip on the board itself — an SDRAM, its pins on the
+      /// `Sdram` connector — where a mapping may place regions (`OnBoardMemory`).
+      boardMemory: SdramChip option
       host: HostDriver
       loading: Loading
       connectors: Connector list
@@ -543,12 +636,13 @@ let kv260At (fabricHz: int) =
       audioClockHz = None
       hostMemory =
         Some
-            { port = "S_AXI_HPC0_FPD"
+            { ports = [ "S_AXI_HPC0_FPD"; "S_AXI_HP0_FPD"; "S_AXI_HP1_FPD"; "S_AXI_HP2_FPD"; "S_AXI_HP3_FPD" ]
               width = 128
               arenaBytes = 8 <<< 20
               // The top of `Stdlib.fs`'s stated 8..16 sweet spot for an HP
               // port, and what the frame design and Game of Life both use.
               writeOutstanding = 16 }
+      boardMemory = None
       host = AxiLiteAt 0xB0000000UL
       loading = OsApp "/lib/firmware/xilinx"
       connectors =
@@ -619,6 +713,7 @@ let iceBreakerAt (fabricHz: int) =
       fabricHz = fabricHz
       audioClockHz = None
       hostMemory = None
+      boardMemory = None
       host = UartAt iceBreakerBaud
       loading = Sram
       connectors =
@@ -678,6 +773,7 @@ let icepiAt (fabricHz: int) =
       fabricHz = fabricHz
       audioClockHz = None
       hostMemory = None
+      boardMemory = Some sdram256Mb16
       host = UartAt 1_000_000
       loading = Sram
       connectors =
@@ -685,7 +781,21 @@ let icepiAt (fabricHz: int) =
           { role = HostUart
             pins = [ "host_rx", pin "K16"; "host_tx", pin "K15" ] }
           { role = Leds
-            pins = [ "led0", pin "E13"; "led1", pin "D14"; "led2", pin "E12"; "led3", pin "C13"; "led4", pin "D13" ] } ]
+            pins = [ "led0", pin "E13"; "led1", pin "D14"; "led2", pin "E12"; "led3", pin "C13"; "led4", pin "D13" ] }
+          // The SDRAM, from the board's own `gateware/icepi-zero-v1_4.lpf`.
+          { role = Sdram
+            pins =
+              [
+                "sdram_a[0]", pin "B10"; "sdram_a[1]", pin "A9"; "sdram_a[2]", pin "B9"; "sdram_a[3]", pin "A8"
+                "sdram_a[4]", pin "B8"; "sdram_a[5]", pin "A7"; "sdram_a[6]", pin "B7"; "sdram_a[7]", pin "A6"
+                "sdram_a[8]", pin "B6"; "sdram_a[9]", pin "A5"; "sdram_a[10]", pin "A10"; "sdram_a[11]", pin "B5"
+                "sdram_a[12]", pin "A4"; "sdram_dq[0]", pin "B16"; "sdram_dq[1]", pin "C14"; "sdram_dq[2]", pin "C16"
+                "sdram_dq[3]", pin "C15"; "sdram_dq[4]", pin "D16"; "sdram_dq[5]", pin "A15"; "sdram_dq[6]", pin "B15"
+                "sdram_dq[7]", pin "A14"; "sdram_dq[8]", pin "A2"; "sdram_dq[9]", pin "B2"; "sdram_dq[10]", pin "E2"
+                "sdram_dq[11]", pin "D1"; "sdram_dq[12]", pin "C2"; "sdram_dq[13]", pin "C1"; "sdram_dq[14]", pin "C3"
+                "sdram_dq[15]", pin "B1"; "sdram_ba[0]", pin "A11"; "sdram_ba[1]", pin "B11"; "sdram_dqm[0]", pin "B14"
+                "sdram_dqm[1]", pin "B3"; "sdram_csn", pin "B12"; "sdram_cke", pin "B4"; "sdram_clk", pin "A3"
+                "sdram_wen", pin "A13"; "sdram_casn", pin "B13"; "sdram_rasn", pin "A12" ] } ]
       // The header by physical pin number, as the board's constraints
       // comment each GPIO; power and ground positions carry nothing.
       sockets =
@@ -729,6 +839,7 @@ let goBoard =
       fabricHz = 25_000_000
       audioClockHz = None
       hostMemory = None
+      boardMemory = None
       host = UartAt 115_200
       loading = Sram
       connectors =
@@ -770,6 +881,7 @@ let de10Lite =
       fabricHz = 50_000_000
       audioClockHz = None
       hostMemory = None
+      boardMemory = None
       host = UartAt 115_200
       loading = Sram
       connectors =

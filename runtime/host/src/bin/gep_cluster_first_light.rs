@@ -23,7 +23,7 @@ use std::process::exit;
 use std::time::Instant;
 use warp11_host::mmap::{MmapWindow, O_SYNC};
 use warp11_runtime::RegisterWindow;
-use warp11_runtime::gep::{GepClusterDevice, GepRegions, GepResult};
+use warp11_runtime::gep::{GepClusterDevice, GepResult, RECORD_WORDS, RESULT_WORDS, WORK_ITEM_WORDS};
 use warp11_runtime::gep_layout as layout;
 
 const AXI_BASE: i64 = 0xB000_0000;
@@ -31,15 +31,20 @@ const AXI_BASE: i64 = 0xB000_0000;
 /// engine's single-cycle Irwin-Hall multiply is what caps the design here.
 const PL_CLOCK_MHZ: f64 = 99.999_001;
 
-/// The queue holds inline-parent work items (three records each), so it is the
-/// big region and it scales with the batch — hardcoding its size silently
-/// overran the population at 512 entries and cost a debugging round.
+/// Where the build placed the regions, and how far into the arena the last
+/// one this run touches ends. The batch has to fit the regions as built: a
+/// queue item and a ring record an entry, a population slot for every
+/// parent and every destination.
 fn region_offsets(entries: usize, pop_slots: usize) -> (usize, usize, usize) {
-    let align = |v: usize| (v + 0xFFF) & !0xFFF;
-    let queue = 0;
-    let pop = align(queue + entries * layout::WORK_ITEM_BYTES);
-    let ring = align(pop + (pop_slots + entries) * layout::RECORD_BYTES);
-    (queue, pop, ring)
+    assert!(entries <= layout::QUEUE_RECORDS, "{entries} entries, and the queue holds {}", layout::QUEUE_RECORDS);
+    assert!(entries <= layout::RING_RECORDS, "{entries} entries, and the ring holds {}", layout::RING_RECORDS);
+    assert!(
+        pop_slots + entries <= layout::POPULATION_RECORDS,
+        "{} population slots, and the population holds {}",
+        pop_slots + entries,
+        layout::POPULATION_RECORDS
+    );
+    (layout::QUEUE_REGION_OFFSET, layout::POPULATION_REGION_OFFSET, layout::RING_REGION_OFFSET)
 }
 
 fn udmabuf_phys_addr(node: &str) -> Option<u64> {
@@ -112,11 +117,11 @@ fn main() {
     let dest_base = manifest_value(&dir, "dest_base");
     let record_words = manifest_value(&dir, "record_words");
     let work_item_words = manifest_value(&dir, "work_item_words");
-    assert_eq!(record_words, layout::RECORD_WORDS, "vector/layout disagree on a record");
-    assert_eq!(work_item_words, layout::WORK_ITEM_WORDS, "vector/layout disagree on a work item");
+    assert_eq!(record_words, RECORD_WORDS, "vector/layout disagree on a record");
+    assert_eq!(work_item_words, WORK_ITEM_WORDS, "vector/layout disagree on a work item");
 
     let (queue_off, pop_off, ring_off) = region_offsets(entries, pop_slots);
-    let needed = ring_off + entries * layout::RESULT_BYTES;
+    let needed = ring_off + entries * layout::RING_STRIDE_BYTES;
 
     let work_items = read_words(&dir, "workitems.bin");
     let population = read_words(&dir, "population.bin");
@@ -189,16 +194,9 @@ fn main() {
         layout::N_BREEDERS, layout::N_LANES, entries, n_cases);
     println!("ddr: phys 0x{phys:x} via /dev/{node}");
 
-    let regions = GepRegions {
-        queue_base: (phys as usize + queue_off) as u32,
-        pop_base: (phys as usize + pop_off) as u32,
-        ring_base: (phys as usize + ring_off) as u32,
-        queue_entries: entries as u32,
-        ring_records: entries as u32,
-    };
-
+    device.arm(phys as u32).expect("arm the arena");
     device.set_auto_mode(false).expect("auto off");
-    device.start(regions, n_cases as u32).expect("start");
+    device.start(n_cases as u32).expect("start");
 
     let rows: Vec<&[u32]> = (0..n_cases)
         .map(|k| &cases[k * (var_count + 1)..(k + 1) * (var_count + 1)])
@@ -217,7 +215,7 @@ fn main() {
     let telemetry = device.telemetry().expect("telemetry");
 
     // ---- the verdict ----
-    let ring = get(&mut ddr, ring_off, entries * layout::RESULT_WORDS);
+    let ring = get(&mut ddr, ring_off, entries * RESULT_WORDS);
     let mut results = vec![
         GepResult { fitness: 0, entry_id: 0, seq: 0 };
         entries

@@ -93,6 +93,10 @@ type Need =
     /// the host as a constant in the seam, so a driver reads it rather than
     /// writing it down a second time.
     | Fact of name: string * value: uint64
+    /// Records the design reads or writes by index, placed by the board —
+    /// in the host's memory, on the chip, over the link (`notes/DEVICES.md`
+    /// §13). The design never learns which.
+    | Records of RegionSpec
 
 /// Rows into the design, under a name.
 let streamIn name fields = StreamIn(name, fields)
@@ -142,7 +146,9 @@ type Boundary =
       tableIn: string -> Expr -> HostArrayPort
       /// Hand a `SurfaceOut` need its rows — the live registers, one list a
       /// row, each the row's fields. Call once a need.
-      surfaceOut: string -> Expr list list -> unit }
+      surfaceOut: string -> Expr list list -> unit
+      /// A `Records` need — a region — as whatever carries it.
+      region: string -> RegionPort }
 
 /// What a board's clock makes of a design's streams: the rate its converter
 /// frames at, and the fabric cycles each beat gets.
@@ -221,6 +227,43 @@ type Incoming<'p> =
 type Landing<'p> =
     { rows: 'p list
       landed: Expr }
+
+/// A region as a design holds it: `records` of the layout, read by index and
+/// written by index, a record at a time. What carries it — the host's
+/// memory, block RAM on the chip, the link — is the board's, and nothing
+/// here says which.
+type Region<'r> internal (name: string, records: int, layout: Layout<'r>, port: RegionPort option) =
+    let carried () =
+        match port with
+        | Some p -> p
+        | None -> failwith $"region '{name}': a needs factory declares its regions, and does not read or write them"
+
+    /// How many records the region holds — what a ring wraps at.
+    member _.records = records
+
+    /// Indices in, records out, in the order they were asked for. A caller's
+    /// own data rides `withContext`, as through any stage.
+    member _.read(indices: Stream<Expr>) : Stream<'r> =
+        (carried ()).read indices |> streamMapTo layout layout.unpack
+
+    /// Index, record and the caller's context in; the context out once that
+    /// record has *landed* — on a bus, its write response returned — in the
+    /// order they went in. A caller that does not care takes every beat; one
+    /// that stops taking them stalls its own writes once it owes enough.
+    member _.write (context: Layout<'c>) (writes: Stream<Expr * 'r * 'c>) : Stream<'c> =
+        let index, _, _ = writes.payload
+        let operands = layoutOfList (("index", unsignedInt (width index)) :: layout.fields)
+
+        writes
+        |> streamMapTo (layoutJoin operands context) (fun (i, r, c) -> (i :: layout.pack r), c)
+        |> withContext $"{name}_landing" regionWriteCredits operands (layout1 ("landed", 1)) context (carried ()).write
+        |> streamMapTo context snd
+
+/// A region over a carrier's port, for a harness that builds the carrier
+/// itself — a check putting a design's regions on a bus it drives — rather
+/// than taking it from a board top.
+let regionOver (name: string) (records: int) (layout: Layout<'r>) (port: RegionPort) : Region<'r> =
+    Region(name, records, layout, Some port)
 
 /// What a design declares its boundary with. Each call records a need and
 /// hands back its handle; the design's own record of handles is then its io,
@@ -310,6 +353,21 @@ type Needs internal (fit: Fit, boundary: Boundary option) =
         | Some b -> fun surface -> surface |> List.map layout.pack |> b.surfaceOut name
         | None -> fun _ -> failwith $"'{name}': a needs factory declares its surfaces, and does not hand them over"
 
+    /// A region: `records` records of the layout, which the design reads,
+    /// writes or both, and which the host sees or does not. Where it lives is
+    /// the board's.
+    member _.region(name: string, layout: Layout<'r>, records: int, usage: RegionUse, sharing: RegionSharing) : Region<'r> =
+        declared.Add(
+            Records
+                { name = name
+                  fields = layout.fields
+                  records = records
+                  usage = usage
+                  sharing = sharing }
+        )
+
+        Region(name, records, layout, boundary |> Option.map (fun b -> b.region name))
+
     /// A surface the host sends a row at a time, top row first — `rows` rows
     /// of the layout — and the design takes whole once the last has landed:
     /// `surfaceOut`'s dual. On the wire it is rows in, so any carrier that
@@ -394,6 +452,13 @@ let sized (name: string) (choose: Fit -> Design) : Design =
             | Some resolve -> resolve fit
             | None -> chosen) }
 
+/// What carries a region: by name first, then a private region by the kind
+/// every preset binds on chip, then any region by kind.
+let private carriersOfRegion (path: DataPath) (spec: RegionSpec) =
+    match spec.sharing, carriersFor path EveryPrivateRegion spec.name with
+    | Private, (_ :: _ as carriers) -> carriers
+    | _ -> carriersFor path EveryRegion spec.name
+
 /// What carries the design's input stream, and its output stream. Each asks
 /// the path by the need's own name first, so a mapping can rebind one need
 /// of a preset without restating the others.
@@ -409,6 +474,7 @@ let private carrierOfNeed (path: DataPath) (need: Need) =
     | SurfaceOut(name, _, _) -> carrierFor path EveryStreamOut name
     // Nothing carries a fact; the seam states it.
     | Fact _ -> None
+    | Records spec -> carriersOfRegion path spec |> List.tryHead
 
 /// Every carrier bound to a need, in binding order.
 let internal carriersOfNeed (path: DataPath) (need: Need) =
@@ -421,6 +487,7 @@ let internal carriersOfNeed (path: DataPath) (need: Need) =
     | TableIn(name, _, _, _, _) -> carriersFor path EveryValueIn name
     | SurfaceOut(name, _, _) -> carriersFor path EveryStreamOut name
     | Fact _ -> []
+    | Records spec -> carriersOfRegion path spec
 
 let internal carrierOfInput (path: DataPath) (d: Design) =
     d.needs
@@ -502,6 +569,13 @@ let surfacesOf (d: Design) =
         | SurfaceOut(name, fields, rows) -> Some(name, fields, rows)
         | _ -> None)
 
+/// The regions the design declares, in declaration order.
+let regionsOf (d: Design) =
+    d.needs
+    |> List.choose (function
+        | Records spec -> Some spec
+        | _ -> None)
+
 /// Where each of those starts.
 let startingOf (d: Design) =
     d.needs
@@ -562,6 +636,12 @@ let apertureAddrWidth = 8
 /// The design's boundary on the converter: its stream in off the link, its
 /// stream out onto it — forked first when the need is bound to a recorder as
 /// well — and its values from wherever `values` says.
+/// The refusal every top but the registers one gives a region: rows and
+/// regions on one top is not built (`notes/DEVICES.md` §13, rung 1).
+let private noRegionsOn (top: string) (d: Design) : string -> RegionPort =
+    fun name ->
+        failwith $"{d.name}: '{name}' is a region, and {top} carries none — rows and regions on one top is not built yet"
+
 let private onPins
     (d: Design)
     (path: DataPath)
@@ -618,7 +698,8 @@ let private onPins
       pulseIn = pulses
       valueOut = report
       tableIn = tables
-      surfaceOut = fun name _ -> failwith $"{d.name}: '{name}' is a surface, and the converter top carries none — bind it to the host link" }
+      surfaceOut = fun name _ -> failwith $"{d.name}: '{name}' is a surface, and the converter top carries none — bind it to the host link"
+      region = noRegionsOn "the converter top" d }
 
 /// The registers the host-memory path adds ahead of the design's controls:
 /// the batch contract every such top speaks, so one driver runs any of them.
@@ -772,10 +853,22 @@ type SnapshotRegs =
     /// pulses on every grant.
     | SnapshotToMemory of baseReg: RegEntry * capture: RegEntry * release: RegEntry * ready: RegEntry * overrun: RegEntry * slot: RegEntry * irq: RegEntry
 
+/// The identity a top with regions in the host's memory answers with — a
+/// different number from `batchId`, so neither driver opens the other's top.
+let regionId = 0x7A115E60UL
+
+/// What regions in the host's memory add ahead of the design's words: who
+/// the top is, which map it was built from, and where the arena starts —
+/// armed when non-zero, written by the driver from the buffer it found.
+type RegionRegs =
+    { regionsId: RegEntry
+      regionsBase: RegEntry }
+
 /// What the bindings contributed to the register map, with the design's own
 /// entries and the map itself.
 type private BindingRegs =
-    { batchRegs: BatchRegs option
+    { regionRegs: RegionRegs option
+      batchRegs: BatchRegs option
       recorderRegs: RecordRegs option
       playerRegs: PlayRegs option
       counterRegs: CountRegs option
@@ -849,6 +942,10 @@ let private contributesBatchContract =
     | AsBeatCount
     | InRegisterMap
     | InLinkFrames
+    | InHostMemory
+    | InHostMemoryOn _
+    | OnChip
+    | OnBoardMemory
     | OnPin _ -> false
 
 /// The host's register map, **assembled** from what the design's needs and
@@ -879,8 +976,26 @@ let private registersFor
                 |> Option.map contributesBatchContract
                 |> Option.defaultValue false)
 
-    let (batch, recorder, player, counter, snapshot, controls), map =
+    let inHostMemory =
+        d.needs
+        |> List.exists (fun n ->
+            match n, carrierOfNeed path n with
+            | Records _, Some(InHostMemory | InHostMemoryOn _) -> true
+            | _ -> false)
+
+    let (regions, batch, recorder, player, counter, snapshot, controls), map =
         buildRegMapAtLeast apertureAddrWidth (fun r ->
+            let regions =
+                if not inHostMemory then
+                    None
+                else
+                    let id = r.RoConst("id", regionId)
+                    r.LayoutHash "layoutHash"
+
+                    Some
+                        { regionsId = id
+                          regionsBase = r.RwReg("regionsBase", 32, 0UL) }
+
             let batch =
                 if not wantsContract then
                     None
@@ -1000,9 +1115,10 @@ let private registersFor
                         | words -> Some(name, r.RwArray(name, entries, storage, words))
                     | _ -> None)
 
-            batch, recorder, player, counter, snapshot, scalars @ tables)
+            regions, batch, recorder, player, counter, snapshot, scalars @ tables)
 
-    { batchRegs = batch
+    { regionRegs = regions
+      batchRegs = batch
       recorderRegs = recorder
       playerRegs = player
       counterRegs = counter
@@ -2145,7 +2261,8 @@ let private linkTop (board: Board) (path: DataPath) (d: Design) : BoardTop =
                       pulseIn = pulsesInOf contributed.designEntries regs
                       valueOut = reporterFor board d path contributed.designEntries (Some regs) outs
                       tableIn = tablesInOf contributed.designEntries regs
-                      surfaceOut = surfaceOut }
+                      surfaceOut = surfaceOut
+                      region = noRegionsOn "the link top" d }
 
                 d.body boundary)
 
@@ -2258,7 +2375,8 @@ let private countedLinkTop (board: Board) (path: DataPath) (d: Design) : BoardTo
                       pulseIn = pulsesInOf contributed.designEntries regs
                       valueOut = reporterFor board d path contributed.designEntries (Some regs) outs
                       tableIn = tablesInOf contributed.designEntries regs
-                      surfaceOut = surfaceOut }
+                      surfaceOut = surfaceOut
+                      region = noRegionsOn "the link top" d }
 
                 d.body boundary)
 
@@ -2643,7 +2761,8 @@ let private hostMemoryTop (board: Board) (path: DataPath) (d: Design) : BoardTop
                       pulseIn = fun name -> regs.pulse byName[name]
                       valueOut = fun name value -> regs.drive byName[name] value
                       tableIn = fun name index -> regs.readArray byName[name] index
-                      surfaceOut = surfaceOut }
+                      surfaceOut = surfaceOut
+                      region = noRegionsOn "the batch top" d }
 
                 match irqPort with
                 | Some port -> regs.irq ==> port
@@ -2741,6 +2860,116 @@ let private hostMemoryTop (board: Board) (path: DataPath) (d: Design) : BoardTop
 /// bits on pins — `hello`, the first design on any board. The host reaches
 /// it through whatever the board's link is; with no host the values are
 /// baked at their starting values and only the pins remain.
+/// Where a design's regions go in the host's memory: placed in the arena,
+/// and each direction's regions spread over the board's ports in
+/// declaration order — or on the port a mapping named. A port with no
+/// region in a direction has no master in it.
+type private RegionPlan =
+    { contract: RegionRegs
+      memory: HostMemoryFacts
+      places: RegionPlace list
+      readsOn: (string * RegionPlace list) list
+      writesOn: (string * RegionPlace list) list }
+
+/// The design's regions by what carries them: those in the host's memory,
+/// placed and spread over the ports, and those on the chip. A region carried
+/// by nothing this top builds is refused by name.
+let private regionPlan (board: Board) (path: DataPath) (d: Design) (contributed: BindingRegs) : RegionPlan option * RegionSpec list * RegionSpec list * RegionSpec list =
+    let specs = regionsOf d
+
+    let carried (spec: RegionSpec) = carrierOfNeed path (Records spec)
+
+    let onChip =
+        specs
+        |> List.filter (fun spec ->
+            match carried spec with
+            | Some OnChip ->
+                if spec.sharing = SharedWithHost then
+                    failwith $"{d.name}: region '{spec.name}' is shared with the host and placed on the chip, where no host reaches it — keep it in the host's memory, or make it private"
+
+                true
+            | _ -> false)
+
+    let overLink =
+        specs
+        |> List.filter (fun spec ->
+            match carried spec with
+            | Some InLinkFrames ->
+                match board.host with
+                | UartAt _ -> true
+                | _ -> failwith $"{d.name}: region '{spec.name}' is carried over the host link, and the {board.name}'s host is not on one"
+            | _ -> false)
+
+    let onBoard =
+        specs
+        |> List.filter (fun spec ->
+            match carried spec, board.boardMemory with
+            | Some OnBoardMemory, Some _ ->
+                if spec.sharing = SharedWithHost then
+                    failwith $"{d.name}: region '{spec.name}' is shared with the host and placed in the {board.name}'s SDRAM, which no host reaches yet — keep it over the link, or make it private"
+
+                true
+            | Some OnBoardMemory, None -> failwith $"{d.name}: region '{spec.name}' is placed in the board's memory, and the {board.name} carries none"
+            | _ -> false)
+
+    let inMemory =
+        specs
+        |> List.filter (fun spec ->
+            match carried spec with
+            | Some(InHostMemory | InHostMemoryOn _) -> true
+            | Some(OnChip | InLinkFrames | OnBoardMemory) -> false
+            | other ->
+                failwith
+                    $"{d.name}: region '{spec.name}' is carried by {other} on this path — the host's memory carries regions (`InHostMemory`), the link carries them (`InLinkFrames`), and the chip carries private ones (`OnChip`)")
+
+    match inMemory, contributed.regionRegs with
+    | [], _ -> None, onChip, overLink, onBoard
+    | _, None -> failwith $"{d.name}: regions in the host's memory and no contract to say where the arena is"
+    | specs, Some contract ->
+        let memory =
+            match board.hostMemory with
+            | Some m -> m
+            | None -> failwith $"{d.name}: the regions are bound to the host's memory, and the {board.name} has none"
+
+        match board.host with
+        | AxiLiteAt _ -> ()
+        | _ -> failwith $"{d.name}: regions in the host's memory need an AXI-Lite host to say where the arena is, and the {board.name} has none"
+
+        let places = placeRegions memory.width memory.arenaBytes specs
+
+        let pinnedPort (p: RegionPlace) =
+            match carried p.spec with
+            | Some(InHostMemoryOn port) ->
+                if not (List.contains port memory.ports) then
+                    let ports = String.concat ", " memory.ports
+                    failwith $"{d.name}: region '{p.spec.name}' is placed on {port}, and the {board.name}'s ports are {ports}"
+
+                Some port
+            | _ -> None
+
+        let spread (direction: RegionUse -> bool) =
+            let assigned =
+                places
+                |> List.filter (fun p -> direction p.spec.usage)
+                |> List.mapi (fun i p ->
+                    let port = pinnedPort p |> Option.defaultValue memory.ports[i % memory.ports.Length]
+                    port, p)
+
+            [ for port in memory.ports do
+                  match assigned |> List.filter (fun (q, _) -> q = port) |> List.map snd with
+                  | [] -> ()
+                  | regions -> yield port, regions ]
+
+        Some
+            { contract = contract
+              memory = memory
+              places = places
+              readsOn = spread regionReads
+              writesOn = spread regionWrites },
+        onChip,
+        overLink,
+        onBoard
+
 let private registersTop (board: Board) (path: DataPath) (d: Design) : BoardTop =
     let contributed = registersFor path None None None None d
     let map = contributed.regMap
@@ -2748,8 +2977,32 @@ let private registersTop (board: Board) (path: DataPath) (d: Design) : BoardTop 
     let pinned = pinnedOutputs d path
     let starting = Map.ofList (startingOf d)
     let formats = Map.ofList (controlsOf d)
+    let plan, onChip, overLink, onBoard = regionPlan board path d contributed
 
-    let body (regs: SlaveRegs option) (outs: (string * Expr) list) =
+    // The pins a top declares beside its host's: the design's own, and the
+    // SDRAM's where a region lives in it.
+    let boardPins (p: Ports) =
+        pinOutsOf pinned p,
+        (match onBoard, board.boardMemory with
+         | [], _ -> None
+         | _, Some chip -> Some(sdramPins p chip)
+         | _, None -> None)
+
+    // Regions the board keeps off the chip — in the host's memory or over the
+    // link — as a port by name, and the call that builds their carrier once
+    // the design has taken every port.
+    let body
+        (regs: SlaveRegs option)
+        ((outs, sdram): (string * Expr) list * SdramPins option)
+        (outside: ((string -> RegionPort) * (unit -> unit)) option)
+        =
+        let chip = if onChip.IsEmpty then None else Some(onChipRegions onChip)
+
+        let inBoardMemory =
+            match sdram, board.boardMemory with
+            | Some pins, Some memory -> Some(sdramRegions board.fabricHz memory pins onBoard)
+            | _ -> None
+
         let boundary: Boundary =
             { streamIn = fun n -> failwith $"{d.name}: no stream in called '{n}'"
               streamOut = fun n _ -> failwith $"{d.name}: no stream out called '{n}'"
@@ -2766,34 +3019,85 @@ let private registersTop (board: Board) (path: DataPath) (d: Design) : BoardTop 
               tableIn =
                 match regs with
                 | Some regs -> tablesInOf entries regs
-                | None -> fun name _ -> failwith $"{d.name}: the table '{name}' is the host's to fill, and the {board.name} has no host" }
+                | None -> fun name _ -> failwith $"{d.name}: the table '{name}' is the host's to fill, and the {board.name} has no host"
+              region =
+                fun name ->
+                    match chip, inBoardMemory with
+                    | Some c, _ when c.Holds name -> c.Port name
+                    | _, Some m when onBoard |> List.exists (fun r -> r.name = name) -> m.Port name
+                    | _ ->
+                        match outside with
+                        | Some(port, _) -> port name
+                        | None -> failwith $"{d.name}: no region called '{name}'" }
 
         d.body boundary
+        outside |> Option.iter (fun (_, finish) -> finish ())
+        inBoardMemory |> Option.iter (fun m -> m.Finish())
+        chip |> Option.iter (fun c -> c.Finish())
 
     let name, top =
-        match board.host with
-        | AxiLiteAt _ ->
+        match board.host, plan with
+        | AxiLiteAt _, Some plan ->
+            let name = $"{d.name}Axi"
+            let width = plan.memory.width
+
+            name,
+            (defModuleClocked
+                axiClock
+                name
+                (fun p ->
+                    axiLiteSlavePorts p map.apertureAddrWidth,
+                    boardPins p,
+                    [ for port, regions in plan.readsOn -> axiReadBusPorts p (masterPrefixOf port) 32 width, regions ],
+                    [ for port, regions in plan.writesOn -> axiWriteBusPorts p (masterPrefixOf port) 32 width, regions ])
+                (fun (slavePorts, outs, reads, writes) ->
+                    let regs = regMapSlave slavePorts map
+
+                    let regions =
+                        hostMemoryRegions
+                            (regs.value plan.contract.regionsBase)
+                            [ for ports, places in reads -> axiReadBusOf ports, places ]
+                            [ for ports, places in writes -> axiWriteBusOf ports, places ]
+                            regionReadOutstanding
+                            plan.memory.writeOutstanding
+
+                    body (Some regs) outs (Some(regions.Port, regions.Finish))))
+                .def
+        | AxiLiteAt _, None ->
             let name = $"{d.name}Axi"
 
             name,
             (defModuleClocked
                 axiClock
                 name
-                (fun p -> axiLiteSlavePorts p map.apertureAddrWidth, pinOutsOf pinned p)
-                (fun (slavePorts, outs) -> body (Some(regMapSlave slavePorts map)) outs))
+                (fun p -> axiLiteSlavePorts p map.apertureAddrWidth, boardPins p)
+                (fun (slavePorts, outs) -> body (Some(regMapSlave slavePorts map)) outs None))
                 .def
-        | UartAt baud ->
+        | UartAt baud, _ when not overLink.IsEmpty ->
             let name = $"{d.name}Uart"
 
             name,
             (defModule
                 name
-                (fun p -> uartPins p "host", pinOutsOf pinned p)
-                (fun (uart, outs) -> body (Some(serialRegMapSlave "host" board.fabricHz baud uart map)) outs))
+                (fun p -> uartPins p "host", boardPins p)
+                (fun (uart, outs) ->
+                    let words = linkRegionWords ()
+                    let regs, played = serialRegMapSlaveLink "host" board.fabricHz baud uart map (Some words) true
+                    let regions = linkRegions overLink words played.Value.words
+                    body (Some regs) outs (Some(regions.Port, regions.Finish))))
                 .def
-        | NoHost ->
+        | UartAt baud, _ ->
+            let name = $"{d.name}Uart"
+
+            name,
+            (defModule
+                name
+                (fun p -> uartPins p "host", boardPins p)
+                (fun (uart, outs) -> body (Some(serialRegMapSlave "host" board.fabricHz baud uart map)) outs None))
+                .def
+        | NoHost, _ ->
             let name = $"{d.name}Top"
-            name, (defModule name (fun p -> pinOutsOf pinned p) (fun outs -> body None outs)).def
+            name, (defModule name (fun p -> boardPins p) (fun outs -> body None outs None)).def
 
     { board = board
       name = name
@@ -2802,7 +3106,26 @@ let private registersTop (board: Board) (path: DataPath) (d: Design) : BoardTop 
       batch = None
       map = map
       target = targetOf board.part
-      seamExtras = [] }
+      seamExtras =
+        (match plan with
+         | None -> []
+         | Some plan ->
+             $"pub const ARENA_BYTES: usize = %d{plan.memory.arenaBytes};"
+             :: [ for p in plan.places do
+                      if p.spec.sharing = SharedWithHost then
+                          yield ""
+                          yield! regionSeamLines p ])
+        @ (match overLink with
+           | [] -> []
+           | specs ->
+               [ yield "/// A region request over the link: the operation in a header word's"
+                 yield "/// top four bits, the region's id in the next four, the record's index"
+                 yield "/// in the low twenty-four."
+                 yield $"pub const REGION_LINK_READ: u32 = %d{linkRegionRead};"
+                 yield $"pub const REGION_LINK_WRITE: u32 = %d{linkRegionWrite};"
+                 for i, spec in List.indexed specs do
+                     yield ""
+                     yield! linkRegionSeamLines i spec ]) }
 
 /// The design handed its clocking on this board and path, where it asks
 /// for one.
@@ -2836,6 +3159,8 @@ let private placed (board: Board) (path: DataPath) (d: Design) : BoardTop =
 
     if not carriesRows then
         registersTop board path d
+    elif not (regionsOf d).IsEmpty then
+        failwith $"{d.name}: the design has rows and regions, and rows and regions on one top is not built yet"
     else
 
     // Six combinations of carriers are built. The rest are sayable — which
@@ -2921,17 +3246,11 @@ let write (dir: string) (t: BoardTop) : string list =
 let ddrServe (top: ModuleDef) (registers: (string * RegEntry) list) (arenaBytes: int) (dataBytes: int) (marker: string) =
     let sim = Sim top
 
-    // A top that reads nothing has no read channel, so its DDR is the
-    // write-only slave; one with both channels gets the model that answers both.
-    let reads = top.decls |> List.exists (function Input(n, _) -> n = "m_axi_arready" | _ -> false)
-
-    let cycle, ddrMemory =
-        if reads then
-            let ddr = SimAxiDdr(sim, arenaBytes, dataBytes = dataBytes)
-            ddr.Cycle, ddr.Memory
-        else
-            let ddr = SimAxiWriteSlave(sim, arenaBytes, dataBytes = dataBytes)
-            ddr.Cycle, ddr.Memory
+    // Every master the top has, on one memory: a slave per channel it uses.
+    // A page past the arena, because a host puts the arena at 0x1000 here —
+    // a zero base is a disarmed one.
+    let ddr = SimAxiMemory(sim, arenaBytes + 4096, axiMasterPrefixesOf top, dataBytes = dataBytes)
+    let cycle, ddrMemory = ddr.Cycle, ddr.Memory
 
     let axi = SimAxi.clientWith sim cycle
     let out = System.Console.Out
@@ -2980,3 +3299,11 @@ let batchServe (t: BoardTop) =
         | _ -> failwith $"{t.name}: the batch bridge serves a host-memory top"
 
     ddrServe t.top t.registers memory.arenaBytes (memory.width / 8) "BATCHSERVE"
+
+/// The bridge for a top with regions in the host's memory: the same loop,
+/// with the `REGIONSERVE` marker. The host puts the arena at 0x1000 — a zero
+/// base is disarmed — and reaches each region at the seam's offset from it.
+let regionServe (t: BoardTop) =
+    match t.board.hostMemory with
+    | Some m -> ddrServe t.top t.registers m.arenaBytes (m.width / 8) "REGIONSERVE"
+    | None -> failwith $"{t.name}: the region bridge serves a top with regions in the host's memory"

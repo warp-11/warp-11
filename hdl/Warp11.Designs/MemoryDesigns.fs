@@ -453,6 +453,22 @@ let axiWriteMasterSingle =
             streamSource inPorts
             |> axiMasterWriterOn (axiWriteBusOf busPorts) 1)
 
+/// The burst write master: `(addr, len)` descriptors on one stream, the
+/// bursts' `(data, strb)` beats on another, one `landed` pulse per burst.
+let axiWriteMasterBurst =
+    defModule
+        "AxiWriteMasterBurst"
+        (fun p ->
+            (streamInputPorts p "req" (layout2 ("addr", 32) ("len", 8)),
+             streamInputPorts p "beat" (layout2 ("data", 32) ("strb", 4)),
+             axiWriteBusPorts p "m_axi" 32 32,
+             p.outPort "landed" 1,
+             p.outPort "idle" 1))
+        (fun (req, beat, busPorts, landed, idle) ->
+            let w = axiMasterWriterBurstOn (axiWriteBusOf busPorts) 4 (streamSource req) (streamSource beat)
+            w.landed ==> landed
+            w.idle ==> idle)
+
 // ---------------------------------------------------------------------------
 // One kernel, three storages — and the kernel does not change
 // ---------------------------------------------------------------------------

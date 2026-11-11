@@ -5,8 +5,9 @@
 ///
 /// One offspring's path:
 ///
-///   a filler claims a free breeder + the next queue slot → fetches the 16-word
-///   entry (one 4-beat burst) and both parent gene records → serializes them
+///   a filler claims a free breeder + the next queue slot → reads the entry's
+///   record from the queue region and both parents' from the population (or
+///   the work item that carries them inline) → serializes them
 ///   into the breeder → the breeder breeds, compiles, and streams the unit
 ///   record out → the router binds that stream to a free lane bank → the PACK
 ///   FSM copies the child genome out of the DONE breeder into that lane-bank's
@@ -15,10 +16,12 @@
 ///   the EMIT FSM writes the 4-beat gene record to the entry's dest slot, then
 ///   the `(fitness, entryId, seq)` ring record.
 ///
-/// Both DDR writes for one offspring happen at result time, genome beats before
-/// the ring beat, so when `results_done` counts a ring B-ack that offspring's
-/// genome has landed too — the invariant a host `awaitResults` leans on. It
-/// counts write *responses*, not beats handed to the master.
+/// Both writes for one offspring happen at result time, and the ring record
+/// waits for its genome to *land* — a stream join on the population region's
+/// landed beats — so when `results_done` counts a landed ring record that
+/// offspring's genome is in memory too, whichever ports the two regions ride.
+/// That is the invariant a host `awaitResults` leans on; it used to be AXI's
+/// in-order B on one master, and is now said where it matters.
 ///
 /// Evaluate-only entries (the skip-writeback flag) release their breeder in the
 /// pack-pick cycle: nothing to stage, and emit goes straight to the ring record.
@@ -92,9 +95,14 @@ type GepClusterShape =
       capacity: int
       nThreads: int
       caseCapacity: int
-      addrWidth: int
-      readOutstanding: int
-      writeOutstanding: int
+      /// Work items the queue region holds — a ring the fillers walk, so a
+      /// power of two.
+      queueRecords: int
+      /// Gene records the population region holds: every parent slot and
+      /// every destination a pairing names.
+      popRecords: int
+      /// Results the ring region holds — a power of two, wrapped by `seq`.
+      ringRecords: int
       divide: FuSharing option
       inlineParents: bool
       auto: GepAutoShape option }
@@ -115,23 +123,17 @@ type GepAutoConfig =
       autoSigma: Expr
       autoRange: Expr
       autoSeed: Expr list
-      /// Op-list mode only: where the breed round streams its entries, whether
-      /// this pass skips the score round, and whether the selection stream
-      /// continues rather than reseeding.
-      oplistBase: Expr option
+      /// Op-list mode only: whether this pass skips the score round, and
+      /// whether the selection stream continues rather than reseeding.
       skipScore: Expr option
       rngContinue: Expr option }
 
-/// The host-facing control bus: queue/population/ring geometry, the run pulse,
-/// and the epoch case-load broadcast. `auto` is present exactly when the shape
-/// carries the generation loop.
+/// The host-facing control bus: the run pulse, how far the host has published,
+/// and the epoch case-load broadcast. Where the queue, the population and the
+/// ring live is not here — they are regions, placed by the board. `auto` is
+/// present exactly when the shape carries the generation loop.
 type GepClusterConfig =
     { startQueue: Expr
-      queueBase: Expr
-      popBase: Expr
-      ringBase: Expr
-      queueMask: Expr
-      ringMask: Expr
       entriesPublished: Expr
       nCases: Expr
       ldCase: Expr
@@ -139,6 +141,97 @@ type GepClusterConfig =
       caseField: Expr
       caseData: Expr
       auto: GepAutoConfig option }
+
+// ---------------------------------------------------------------------------
+// The records, as regions carry them (`notes/DEVICES.md` §13)
+// ---------------------------------------------------------------------------
+//
+// A field a word, in the order the words have always been in, so a record's
+// bytes are the bytes the fabric and the host marshaller always agreed on —
+// and the seam now says where each one is. Two rate halves share a word, and
+// the flags share the last rate's: those words are fields as they stand.
+
+let private word (name: string) = name, unsignedInt 32
+
+/// A pairing entry: 16 words, 64 B.
+let gepEntryFields =
+    [ word "parentA"
+      word "parentB"
+      word "dest"
+      // mutation | constReplace << 16, creep | inversion, isTrans | risTrans,
+      // onePoint | twoPoint
+      word "rates0"
+      word "rates1"
+      word "rates2"
+      word "rates3"
+      // geneRecomb | flags << 16
+      word "recombFlags"
+      word "sigma"
+      word "range"
+      word "entryId"
+      word "reserved"
+      "seed", unsignedInt 128 ]
+
+/// A gene record: 16 words, 64 B — a header word, symbols four to a word from
+/// word 1, constants from word 10.
+let gepGeneRecordFields =
+    [ word "header"; "symbols", unsignedInt (9 * 32); "constants", unsignedInt (6 * 32) ]
+
+/// An inline-parent work item: the entry and both parents' gene records, 48
+/// words. The carrier pads its stride to 256 B, so it moves as one burst.
+let gepWorkItemFields =
+    gepEntryFields @ [ "parentARecord", unsignedInt (16 * 32); "parentBRecord", unsignedInt (16 * 32) ]
+
+/// A fitness-ring record: the fitness, the entry it scores, and its sequence
+/// number.
+let gepResultFields = [ "fitness", unsignedInt 64; word "resultEntryId"; word "seq" ]
+
+/// Whether a pool reads parents from the population by slot: always without
+/// inline parents, and in auto mode with them.
+let gepReadsParentsBySlot (shape: GepClusterShape) = not shape.inlineParents || shape.auto.IsSome
+
+/// The regions a cluster asks for, in the order the seam lists them.
+let gepRegions (shape: GepClusterShape) : RegionSpec list =
+    [ { name = "queue"
+        fields = (if shape.inlineParents then gepWorkItemFields else gepEntryFields)
+        records = shape.queueRecords
+        usage = Reads
+        sharing = SharedWithHost }
+      { name = "population"
+        fields = gepGeneRecordFields
+        records = shape.popRecords
+        usage = (if gepReadsParentsBySlot shape then ReadsAndWrites else Writes)
+        sharing = SharedWithHost }
+      { name = "ring"
+        fields = gepResultFields
+        records = shape.ringRecords
+        usage = Writes
+        sharing = SharedWithHost }
+      match shape.auto with
+      | Some a when a.opList ->
+          { name = "oplist"
+            fields = gepEntryFields
+            records = a.popCapacity
+            usage = Writes
+            sharing = SharedWithHost }
+      | _ -> () ]
+
+/// The regions as a pool takes them.
+type GepMemory =
+    { queue: BoardTop.Region<Expr list>
+      population: BoardTop.Region<Expr list>
+      ring: BoardTop.Region<Expr list>
+      oplist: BoardTop.Region<Expr list> option }
+
+/// A pool's regions over whatever carries them, by name.
+let gepMemoryOver (shape: GepClusterShape) (port: string -> RegionPort) : GepMemory =
+    let over (spec: RegionSpec) = BoardTop.regionOver spec.name spec.records (layoutOfList spec.fields) (port spec.name)
+    let spec name = gepRegions shape |> List.find (fun r -> r.name = name)
+
+    { queue = over (spec "queue")
+      population = over (spec "population")
+      ring = over (spec "ring")
+      oplist = gepRegions shape |> List.tryFind (fun r -> r.name = "oplist") |> Option.map over }
 
 // One piece of machinery: the parameters size the datapath and the body
 // elaborates it once.
@@ -193,8 +286,7 @@ type private Emitter =
 let gepClusterPool
     (shape: GepClusterShape)
     (prefix: string)
-    (readBusPorts: AxiReadBusPorts)
-    (writeBusPorts: AxiWriteBusPorts)
+    (memory: GepMemory)
     (cfg: GepClusterConfig)
     =
     let nBreeders = shape.nBreeders
@@ -203,7 +295,9 @@ let gepClusterPool
     let geneLen = shape.geneLen
     let constCount = shape.constCount
     let capacity = shape.capacity
-    let addrWidth = shape.addrWidth
+    if not (isPowerOfTwo shape.queueRecords && isPowerOfTwo shape.ringRecords) then
+        failwith $"the queue and the ring are rings: %d{shape.queueRecords} and %d{shape.ringRecords} records, and each must be a power of two"
+
 
     // The two records the fabric constructors take, built from the cluster's
     // shape once. Six and five numbers respectively, and every one of them
@@ -242,8 +336,8 @@ let gepClusterPool
             if c.autoSeed.Length <> 4 then
                 failwith "the selection stream takes four pre-expanded seed words"
 
-            if s.opList && (c.oplistBase.IsNone || c.skipScore.IsNone || c.rngContinue.IsNone) then
-                failwith "op-list mode needs oplistBase, skipScore and rngContinue"
+            if s.opList && (c.skipScore.IsNone || c.rngContinue.IsNone) then
+                failwith "op-list mode needs skipScore and rngContinue"
 
             Some(s, c)
         | None, None -> None
@@ -289,12 +383,6 @@ let gepClusterPool
     let entDepth = 4
     let entAddrW = 2
 
-    // ---- Config latch ----
-    let queueBaseR = reg $"{prefix}_queueBase" addrWidth
-    let popBaseR = reg $"{prefix}_popBase" addrWidth
-    let ringBaseR = reg $"{prefix}_ringBase" addrWidth
-    let queueMaskR = reg $"{prefix}_queueMask" 32
-    let ringMaskR = reg $"{prefix}_ringMask" 32
     let running = regBit $"{prefix}_running"
 
     // ---- The generation loop (auto mode) ----
@@ -362,8 +450,9 @@ let gepClusterPool
             let entPush = wireBit $"{prefix}_entPush"
             let entPop = wireBit $"{prefix}_entPop"
 
-            let oplistBaseR =
-                if ashape.opList then Some(reg $"{prefix}_oplistBase" addrWidth) else None
+            // Entries the op-list region has answered as landed: done means
+            // every one emitted is in memory, not merely handed over.
+            let olLanded = if ashape.opList then Some(reg $"{prefix}_olLanded" 32) else None
 
             let opListActiveRound =
                 if ashape.opList then Some(wireBit $"{prefix}_opListActiveRound") else None
@@ -557,7 +646,7 @@ let gepClusterPool
                entPop = entPop
                rateHalf = rateHalf
                rateWords = rateWords
-               oplistBaseR = oplistBaseR
+               olLanded = olLanded
                opListActiveRound = opListActiveRound
                olPop = olPop
                olEmitted = olEmitted |})
@@ -634,49 +723,30 @@ let gepClusterPool
     let busyOwnerId = reg $"{prefix}_busyOwnerId" fW
     let lastRd = reg $"{prefix}_lastRd" fW
 
-    // ---- Per-filler fetch addressing ----
-    let entrySlot =
+    // ---- Per-filler fetch: which record of which region ----
+    // The queue is a ring, so an entry's record is the slot pointer's low
+    // bits; a parent is its population slot. Neither knows an address.
+    let queueIndexW = log2Exact shape.queueRecords
+    let popIndexW = max 1 (ceilLog2 shape.popRecords)
+
+    if queueIndexW < 1 then
+        failwith $"the queue is a ring of at least two records, not %d{shape.queueRecords}"
+
+    let entryIndex =
         [ for f in 0 .. nFillers - 1 ->
-              let w = wire (fn "entrySlot" f) 32
-              (slotPtr[f] &&& queueMaskR) ==> w
+              let w = wire (fn "entryIndex" f) queueIndexW
+              slice (queueIndexW - 1) 0 slotPtr[f] ==> w
               w ]
 
-    let entryAddr =
-        [ for f in 0 .. nFillers - 1 ->
-              let w = wire (fn "entryAddr" f) addrWidth
-
-              if shape.inlineParents then
-                  // The stride is a padded 256 B, so the address is a shift and
-                  // the 12-beat burst never crosses a 4 KB boundary.
-                  (queueBaseR + cat (slice (addrWidth - 9) 0 entrySlot[f]) (lit 0UL 8)) ==> w
-              else
-                  (queueBaseR + cat (slice (addrWidth - 7) 0 entrySlot[f]) (lit 0UL 6)) ==> w
-
-              w ]
-
-    let parentAddr (f: int) (second: bool) =
-        let w = wire (fn (if second then "parBAddr" else "parAAddr") f) addrWidth
-        let inlineOff = (if second then 2 else 1) * gepRecordWords * 4
-
-        // Auto mode always fetches the parent from its population slot; only
-        // queue mode can have it inline, because only queue mode has a host
-        // marshalling the work item.
+    // An inline pool reads its parents out of the work item and never asks
+    // the population for one, so it has no slot to ask with.
+    let parentIndex (f: int) (second: bool) =
         match parReg[f] with
         | Some (parA, parB) ->
-            let bySlot = popBaseR + cat (slice (addrWidth - 7) 0 (if second then parB else parA)) (lit 0UL 6)
-
-            if shape.inlineParents then
-                match auto with
-                | Some (_, ac) -> mux ac.autoMode bySlot (entryAddr[f] + k inlineOff addrWidth) ==> w
-                | None -> (entryAddr[f] + k inlineOff addrWidth) ==> w
-            else
-                bySlot ==> w
-        | None -> (entryAddr[f] + k inlineOff addrWidth) ==> w
-
-        w
-
-    let parAAddr = [ for f in 0 .. nFillers - 1 -> parentAddr f false ]
-    let parBAddr = [ for f in 0 .. nFillers - 1 -> parentAddr f true ]
+            let w = wire (fn (if second then "parBIndex" else "parAIndex") f) popIndexW
+            slice (popIndexW - 1) 0 (if second then parB else parA) ==> w
+            w
+        | None -> lit 0UL popIndexW
 
     let inD (f: int) (state: Filler) = dstate[f].Is state
 
@@ -724,12 +794,6 @@ let gepClusterPool
               (fetching[f] &&& bnot reqSent[f]) ==> w
               w ]
 
-    let reqAddr =
-        [ for f in 0 .. nFillers - 1 ->
-              let w = wire (fn "reqAddr" f) addrWidth
-              mux (inD f Filler.Entry) entryAddr[f] (mux (inD f Filler.ParentA) parAAddr[f] parBAddr[f]) ==> w
-              w ]
-
     // ---- The wormhole over the shared read master: a held burst keeps its
     // owner, otherwise the lowest fetcher at or after lastRd+1 wins this cycle
     // (combinational, so one filler issues with no added latency). ----
@@ -752,28 +816,77 @@ let gepClusterPool
 
     let ownReqPending = wireBit $"{prefix}_ownReqPending"
     byId grantId (fun f -> reqPending[f]) ==> ownReqPending
-    let ownReqAddr = wire $"{prefix}_ownReqAddr" addrWidth
-    byId grantId (fun f -> reqAddr[f]) ==> ownReqAddr
     let reqValid = wireBit $"{prefix}_reqValid"
     (grantValid &&& ownReqPending) ==> reqValid
+
+    // The granted filler asks one region for one record: the queue for its
+    // work item, the population for a parent by slot.
+    let ownFromQueue = wireBit $"{prefix}_ownFromQueue"
+    byId grantId (fun f -> inD f Filler.Entry) ==> ownFromQueue
+    let ownQueueIndex = wire $"{prefix}_ownQueueIndex" queueIndexW
+    byId grantId (fun f -> entryIndex[f]) ==> ownQueueIndex
+    let ownPopIndex = wire $"{prefix}_ownPopIndex" popIndexW
+    byId grantId (fun f -> mux (inD f Filler.ParentA) (parentIndex f false) (parentIndex f true)) ==> ownPopIndex
+
+    let queueAskReady = wireBit $"{prefix}_queueAskReady"
+    registerStreamReady queueAskReady
+
+    let queueRecord =
+        memory.queue.read
+            { payload = ownQueueIndex
+              valid = reqValid &&& ownFromQueue
+              ready = queueAskReady
+              layout = layout1 ("index", queueIndexW) }
+
+    let popRecord =
+        if gepReadsParentsBySlot shape then
+            let popAskReady = wireBit $"{prefix}_popAskReady"
+            registerStreamReady popAskReady
+
+            Some(
+                popAskReady,
+                memory.population.read
+                    { payload = ownPopIndex
+                      valid = reqValid &&& bnot ownFromQueue
+                      ready = popAskReady
+                      layout = layout1 ("index", popIndexW) }
+            )
+        else
+            None
+
     let reqReady = wireBit $"{prefix}_reqReady"
-    registerStreamReady reqReady
 
-    let resp =
-        axiMasterReaderBurstOn
-            (axiReadBusOf readBusPorts)
-            shape.readOutstanding
-            16
-            { payload = (ownReqAddr, mux singleBurst (k (gepWorkItemBeats - 1) 8) (k 3 8))
-              valid = reqValid
-              ready = reqReady
-              layout = layout2 ("addr", addrWidth) ("len", 8) }
+    match popRecord with
+    | Some (popAskReady, _) -> mux ownFromQueue queueAskReady popAskReady ==> reqReady
+    | None -> queueAskReady ==> reqReady
 
-    let respFlow = streamToFlow resp
+    // The record arrives whole, and the beats the staging and the breeder's
+    // entry registers have always been fed are replayed off it, one a cycle,
+    // by the owner's own beat counter. It is taken on its last.
+    let replayBeat = wire $"{prefix}_replayBeat" 4
+    byId grantId (fun f -> beatCtr[f]) ==> replayBeat
+
+    let flatOf (name: string) (fields: Expr list) =
+        let w = wire $"{prefix}_{name}" (fields |> List.sumBy width)
+        fields |> List.rev |> List.reduce cat ==> w
+        w
+
+    let beatOf (flat: Expr) =
+        selectIndexed replayBeat [ for b in 0 .. width flat / 128 - 1 -> slice (128 * b + 127) (128 * b) flat ]
+
     let respFire = wireBit $"{prefix}_respFire"
-    respFlow.valid ==> respFire
     let beatIn = wire $"{prefix}_beatIn" 128
-    fst respFlow.payload ==> beatIn
+    let queueBeat = beatOf (flatOf "queueRecord" queueRecord.payload)
+    (queueRecord.valid &&& eq replayBeat lastBeat) ==> queueRecord.ready
+
+    match popRecord with
+    | Some (_, record) ->
+        (queueRecord.valid ||| record.valid) ==> respFire
+        mux queueRecord.valid queueBeat (beatOf (flatOf "popRecord" record.payload)) ==> beatIn
+        (record.valid &&& eq replayBeat lastBeat) ==> record.ready
+    | None ->
+        queueRecord.valid ==> respFire
+        queueBeat ==> beatIn
 
     let reqFire = wireBit $"{prefix}_reqFire"
     (reqValid &&& reqReady) ==> reqFire
@@ -1415,8 +1528,9 @@ let gepClusterPool
 
     If (bnot (estate.Is Emitter.Idle)) (fun () -> emitBusyCyc + lit 1UL 32 ==> emitBusyCyc)
 
-    // Emit: 4 beats from the staging slot to the dest population slot, then one
-    // ring record. Non-payload gene-record words emit zero.
+    // Emit: the four genome beats out of the staging slot into one record, a
+    // beat a cycle, then the offspring handed on whole. Non-payload
+    // gene-record words emit zero.
     let emitWords =
         [ for j in 0..3 ->
               let addr = wire $"{prefix}_emitA%d{j}" (slotW + 4)
@@ -1438,42 +1552,104 @@ let gepClusterPool
 
     let genomeBeat = wire $"{prefix}_genomeBeat" 128
     catAll [ emitWords[3]; emitWords[2]; emitWords[1]; emitWords[0] ] ==> genomeBeat
-    let ringSlot = wire $"{prefix}_ringSlot" 32
-    (resultSeq &&& ringMaskR) ==> ringSlot
-    let ringAddr = wire $"{prefix}_ringAddr" addrWidth
-    (ringBaseR + cat (slice (addrWidth - 5) 0 ringSlot) (lit 0UL 4)) ==> ringAddr
-    let destByte = wire $"{prefix}_destByte" addrWidth
-    (popBaseR + cat (slice (addrWidth - 7) 0 eDest) (lit 0UL 6)) ==> destByte
-    let emitAddr = wire $"{prefix}_emitAddr" addrWidth
-    (destByte + zext addrWidth (cat wbBeat (lit 0UL 4))) ==> emitAddr
-    let ringBeat = wire $"{prefix}_ringBeat" 128
-    cat (cat resultSeq eUnit) eFit ==> ringBeat
+    let genomeBeats = [ for j in 0..3 -> reg $"{prefix}_genomeBeat%d{j}" 128 ]
 
-    // ---- Write master ----
-    let wrReady = wireBit $"{prefix}_wrReady"
-    registerStreamReady wrReady
+    If (estate.Is Emitter.Genome) (fun () ->
+        for j in 0..3 do
+            If (eq wbBeat (k j 2)) (fun () -> genomeBeat ==> genomeBeats[j])
 
-    let emitValid = wireBit $"{prefix}_emitValid"
-    (estate.Is Emitter.Genome ||| estate.Is Emitter.Ring) ==> emitValid
-    let emitBeatAddr = wire $"{prefix}_emitBeatAddr" addrWidth
-    mux (estate.Is Emitter.Genome) emitAddr ringAddr ==> emitBeatAddr
-    let emitBeatData = wire $"{prefix}_emitBeatData" 128
-    mux (estate.Is Emitter.Genome) genomeBeat ringBeat ==> emitBeatData
+        ifElse [ (eq wbBeat (k 3 2), fun () -> estate.Goto Emitter.Ring)
+                 (otherwise, fun () -> wbBeat + lit 1UL 2 ==> wbBeat) ])
+
+    let genome = wire $"{prefix}_genome" 512
+    catAll [ genomeBeats[3]; genomeBeats[2]; genomeBeats[1]; genomeBeats[0] ] ==> genome
+
+    /// A flat record cut back into a layout's fields, low field first.
+    let fieldsOf (fields: (string * NumberFormat) list) (flat: Expr) =
+        fields
+        |> List.mapFold (fun at (_, f: NumberFormat) -> slice (at + f.totalWidth - 1) at flat, at + f.totalWidth) 0
+        |> fst
+
+    let token = layout1 ("token", 1)
+    let popIndexOf (slot: Expr) = slice (popIndexW - 1) 0 slot
+
+    // ---- Results: genome, then ring record, each once it has landed ----
+    // Every offspring joins an order queue; one with a genome also writes it
+    // to its destination. The queue's head goes to the ring once its genome
+    // has landed — or at once, for an evaluate-only entry — so a ring record
+    // in memory always means its genome is too. That is AXI's in-order B on
+    // one master said as a stream join, which holds wherever the two regions
+    // are placed (`notes/DEVICES.md` §13).
+    let orderLayout = layoutOfList [ "skip", unsignedInt 1; "fit", unsignedInt 64; "unit", unsignedInt 32; "seq", unsignedInt 32 ]
+    let orderInReady = wireBit $"{prefix}_orderInReady"
+    registerStreamReady orderInReady
+    let genomeReady = wireBit $"{prefix}_genomeReady"
+    registerStreamReady genomeReady
+    let issuing = wireBit $"{prefix}_issuing"
+    estate.Is Emitter.Ring ==> issuing
+
+    let genomeLanded =
+        ({ payload = popIndexOf eDest, fieldsOf gepGeneRecordFields genome, lit 1UL 1
+           valid = issuing &&& bnot eSkip &&& orderInReady
+           ready = genomeReady
+           layout = layoutJoin3 (layout1 ("dest", popIndexW)) (layoutOfList gepGeneRecordFields) token }
+        : Stream<Expr * Expr list * Expr>)
+        |> memory.population.write token
+
+    let order =
+        ({ payload = [ eSkip; eFit; eUnit; resultSeq ]
+           valid = issuing &&& (eSkip ||| genomeReady)
+           ready = orderInReady
+           layout = orderLayout }
+        : Stream<Expr list>)
+        |> streamFifo $"{prefix}_order" 32
+
     let wrFire = wireBit $"{prefix}_wrFire"
-    (emitValid &&& wrReady) ==> wrFire
+    (issuing &&& orderInReady &&& (eSkip ||| genomeReady)) ==> wrFire
+
+    If wrFire (fun () ->
+        estate.Goto Emitter.Idle
+        resultSeq + lit 1UL 32 ==> resultSeq)
+
+    let headSkip, headFit, headUnit, headSeq =
+        match order.payload with
+        | [ s; f; u; q ] -> s, f, u, q
+        | _ -> failwith "an order entry is four fields"
+
+    let ringIndexW = log2Exact shape.ringRecords
+    let headSeqW = wire $"{prefix}_headSeq" 32
+    headSeq ==> headSeqW
+    let ringReady = wireBit $"{prefix}_ringReady"
+    registerStreamReady ringReady
+    let joined = wireBit $"{prefix}_joined"
+    (order.valid &&& (headSkip ||| genomeLanded.valid)) ==> joined
+
+    let ringLanded =
+        ({ payload = slice (ringIndexW - 1) 0 headSeqW, [ headFit; headUnit; headSeqW ], lit 1UL 1
+           valid = joined
+           ready = ringReady
+           layout = layoutJoin3 (layout1 ("slot", ringIndexW)) (layoutOfList gepResultFields) token }
+        : Stream<Expr * Expr list * Expr>)
+        |> memory.ring.write token
+
+    (joined &&& ringReady) ==> order.ready
+    (order.valid &&& bnot headSkip &&& ringReady) ==> genomeLanded.ready
+
+    // A ring record that landed is a result done — its genome landed first.
+    let resultsDone = reg $"{prefix}_resultsDone" 32
+    lit 1UL 1 ==> ringLanded.ready
+    If ringLanded.valid (fun () -> resultsDone + lit 1UL 32 ==> resultsDone)
 
     // ---- Op-list emitter: the producer half of the streaming redesign ----
     // In op-list mode the breed round does NOT breed internally — the selection
-    // FSM's entries stream to a DDR ring in the same 16-word record the queue
-    // consumes, for the host to gather inline parents. The emit FSM is idle then
-    // (the dispatcher is gated off and the score round's results have all
-    // drained past the barrier), so this is a phase-gated mux on the write
-    // master, not an arbiter.
+    // FSM's entries go to the op-list region in the same 16-word record the
+    // queue consumes, for the host to gather inline parents: four words a
+    // cycle into one record, then written at its entry id.
     let olEmit =
         match autoState with
         | Some a when opList ->
-            let olIdle, olWrite = 0UL, 1UL
-            let olState = regInit $"{prefix}_olState" 1 olIdle
+            let olIdle, olGather_, olIssue = 0UL, 1UL, 2UL
+            let olState = regInit $"{prefix}_olState" 2 olIdle
             let olBeat = reg $"{prefix}_olBeat" 2
             (a.cfg.autoMode &&& a.aPhase) ==> a.opListActiveRound.Value
 
@@ -1515,88 +1691,53 @@ let gepClusterPool
                     [ 0..2 ]
             ==> olBeatData
 
-            let entIdX = wire $"{prefix}_olEntryId" addrWidth
-            zext addrWidth (memRead a.entId a.entRdP) ==> entIdX
-            let olEntryBase = wire $"{prefix}_olEntryBase" addrWidth
-            (a.oplistBaseR.Value + cat (slice (addrWidth - 7) 0 entIdX) (lit 0UL 6)) ==> olEntryBase
-            let olAddr = wire $"{prefix}_olAddr" addrWidth
-            (olEntryBase + zext addrWidth (cat olBeat (lit 0UL 4))) ==> olAddr
-            let olActive = wireBit $"{prefix}_olActive"
-            eq olState (lit olWrite 1) ==> olActive
-            let olFire = wireBit $"{prefix}_olFire"
-            (olActive &&& wrReady) ==> olFire
-            (olFire &&& eq olBeat (k 3 2)) ==> a.olPop.Value
+            let olGather = [ for b in 0..3 -> reg $"{prefix}_olGather%d{b}" 128 ]
+            let olGathering = wireBit $"{prefix}_olGathering"
+            eq olState (lit olGather_ 2) ==> olGathering
+            let olIssuing = wireBit $"{prefix}_olIssuing"
+            eq olState (lit olIssue 2) ==> olIssuing
 
-            If (bnot olState &&& a.opListActiveRound.Value &&& bnot (eq a.entCnt (k 0 3))) (fun () ->
-                lit olWrite 1 ==> olState
+            If olGathering (fun () ->
+                for b in 0..3 do
+                    If (eq olBeat (k b 2)) (fun () -> olBeatData ==> olGather[b])
+
+                ifElse [ (eq olBeat (k 3 2), fun () -> lit olIssue 2 ==> olState)
+                         (otherwise, fun () -> olBeat + lit 1UL 2 ==> olBeat) ])
+
+            let olRecord = wire $"{prefix}_olRecord" 512
+            catAll [ olGather[3]; olGather[2]; olGather[1]; olGather[0] ] ==> olRecord
+            let olIndexW = log2Exact (Option.get shape.auto).popCapacity
+            let olEntryId = wire $"{prefix}_olEntryId" 16
+            memRead a.entId a.entRdP ==> olEntryId
+            let olReady = wireBit $"{prefix}_olReady"
+            registerStreamReady olReady
+
+            let olLanded =
+                ({ payload = slice (olIndexW - 1) 0 olEntryId, fieldsOf gepEntryFields olRecord, lit 1UL 1
+                   valid = olIssuing
+                   ready = olReady
+                   layout = layoutJoin3 (layout1 ("entry", olIndexW)) (layoutOfList gepEntryFields) token }
+                : Stream<Expr * Expr list * Expr>)
+                |> memory.oplist.Value.write token
+
+            lit 1UL 1 ==> olLanded.ready
+            If olLanded.valid (fun () -> a.olLanded.Value + lit 1UL 32 ==> a.olLanded.Value)
+
+            let olFire = wireBit $"{prefix}_olFire"
+            (olIssuing &&& olReady) ==> olFire
+            olFire ==> a.olPop.Value
+
+            If (eq olState (lit olIdle 2) &&& a.opListActiveRound.Value &&& bnot (eq a.entCnt (k 0 3))) (fun () ->
+                lit olGather_ 2 ==> olState
                 k 0 2 ==> olBeat)
 
             If olFire (fun () ->
-                ifElse [(eq olBeat (k 3 2), fun () ->
-                    lit olIdle 1 ==> olState
-                    a.olEmitted.Value + lit 1UL 32 ==> a.olEmitted.Value
-                    a.entRdP + lit 1UL entAddrW ==> a.entRdP); (otherwise, fun () -> olBeat + lit 1UL 2 ==> olBeat) ]) // pop the FIFO
+                lit olIdle 2 ==> olState
+                a.olEmitted.Value + lit 1UL 32 ==> a.olEmitted.Value
+                a.entRdP + lit 1UL entAddrW ==> a.entRdP) // pop the FIFO
 
-            Some
-                {| active = olActive
-                   addr = olAddr
-                   data = olBeatData
-                   fire = olFire |}
+            Some olFire
         | _ -> None
-
-    let beatValid = wireBit $"{prefix}_beatValid"
-    let beatAddr = wire $"{prefix}_beatAddr" addrWidth
-    let beatData = wire $"{prefix}_beatData" 128
-
-    match olEmit with
-    | Some ol ->
-        (emitValid ||| ol.active) ==> beatValid
-        mux ol.active ol.addr emitBeatAddr ==> beatAddr
-        mux ol.active ol.data emitBeatData ==> beatData
-    | None ->
-        emitValid ==> beatValid
-        emitBeatAddr ==> beatAddr
-        emitBeatData ==> beatData
-
-    let writer =
-        axiMasterWriterTrackedOn
-            (axiWriteBusOf writeBusPorts)
-            shape.writeOutstanding
-            { payload = (beatAddr, beatData, lit 0xFFFFUL 16)
-              valid = beatValid
-              ready = wrReady
-              layout = axiWriteBeatLayout addrWidth 128 }
-
-    If (estate.Is Emitter.Genome &&& wrFire) (fun () ->
-        ifElse [(eq wbBeat (k 3 2), fun () -> estate.Goto Emitter.Ring); (otherwise, fun () -> wbBeat + lit 1UL 2 ==> wbBeat) ])
-
-    If (estate.Is Emitter.Ring &&& wrFire) (fun () ->
-        estate.Goto Emitter.Idle
-        resultSeq + lit 1UL 32 ==> resultSeq)
-
-    // ---- In-order B-ack bookkeeping: one FIFO bit per accepted write, and a
-    // popped ring bit means that offspring's genome writes all landed too. This
-    // counts write RESPONSES, not beats handed to the master. ----
-    let isRing = distributedMem $"{prefix}_isRing" 4 1
-    let ringWrPtr = reg $"{prefix}_ringWrPtr" 4
-    let ringRdPtr = reg $"{prefix}_ringRdPtr" 4
-    let resultsDone = reg $"{prefix}_resultsDone" 32
-
-    // Op-list writes ride the same bookkeeping as any non-ring write (isRing
-    // bit 0): their B-acks must advance ringRdPtr so all_idle and the pointer
-    // comparison stay honest, but they must not bump resultsDone.
-    let wrAccept =
-        match olEmit with
-        | Some ol -> wrFire ||| ol.fire
-        | None -> wrFire
-
-    If wrAccept (fun () ->
-        memWrite isRing ringWrPtr (estate.Is Emitter.Ring) one1
-        ringWrPtr + lit 1UL 4 ==> ringWrPtr)
-
-    If writer.bAck (fun () ->
-        ringRdPtr + lit 1UL 4 ==> ringRdPtr
-        If (memRead isRing ringRdPtr) (fun () -> resultsDone + lit 1UL 32 ==> resultsDone))
 
     // ---- Auto mode: the fitness table writeback, the argmin, the barrier ----
     match autoState with
@@ -1692,7 +1833,13 @@ let gepClusterPool
          &&& estate.Is Emitter.Idle
          &&& List.reduce (&&&) [ for e in lanes -> e.idle ]
          &&& bnot (List.reduce (|||) slotValid)
-         &&& eq ringWrPtr ringRdPtr)
+         &&& eq resultsDone resultSeq
+         &&& (match autoState with
+              | Some a ->
+                  match a.olEmitted, a.olLanded with
+                  | Some emitted, Some landed -> eq emitted landed
+                  | _ -> one1
+              | None -> one1))
     ==> allIdle
 
     // ---- Start: latch config, reset every pointer, free every breeder. The
@@ -1700,18 +1847,11 @@ let gepClusterPool
     // survive on purpose — they shadow engine state start does not touch. ----
     If cfg.startQueue (fun () ->
         one1 ==> running
-        cfg.queueBase ==> queueBaseR
-        cfg.popBase ==> popBaseR
-        cfg.ringBase ==> ringBaseR
-        cfg.queueMask ==> queueMaskR
-        cfg.ringMask ==> ringMaskR
         lit pIdle 1 ==> pstate
         estate.Goto Emitter.Idle
         lit 0UL 32 ==> entryPtr
         lit 0UL 32 ==> resultSeq
         lit 0UL 32 ==> resultsDone
-        k 0 4 ==> ringWrPtr
-        k 0 4 ==> ringRdPtr
         zero1 ==> busyOwnerValid
         lit 0UL fW ==> busyOwnerId
         lit 0UL fW ==> lastRd
@@ -1776,9 +1916,9 @@ let gepClusterPool
             lit 0UL 16 ==> a.lastBestIdx
             zext 32 a.cfg.autoPop ==> a.roundTarget
 
-            match a.oplistBaseR, a.cfg.oplistBase with
-            | Some r, Some v -> v ==> r
-            | _ -> ()
+            match a.olLanded with
+            | Some l -> lit 0UL 32 ==> l
+            | None -> ()
 
             match a.olEmitted with
             | Some e -> lit 0UL 32 ==> e
@@ -1814,7 +1954,7 @@ let gepClusterPool
                // B-acked, so the host may read the ring the instant it asserts.
                oplistDone =
                 a.olEmitted
-                |> Option.map (fun e -> eq e (zext 32 a.cfg.autoPop) &&& eq ringWrPtr ringRdPtr) |}) |}
+                |> Option.map (fun e -> eq e (zext 32 a.cfg.autoPop) &&& eq a.olLanded.Value e) |}) |}
 
 /// The check geometry as a software config too, so the elaborated shape and the
 /// oracle cannot drift: 4 variables, 4 constants, head 8 (a 17-symbol gene),
@@ -1838,9 +1978,9 @@ let clusterShape (nFillers: int) (inlineParents: bool) =
       capacity = 32
       nThreads = 8
       caseCapacity = 64
-      addrWidth = 32
-      readOutstanding = 4
-      writeOutstanding = 8
+      queueRecords = 4
+      popRecords = 32
+      ringRecords = 4
       divide = None
       inlineParents = inlineParents
       auto = None }
@@ -1866,6 +2006,9 @@ type ClusterPoolWalkAutoOuts =
 /// two DDR master buses, then every status output.
 type ClusterPoolWalkIo =
     { cfg: GepClusterConfig
+      /// Where the arena starts: the walk's regions sit at the offsets
+      /// `clusterWalkPlaces` gives, from here.
+      regionsBase: Input
       readBus: AxiReadBusPorts
       writeBus: AxiWriteBusPorts
       running: Output
@@ -1885,6 +2028,13 @@ type ClusterPoolWalkIo =
       breederBusyCycles: Output list
       laneBusyCycles: Output list }
 
+/// The arena the bare-port checks place a walk's regions in.
+let clusterWalkArenaBytes = 4 <<< 20
+
+/// Where a walk's regions sit, from the base the check pokes.
+let clusterWalkPlaces (shape: GepClusterShape) =
+    placeRegions 128 clusterWalkArenaBytes (gepRegions shape)
+
 let clusterPoolDesign (name: string) (shape: GepClusterShape) =
     let caseAddrW = log2Exact shape.caseCapacity
     // streamsActive's width, stated statically — the router sizes it as one
@@ -1898,11 +2048,6 @@ let clusterPoolDesign (name: string) (shape: GepClusterShape) =
         (fun p ->
             { cfg =
                 { startQueue = p.inPort "start_queue" 1
-                  queueBase = p.inPort "queue_base" 32
-                  popBase = p.inPort "pop_base" 32
-                  ringBase = p.inPort "ring_base" 32
-                  queueMask = p.inPort "queue_mask" 32
-                  ringMask = p.inPort "ring_mask" 32
                   entriesPublished = p.inPort "entries_published" 32
                   nCases = p.inPort "n_cases" (caseAddrW + 1)
                   ldCase = p.inPort "ld_case" 1
@@ -1919,11 +2064,11 @@ let clusterPoolDesign (name: string) (shape: GepClusterShape) =
                           autoSigma = p.inPort "auto_sigma" 32
                           autoRange = p.inPort "auto_range" 32
                           autoSeed = [ for i in 0..3 -> p.inPort $"auto_s{i}" 32 ]
-                          oplistBase = (if ashape.opList then Some(p.inPort "oplist_base" 32) else None)
                           skipScore = (if ashape.opList then Some(p.inPort "skip_score" 1) else None)
                           rngContinue = (if ashape.opList then Some(p.inPort "rng_continue" 1) else None) }) }
-              readBus = axiReadBusPorts p "m_axi" shape.addrWidth 128
-              writeBus = axiWriteBusPorts p "m_axi" shape.addrWidth 128
+              regionsBase = p.inPort "regions_base" 32
+              readBus = axiReadBusPorts p "m_axi" 32 128
+              writeBus = axiWriteBusPorts p "m_axi" 32 128
               running = p.outPort "running" 1
               allIdle = p.outPort "all_idle" 1
               autoOuts =
@@ -1950,7 +2095,20 @@ let clusterPoolDesign (name: string) (shape: GepClusterShape) =
               breederBusyCycles = [ for b in 0 .. shape.nBreeders - 1 -> p.outPort $"breeder{b}_busy_cycles" 32 ]
               laneBusyCycles = [ for l in 0 .. shape.nLanes - 1 -> p.outPort $"lane{l}_busy_cycles" 32 ] })
         (fun io ->
-            let pool = gepClusterPool shape "cl" io.readBus io.writeBus io.cfg
+            // Every region on the one master pair, as the bare-port checks
+            // have always had it: one memory behind both channels.
+            let places = clusterWalkPlaces shape
+
+            let regions =
+                hostMemoryRegions
+                    io.regionsBase
+                    [ axiReadBusOf io.readBus, places |> List.filter (fun p -> regionReads p.spec.usage) ]
+                    [ axiWriteBusOf io.writeBus, places |> List.filter (fun p -> regionWrites p.spec.usage) ]
+                    regionReadOutstanding
+                    8
+
+            let pool = gepClusterPool shape "cl" (gepMemoryOver shape regions.Port) io.cfg
+            regions.Finish()
 
             pool.running ==> io.running
             pool.allIdle ==> io.allIdle
@@ -2019,11 +2177,15 @@ let clusterAutoCapacity = 16
 /// The streaming redesign's two halves ship together, so the op-list shape is
 /// also the inline-parent one: the fabric emits the op list, and the host hands
 /// the gathered work items straight back through queue mode.
+let clusterAutoWalkShape (opList: bool) =
+    { clusterShape 1 opList with
+        // Three rounds of eight results, so the ring holds them unwrapped.
+        ringRecords = 32
+        auto =
+            Some
+                { popCapacity = clusterAutoCapacity
+                  opList = opList } }
+
+/// The cluster running its own generation loop, at ports.
 let clusterAutoWalk (opList: bool) =
-    clusterPoolDesign
-        (if opList then "GepClusterOpListWalk" else "GepClusterAutoWalk")
-        { clusterShape 1 opList with
-            auto =
-                Some
-                    { popCapacity = clusterAutoCapacity
-                      opList = opList } }
+    clusterPoolDesign (if opList then "GepClusterOpListWalk" else "GepClusterAutoWalk") (clusterAutoWalkShape opList)

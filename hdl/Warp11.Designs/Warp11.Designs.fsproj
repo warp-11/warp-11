@@ -12,6 +12,7 @@
         <Compile Include="BusDesigns.fs"/>
         <Compile Include="Hello.fs"/>
         <Compile Include="Tally.fs"/>
+        <Compile Include="RecordCopy.fs"/>
         <Compile Include="Registry.fs"/>
         <Compile Include="Main.fs"/>
     </ItemGroup>
@@ -26,6 +27,7 @@
         <EmbeddedResource Include="Designs.fs" LogicalName="Designs.fs"/>
         <EmbeddedResource Include="BusDesigns.fs" LogicalName="BusDesigns.fs"/>
         <EmbeddedResource Include="Hello.fs" LogicalName="Hello.fs"/>
+        <EmbeddedResource Include="RecordCopy.fs" LogicalName="RecordCopy.fs"/>
         <EmbeddedResource Include="doc/*.md" LogicalName="doc/%(Filename).md"/>
     </ItemGroup>
 

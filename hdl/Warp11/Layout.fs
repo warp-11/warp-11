@@ -91,6 +91,18 @@ let layoutJoin (a: Layout<'a>) (b: Layout<'b>) : Layout<'a * 'b> =
 
             a.unpack (List.truncate aCount nets), b.unpack (List.skip aCount nets) }
 
+/// Three payloads side by side, as one — `layoutJoin` once more, as a
+/// triple rather than a nested pair.
+let layoutJoin3 (a: Layout<'a>) (b: Layout<'b>) (c: Layout<'c>) : Layout<'a * 'b * 'c> =
+    let joined = layoutJoin (layoutJoin a b) c
+
+    { fields = joined.fields
+      pack = fun (x, y, z) -> joined.pack ((x, y), z)
+      unpack =
+        fun nets ->
+            let (x, y), z = joined.unpack nets
+            x, y, z }
+
 /// One named field. The payload *is* the `Expr`, so a single-field stream
 /// carries a value rather than a one-tuple.
 let layout1 (an: string, aw: int) : Layout<Expr> =

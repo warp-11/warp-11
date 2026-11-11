@@ -65,6 +65,10 @@ let rec internal emitAt target expr =
             | Mul (a, b) -> $"({emitAt w a} * {emitAt w b})"
             | Mux (c, t, f) -> $"({emitAt 1 c} ? {emitAt w t} : {emitAt w f})"
             | Concat (hi, lo) -> $"{{{emitAt (width hi) hi}, {emitAt (width lo) lo}}}"
+            // A one-bit net is declared with no range, and Verilog has no bit
+            // select on a scalar: the whole of it is the net itself.
+            | Slice (source, 0, 0) when (match namedRef source with Some (_, 1) -> true | _ -> false) ->
+                (namedRef source).Value |> fst
             | Slice (source, hi, lo) when (namedRef source).IsSome ->
                 $"{(namedRef source).Value |> fst}[{hi}:{lo}]"
             | Slice _ -> failwith "emit: slice of a computed value — assign it to a wire first"

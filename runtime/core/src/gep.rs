@@ -51,17 +51,14 @@ impl<E> From<E> for GepError<E> {
     }
 }
 
-/// Where the four DDR regions live, as byte addresses the fabric's masters use.
-/// The two masks are ring sizes minus one, so both rings must be a power of two
-/// in records.
-#[derive(Clone, Copy, Debug)]
-pub struct GepRegions {
-    pub queue_base: u32,
-    pub pop_base: u32,
-    pub ring_base: u32,
-    pub queue_entries: u32,
-    pub ring_records: u32,
-}
+/// The record geometry, read off the regions the seam places — the build's,
+/// not this driver's. A gene record and a pairing entry are both 16 words; a
+/// work item is an entry and two gene records on the queue's stride.
+pub const RECORD_WORDS: usize = layout::POPULATION_RECORD_BYTES / 4;
+pub const ENTRY_WORDS: usize = layout::QUEUE_PARENT_A_RECORD_OFFSET / 4;
+pub const WORK_ITEM_WORDS: usize = layout::QUEUE_STRIDE_BYTES / 4;
+pub const WORK_ITEM_PAYLOAD_WORDS: usize = layout::QUEUE_RECORD_BYTES / 4;
+pub const RESULT_WORDS: usize = layout::RING_STRIDE_BYTES / 4;
 
 /// One breeding policy, already quantized the way the fabric reads it: nine
 /// gates as their top 16 bits packed two per word, plus the two spans the creep
@@ -123,19 +120,20 @@ pub fn pack_entry(p: &Pairing, rates: &BreedRates, out: &mut [u32]) {
         0
     };
 
-    out[layout::ENTRY_PARENT_A] = p.parent_a;
-    out[layout::ENTRY_PARENT_B] = p.parent_b;
-    out[layout::ENTRY_DEST] = p.dest;
-    out[layout::ENTRY_RATE0] = rates.words[0];
-    out[layout::ENTRY_RATE0 + 1] = rates.words[1];
-    out[layout::ENTRY_RATE0 + 2] = rates.words[2];
-    out[layout::ENTRY_RATE0 + 3] = rates.words[3];
-    out[layout::ENTRY_FLAGS_WORD] = (rates.words[4] & 0xFFFF) | (flags << 16);
-    out[layout::ENTRY_SIGMA] = rates.sigma_fx;
-    out[layout::ENTRY_RANGE] = rates.range_fx;
-    out[layout::ENTRY_ID] = p.entry_id;
-    out[11] = 0;
-    out[layout::ENTRY_SEED0..layout::ENTRY_SEED0 + 4].copy_from_slice(&p.seed);
+    out[layout::QUEUE_PARENT_A_OFFSET / 4] = p.parent_a;
+    out[layout::QUEUE_PARENT_B_OFFSET / 4] = p.parent_b;
+    out[layout::QUEUE_DEST_OFFSET / 4] = p.dest;
+    out[layout::QUEUE_RATES0_OFFSET / 4] = rates.words[0];
+    out[layout::QUEUE_RATES1_OFFSET / 4] = rates.words[1];
+    out[layout::QUEUE_RATES2_OFFSET / 4] = rates.words[2];
+    out[layout::QUEUE_RATES3_OFFSET / 4] = rates.words[3];
+    out[layout::QUEUE_RECOMB_FLAGS_OFFSET / 4] = (rates.words[4] & 0xFFFF) | (flags << 16);
+    out[layout::QUEUE_SIGMA_OFFSET / 4] = rates.sigma_fx;
+    out[layout::QUEUE_RANGE_OFFSET / 4] = rates.range_fx;
+    out[layout::QUEUE_ENTRY_ID_OFFSET / 4] = p.entry_id;
+    out[layout::QUEUE_RESERVED_OFFSET / 4] = 0;
+    let seed = layout::QUEUE_SEED_OFFSET / 4;
+    out[seed..seed + layout::QUEUE_SEED_WORDS].copy_from_slice(&p.seed);
 }
 
 /// One fitness-ring record as the fabric writes it.
@@ -149,11 +147,12 @@ pub struct GepResult {
 /// Parse `count` ring records out of a word buffer.
 pub fn parse_results(words: &[u32], out: &mut [GepResult]) {
     for (r, slot) in out.iter_mut().enumerate() {
-        let base = r * layout::RESULT_WORDS;
+        let base = r * RESULT_WORDS;
+        let fitness = base + layout::RING_FITNESS_OFFSET / 4;
         *slot = GepResult {
-            fitness: (words[base + 1] as u64) << 32 | words[base] as u64,
-            entry_id: words[base + 2],
-            seq: words[base + 3],
+            fitness: (words[fitness + 1] as u64) << 32 | words[fitness] as u64,
+            entry_id: words[base + layout::RING_RESULT_ENTRY_ID_OFFSET / 4],
+            seq: words[base + layout::RING_SEQ_OFFSET / 4],
         };
     }
 }
@@ -168,20 +167,21 @@ pub fn parse_results(words: &[u32], out: &mut [GepResult]) {
 /// definition the parallel one has to agree with.
 pub fn marshal_serial(op_list: &[u32], item_count: usize, population: &[u32], out: &mut [u32]) {
     for i in 0..item_count {
-        let src = i * layout::RECORD_WORDS;
-        let dst = i * layout::WORK_ITEM_WORDS;
-        out[dst..dst + layout::RECORD_WORDS].copy_from_slice(&op_list[src..src + layout::RECORD_WORDS]);
+        let src = i * ENTRY_WORDS;
+        let dst = i * WORK_ITEM_WORDS;
+        out[dst..dst + ENTRY_WORDS].copy_from_slice(&op_list[src..src + ENTRY_WORDS]);
         // The tail of the padded stride is never read by the fabric; zero it so
         // a stale buffer cannot look like data if that ever changes.
-        out[dst + layout::WORK_ITEM_PAYLOAD_WORDS..dst + layout::WORK_ITEM_WORDS].fill(0);
+        out[dst + WORK_ITEM_PAYLOAD_WORDS..dst + WORK_ITEM_WORDS].fill(0);
 
-        for (half, slot) in [op_list[src] as usize, op_list[src + 1] as usize]
-            .iter()
-            .enumerate()
-        {
-            let from = slot * layout::RECORD_WORDS;
-            let to = dst + layout::RECORD_WORDS * (1 + half);
-            out[to..to + layout::RECORD_WORDS].copy_from_slice(&population[from..from + layout::RECORD_WORDS]);
+        let parents = [
+            (op_list[src + layout::QUEUE_PARENT_A_OFFSET / 4] as usize, layout::QUEUE_PARENT_A_RECORD_OFFSET / 4),
+            (op_list[src + layout::QUEUE_PARENT_B_OFFSET / 4] as usize, layout::QUEUE_PARENT_B_RECORD_OFFSET / 4),
+        ];
+        for (slot, at) in parents {
+            let from = slot * RECORD_WORDS;
+            let to = dst + at;
+            out[to..to + RECORD_WORDS].copy_from_slice(&population[from..from + RECORD_WORDS]);
         }
     }
 }
@@ -251,19 +251,17 @@ impl<W: RegisterWindow> GepClusterDevice<W> {
         Ok((self.window.read32(offset)? & mask) >> shift)
     }
 
-    /// Program the DDR geometry and the case count, then pulse start — which
-    /// latches all of it, frees every breeder, and zeroes every counter.
-    ///
-    /// The masks are derived here rather than taken, so a caller cannot program
-    /// a ring size that is not a power of two.
-    pub fn start(&mut self, regions: GepRegions, n_cases: u32) -> Result<(), W::Error> {
-        self.window.write32(layout::QUEUE_BASE_OFFSET, regions.queue_base)?;
-        self.window.write32(layout::POP_BASE_OFFSET, regions.pop_base)?;
-        self.window.write32(layout::RING_BASE_OFFSET, regions.ring_base)?;
-        self.window
-            .write32(layout::QUEUE_MASK_OFFSET, regions.queue_entries - 1)?;
-        self.window
-            .write32(layout::RING_MASK_OFFSET, regions.ring_records - 1)?;
+    /// Tell the fabric where the arena is — the address its masters see for
+    /// the arena's first byte. Every region sits at the offset the seam gives
+    /// from there; zero disarms them, which is what to write before the
+    /// bitstream is unloaded.
+    pub fn arm(&mut self, arena_base: u32) -> Result<(), W::Error> {
+        self.window.write32(layout::REGIONS_BASE_OFFSET, arena_base)
+    }
+
+    /// Program the case count, then pulse start — which frees every breeder
+    /// and zeroes every counter. The arena must be armed first.
+    pub fn start(&mut self, n_cases: u32) -> Result<(), W::Error> {
         self.window.write32(layout::N_CASES_OFFSET, n_cases)?;
         self.window
             .write32(layout::START_QUEUE_OFFSET, 1 << layout::START_QUEUE_BIT)
@@ -411,10 +409,6 @@ impl<W: RegisterWindow> GepClusterDevice<W> {
             .write32(layout::RNG_CONTINUE_OFFSET, rng_continue as u32)
     }
 
-    pub fn set_oplist_base(&mut self, base: u32) -> Result<(), W::Error> {
-        self.window.write32(layout::OPLIST_BASE_OFFSET, base)
-    }
-
     /// Emitted AND committed: every entry accepted and every beat B-acked, so
     /// the op-list ring is safe to read the instant this is true.
     pub fn oplist_done(&mut self) -> Result<bool, W::Error> {
@@ -498,26 +492,27 @@ mod tests {
             seed: [1, 2, 3, 4],
         };
 
-        let mut words = [0u32; layout::RECORD_WORDS];
+        let mut words = [0u32; ENTRY_WORDS];
         pack_entry(&pairing, &rates, &mut words);
 
-        assert_eq!(words[layout::ENTRY_PARENT_A], 5);
-        assert_eq!(words[layout::ENTRY_PARENT_B], 9);
-        assert_eq!(words[layout::ENTRY_DEST], 40);
-        assert_eq!(words[layout::ENTRY_RATE0], 0x2222_1111);
-        assert_eq!(words[layout::ENTRY_RATE0 + 1], 0x4444_3333);
-        assert_eq!(words[layout::ENTRY_RATE0 + 2], 0x6666_5555);
-        assert_eq!(words[layout::ENTRY_RATE0 + 3], 0x8888_7777);
+        // The words where they have always been — the fabric replays an entry
+        // as beats and slices each by position, so the region's placement of
+        // these fields is pinned here by number, not by name.
+        assert_eq!(ENTRY_WORDS, 16);
+        assert_eq!(words[0], 5);
+        assert_eq!(words[1], 9);
+        assert_eq!(words[2], 40);
+        assert_eq!(words[3], 0x2222_1111);
+        assert_eq!(words[4], 0x4444_3333);
+        assert_eq!(words[5], 0x6666_5555);
+        assert_eq!(words[6], 0x8888_7777);
         // Word 7 is the flags over the geneRecomb half.
-        assert_eq!(
-            words[layout::ENTRY_FLAGS_WORD],
-            (layout::FLAG_SKIP_WRITEBACK << 16) | 0x9999
-        );
-        assert_eq!(words[layout::ENTRY_SIGMA], 0x0001_999A);
-        assert_eq!(words[layout::ENTRY_RANGE], 0x000A_0000);
-        assert_eq!(words[layout::ENTRY_ID], 0xD00D);
+        assert_eq!(words[7], (layout::FLAG_SKIP_WRITEBACK << 16) | 0x9999);
+        assert_eq!(words[8], 0x0001_999A);
+        assert_eq!(words[9], 0x000A_0000);
+        assert_eq!(words[10], 0xD00D);
         assert_eq!(words[11], 0);
-        assert_eq!(&words[layout::ENTRY_SEED0..], &[1, 2, 3, 4]);
+        assert_eq!(&words[12..], &[1, 2, 3, 4]);
     }
 
     /// The gather puts each entry's two parent records immediately behind it,
@@ -525,15 +520,15 @@ mod tests {
     #[test]
     fn marshal_lays_parents_behind_their_entry() {
         const ITEMS: usize = 3;
-        let mut population = [0u32; 8 * layout::RECORD_WORDS];
+        let mut population = [0u32; 8 * RECORD_WORDS];
 
         for slot in 0..8 {
-            for w in 0..layout::RECORD_WORDS {
-                population[slot * layout::RECORD_WORDS + w] = (slot as u32) << 16 | w as u32;
+            for w in 0..RECORD_WORDS {
+                population[slot * RECORD_WORDS + w] = (slot as u32) << 16 | w as u32;
             }
         }
 
-        let mut op_list = [0u32; ITEMS * layout::RECORD_WORDS];
+        let mut op_list = [0u32; ITEMS * RECORD_WORDS];
         let rates = BreedRates::default();
 
         for i in 0..ITEMS {
@@ -546,46 +541,48 @@ mod tests {
                 seed: [9, 9, 9, 9],
             };
 
-            let base = i * layout::RECORD_WORDS;
-            pack_entry(&pairing, &rates, &mut op_list[base..base + layout::RECORD_WORDS]);
+            let base = i * RECORD_WORDS;
+            pack_entry(&pairing, &rates, &mut op_list[base..base + RECORD_WORDS]);
         }
 
-        let mut out = [0u32; ITEMS * layout::WORK_ITEM_WORDS];
+        let mut out = [0u32; ITEMS * WORK_ITEM_WORDS];
         marshal_serial(&op_list, ITEMS, &population, &mut out);
 
         for i in 0..ITEMS {
-            let dst = i * layout::WORK_ITEM_WORDS;
-            let src = i * layout::RECORD_WORDS;
+            let dst = i * WORK_ITEM_WORDS;
+            let src = i * RECORD_WORDS;
             assert_eq!(
-                &out[dst..dst + layout::RECORD_WORDS],
-                &op_list[src..src + layout::RECORD_WORDS],
+                &out[dst..dst + RECORD_WORDS],
+                &op_list[src..src + RECORD_WORDS],
                 "item {i} entry"
             );
 
             for half in 0..2 {
-                let slot = (i * 2 + half) * layout::RECORD_WORDS;
-                let to = dst + layout::RECORD_WORDS * (1 + half);
+                let slot = (i * 2 + half) * RECORD_WORDS;
+                let to = dst + RECORD_WORDS * (1 + half);
                 assert_eq!(
-                    &out[to..to + layout::RECORD_WORDS],
-                    &population[slot..slot + layout::RECORD_WORDS],
+                    &out[to..to + RECORD_WORDS],
+                    &population[slot..slot + RECORD_WORDS],
                     "item {i} parent {half}"
                 );
             }
         }
     }
 
-    /// The payload is the entry plus two records; the STRIDE is padded so the
-    /// fabric can fetch a whole item as one burst without crossing a 4 KB
-    /// boundary. Both numbers matter and they are not the same one.
+    /// The payload is the entry plus two records; the stride the queue's
+    /// carrier chose is padded so a whole item moves as one burst without
+    /// crossing a 4 KB boundary. Both numbers matter and they are not the same
+    /// one — and the second is the region's now, which this pins.
     #[test]
     fn work_item_stride_matches_the_fabric() {
-        assert_eq!(layout::WORK_ITEM_PAYLOAD_WORDS, 3 * layout::RECORD_WORDS);
-        assert_eq!(layout::RECORD_BYTES, 64);
-        assert_eq!(layout::WORK_ITEM_BYTES, layout::WORK_ITEM_WORDS * 4);
+        assert_eq!(WORK_ITEM_PAYLOAD_WORDS, ENTRY_WORDS + 2 * RECORD_WORDS);
+        assert_eq!(layout::POPULATION_RECORD_BYTES, 64);
+        assert_eq!(layout::QUEUE_STRIDE_BYTES, WORK_ITEM_WORDS * 4);
         // The stride must divide 4 KB, or a burst straddles the boundary.
-        assert_eq!(4096 % layout::WORK_ITEM_BYTES, 0);
-        assert!(layout::WORK_ITEM_BYTES >= layout::WORK_ITEM_PAYLOAD_WORDS * 4);
-        assert_eq!(layout::WORK_ITEM_BEATS * 16, layout::WORK_ITEM_PAYLOAD_WORDS * 4);
+        assert_eq!(4096 % layout::QUEUE_STRIDE_BYTES, 0);
+        assert!(layout::QUEUE_STRIDE_BYTES >= WORK_ITEM_PAYLOAD_WORDS * 4);
+        assert_eq!(layout::QUEUE_PARENT_A_RECORD_OFFSET, ENTRY_WORDS * 4);
+        assert_eq!(layout::QUEUE_PARENT_B_RECORD_OFFSET, (ENTRY_WORDS + RECORD_WORDS) * 4);
     }
 
     /// Ring records parse back to what the fabric writes: fitness low word

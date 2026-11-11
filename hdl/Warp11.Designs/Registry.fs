@@ -36,7 +36,7 @@ let private multibandDemo =
 let catalog =
     embeddedFrom
         (System.Reflection.Assembly.GetExecutingAssembly())
-        [ "MemoryDesigns.fs"; "BusDesigns.fs"; "Designs.fs"; "Hello.fs"; "Tally.fs" ]
+        [ "MemoryDesigns.fs"; "BusDesigns.fs"; "Designs.fs"; "Hello.fs"; "Tally.fs"; "RecordCopy.fs" ]
         [ entry "Hello on the iCEBreaker" (nameof helloOnIceBreaker) (fun () -> helloOnIceBreaker)
           entry "Hello on the KV260" (nameof helloOnKv260) (fun () -> helloOnKv260)
           entry "Counter" (nameof onCounter) (fun () -> onCounter.def)
@@ -112,6 +112,10 @@ let catalog =
           entry "Bus: two owners, two ports" (nameof twoOwnersTwoPorts) (fun () -> twoOwnersTwoPorts.def)
           entry "Bus: sum from a read window" (nameof sumFromReadWindow) (fun () -> sumFromReadWindow.def)
           entry "Window: done means landed" (nameof sumReportsDone) (fun () -> sumReportsDone.def)
+          entry "Burst writes land whole" (nameof axiWriteMasterBurst) (fun () -> axiWriteMasterBurst.def)
+          entry "Regions: copy records" (nameof RecordCopy.recordCopyTop) (fun () -> RecordCopy.recordCopyTop)
+          entry "Regions: copy through a private scratch" (nameof RecordCopy.recordCopyScratchTop) (fun () -> RecordCopy.recordCopyScratchTop)
+          entry "Regions: a region in SDRAM" (nameof RecordCopy.regionInSdram) (fun () -> RecordCopy.regionInSdram.def)
           entry "Window: wholly on chip" (nameof sumWhollyOnChip) (fun () -> sumWhollyOnChip.def)
           entry "Command processor (union + mem)" (nameof cmdProcessor) (fun () -> cmdProcessor.def)
           entry "Stream pipe" (nameof streamPipe) (fun () -> streamPipe.def)

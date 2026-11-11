@@ -21,7 +21,7 @@ use warp11_host::fs_sim_window::FsSimWindow;
 use warp11_host::gep_evolve::{board, evolve, sim, Arena, Ddr, Generation, Policy};
 use warp11_host::mmap::{MmapWindow, O_SYNC};
 use warp11_host::udmabuf;
-use warp11_runtime::gep::{BreedRates, GepClusterDevice};
+use warp11_runtime::gep::{BreedRates, GepClusterDevice, RECORD_WORDS};
 use warp11_runtime::gep_layout as layout;
 use warp11_runtime::RegisterWindow;
 
@@ -58,7 +58,7 @@ fn fitness_words(words: &[u32]) -> Vec<u64> {
 }
 
 fn record(words: &[u32], e: usize) -> &[u32] {
-    &words[e * layout::RECORD_WORDS..(e + 1) * layout::RECORD_WORDS]
+    &words[e * RECORD_WORDS..(e + 1) * RECORD_WORDS]
 }
 
 /// Judge every generation against the vector, print the verdict and the
@@ -113,7 +113,7 @@ where
     let cases = read_words(dir, "cases.bin");
     let rates = read_words(dir, "rates.bin");
     let seed = read_words(dir, "seed.bin");
-    assert_eq!(population.len(), pop * layout::RECORD_WORDS, "population.bin is {pop} records");
+    assert_eq!(population.len(), pop * RECORD_WORDS, "population.bin is {pop} records");
     let policy = Policy {
         rates: BreedRates { words: [rates[0], rates[1], rates[2], rates[3], rates[4]], sigma_fx: rates[5], range_fx: rates[6] },
         seed: [seed[0], seed[1], seed[2], seed[3]],
@@ -150,7 +150,11 @@ fn main() {
             exit(1);
         });
         let mut ddr = shared;
-        let arena = Arena::for_population(0, pop);
+        let arena = Arena::placed(sim::SIM_ARENA_BASE as u32);
+        arena.holds(pop).unwrap_or_else(|e| {
+            eprintln!("{e}");
+            exit(2);
+        });
         println!("sim: {} breeders x {} lanes, population {pop}", layout::N_BREEDERS, layout::N_LANES);
         run(&dir, &mut device, &mut ddr, arena, 200_000)
     } else {
@@ -159,8 +163,12 @@ fn main() {
             exit(1);
         });
         let buf_file = OpenOptions::new().read(true).write(true).custom_flags(O_SYNC).open(&buf.dev_path).expect("open udmabuf");
-        let arena = Arena::for_population(buf.phys_addr as u32, pop);
-        let needed = arena.bytes_needed(pop);
+        let arena = Arena::placed(buf.phys_addr as u32);
+        arena.holds(pop).unwrap_or_else(|e| {
+            eprintln!("{e}");
+            exit(2);
+        });
+        let needed = arena.bytes_needed();
         assert!(needed <= buf.size, "the loop needs {needed} bytes and the arena is {}", buf.size);
         let mapping = MmapWindow::open(&buf_file, 0, needed.max(4096)).expect("mmap udmabuf");
         let mut ddr = board::Mapped(mapping);

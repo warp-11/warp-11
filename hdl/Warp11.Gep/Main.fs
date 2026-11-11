@@ -1070,6 +1070,35 @@ let private clusterElaborations () : bool =
 /// `inlineParents` is the decisive variant: the population's parent slots hold
 /// GARBAGE and the real parents live only inside the marshaled work items, so a
 /// bit-exact fitness can only mean the fabric bred from the inline copies.
+/// A walk's regions as a check reaches them: the base it pokes into
+/// `regions_base`, where each region starts in the behavioural DDR, and how
+/// much DDR that takes — every number the carrier's placement, none written
+/// here.
+type private WalkArena =
+    { regionsBase: int
+      queue: int
+      pop: int
+      ring: int
+      oplist: int
+      ddrBytes: int }
+
+let private walkArena (shape: Cluster.GepClusterShape) =
+    let regionsBase = 0x1000
+    let places = Cluster.clusterWalkPlaces shape
+
+    let at name =
+        places
+        |> List.tryFind (fun p -> p.spec.name = name)
+        |> Option.map (fun p -> regionsBase + p.offset)
+        |> Option.defaultValue 0
+
+    { regionsBase = regionsBase
+      queue = at "queue"
+      pop = at "population"
+      ring = at "ring"
+      oplist = at "oplist"
+      ddrBytes = regionsBase + (places |> List.map (fun p -> p.offset + regionBytes p) |> List.max) }
+
 let private clusterQueueVsOracle (nFillers: int) (inlineParents: bool) : bool =
     let config = Cluster.clusterConfig
     let recordWords = Cluster.gepRecordWords
@@ -1082,9 +1111,10 @@ let private clusterQueueVsOracle (nFillers: int) (inlineParents: bool) : bool =
     let entries = waves * queueSlots
     let popSlots = 10
     let destBase = 16
-    let queueOff = 0
-    let popOff = 4096
-    let ringOff = 12288
+    let arena = walkArena (Cluster.clusterShape nFillers inlineParents)
+    let queueOff = arena.queue
+    let popOff = arena.pop
+    let ringOff = arena.ring
 
     let rng = GepRng(7171L)
     let rangeFx = fx defaultConstantRange
@@ -1136,7 +1166,7 @@ let private clusterQueueVsOracle (nFillers: int) (inlineParents: bool) : bool =
                child = hwBreedOffspring population[parentA] population[parentB] config thresholds (GepRng seed) |} ]
 
     let sim = Sim (Cluster.clusterPoolWalk nFillers inlineParents).def
-    let ddr = SimAxiDdr(sim, 16384)
+    let ddr = SimAxiDdr(sim, arena.ddrBytes)
 
     let writeWords (byteAddr: int) (words: uint32[]) =
         words |> Array.iteri (fun i w -> ddr.WriteWord(byteAddr + i * 4, w))
@@ -1157,11 +1187,7 @@ let private clusterQueueVsOracle (nFillers: int) (inlineParents: bool) : bool =
     for p in pairings do
         writeWords (popOff + p.dest * recordBytes) sentinel
 
-    sim.Poke("queue_base", uint64 queueOff)
-    sim.Poke("pop_base", uint64 popOff)
-    sim.Poke("ring_base", uint64 ringOff)
-    sim.Poke("queue_mask", uint64 (queueSlots - 1))
-    sim.Poke("ring_mask", uint64 (ringSlots - 1))
+    sim.Poke("regions_base", uint64 arena.regionsBase)
     sim.Poke("n_cases", uint64 nCases)
     sim.Poke("start_queue", 1UL)
     ddr.Cycle()
@@ -1365,8 +1391,9 @@ let private clusterAutoVsMirror () : bool =
     let nCases = 16
     let recordWords = Cluster.gepRecordWords
     let recordBytes = recordWords * 4
-    let popOff = 0
-    let ringOff = 2048
+    let arena = walkArena (Cluster.clusterAutoWalkShape false)
+    let popOff = arena.pop
+    let ringOff = arena.ring
     let ringSlots = 32
     let rounds = 1 + gens // the score round, then `gens` breed rounds
 
@@ -1411,7 +1438,7 @@ let private clusterAutoVsMirror () : bool =
 
     // ---- The fabric ----
     let sim = Sim (Cluster.clusterAutoWalk false).def
-    let ddr = SimAxiDdr(sim, 4096)
+    let ddr = SimAxiDdr(sim, arena.ddrBytes)
 
     let writeWords (byteAddr: int) (words: uint32[]) =
         words |> Array.iteri (fun i w -> ddr.WriteWord(byteAddr + i * 4, w))
@@ -1424,11 +1451,7 @@ let private clusterAutoVsMirror () : bool =
              else
                  Array.init recordWords (fun i -> 0xDEAD0000u ||| uint32 i))
 
-    sim.Poke("queue_base", 0UL)
-    sim.Poke("pop_base", uint64 popOff)
-    sim.Poke("ring_base", uint64 ringOff)
-    sim.Poke("queue_mask", 0UL)
-    sim.Poke("ring_mask", uint64 (ringSlots - 1))
+    sim.Poke("regions_base", uint64 arena.regionsBase)
     sim.Poke("n_cases", uint64 nCases)
     sim.Poke("auto_mode", 1UL)
     sim.Poke("auto_pop", uint64 popSize)
@@ -1556,9 +1579,10 @@ let private clusterOpListVsMirror () : bool =
     let nCases = 16
     let recordWords = Cluster.gepRecordWords
     let recordBytes = recordWords * 4
-    let popOff = 0
-    let ringOff = 2048
-    let oplistOff = 2560
+    let arena = walkArena (Cluster.clusterAutoWalkShape true)
+    let popOff = arena.pop
+    let ringOff = arena.ring
+    let oplistOff = arena.oplist
     let ringSlots = 32
 
     let rng = GepRng(20_260_810L)
@@ -1629,7 +1653,7 @@ let private clusterOpListVsMirror () : bool =
            for w in e.seeds -> uint32 w |]
 
     let sim = Sim (Cluster.clusterAutoWalk true).def
-    let ddr = SimAxiDdr(sim, 4096)
+    let ddr = SimAxiDdr(sim, arena.ddrBytes)
 
     let writeWords (byteAddr: int) (words: uint32[]) =
         words |> Array.iteri (fun i w -> ddr.WriteWord(byteAddr + i * 4, w))
@@ -1642,12 +1666,7 @@ let private clusterOpListVsMirror () : bool =
              else
                  Array.init recordWords (fun i -> 0xDEAD0000u ||| uint32 i))
 
-    sim.Poke("queue_base", 0UL)
-    sim.Poke("pop_base", uint64 popOff)
-    sim.Poke("ring_base", uint64 ringOff)
-    sim.Poke("oplist_base", uint64 oplistOff)
-    sim.Poke("queue_mask", 0UL)
-    sim.Poke("ring_mask", uint64 (ringSlots - 1))
+    sim.Poke("regions_base", uint64 arena.regionsBase)
     sim.Poke("n_cases", uint64 nCases)
     sim.Poke("auto_mode", 1UL)
     sim.Poke("auto_pop", uint64 popSize)
@@ -1738,19 +1757,44 @@ let private clusterOpListVsMirror () : bool =
 /// The map is read here, never re-typed: offsets come from the same
 /// `gepClusterMap` value the slave is elaborated from, so a moved register
 /// moves the check with it.
+/// The seam's constants, as a host reads them: `NAME` to its number.
+let private seamConstants (t: BoardTop.BoardTop) =
+    BoardTop.seamLines t
+    |> List.choose (fun line ->
+        let line = line.Trim()
+
+        if line.StartsWith "pub const " then
+            match line.Substring(10).Split(':') with
+            | [| name; rest |] when rest.Contains "=" ->
+                let value = rest.Split('=').[1].Trim().TrimEnd(';').Trim()
+
+                match System.Int64.TryParse value with
+                | true, v -> Some(name.Trim(), v)
+                | _ when value.StartsWith "0x" -> Some(name.Trim(), System.Convert.ToInt64(value.Substring 2, 16))
+                | _ -> None
+            | _ -> None
+        else
+            None)
+    |> Map.ofList
+
 let private clusterAxiSeamParts (jitter: int option) : bool * bool =
     let config = Cluster.clusterConfig
     let shape = Cluster.clusterShape 1 false
-    let m, _ = ClusterAxi.gepClusterMap shape
+    let t = ClusterAxi.clusterAxiWalk.Value
+    let entry (name: string) = t.map.entries |> List.find (fun e -> e.name = name)
+    let seam = seamConstants t
     let recordWords = Cluster.gepRecordWords
     let recordBytes = recordWords * 4
     let nCases = 16
     let entries = 4
     let popSlots = 6
     let destBase = 8
-    let queueOff = 0
-    let popOff = 2048
-    let ringOff = 6144
+    // Where the regions are, as a host finds them: the seam's offsets from
+    // the base it arms.
+    let regionsBase = 0x1000
+    let queueOff = regionsBase + int seam["QUEUE_REGION_OFFSET"]
+    let popOff = regionsBase + int seam["POPULATION_REGION_OFFSET"]
+    let ringOff = regionsBase + int seam["RING_REGION_OFFSET"]
 
     let rng = GepRng(5150L)
     let rangeFx = fx defaultConstantRange
@@ -1791,11 +1835,13 @@ let private clusterAxiSeamParts (jitter: int option) : bool * bool =
                child = hwBreedOffspring population[parentA] population[parentB] config thresholds (GepRng seed)
                words = entryWordsOf parentA parentB (destBase + e) thresholds (0xAB00 + e) skip seed |} ]
 
-    let sim = Sim ClusterAxi.clusterAxiWalk.def
-    let ddr = SimAxiDdr(sim, 8192, ?jitter = jitter)
+    let sim = Sim t.top
+    // One memory behind every port the regions were spread over.
+    let ddr = SimAxiMemory(sim, 1 <<< 16, axiMasterPrefixesOf t.top, ?jitter = jitter)
+    let ddrWord (at: int) = System.BitConverter.ToUInt32(ddr.Memory, at)
 
     let writeWords (byteAddr: int) (words: uint32[]) =
-        words |> Array.iteri (fun i w -> ddr.WriteWord(byteAddr + i * 4, w))
+        words |> Array.iteri (fun i w -> System.BitConverter.GetBytes(w).CopyTo(ddr.Memory, byteAddr + i * 4))
 
     for s in 0 .. popSlots - 1 do
         writeWords (popOff + s * recordBytes) (geneRecordWords population[s])
@@ -1826,57 +1872,53 @@ let private clusterAxiSeamParts (jitter: int option) : bool * bool =
     // wrong address and reads it successfully — this is the one read that says
     // so, and it is worth asserting here because nothing else in this check
     // would notice the whole map having shifted.
-    if read32 m.id.offset <> ClusterAxi.clusterIdMagic then
+    if read32 (entry "id").offset <> BoardTop.regionId then
         protocolOk <- false
 
-    write32 m.queueBase.offset (uint64 queueOff)
-    write32 m.popBase.offset (uint64 popOff)
-    write32 m.ringBase.offset (uint64 ringOff)
-    write32 m.queueMask.offset (uint64 (entries - 1))
-    write32 m.ringMask.offset (uint64 (entries - 1))
-    write32 m.nCases.offset (uint64 nCases)
-    write32 ClusterAxi.ctrlOffset 1UL // the start pulse, bit 0 of the control word
+    write32 (entry "regionsBase").offset (uint64 regionsBase)
+    write32 (entry "nCases").offset (uint64 nCases)
+    write32 (entry "startQueue").offset 1UL
 
     for idx in 0 .. nCases - 1 do
         let vars, target = cases[idx]
-        write32 m.caseAddr.offset (uint64 idx)
+        write32 (entry "caseAddr").offset (uint64 idx)
 
         for f in 0 .. config.variableCount - 1 do
-            write32 m.caseField.offset (uint64 f)
-            write32 m.caseData.offset (uint64 (uint32 vars[f]))
-            write32 ClusterAxi.ctrlOffset 2UL // the ldCase pulse, bit 1
+            write32 (entry "caseField").offset (uint64 f)
+            write32 (entry "caseData").offset (uint64 (uint32 vars[f]))
+            write32 (entry "ldCase").offset 1UL
 
-        write32 m.caseField.offset (uint64 config.variableCount)
-        write32 m.caseData.offset (uint64 (uint32 target))
-        write32 ClusterAxi.ctrlOffset 2UL
+        write32 (entry "caseField").offset (uint64 config.variableCount)
+        write32 (entry "caseData").offset (uint64 (uint32 target))
+        write32 (entry "ldCase").offset 1UL
 
     // The per-lane broadcast registers are one cycle behind the bus.
     ddr.Cycle()
     ddr.Cycle()
 
-    let runningAfterStart = field m.running = 1UL
-    write32 m.entriesPublished.offset (uint64 entries)
+    let runningAfterStart = field (entry "running") = 1UL
+    write32 (entry "entriesPublished").offset (uint64 entries)
 
     let mutable cycles = 0
 
-    while field m.resultsDone <> uint64 entries && cycles < 200_000 do
+    while field (entry "resultsDone") <> uint64 entries && cycles < 200_000 do
         ddr.Cycle()
         cycles <- cycles + 1
 
-    let harvested = field m.resultsDone = uint64 entries
+    let harvested = field (entry "resultsDone") = uint64 entries
 
     // Quiesce before reading the ring: all_idle is what a driver waits on.
     let mutable settle = 0
 
-    while field m.allIdle <> 1UL && settle < 1000 do
+    while field (entry "allIdle") <> 1UL && settle < 1000 do
         ddr.Cycle()
         settle <- settle + 1
 
     let byEntry =
         [ for r in 0 .. entries - 1 ->
-            int (ddr.ReadWord(ringOff + r * 16 + 8)),
-            (uint64 (ddr.ReadWord(ringOff + r * 16 + 4)) <<< 32)
-            ||| uint64 (ddr.ReadWord(ringOff + r * 16)) ]
+            int (ddrWord(ringOff + r * 16 + 8)),
+            (uint64 (ddrWord(ringOff + r * 16 + 4)) <<< 32)
+            ||| uint64 (ddrWord(ringOff + r * 16)) ]
         |> Map.ofList
 
     let fitnessOk =
@@ -1887,19 +1929,23 @@ let private clusterAxiSeamParts (jitter: int option) : bool * bool =
     let writebackOk =
         pairings
         |> List.forall (fun p ->
-            let got = [| for i in 0 .. recordWords - 1 -> ddr.ReadWord(popOff + p.dest * recordBytes + i * 4) |]
+            let got = [| for i in 0 .. recordWords - 1 -> ddrWord(popOff + p.dest * recordBytes + i * 4) |]
             got = (if p.skip then sentinel else geneRecordWords p.child))
 
     // The telemetry a driver polls has to mean what the map says it means.
     let telemetryOk =
-        field m.entriesTaken = uint64 entries
-        && field m.allIdle = 1UL
-        && field m.streamsActive = 0UL
-        && field m.cycleCount > 0UL
-        && field m.busyBreederCycles > 0UL
-        && field m.busyLaneCycles > 0UL
-        && (m.breederBusy |> List.forall (fun e -> field e > 0UL))
-        && (m.laneBusy |> List.forall (fun e -> field e > 0UL))
+        field (entry "entriesTaken") = uint64 entries
+        && field (entry "allIdle") = 1UL
+        && field (entry "streamsActive") = 0UL
+        && field (entry "cycleCount") > 0UL
+        && field (entry "busyBreederCycles") > 0UL
+        && field (entry "busyLaneCycles") > 0UL
+        // Each block sums to its total — what the counters mean, whichever
+        // lane the schedule happened to give the work. "Every lane was busy"
+        // was this line until 2026-11-09, and it held only by timing: with the
+        // regions spread over three ports, all four offspring land on lane 0.
+        && ([ for b in 0 .. shape.nBreeders - 1 -> field (entry $"breeder{b}BusyCycles") ] |> List.sum) = field (entry "busyBreederCycles")
+        && ([ for l in 0 .. shape.nLanes - 1 -> field (entry $"lane{l}BusyCycles") ] |> List.sum) = field (entry "busyLaneCycles")
 
     printfn $"      cluster seam: %d{entries} offspring through the register map in %d{cycles} cycles"
 
@@ -2077,10 +2123,6 @@ let private runClusterMix (sharing: FuSharing) (nBreeders: int) (nLanes: int) (n
     if entries &&& (entries - 1) <> 0 then
         failwith $"the sweep batch must be a power of two, got %d{entries}"
 
-    let queueOff = 0
-    let popOff = 0x4000
-    let ringOff = 0xC000
-
     let shape =
         { ClusterAxi.clusterSiliconShape with
             nBreeders = nBreeders
@@ -2088,6 +2130,11 @@ let private runClusterMix (sharing: FuSharing) (nBreeders: int) (nLanes: int) (n
             nFillers = nFillers
             divide = Some sharing
             auto = None }
+
+    let arena = walkArena shape
+    let queueOff = arena.queue
+    let popOff = arena.pop
+    let ringOff = arena.ring
 
     let tag =
         match sharing with
@@ -2103,7 +2150,7 @@ let private runClusterMix (sharing: FuSharing) (nBreeders: int) (nLanes: int) (n
     // twenty minutes later.
     emitDesign design |> ignore
     let sim = Sim(design)
-    let ddr = SimAxiDdr(sim, 0x10000, rDelay = rDelay)
+    let ddr = SimAxiDdr(sim, arena.ddrBytes, rDelay = rDelay)
 
     let writeWords (byteAddr: int) (words: uint32[]) =
         words |> Array.iteri (fun i w -> ddr.WriteWord(byteAddr + i * 4, w))
@@ -2117,11 +2164,7 @@ let private runClusterMix (sharing: FuSharing) (nBreeders: int) (nLanes: int) (n
         writeWords (queueOff + e * itemBytes + recordBytes) (geneRecordWords vector.population[p.parentA])
         writeWords (queueOff + e * itemBytes + 2 * recordBytes) (geneRecordWords vector.population[p.parentB]))
 
-    sim.Poke("queue_base", uint64 queueOff)
-    sim.Poke("pop_base", uint64 popOff)
-    sim.Poke("ring_base", uint64 ringOff)
-    sim.Poke("queue_mask", uint64 (entries - 1))
-    sim.Poke("ring_mask", uint64 (entries - 1))
+    sim.Poke("regions_base", uint64 arena.regionsBase)
     sim.Poke("n_cases", uint64 vector.nCases)
     sim.Poke("start_queue", 1UL)
     ddr.Cycle()
@@ -2291,21 +2334,30 @@ let main argv =
         let verilogPath = System.IO.Path.Combine(buildDir, "GepClusterAxi.v")
         let layoutPath = System.IO.Path.Combine(runtimeSrc, "gep_layout.rs")
         let started = System.Diagnostics.Stopwatch.StartNew()
-        let verilog = emitDesign ClusterAxi.clusterAxiSilicon.Value.def
+        let verilog = emitDesign ClusterAxi.clusterAxiSilicon.Value.top
         System.IO.File.WriteAllText(verilogPath, verilog + "\n")
 
         System.IO.File.WriteAllText(
             layoutPath,
-            String.concat "\n" (ClusterAxi.clusterLayoutRs ClusterAxi.clusterSiliconShape)
+            String.concat "\n" (ClusterAxi.clusterLayoutRs ())
         )
 
         printfn $"wrote {verilogPath} ({verilog.Length / 1024} KiB, {started.ElapsedMilliseconds} ms)"
         printfn $"wrote {layoutPath}"
         0
+    // The smallest cluster on the Icepi over its link: `icepi <dir>`.
+    | [| "icepi"; dir |] ->
+        let out = Warp11.Build.write dir ClusterAxi.clusterOnIcepi.Value
+
+        for file in out.files do
+            printfn $"wrote {file}"
+
+        printfn $"build with: {out.run}"
+        0
     // The directory the KV260's toolchain builds the cluster from: `build <dir>`.
     | [| "build"; dir |] ->
         let out =
-            Warp11.Build.write dir (ClusterAxi.clusterTop ClusterAxi.clusterSiliconShape ClusterAxi.clusterAxiSilicon.Value)
+            Warp11.Build.write dir ClusterAxi.clusterAxiSilicon.Value
 
         for file in out.files do
             printfn $"wrote {file}"
@@ -2318,7 +2370,7 @@ let main argv =
     // second at this shape (measured 2026-11-07), a few seconds a generation
     // at a small population.
     | [| "simserve" |] ->
-        BoardTop.ddrServe ClusterAxi.clusterAxiSilicon.Value.def [] (4 <<< 20) 16 "GEPSERVE"
+        BoardTop.ddrServe ClusterAxi.clusterAxiSilicon.Value.top [] (4 <<< 20) 16 "GEPSERVE"
         0
     // The streaming loop's vector: a population, cases, the policy, and the
     // mirror's answer for every generation — the op-list the fabric must
@@ -2594,7 +2646,7 @@ let main argv =
 
         for sharing, name in [ PerLane, "perlane"; Pooled, "pooled" ] do
             let shape = { ClusterAxi.clusterSiliconShape with divide = Some sharing }
-            let design = (ClusterAxi.gepClusterAxi $"GepClusterAxi{name}" shape).def
+            let design = (ClusterAxi.clusterTopOf $"GepCluster{name}" shape).top
             let path = System.IO.Path.Combine(dir, name + ".v")
             System.IO.File.WriteAllText(path, emitDesign design + "\n")
             printfn $"wrote {path}"

@@ -105,3 +105,35 @@ pub fn resolve(name: &str, registers: &[(String, usize)]) -> Result<usize, Strin
             format!("no register '{name}' — the design has [{}]", known.join(", "))
         })
 }
+
+/// A region by its name in the design — `source` is `SOURCE_REGION_OFFSET`
+/// and the rest — as the seam places it, or why not.
+pub fn read_region(path: &Path, name: &str) -> Result<warp11_runtime::region::Region, String> {
+    let s = screaming(name);
+    let need = |what: &str| -> Result<usize, String> {
+        let constant = format!("{s}_{what}");
+        read_const(path, &constant)?
+            .map(|v| v as usize)
+            .ok_or_else(|| format!("{}: no {constant} — is '{name}' a region shared with the host?", path.display()))
+    };
+    Ok(warp11_runtime::region::Region {
+        offset: need("REGION_OFFSET")?,
+        records: need("RECORDS")?,
+        record_bytes: need("RECORD_BYTES")?,
+        stride_bytes: need("STRIDE_BYTES")?,
+    })
+}
+
+/// A field of a region's record — `source`, `weight` is `SOURCE_WEIGHT_*`.
+pub fn read_field(path: &Path, region: &str, field: &str) -> Result<warp11_runtime::region::Field, String> {
+    use warp11_runtime::region::Field;
+    let s = format!("{}_{}", screaming(region), screaming(field));
+    let offset = read_const(path, &format!("{s}_OFFSET"))?
+        .ok_or_else(|| format!("{}: no {s}_OFFSET — no field '{field}' in region '{region}'", path.display()))? as usize;
+    if let Some(words) = read_const(path, &format!("{s}_WORDS"))? {
+        return Ok(Field::Words { offset, words: words as usize });
+    }
+    let shift = read_const(path, &format!("{s}_SHIFT"))?.ok_or_else(|| format!("{}: no {s}_SHIFT", path.display()))?;
+    let mask = read_const(path, &format!("{s}_MASK"))?.ok_or_else(|| format!("{}: no {s}_MASK", path.display()))?;
+    Ok(Field::Bits { offset, shift, mask })
+}

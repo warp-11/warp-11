@@ -21,7 +21,13 @@
     },
     "fabricHz": 100000000,
     "hostMemory": {
-      "port": "S_AXI_HPC0_FPD",
+      "ports": [
+        "S_AXI_HPC0_FPD",
+        "S_AXI_HP0_FPD",
+        "S_AXI_HP1_FPD",
+        "S_AXI_HP2_FPD",
+        "S_AXI_HP3_FPD"
+      ],
       "width": 128,
       "arenaBytes": 8388608,
       "writeOutstanding": 16

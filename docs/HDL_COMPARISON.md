@@ -615,7 +615,7 @@ caller, where every direction is flipped. Operators: `streamStageFor`/`streamMap
 | SpinalHDL | AXI4, AXI4-Lite, AXI4-Stream, AHB-Lite, APB3, Wishbone, TileLink — all built-in |
 | HardCaml | `hardcaml_axi` |
 | Amaranth | `amaranth-soc` for SoC interconnect (CSR bus etc.); AXI via separate libs |
-| Warp 11 | A **declarative register map** — a list of `pulseBit` / `rwReg` / `roField` / `w1cBit` / `roConst` / `rwArray` / `roArray` entries — from which `regMapSlave` synthesizes the W/R FSMs, register storage, multi-source IRQ OR and read mux, *and* `regMapRsLines` emits the Rust layout the driver imports. A window declares its storage like any memory, and a host-written one may carry initial contents (`preloadedBlockMem`): the design boots on them, the seam carries them as `{NAME}_INIT`, and a board with no processor is fitted from configuration. The same map goes behind a **UART** (`serialRegMapSlave`, 8N1, a framed request/reply with a checksum) with the design unable to tell which link it is behind. Written with `buildRegMap`, which **allocates the offsets**: registers are declared in order, packed words are a scope, and windows round the cursor up to their own alignment, so a map states widths and nothing states an address. `axiMasterReader` (multi-beat INCR bursts, `maxOutstanding`), `axiMasterReaderBurst`, `axiMasterWriter` (single- and multi-outstanding ring-buffer modes) |
+| Warp 11 | A **declarative register map** — a list of `pulseBit` / `rwReg` / `roField` / `w1cBit` / `roConst` / `rwArray` / `roArray` entries — from which `regMapSlave` synthesizes the W/R FSMs, register storage, multi-source IRQ OR and read mux, *and* `regMapRsLines` emits the Rust layout the driver imports. A window declares its storage like any memory, and a host-written one may carry initial contents (`preloadedBlockMem`): the design boots on them, the seam carries them as `{NAME}_INIT`, and a board with no processor is fitted from configuration. The same map goes behind a **UART** (`serialRegMapSlave`, 8N1, a framed request/reply with a checksum) with the design unable to tell which link it is behind. Written with `buildRegMap`, which **allocates the offsets**: registers are declared in order, packed words are a scope, and windows round the cursor up to their own alignment, so a map states widths and nothing states an address. `axiMasterReader` (multi-beat INCR bursts, `maxOutstanding`), `axiMasterReaderBurst`, `axiMasterWriter` (single- and multi-outstanding ring-buffer modes), `axiMasterWriterBurstOn` (a descriptor and its beats, WLAST counted against the descriptor, one `landed` pulse per burst on its write response) |
 
 Warp 11 doesn't ship higher-level fabrics (TileLink, Wishbone, etc.) or an AXI4 *slave* beyond AXI-Lite, but the AXI-Lite + AXI4-master pair covers KV260 deployments and is what every demo runs on — including GEP's sustained burst feed and Mandelbrot's 16-px-per-beat framebuffer egress.
 
@@ -630,6 +630,7 @@ The **generated seam** is the piece with the least prior art among the embedded 
 | HardCaml | `hardcaml_axi` channel records |
 | Amaranth | `amaranth-soc` CSR/Wishbone, where `ack` is the transaction's own completion |
 | Warp 11 | A `ReadWindow`/`WriteWindow`: `words` of `wordWidth`, addressed **by index**, with `idle` saying every word accepted has reached memory. No bus, no base address, no stride — a client takes windows and scalars and cannot tell what is behind them |
+| Warp 11 | A **region** — `n.region ("queue", layout, records, Reads, SharedWithHost)` in a design's needs: records of a typed layout, read by index and written by index, and the write a stage whose output is the caller's context **once that record has landed**. The board places it: a slice of the host's memory behind AXI masters it spreads over the PS ports, with bursts, strides and the 4 KB rule the carrier's — or, for a region nothing outside the design sees, a block RAM on the chip, with the same answers byte for byte; on a board with no processing system, the host itself over the UART the registers share (a header word and the record, answered with the record or a landed word), or the board's SDRAM behind a controller that answers the same AXI buses the KV260's DDR does. Several regions on one master are arbitrated a record at a time and answered by an owner FIFO; the seam prints every region's place and every field as register-map constants, and a Rust `RegionDevice` reaches records by name |
 
 Every entry above gives a design the write-response channel, so a completion
 signal is always *reachable*. The question this section is about is a different
@@ -655,12 +656,15 @@ against a region of an AXI port it is the master's quiescence and waits for the
 write responses. The same source, correct in both, with nothing in it naming
 either.
 
-What the type deliberately does **not** carry is a per-word acknowledgement.
-Several windows may share one master, and a write response says only that *a*
-write landed — attributing it would need an owner tag through the master's ring,
-and no design here both shares a write bus and wants per-item granularity. A
-design that does reaches past the window to `axiMasterWriterTracked` and owns
-its bus outright, which is the honest way to spend the extra hardware.
+What the window type does **not** carry is a per-word acknowledgement: a write
+response says only that *a* write landed, and attributing it needs an owner
+tag beside the master. A region pays for that tag and carries it — each region
+on a master is an owner, AXI's in-order responses at one ID make the head of a
+FIFO the owner of the response that just returned, and a region's write
+answers with the caller's own context, in order, as each record lands. So a
+design that must not report a result before its payload landed (GEP advances
+a ring per landed record) says it with an ordinary stream, and never names a
+`B` channel.
 
 ### The first design on a board
 

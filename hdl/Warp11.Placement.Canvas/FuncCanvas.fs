@@ -1647,7 +1647,7 @@ let view (opening: Opening) : Control =
                       | Some hm ->
                           line
                               [ label "host memory"
-                                label $"{hm.port}, %d{hm.width} bits, arena"
+                                label $"""{hm.ports |> String.concat ", "}, %d{hm.width} bits, arena"""
                                 entry 50.0 arenaText.Current arenaText.Set (fun typed ->
                                     match System.Int32.TryParse typed with
                                     | true, mib when mib > 0 ->

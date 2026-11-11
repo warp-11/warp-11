@@ -1,5 +1,7 @@
+pub mod arena;
 pub mod fs_sim_window;
 pub mod gep_evolve;
+pub mod link_regions;
 pub mod udmabuf;
 pub mod wav;
 pub mod pgm;

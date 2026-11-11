@@ -38,6 +38,7 @@ let private roleText (r: DeviceRole) =
     | ClockIn -> "ClockIn"
     | AudioClockIn -> "AudioClockIn"
     | Leds -> "Leds"
+    | Sdram -> "Sdram"
 
 let private readRole (text: string) : Result<DeviceRole, string> =
     match text with
@@ -48,6 +49,7 @@ let private readRole (text: string) : Result<DeviceRole, string> =
     | "ClockIn" -> Ok ClockIn
     | "AudioClockIn" -> Ok AudioClockIn
     | "Leds" -> Ok Leds
+    | "Sdram" -> Ok Sdram
     | other -> Error $"'role': no device role called '{other}'"
 
 /// A pin as JSON. `activeLow` is written only when it is true, so a board
@@ -101,11 +103,17 @@ let private boardNode (b: Board) : JsonObject =
     b.hostMemory
     |> Option.iter (fun m ->
         let hm = JsonObject()
-        hm["port"] <- str m.port
+        hm["ports"] <- JsonArray([| for port in m.ports -> str port |])
         hm["width"] <- num m.width
         hm["arenaBytes"] <- num m.arenaBytes
         hm["writeOutstanding"] <- num m.writeOutstanding
         o["hostMemory"] <- hm)
+
+    b.boardMemory
+    |> Option.iter (fun c ->
+        match sdramChips |> List.tryFind (fun (_, k) -> k = c) with
+        | Some(name, _) -> o["boardMemory"] <- str name
+        | None -> failwith "a board's SDRAM is one of `sdramChips` to be written to a file")
 
     let host = JsonObject()
 
@@ -332,8 +340,14 @@ let private readBoard (o: JsonNode) : Result<Board, string> =
                                                         (match optional o "hostMemory" with
                                                          | None -> Ok None
                                                          | Some hm ->
-                                                             getString hm "port"
-                                                             >>= fun port ->
+                                                             (match field hm "ports" with
+                                                              | Ok(:? JsonArray as arr) when arr.Count > 0 ->
+                                                                  arr
+                                                                  |> List.ofSeq
+                                                                  |> List.fold (fun acc p -> acc >>= fun ps -> asString "'ports'" p |> Result.map (fun port -> ps @ [ port ])) (Ok [])
+                                                              | Ok _ -> Error "'hostMemory.ports': expected a non-empty array of PS slave ports"
+                                                              | Error e -> Error e)
+                                                             >>= fun ports ->
                                                                  getInt hm "width"
                                                                  >>= fun width ->
                                                                      getInt hm "arenaBytes"
@@ -345,7 +359,7 @@ let private readBoard (o: JsonNode) : Result<Board, string> =
                                                                              | Some n -> n
                                                                              | None -> 16
 
-                                                                         Some { port = port; width = width; arenaBytes = arena; writeOutstanding = outstanding }))
+                                                                         Some { ports = ports; width = width; arenaBytes = arena; writeOutstanding = outstanding }))
                                                         >>= fun hostMemory ->
                                                             field o "host"
                                                             >>= fun host ->
@@ -414,6 +428,10 @@ let private readBoard (o: JsonNode) : Result<Board, string> =
                                                                                           fabricHz = fabricHz
                                                                                           audioClockHz = audioClockHz
                                                                                           hostMemory = hostMemory
+                                                                                          boardMemory =
+                                                                                            optional o "boardMemory"
+                                                                                            |> Option.bind (fun n -> asString "'boardMemory'" n |> Result.toOption)
+                                                                                            |> Option.bind (fun name -> sdramChips |> List.tryFind (fun (n, _) -> n = name) |> Option.map snd)
                                                                                           host = host
                                                                                           loading = loading
                                                                                           connectors = connectors
@@ -485,6 +503,10 @@ let carrierText (c: Carrier) =
     | InRegisterMap -> "InRegisterMap"
     | InLinkFrames -> "InLinkFrames"
     | OnPin port -> $"OnPin:{port}"
+    | InHostMemory -> "InHostMemory"
+    | OnChip -> "OnChip"
+    | OnBoardMemory -> "OnBoardMemory"
+    | InHostMemoryOn port -> $"InHostMemoryOn:{port}"
 
 let readCarrier (text: string) : Result<Carrier, string> =
     match text with
@@ -494,6 +516,10 @@ let readCarrier (text: string) : Result<Carrier, string> =
     | "InHostRowsAt" -> Ok InHostRowsAt
     | "InRegisterMap" -> Ok InRegisterMap
     | "InLinkFrames" -> Ok InLinkFrames
+    | "InHostMemory" -> Ok InHostMemory
+    | "OnChip" -> Ok OnChip
+    | "OnBoardMemory" -> Ok OnBoardMemory
+    | port when port.StartsWith "InHostMemoryOn:" && port.Length > 15 -> Ok(InHostMemoryOn(port.Substring 15))
     | pin when pin.StartsWith "OnPin:" && pin.Length > 6 -> Ok(OnPin(pin.Substring 6))
     | other -> Error $"'bind': no carrier called '{other}'"
 
@@ -724,6 +750,7 @@ let showBoard (b: Board) : string =
         | ClockIn -> "ClockIn"
         | AudioClockIn -> "AudioClockIn"
         | Leds -> "Leds"
+        | Sdram -> "Sdram"
 
     let pinValue (p: Pin) =
         let low = if p.activeLow then "true" else "false"
@@ -745,7 +772,9 @@ let showBoard (b: Board) : string =
 
     let memory =
         b.hostMemory
-        |> showOption (fun m -> $"{{ port = {quote m.port}; width = %d{m.width}; arenaBytes = %d{m.arenaBytes}; writeOutstanding = %d{m.writeOutstanding} }}")
+        |> showOption (fun m ->
+            let ports = m.ports |> List.map quote |> String.concat "; "
+            $"{{ ports = [ {ports} ]; width = %d{m.width}; arenaBytes = %d{m.arenaBytes}; writeOutstanding = %d{m.writeOutstanding} }}")
 
     String.concat
         "\n"
@@ -756,6 +785,7 @@ let showBoard (b: Board) : string =
           $"      fabricHz = %d{b.fabricHz}"
           (let audio = showOption string b.audioClockHz in $"      audioClockHz = {audio}")
           $"      hostMemory = {memory}"
+          (let chip = showOption (fun c -> sdramChips |> List.tryFind (fun (_, k) -> k = c) |> Option.map fst |> Option.defaultValue "a chip") b.boardMemory in $"      boardMemory = {chip}")
           $"      host = {host}"
           $"      loading = {loading}"
           "      connectors ="

@@ -37,7 +37,73 @@ let private portsOf (m: ModuleDef) =
 /// AXI-Lite slave's and the masters' nets, and the interrupt, which the block
 /// design wires into the PS.
 let private isBusPort (n: string) =
-    n.StartsWith "s_axi_" || n.StartsWith "m_axi_" || n = "irq"
+    n.StartsWith "s_axi_" || n.StartsWith "m_axi_" || n = "irq" || n.StartsWith "sdram_"
+
+/// An SDRAM controller's ports on the top, where it has one: their widths by
+/// name. The wrapper joins them to the board's `Sdram` pins a bit at a time,
+/// the data bus as one inout and the chip's clock the fabric's, inverted, so
+/// the chip samples mid-cycle what the controller registered on the edge.
+let private sdramPortsOf (t: BoardTop) : (string * bool * int) list option =
+    let ports = portsOf t.top |> List.filter (fun (n, _, _) -> n.StartsWith "sdram_")
+
+    match ports with
+    | [] -> None
+    | ports ->
+        match connectorFor Sdram t.board with
+        | Some _ -> Some ports
+        | None -> failwith $"{t.name} on the {t.board.name}: the top drives an SDRAM, and the board has no `Sdram` connector"
+
+/// The SDRAM's side of the wrapper: its ports, its connections into the
+/// design, and the two assigns that make the clock and the data bus.
+let private sdramWrapping (ports: (string * bool * int) list) =
+    let widthOf name = ports |> List.find (fun (n, _, _) -> n = name) |> fun (_, _, w) -> w
+    let range w = if w = 1 then "" else $"[%d{w - 1}:0] "
+    let dq = widthOf "sdram_dq_out"
+
+    let decls =
+        [ for n, _, w in ports do
+              match n with
+              | "sdram_dq_out"
+              | "sdram_dq_oe"
+              | "sdram_dq_in" -> ()
+              | _ -> yield $"    output wire {range w}{n},"
+          yield $"    inout  wire {range dq}sdram_dq," ]
+
+    let connections =
+        [ for n, _, _ in ports do
+              match n with
+              | "sdram_clk" -> yield "        .sdram_clk(),"
+              | "sdram_dq_out" -> yield "        .sdram_dq_out(sdram_dq_out),"
+              | "sdram_dq_oe" -> yield "        .sdram_dq_oe(sdram_dq_oe),"
+              | "sdram_dq_in" -> yield "        .sdram_dq_in(sdram_dq),"
+              | _ -> yield $"        .{n}({n})," ]
+
+    let body =
+        String.concat
+            "\n"
+            [ "    // The SDRAM's clock is the fabric's, inverted: the controller changes"
+              "    // its pins on the rising edge and the chip samples them on its own, half"
+              "    // a cycle later. The data bus is driven only while the controller writes."
+              $"    wire [%d{dq - 1}:0] sdram_dq_out;"
+              "    wire sdram_dq_oe;"
+              "    assign sdram_clk = ~clk;"
+              $"    assign sdram_dq = sdram_dq_oe ? sdram_dq_out : %d{dq}'bz;"
+              "" ]
+
+    decls, connections, body
+
+/// The SDRAM's pins in the ECP5's constraint format, from the board's
+/// `Sdram` connector, bit by bit as the board names them.
+let private sdramLpf (t: BoardTop) =
+    match sdramPortsOf t, connectorFor Sdram t.board with
+    | Some _, Some pins ->
+        [ for name, pin in pins do
+              yield $"LOCATE COMP \"{name}\" SITE \"{pin.pin}\";"
+
+              match pin.standard with
+              | Some standard -> yield $"IOBUF PORT \"{name}\" IO_TYPE={standard};"
+              | None -> () ]
+    | _ -> []
 
 /// The pin gate: every pin port of the top lands on a pin the board's
 /// connectors name, and a connector the top uses is used whole — LEDs aside. Refused by
@@ -107,8 +173,9 @@ let private apertureRange (m: RegMap) = max 4096 (1 <<< m.apertureAddrWidth)
 /// `validate_bd_design` fails on a frequency mismatch that says nothing
 /// about the cause. The emitter has no attribute surface, so it is put on
 /// the emitted text here, once, where the master is known to exist.
-let private withBusInterfaceAttribute (verilog: string) =
-    let attribute = "(* X_INTERFACE_PARAMETER = \"ASSOCIATED_BUSIF s_axi:m_axi, ASSOCIATED_RESET s_axi_aresetn\" *) "
+let private withBusInterfaceAttribute (masters: string list) (verilog: string) =
+    let busses = String.concat ":" ("s_axi" :: masters)
+    let attribute = $"(* X_INTERFACE_PARAMETER = \"ASSOCIATED_BUSIF {busses}, ASSOCIATED_RESET s_axi_aresetn\" *) "
     let marker = "input s_axi_aclk"
     let at = verilog.IndexOf marker
 
@@ -122,8 +189,26 @@ let private withBusInterfaceAttribute (verilog: string) =
 /// the block design has to wire, whichever binding put them there.
 let private hasMaster (t: BoardTop) =
     t.top.decls |> List.exists (function
-        | Output(n, _) -> n = "m_axi_awaddr" || n = "m_axi_araddr"
+        | Output(n, _) -> n = "m_axi_awaddr" || n = "m_axi_araddr" || (n.StartsWith "m_axi_" && (n.EndsWith "_awaddr" || n.EndsWith "_araddr"))
         | _ -> false)
+
+/// Every master interface the top has, with the PS port it reaches: `m_axi`
+/// on the board's first port — the batch and surface tops' one master — and
+/// `m_axi_hp0` and its kind on the port each is named for, which is how a
+/// top with regions spread over several ports says where each goes.
+let private mastersOf (t: BoardTop) : (string * string) list =
+    let outputs =
+        t.top.decls |> List.choose (function Output(n, _) -> Some n | _ -> None) |> Set.ofList
+
+    let has (prefix: string) = outputs.Contains $"{prefix}_awaddr" || outputs.Contains $"{prefix}_araddr"
+
+    match t.board.hostMemory with
+    | None -> if hasMaster t then failwith "a top that masters the host's memory, on a board with none" else []
+    | Some m ->
+        (if has "m_axi" then [ "m_axi", m.ports.Head ] else [])
+        @ [ for port in m.ports do
+                let prefix = masterPrefixOf port
+                if has prefix then yield prefix, port ]
 
 /// Whether the top raises an interrupt: an output named `irq`, which the
 /// block design wires into `pl_ps_irq0` and the overlay declares as SPI 89.
@@ -159,11 +244,13 @@ let private blockDesignTcl (t: BoardTop) (pinned: Pinned list) (psClock: int) =
         | AxiLiteAt b -> b
         | _ -> failwith "a block design wants an AXI-Lite host"
 
+    let masters = mastersOf t
+
     let memory =
-        match hasMaster t, t.board.hostMemory with
-        | true, Some m -> Some m
-        | true, None -> failwith "a top that masters the host's memory, on a board with none"
-        | false, _ -> None
+        match masters, t.board.hostMemory with
+        | [], _ -> None
+        | _, Some m -> Some m
+        | _, None -> failwith "a top that masters the host's memory, on a board with none"
 
     let psConfig =
         [ "CONFIG.PSU__USE__M_AXI_GP0 {1}"
@@ -174,8 +261,10 @@ let private blockDesignTcl (t: BoardTop) (pinned: Pinned list) (psClock: int) =
           $"CONFIG.PSU__CRL_APB__PL0_REF_CTRL__FREQMHZ {{{megahertz t.board.fabricHz}}}" ]
         @ (match memory with
            | Some m ->
-               let gp, _, _ = psSlavePort m.port
-               [ $"CONFIG.PSU__USE__S_AXI_GP%d{gp} {{1}}"; $"CONFIG.PSU__SAXIGP%d{gp}__DATA_WIDTH {{%d{m.width}}}" ]
+               [ for port in masters |> List.map snd |> List.distinct do
+                     let gp, _, _ = psSlavePort port
+                     yield $"CONFIG.PSU__USE__S_AXI_GP%d{gp} {{1}}"
+                     yield $"CONFIG.PSU__SAXIGP%d{gp}__DATA_WIDTH {{%d{m.width}}}" ]
            | None -> [])
 
     let configLines = psConfig |> List.map (fun l -> $"    {l} \\") |> String.concat "\n"
@@ -209,17 +298,24 @@ let private blockDesignTcl (t: BoardTop) (pinned: Pinned list) (psClock: int) =
         else
             ""
 
-    let masterCells, masterNets, masterClocks, masterResets, masterAddress =
-        match memory with
-        | Some m ->
-            let _, segment, aclk = psSlavePort m.port
+    // One smartconnect a master, onto its port. The batch top's one `m_axi`
+    // keeps the names it always had, so its block design does not move.
+    let perMaster =
+        [ for prefix, port in masters ->
+              let gp, segment, aclk = psSlavePort port
+              let smc = if prefix = "m_axi" then "axi_smc_hp" else $"axi_smc_{prefix.Substring 6}"
 
-            "set axi_smc_hp [ create_bd_cell -type ip -vlnv xilinx.com:ip:smartconnect:1.0 axi_smc_hp ]\nset_property -dict [list CONFIG.NUM_SI {1} CONFIG.NUM_MI {1}] $axi_smc_hp",
-            $"connect_bd_intf_net -intf_net {cell}_m_axi [get_bd_intf_pins {cell}/m_axi] [get_bd_intf_pins axi_smc_hp/S00_AXI]\nconnect_bd_intf_net -intf_net axi_smc_hp_M00_AXI [get_bd_intf_pins axi_smc_hp/M00_AXI] [get_bd_intf_pins zynq_ultra_ps_e_0/{m.port}]",
-            $" \\\n  [get_bd_pins axi_smc_hp/aclk] \\\n  [get_bd_pins zynq_ultra_ps_e_0/{aclk}]",
-            " \\\n  [get_bd_pins axi_smc_hp/aresetn]",
-            $"assign_bd_address -offset 0x00000000 -range 0x80000000 -target_address_space [get_bd_addr_spaces {cell}/m_axi] [get_bd_addr_segs zynq_ultra_ps_e_0/SAXIGP%d{let gp, _, _ = psSlavePort m.port in gp}/{segment}] -force"
-        | None -> "", "", "", "", ""
+              $"set {smc} [ create_bd_cell -type ip -vlnv xilinx.com:ip:smartconnect:1.0 {smc} ]\nset_property -dict [list CONFIG.NUM_SI {{1}} CONFIG.NUM_MI {{1}}] ${smc}",
+              $"connect_bd_intf_net -intf_net {cell}_{prefix} [get_bd_intf_pins {cell}/{prefix}] [get_bd_intf_pins {smc}/S00_AXI]\nconnect_bd_intf_net -intf_net {smc}_M00_AXI [get_bd_intf_pins {smc}/M00_AXI] [get_bd_intf_pins zynq_ultra_ps_e_0/{port}]",
+              $" \\\n  [get_bd_pins {smc}/aclk] \\\n  [get_bd_pins zynq_ultra_ps_e_0/{aclk}]",
+              $" \\\n  [get_bd_pins {smc}/aresetn]",
+              $"assign_bd_address -offset 0x00000000 -range 0x80000000 -target_address_space [get_bd_addr_spaces {cell}/{prefix}] [get_bd_addr_segs zynq_ultra_ps_e_0/SAXIGP%d{gp}/{segment}] -force" ]
+
+    let masterCells = perMaster |> List.map (fun (c, _, _, _, _) -> c) |> String.concat "\n"
+    let masterNets = perMaster |> List.map (fun (_, n, _, _, _) -> n) |> String.concat "\n"
+    let masterClocks = perMaster |> List.map (fun (_, _, c, _, _) -> c) |> String.concat ""
+    let masterResets = perMaster |> List.map (fun (_, _, _, r, _) -> r) |> String.concat ""
+    let masterAddress = perMaster |> List.map (fun (_, _, _, _, a) -> a) |> String.concat "\n"
 
     $"""# {bd}.tcl — the block design around {t.name}, generated by Warp11.Build.
 # The processing system is the board part's preset; everything else is
@@ -713,7 +809,7 @@ let private writeVivado (dir: string) (t: BoardTop) : BuildOutput =
 
     let verilog =
         let text = emitDesignFor t.target t.top + "\n"
-        if hasMaster t then withBusInterfaceAttribute text else text
+        if hasMaster t then withBusInterfaceAttribute (mastersOf t |> List.map fst) text else text
 
     let files =
         [ $"{t.name}.v", verilog
@@ -1076,6 +1172,11 @@ let ecp5Pll (inputHz: int) (targetHz: int) : Ecp5Pll =
 let private ecp5Wrapper (t: BoardTop) (clockPort: string) (clockHz: int) (passthrough: Pinned list) (audio: (int * Pin) option) =
     let top = $"{snakeOf t.name}_top"
 
+    let sdramDecls, sdramConnections, sdramBody =
+        match sdramPortsOf t with
+        | Some ports -> sdramWrapping ports
+        | None -> [], [], ""
+
     let portDecls =
         [ yield $"    input  wire {clockPort},"
           if audio.IsSome then
@@ -1083,7 +1184,8 @@ let private ecp5Wrapper (t: BoardTop) (clockPort: string) (clockHz: int) (passth
           for p in passthrough ->
               let dir = if p.input then "input " else "output"
               let range = if p.width = 1 then "" else $"[%d{p.width - 1}:0] "
-              $"    {dir} wire {range}{p.port}," ]
+              $"    {dir} wire {range}{p.port},"
+          yield! sdramDecls ]
         |> String.concat "\n"
 
     let portDecls = portDecls.TrimEnd(',')
@@ -1094,7 +1196,8 @@ let private ecp5Wrapper (t: BoardTop) (clockPort: string) (clockHz: int) (passth
           if audio.IsSome then
               yield "        .audio_clk(audio_clk_in),"
               yield "        .audio_rst(audio_rst_sync),"
-          for p in passthrough -> $"        .{p.port}({p.port})," ]
+          for p in passthrough -> $"        .{p.port}({p.port}),"
+          yield! sdramConnections ]
         |> String.concat "\n"
 
     let connections = connections.TrimEnd(',')
@@ -1203,7 +1306,8 @@ module {top} (
     end
 
     wire rst = (por != 4'd15);
-{audioReset}
+
+{sdramBody}{audioReset}
     {t.name} inner (
 {connections}
     );
@@ -1232,6 +1336,10 @@ let private lpf (clockPort: string) (clockHz: int) (pinned: Pinned list) (audio:
       | Some (hz, _) -> yield $"FREQUENCY PORT \"audio_clk_in\" {megahertz hz} MHZ;"
       | None -> () ]
     |> String.concat "\n"
+
+/// The ECP5's pin map with the SDRAM's, where the top drives one.
+let private lpfFor (t: BoardTop) (clockPort: string) (clockHz: int) (pinned: Pinned list) (audio: (int * Pin) option) =
+    String.concat "\n" (lpf clockPort clockHz pinned audio :: sdramLpf t)
 
 let private ecp5FlowSh (t: BoardTop) (top: string) (sources: string list) =
     let device = t.board.part.device
@@ -1395,6 +1503,9 @@ let private writeOpenFlow (dir: string) (t: BoardTop) : BuildOutput =
     let familyFiles =
         match t.board.part.family with
         | Family.Ice40 ->
+            if (sdramPortsOf t).IsSome then
+                failwith $"{t.board.name}: the iCE40 wrapper does not drive an SDRAM — the ECP5's does"
+
             if audio.IsSome then
                 failwith
                     $"{t.board.name}: the iCE40 wrapper is not built for the audio clock — and its parts refuse the asyncFifo's LUT-RAM anyway; the ECP5 and Vivado flows carry the audio domain"
@@ -1406,7 +1517,7 @@ let private writeOpenFlow (dir: string) (t: BoardTop) : BuildOutput =
         | Family.Ecp5 ->
             [ $"{t.name}.v", emitDesignFor t.target t.top + "\n"
               $"{top}.v", ecp5Wrapper t crystalPort crystalHz passthrough audio
-              $"{top}.lpf", lpf crystalPort crystalHz pinned audio + "\n"
+              $"{top}.lpf", lpfFor t crystalPort crystalHz pinned audio + "\n"
               "build.sh", ecp5FlowSh t top [ $"{t.name}.v"; $"{top}.v" ] ]
         | UltraScalePlus -> failwith $"{t.board.name}: the open flow does not build an UltraScale+ part"
         | Family.Max10 -> failwith $"{t.board.name}: the open flow does not build a MAX 10 part — Quartus does"
@@ -1440,6 +1551,9 @@ let private writeOpenFlow (dir: string) (t: BoardTop) : BuildOutput =
 /// other port through to a pin. A PLL (`altpll`) is not built yet, so a
 /// board asking for one is refused here by name rather than wired wrong.
 let private quartusWrapper (t: BoardTop) (clockPort: string) (clockHz: int) (passthrough: Pinned list) =
+    if (sdramPortsOf t).IsSome then
+        failwith $"{t.board.name}: the Quartus wrapper does not drive an SDRAM yet — the ECP5's does"
+
     if clockHz <> t.board.fabricHz then
         failwith
             $"{t.board.name}: the Quartus flow has no PLL yet — `fabricHz` must be the oscillator's %d{clockHz} Hz, not %d{t.board.fabricHz}"

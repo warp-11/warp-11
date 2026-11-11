@@ -1386,10 +1386,15 @@ type AxiReadBus =
 type AxiWriteBus =
     { prefix: string
       awaddr: Expr
+      /// Written by the burst master and tied by the single-beat one, as
+      /// `arlen` is on the read side.
+      awlen: Expr
       awvalid: Expr
       awready: Expr
       wdata: Expr
       wstrb: Expr
+      /// The burst master's; the single-beat one ties it high.
+      wlast: Expr
       wvalid: Expr
       wready: Expr
       bvalid: Expr
@@ -1557,21 +1562,22 @@ let axiWriteBusPorts (p: Ports) (prefix: string) (addrWidth: int) (dataWidth: in
       bready = bready }
 
 /// The body half: tie the write side's transaction constants and hand back
-/// the bus the masters take.
+/// the bus the masters take. `awlen` and `wlast` are never tied here: the
+/// single-beat master ties them, the burst master drives them.
 let axiWriteBusOf (ports: AxiWriteBusPorts) : AxiWriteBus =
-    lit 0UL 8 ==> ports.awlen // 1 beat per burst
     lit (axiSizeEncoding (width ports.wdata)) 3 ==> ports.awsize
     lit 1UL 2 ==> ports.awburst // INCR
     lit 0UL 4 ==> ports.awcache
     lit 0UL 3 ==> ports.awprot
-    lit 1UL 1 ==> ports.wlast // every beat is last
 
     { prefix = ports.prefix
       awaddr = ports.awaddr
+      awlen = ports.awlen
       awvalid = ports.awvalid
       awready = ports.awready
       wdata = ports.wdata
       wstrb = ports.wstrb
+      wlast = ports.wlast
       wvalid = ports.wvalid
       wready = ports.wready
       bvalid = ports.bvalid
@@ -1619,6 +1625,9 @@ let private axiMasterWriterCoreOn
     // when the two buses are `m_axi_hp0` and `m_axi_hp1` — and a design wanting
     // an ordinary wire called `idle` collides with the master.
     let named (suffix: string) = $"{bus.prefix}_{suffix}"
+
+    lit 0UL 8 ==> bus.awlen // 1 beat per burst
+    lit 1UL 1 ==> bus.wlast // every beat is last
 
     let inAddr, inData, inStrb = beats.payload
 
@@ -1979,6 +1988,124 @@ let axiMasterWriterTrackedOn
 /// (`enq_ptr = b_ptr` on the ring; all three pendings clear at N=1).
 let axiMasterWriterWithIdleOn (bus: AxiWriteBus) (maxOutstanding: int) (beats: Stream<Expr * Expr * Expr>) : Expr =
     (axiMasterWriterCoreOn true bus maxOutstanding beats).idle.Value
+
+
+/// What the burst write master hands back.
+type BurstWriter =
+    { /// High when no burst is in flight: every accepted burst's response
+      /// has returned.
+      idle: Expr
+      /// One cycle per write response — a whole burst has landed. Responses
+      /// return in the order the bursts were accepted, so the nth pulse is
+      /// the nth burst.
+      landed: Expr }
+
+/// The burst-mode AXI4 write master, the write side's `axiMasterReaderBurstOn`:
+/// a descriptor `(addr, len)` — AWLEN encoding, beats − 1 — and then that
+/// many `(data, strb)` beats on their own stream. The AW side is a slot ring
+/// of descriptors; the W side is a **streaming passthrough** — `wvalid` is the
+/// beat's valid while a descriptor is waiting for its data, and the beat's
+/// ready is `wready` — so a burst is never held in slot registers, which
+/// could not hold one. WLAST is counted against the descriptor at the W
+/// pointer, so the caller states a burst's length once and cannot disagree
+/// with itself about where it ends. One B per burst; `landed` pulses for it.
+///
+/// The caller owns AXI's address rules, as on the read side: a burst must
+/// not cross a 4 KB boundary, and on the KV260's HP ports the address is
+/// 16-byte aligned with every strobe set.
+let axiMasterWriterBurstOn
+    (bus: AxiWriteBus)
+    (maxOutstanding: int)
+    (bursts: Stream<Expr * Expr>)
+    (beats: Stream<Expr * Expr>)
+    : BurstWriter =
+    axiOutstanding maxOutstanding
+    claimBus bus.prefix "write" bus.claimed
+
+    if maxOutstanding = 1 then
+        failwith "burst mode requires a multi-outstanding ring (maxOutstanding > 1)"
+
+    let addrWidth = width bus.awaddr
+    let named (suffix: string) = $"{bus.prefix}_burst_{suffix}"
+    let burstAddr, burstLen = bursts.payload
+    let beatData, beatStrb = beats.payload
+
+    if width burstLen <> 8 then
+        failwith $"axiMasterWriterBurstOn '{bus.prefix}': a burst's length is AWLEN, 8 bits, and this one is %d{width burstLen}"
+
+    let n = maxOutstanding
+    let log2N = log2 n
+    let ptrWidth = log2N + 1
+    let addrSlots = [ for i in 0 .. n - 1 -> reg (named $"addr_q_%d{i}") addrWidth ]
+    let lenSlots = [ for i in 0 .. n - 1 -> reg (named $"len_q_%d{i}") 8 ]
+    let enqPtr = reg (named "enq_ptr") ptrWidth
+    let awPtr = reg (named "aw_ptr") ptrWidth
+    let wPtr = reg (named "w_ptr") ptrWidth
+    let bPtr = reg (named "b_ptr") ptrWidth
+
+    let inFlight = wire (named "in_flight") ptrWidth
+    enqPtr - bPtr ==> inFlight
+    let notFull = wireBit (named "not_full")
+    lt inFlight (lit (uint64 n) ptrWidth) ==> notFull
+    notFull ==> bursts.ready
+    let accept = wireBit (named "accept")
+    (bursts.valid &&& notFull) ==> accept
+
+    let enqSlot = wire (named "enq_slot") log2N
+    slice (log2N - 1) 0 enqPtr ==> enqSlot
+
+    for i in 0 .. n - 1 do
+        If (accept &&& eq enqSlot (lit (uint64 i) log2N)) (fun () ->
+            burstAddr ==> addrSlots[i]
+            burstLen ==> lenSlots[i])
+
+    If accept (fun () -> enqPtr + lit 1UL ptrWidth ==> enqPtr)
+
+    // --- AW: one per descriptor ---------------------------------------------
+    let awSlot = wire (named "aw_slot") log2N
+    slice (log2N - 1) 0 awPtr ==> awSlot
+    let awHasWork = wireBit (named "aw_has_work")
+    bnot (eq awPtr enqPtr) ==> awHasWork
+    awHasWork ==> bus.awvalid
+    selectIndexed awSlot addrSlots ==> bus.awaddr
+    selectIndexed awSlot lenSlots ==> bus.awlen
+    If (awHasWork &&& bus.awready) (fun () -> awPtr + lit 1UL ptrWidth ==> awPtr)
+
+    // --- W: the beats pass through, counted against their descriptor --------
+    let wSlot = wire (named "w_slot") log2N
+    slice (log2N - 1) 0 wPtr ==> wSlot
+    let wHasWork = wireBit (named "w_has_work")
+    bnot (eq wPtr enqPtr) ==> wHasWork
+    let beatCount = reg (named "beat_count") 8
+    let wLast = wireBit (named "w_last")
+    eq beatCount (selectIndexed wSlot lenSlots) ==> wLast
+
+    (beats.valid &&& wHasWork) ==> bus.wvalid
+    (bus.wready &&& wHasWork) ==> beats.ready
+    beatData ==> bus.wdata
+    beatStrb ==> bus.wstrb
+    wLast ==> bus.wlast
+
+    let wFire = wireBit (named "w_fire")
+    (beats.valid &&& wHasWork &&& bus.wready) ==> wFire
+
+    If wFire (fun () ->
+        ifElse [
+            (wLast, fun () ->
+                lit 0UL 8 ==> beatCount
+                wPtr + lit 1UL ptrWidth ==> wPtr)
+            (otherwise, fun () -> beatCount + lit 1UL 8 ==> beatCount) ])
+
+    // --- B: one per burst, in order -----------------------------------------
+    lit 1UL 1 ==> bus.bready // a slot frees only when bPtr advances
+    If bus.bvalid (fun () -> bPtr + lit 1UL ptrWidth ==> bPtr)
+
+    let landed = wireBit (named "landed")
+    bus.bvalid ==> landed
+    let idle = wireBit (named "idle")
+    eq enqPtr bPtr ==> idle
+
+    { idle = idle; landed = landed }
 
 
 // ---------------------------------------------------------------------------

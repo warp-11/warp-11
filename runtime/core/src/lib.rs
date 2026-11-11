@@ -16,6 +16,7 @@
 #![no_std]
 
 pub mod batch;
+pub mod region;
 pub mod frame;
 pub mod gep;
 /// The generated register maps — emitted by hdl's `dotnet run --

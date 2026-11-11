@@ -20,4 +20,6 @@ let board =
     // The hand block design mastered DDR through S_AXI_HP0_FPD rather than the
     // preset's HPC0 — kept, so the generated block design matches what ran.
     { kv with
-        hostMemory = kv.hostMemory |> Option.map (fun m -> { m with port = "S_AXI_HP0_FPD" }) }
+        hostMemory =
+            kv.hostMemory
+            |> Option.map (fun m -> { m with ports = "S_AXI_HP0_FPD" :: List.filter ((<>) "S_AXI_HP0_FPD") m.ports }) }
