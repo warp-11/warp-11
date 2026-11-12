@@ -140,6 +140,12 @@ impl FsSimWindow {
             .collect()
     }
 
+    /// The seam's constants as `NAME=value` pairs — what a board's seam file
+    /// says, answered by the bridge so the Sim needs no build.
+    pub fn seam_constants(&mut self) -> Result<String, FsSimError> {
+        self.round_trip("S")
+    }
+
     fn round_trip(&mut self, request: &str) -> Result<String, FsSimError> {
         writeln!(self.stdin, "{request}").map_err(FsSimError::Io)?;
         self.stdin.flush().map_err(FsSimError::Io)?;

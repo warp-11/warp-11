@@ -196,12 +196,14 @@ fn main() {
 
     device.arm(phys as u32).expect("arm the arena");
     device.set_auto_mode(false).expect("auto off");
-    device.start(n_cases as u32).expect("start");
 
+    // Cases before start: start zeroes the cycle counter, so loading them after
+    // it put ~5,800 cycles of host AXI-Lite writes into every rate printed below.
     let rows: Vec<&[u32]> = (0..n_cases)
         .map(|k| &cases[k * (var_count + 1)..(k + 1) * (var_count + 1)])
         .collect();
     device.load_cases(&rows).expect("load cases");
+    device.start(n_cases as u32).expect("start");
 
     let started = Instant::now();
     device.publish(entries as u32).expect("publish");

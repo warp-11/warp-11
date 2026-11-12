@@ -193,20 +193,22 @@ let clusterTopOf (name: string) (shape: GepClusterShape) : BoardTop.BoardTop =
 /// two-lane pool the bare-port oracle runs, now driven the way silicon is.
 let clusterAxiWalk = lazy (clusterTopOf "GepClusterWalk" (clusterShape 1 false))
 
-/// The silicon shape — the measured pick, ported: 4 breeders x 8
-/// DIV-resident 16-thread lanes, the warped dispatcher at two fillers, and the
-/// host-marshaled streaming loop (inline parents + the op-list emitter). That
-/// shape is balanced and it FITS: 95,266 LUT / 81.3% at synth on the KV260,
-/// where 6x12 is 131% and does not. The breeders, not the dividers, are the LUT
-/// hog — which is why the divide stays `PerLane` (the pod cannot relieve the
-/// binding resource, and pooling it cost 44-118% throughput).
+/// The silicon shape — the re-swept pick: 8 breeders x 4 DIV-resident
+/// 16-thread lanes, the warped dispatcher at two fillers, and the
+/// host-marshaled streaming loop (inline parents + the op-list emitter). Once
+/// the fill path stopped binding, the breeders did: 4x8 measured 75.9
+/// cycles/offspring in the model with lanes 3-7 idle on silicon at 32 cases,
+/// and 8 breeders saturate at 52.8 with four lanes enough to keep up. The
+/// breeders, not the dividers, are the LUT hog — which is why the divide stays
+/// `PerLane` (the pod cannot relieve the binding resource, and pooling it cost
+/// 44-118% throughput).
 ///
 /// The superset function set (comparison plus DIV) covers Coulomb and the
 /// comparison benchmarks from one bitstream.
 let clusterSiliconShape =
     { clusterShape 2 true with
-        nBreeders = 4
-        nLanes = 8
+        nBreeders = 8
+        nLanes = 4
         functionSet = Array.append Opcodes.comparisonSet [| Opcodes.DIV |]
         nThreads = 16
         caseCapacity = 256

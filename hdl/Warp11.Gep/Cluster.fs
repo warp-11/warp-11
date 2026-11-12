@@ -1297,8 +1297,6 @@ let gepClusterPool
     let claimFiller = wire $"{prefix}_claimFiller" fW
     pickFE[0] ==> claimFiller
 
-    If (anyPick &&& bnot goCond) (fun () ->
-        If running (fun () -> feedStallCyc + lit 1UL 32 ==> feedStallCyc))
 
     If (anyPick &&& goCond &&& bnot anyFree) (fun () ->
         breederStallCyc + lit 1UL 32 ==> breederStallCyc)
@@ -1798,7 +1796,6 @@ let gepClusterPool
 
     // ---- Counters and status ----
     let cyc = reg $"{prefix}_cyc" 32
-    cyc + lit 1UL 32 ==> cyc
 
     let busyBreederCyc = reg $"{prefix}_busyBreederCyc" 32
 
@@ -1841,6 +1838,12 @@ let gepClusterPool
                   | _ -> one1
               | None -> one1))
     ==> allIdle
+
+    // Counted only while there is work, so a rate the host divides by it is
+    // the fabric's: not the host loading cases before publishing, nor its
+    // polling after the last result.
+    If (running &&& bnot allIdle) (fun () -> cyc + lit 1UL 32 ==> cyc)
+    If (running &&& bnot allIdle &&& anyPick &&& bnot goCond) (fun () -> feedStallCyc + lit 1UL 32 ==> feedStallCyc)
 
     // ---- Start: latch config, reset every pointer, free every breeder. The
     // host must quiesce (all_idle) before re-starting. The lane-bank mirrors

@@ -22,8 +22,6 @@ pub mod gep;
 /// The generated register maps — emitted by hdl's `dotnet run --
 /// hardware`, committed here so the driver's diff shows layout changes. The
 /// one place the two languages agree on offsets.
-pub mod audio_batch_layout;
-pub mod audio_effects_layout;
 pub mod gep_layout;
 
 /// Byte offsets of the AXI-Lite register file. Both the elaborated slave and the

@@ -18,6 +18,12 @@
 //! same shape, `dotnet run --project Warp11.Placement -- image design.json
 //! in.pgm out.pgm` being the Sim's own answer to compare with.
 //!
+//! `in.csv out.csv` is a table a row a beat: each column one of the
+//! design's input fields, placed in the row where the seam's `ROW_IN_*`
+//! says, and what comes back written as a CSV of the `ROW_OUT_*` fields —
+//! the seam file on a board, the bridge's `S` answer in the Sim. The link
+//! does not carry a table yet.
+//!
 //! `count:<n>` is a design with nothing in — a tone — asked for `n` rows,
 //! written as a WAV at `--rate`, which the rows do not carry.
 //!
@@ -54,6 +60,7 @@ use warp11_host::wav::{from_sample, read_wav, to_sample, write_wav};
 use warp11_runtime::batch::{BatchDevice, BatchError};
 use warp11_runtime::frame::{FrameShape, BEATS_PER_BURST, PIXELS_PER_BEAT};
 use warp11_host::pgm::{read_pgm, write_pgm};
+use warp11_host::table::{read_csv, row_shape, stage as stage_table, unstage as unstage_table, write_csv, Constants, RowShape, Table};
 
 /// Rows a burst holds for a stereo boundary: what `frameCount` must be a
 /// multiple of. Two rows a 128-bit beat, sixteen beats a burst.
@@ -75,6 +82,30 @@ enum Source {
     /// An image, a row a beat: the design's one field is the row, `width`
     /// pixels of a byte each.
     Pgm(PathBuf),
+    /// A table, a row a beat: each column one of the design's input fields,
+    /// placed where the seam says.
+    Csv(PathBuf),
+}
+
+/// A table's run: the rows read once, and their shapes in and out as the
+/// seam states them.
+struct CsvRun {
+    table: Table,
+    input: RowShape,
+    output: RowShape,
+    rows_per_burst: usize,
+}
+
+impl CsvRun {
+    fn new(args: &Args, constants: &Constants) -> Result<CsvRun, String> {
+        let Source::Csv(path) = &args.input else { return Err("not a table".into()) };
+        Ok(CsvRun {
+            table: read_csv(path)?,
+            input: row_shape(constants, "IN")?,
+            output: row_shape(constants, "OUT")?,
+            rows_per_burst: constants.number("ROWS_PER_BURST")? as usize,
+        })
+    }
 }
 
 /// How a row of `width` pixels sits in the host's memory — the fabric's
@@ -112,6 +143,9 @@ struct Args {
 }
 
 fn parse_frame(text: &str) -> Option<Source> {
+    if text.ends_with(".csv") {
+        return Some(Source::Csv(PathBuf::from(text)));
+    }
     if text.ends_with(".pgm") {
         return Some(Source::Pgm(PathBuf::from(text)));
     }
@@ -126,7 +160,7 @@ fn parse_frame(text: &str) -> Option<Source> {
 }
 
 fn usage() -> ! {
-    eprintln!("usage: warp11_batch (in.wav out.wav | in.pgm out.pgm | frame:<w>x<h> out.pgm [--chunk <pixels>] | count:<n> out.wav [--rate 48000]) (--board <uio name> --layout <seam.rs> | --serial <tty> [--baud 1000000] --layout <seam.rs> | --sim <design.json> [--preset kv260] [--fsproj <fsproj>]) [--set name=value]...");
+    eprintln!("usage: warp11_batch (in.wav out.wav | in.pgm out.pgm | in.csv out.csv | frame:<w>x<h> out.pgm [--chunk <pixels>] | count:<n> out.wav [--rate 48000]) (--board <uio name> --layout <seam.rs> | --serial <tty> [--baud 1000000] --layout <seam.rs> | --sim <design.json> [--preset kv260] [--fsproj <fsproj>]) [--set name=value]...");
     std::process::exit(2)
 }
 
@@ -230,6 +264,7 @@ fn describe<E: std::fmt::Debug>(e: BatchError<E>) -> String {
 enum Output {
     Frames(Vec<(i16, i16)>),
     Pixels(Vec<u8>),
+    Table(Table),
 }
 
 /// The image a `Source::Pgm` names, read once.
@@ -263,8 +298,13 @@ fn stage_image(image: &Image) -> (Vec<u8>, usize, usize) {
 
 /// The staged input and its count: a recording's rows, or nothing and the
 /// beats of a frame.
-fn staged(args: &Args, frames: &[(i16, i16)]) -> (Vec<u8>, usize, usize) {
-    match &args.input {
+fn staged(args: &Args, frames: &[(i16, i16)], csv: Option<&CsvRun>) -> Result<(Vec<u8>, usize, usize), String> {
+    Ok(match &args.input {
+        Source::Csv(_) => {
+            let run = csv.ok_or("a table needs the seam's row shapes")?;
+            let (bytes, padded) = stage_table(&run.table, &run.input, run.rows_per_burst)?;
+            (bytes, padded, padded * run.output.bytes)
+        }
         Source::Wav(_) => {
             let (bytes, padded) = stage(frames);
             let out_len = bytes.len();
@@ -289,11 +329,15 @@ fn staged(args: &Args, frames: &[(i16, i16)]) -> (Vec<u8>, usize, usize) {
             let out_len = bytes.len();
             (bytes, padded, out_len)
         }
-    }
+    })
 }
 
-fn unstaged(args: &Args, frames: &[(i16, i16)], bytes: &[u8]) -> Output {
+fn unstaged(args: &Args, frames: &[(i16, i16)], bytes: &[u8], csv: Option<&CsvRun>) -> Output {
     match &args.input {
+        Source::Csv(_) => {
+            let run = csv.expect("staged checked the table's run");
+            Output::Table(unstage_table(bytes, &run.output, run.table.rows.len()))
+        }
         Source::Wav(_) => Output::Frames(unstage(bytes, frames.len())),
         Source::Frame { width, height } => {
             let shape = FrameShape::new(*width, *height, args.chunk);
@@ -334,8 +378,15 @@ fn run_sim(args: &Args, frames: &[(i16, i16)]) -> Result<Output, String> {
     for (offset, value) in resolve(&args.sets, &registers)? {
         device.set(offset, value).map_err(|e| format!("{e:?}"))?;
     }
+    let csv = match args.input {
+        Source::Csv(_) => {
+            let pairs = device.window_mut().seam_constants().map_err(|e| format!("{e:?}"))?;
+            Some(CsvRun::new(args, &Constants::from_pairs(&pairs))?)
+        }
+        _ => None,
+    };
 
-    let (bytes, count, out_len) = staged(args, frames);
+    let (bytes, count, out_len) = staged(args, frames, csv.as_ref())?;
     let dst = SIM_SRC + bytes.len();
     if !bytes.is_empty() {
         device.window_mut().write_ddr(SIM_SRC, &bytes).map_err(|e| format!("{e:?}"))?;
@@ -347,7 +398,7 @@ fn run_sim(args: &Args, frames: &[(i16, i16)]) -> Result<Output, String> {
         .map_err(describe)?;
     eprintln!("{} rows in {} fabric cycles", count, device.cycles().map_err(|e| format!("{e:?}"))?);
     let out = device.window_mut().read_ddr(dst, out_len).map_err(|e| format!("{e:?}"))?;
-    Ok(unstaged(args, frames, &out))
+    Ok(unstaged(args, frames, &out, csv.as_ref()))
 }
 
 fn run_board(args: &Args, frames: &[(i16, i16)]) -> Result<Output, String> {
@@ -364,7 +415,11 @@ fn run_board(args: &Args, frames: &[(i16, i16)]) -> Result<Output, String> {
         .map_err(|e| format!("{e}"))?
         .ok_or_else(|| format!("no u-dma-buf called '{arena_name}' — is the app loaded?"))?;
 
-    let (bytes, count, out_len) = staged(args, frames);
+    let csv = match args.input {
+        Source::Csv(_) => Some(CsvRun::new(args, &Constants::from_seam(layout)?)?),
+        _ => None,
+    };
+    let (bytes, count, out_len) = staged(args, frames, csv.as_ref())?;
     let half = arena.size / 2;
     if bytes.len().max(out_len) > half {
         return Err(format!("{} rows need {} bytes; the arena's half is {}", count, bytes.len().max(out_len), half));
@@ -404,7 +459,7 @@ fn run_board(args: &Args, frames: &[(i16, i16)]) -> Result<Output, String> {
     device.acknowledge().map_err(|e| format!("{e:?}"))?;
 
     arena.sync_for_cpu(half, out_len).map_err(|e| format!("sync_for_cpu: {e}"))?;
-    let out = unstaged(args, frames, &arena_map.bytes()[half..half + out_len]);
+    let out = unstaged(args, frames, &arena_map.bytes()[half..half + out_len], csv.as_ref());
     eprintln!("{} rows in {:.3} ms wall, {} fabric cycles", count, elapsed.as_secs_f64() * 1e3, cycles);
     Ok(out)
 }
@@ -447,6 +502,9 @@ fn run_serial(args: &Args, frames: &[(i16, i16)]) -> Result<Output, String> {
     if let Source::Count(n) = args.input {
         let words = count_over_link(args, &mut window, &registers, n, 2 * n, record_arm, sent, record_dropped)?;
         return Ok(Output::Frames(words.chunks(2).map(|w| (from_sample(w[0] as i32), from_sample(w[1] as i32))).collect()));
+    }
+    if matches!(args.input, Source::Csv(_)) {
+        return Err("a table over the link is not built yet: --board or --sim".into());
     }
     if matches!(args.input, Source::Pgm(_)) {
         let image = image_of(args)?;
@@ -669,7 +727,7 @@ fn main() {
         },
         Source::Frame { .. } => (0, Vec::new()),
         Source::Count(_) => (args.rate, Vec::new()),
-        Source::Pgm(_) => (0, Vec::new()),
+        Source::Pgm(_) | Source::Csv(_) => (0, Vec::new()),
     };
 
     let result = if args.sim.is_some() {
@@ -692,7 +750,11 @@ fn main() {
             let image = image_of(&args)?;
             write_pgm(&args.output, image.width, image.height, &pixels).map(|()| format!("{}×{}", image.width, image.height))
         }
-        (Output::Pixels(_), Source::Wav(_) | Source::Count(_)) => Err("a recording came back as pixels".to_string()),
+        (Output::Pixels(_), _) => Err("pixels came back for something that is not an image".to_string()),
+        (Output::Table(table), _) => {
+            let n = table.rows.len();
+            write_csv(&args.output, &table).map(|()| format!("{n} rows"))
+        }
     });
 
     match written {

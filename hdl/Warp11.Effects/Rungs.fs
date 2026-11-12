@@ -35,9 +35,6 @@ let iceBoard = iceBreakerAt 24_000_000
 /// detune, which the living check pins.
 let iceSampleRate = iceBoard.fabricHz / 512
 
-/// The stereo row every rung speaks.
-let stereo = pins2 ("left", signedInt sampleWidth) ("right", signedInt sampleWidth)
-
 /// What the tone asks of the world.
 type ToneIo =
     { /// One sample a beat: the host asks for a count, or plays rows it
@@ -127,7 +124,9 @@ let private mappingOn (path: Board -> DataPath) : Mapping.Mapping =
 
 let rungs: Rung list =
     [ { name = "tone"; design = tone; mapping = mappingOn viaCountHost }
-      { name = "passthru"; design = passthru; mapping = mappingOn viaHost } ]
+      { name = "passthru"; design = passthru; mapping = mappingOn viaHost }
+      { name = "effects"; design = effects; mapping = mappingOn viaHost }
+      { name = "multiband"; design = multiband; mapping = mappingOn viaHost } ]
 
 /// A rung by name, or the names there are.
 let rungNamed (name: string) : Result<Rung, string> =

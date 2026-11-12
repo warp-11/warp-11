@@ -2370,7 +2370,7 @@ let main argv =
     // second at this shape (measured 2026-11-07), a few seconds a generation
     // at a small population.
     | [| "simserve" |] ->
-        BoardTop.ddrServe ClusterAxi.clusterAxiSilicon.Value.top [] (4 <<< 20) 16 "GEPSERVE"
+        BoardTop.ddrServe ClusterAxi.clusterAxiSilicon.Value.top [] [] (4 <<< 20) 16 "GEPSERVE"
         0
     // The streaming loop's vector: a population, cases, the policy, and the
     // mirror's answer for every generation — the op-list the fabric must

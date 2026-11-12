@@ -4,9 +4,15 @@ module Warp11.Effects.Main
 
 open Warp11
 
-let private designs =
-    [ "AudioEffectsAxi", audioEffectsAxi.def
-      "AudioBatchAxi", Batch.audioBatchAxi.def ]
+/// The two chains on the KV260 as their boards build them: the effects chain
+/// on the Pmod I2S2's pins, the multiband compressor through the host's DDR —
+/// what the hand tops `AudioEffectsAxi` and `AudioBatchAxi` were, generated.
+let private effectsOnPins = lazy (BoardTop.boardTop kv260 viaPins effects)
+let private multibandOnMemory = lazy (BoardTop.boardTop kv260 viaHostMemory multiband)
+
+let private designs () =
+    [ "EffectsPins", effectsOnPins.Value.top
+      "MultibandBatch", multibandOnMemory.Value.top ]
 
 /// The two rungs as designs, built for the iCEBreaker's converter: what the
 /// hand tops in `hardware/ice40/` were, through `boardTop` — and what any
@@ -20,23 +26,24 @@ let private rungsOnIce () =
 /// make a sound) with nothing written to it. A default that clamps, mutes or
 /// zeroes would look exactly like broken hardware on a bench.
 let private defaultsArePassthrough () : bool =
-    let sim = Sim audioEffectsAxi.def
-    // No AXI writes at all — read the reset state straight out of the slave.
-    sim.Tick()
+    let registers = effectsOnPins.Value.registers
 
-    let isUnity (e: RegEntry) expected =
-        match e.kind with
-        | RwReg (_, init) -> init = expected
-        | _ -> false
+    let isUnity name expected =
+        match registers |> List.tryFind (fun (n, _) -> n = name) with
+        | Some (_, e) ->
+            match e.kind with
+            | RwReg (_, init) -> init = expected
+            | _ -> false
+        | None -> false
 
-    isUnity effectsRegs.volume gainUnity
-    && isUnity effectsRegs.mute 0UL
-    && isUnity effectsRegs.eq[0] biquadUnity
-    && List.forall (fun e -> isUnity e 0UL) (List.skip 1 effectsRegs.eq)
-    && isUnity effectsRegs.compRatio 0UL
-    && isUnity effectsRegs.compMakeup gainUnity
-    && isUnity effectsRegs.compThreshold ((1UL <<< sampleWidth) - 1UL)
-    && isUnity effectsRegs.limitThreshold ((1UL <<< (sampleWidth - 1)) - 1UL)
+    isUnity "volume" gainUnity
+    && isUnity "mute" 0UL
+    && isUnity "eqB0" biquadUnity
+    && List.forall (fun n -> isUnity n 0UL) [ "eqB1"; "eqB2"; "eqA1"; "eqA2" ]
+    && isUnity "compRatio" 0UL
+    && isUnity "compMakeup" gainUnity
+    && isUnity "compThreshold" ((1UL <<< sampleWidth) - 1UL)
+    && isUnity "limitThreshold" ((1UL <<< (sampleWidth - 1)) - 1UL)
 
 /// The slaves must not collide with each other's conventions or with
 /// themselves: every entry word-aligned and inside its aperture, and no two
@@ -45,7 +52,7 @@ let private defaultsArePassthrough () : bool =
 /// this pins the part that is a *convention* rather than a rule.
 let private mapsAreWellFormed () : bool =
     let maps =
-        [ "effects", effectsMap ]
+        [ "effects", effectsOnPins.Value.map; "multiband", multibandOnMemory.Value.map ]
 
     maps
     |> List.forall (fun (_, m) ->
@@ -79,36 +86,42 @@ let private stageFrames (ddr: SimAxiDdr) (at: int) (n: int) (seed: int) =
         ddr.WriteWord(at + i * 8 + 4, lane r)
         l, r |]
 
-/// Drive `audioBatchAxi` over AXI-Lite: stage the frames, point it at them,
-/// pulse start, wait for busy to clear, read the results back out of the same
-/// behavioural DDR.
+/// The multiband top's registers by name, the batch contract beside them.
+let private multibandRegister name =
+    (multibandOnMemory.Value.registers |> List.find (fun (n, _) -> n = name) |> snd).offset
+
+/// Drive the multiband through the host's memory over AXI-Lite, the way
+/// `warp11_batch` does on the board: stage the frames, point the batch
+/// contract at them, pulse start, wait for busy to clear, read the results
+/// back out of the same behavioural DDR.
 let private runBatchPaced (flat: bool) (frames: int) (seed: int) (jitter: int option) =
-    let sim = Sim Batch.audioBatchAxi.def
+    let top = multibandOnMemory.Value
+    let batch = top.batch.Value
+    let sim = Sim top.top
     let src = 0x1000
     let dst = 0x9000
     let ddr = SimAxiDdr(sim, 0x20000, ?jitter = jitter)
     let input = stageFrames ddr src frames seed
 
     let axi = SimAxi.clientWith sim ddr.Cycle
-    let m = Batch.batchRegs
-    let idOk = axi.read32 m.id.offset = 0xAB12C001UL
+    let idOk = axi.read32 batch.id.offset = BoardTop.batchId
 
-    axi.write32 m.srcAddr.offset (uint64 src)
-    axi.write32 m.dstAddr.offset (uint64 dst)
-    axi.write32 m.frameCount.offset (uint64 frames)
-    // "Flat" is now a configuration rather than a route around the DSP:
+    axi.write32 batch.srcAddr.offset (uint64 src)
+    axi.write32 batch.dstAddr.offset (uint64 dst)
+    axi.write32 batch.frameCount.offset (uint64 frames)
+    // "Flat" is a configuration rather than a route around the DSP:
     // threshold at full scale with ratio 0 is no gain reduction whatever the
     // signal, which this chain reassembles bit-exactly.
-    axi.write32 m.threshold.offset (if flat then (1UL <<< sampleWidth) - 1UL else 200_000UL)
-    axi.write32 m.ratio.offset (if flat then 0UL else 4UL)
-    axi.write32 m.attack.offset (1UL <<< 14)
-    axi.write32 m.releaseRate.offset (1UL <<< 12)
-    axi.write32 m.start.offset 1UL
+    axi.write32 (multibandRegister "threshold") (if flat then (1UL <<< sampleWidth) - 1UL else 200_000UL)
+    axi.write32 (multibandRegister "ratio") (if flat then 0UL else 4UL)
+    axi.write32 (multibandRegister "attack") (1UL <<< 14)
+    axi.write32 (multibandRegister "releaseRate") (1UL <<< 12)
+    axi.write32 batch.start.offset 1UL
 
     // Bounded: a design that never lowers busy is a bug, not a reason to hang.
     let mutable spins = 0
 
-    while axi.read32 m.busy.offset <> 0UL && spins < 400_000 do
+    while axi.read32 batch.busy.offset <> 0UL && spins < 400_000 do
         ddr.Cycle()
         spins <- spins + 1
 
@@ -132,8 +145,11 @@ let private runBatch flat frames seed = runBatchPaced flat frames seed None
 /// demo's. Flat is no longer the input: since the crossover became a
 /// phase-matched tree, unity settings are an all-pass, so the plumbing checks
 /// compare against the stage rather than against what went in.
+let private multibandStageNominal =
+    lazy (Batch.multibandStageAt "MultibandStageNominal" BoardTop.nominalRate)
+
 let private stageOutput (flat: bool) (input: (uint64 * uint64)[]) =
-    let sim = Sim Batch.multibandStageRef.def
+    let sim = Sim multibandStageNominal.Value.def
     sim.Poke("threshold", (if flat then (1UL <<< sampleWidth) - 1UL else 200_000UL))
     sim.Poke("ratio", (if flat then 0UL else 4UL))
     sim.Poke("attack", 1UL <<< 14)
@@ -689,35 +705,15 @@ let private checks =
       "link: passthru rows back exactly", passthruOverTheLink
       "link: tone samples are the generator's", toneOverTheCountedLink ]
 
-/// The seam: each design's Verilog beside a Rust layout generated from the very
-/// map the slave was elaborated from. Nothing in public warp11 drives these
-/// boards from a host, but the layout is what makes that possible without
-/// anyone transcribing an offset by hand — and a transcribed offset is the
-/// failure that costs a board reboot.
+/// Each chain's KV260 top as Verilog, for reading. A board build — its seam
+/// included — is `build <name> <board> <path> <dir>`.
 let private writeHardware (repoRoot: string) =
     let buildDir = System.IO.Path.Combine(repoRoot, "hardware", "build")
-    let runtimeSrc = System.IO.Path.Combine(repoRoot, "runtime", "core", "src")
     System.IO.Directory.CreateDirectory buildDir |> ignore
 
-    for name, design in designs do
+    for name, design in designs () do
         let path = System.IO.Path.Combine(buildDir, $"{name}.v")
         System.IO.File.WriteAllText(path, emitDesign design + "\n")
-        printfn $"wrote {path}"
-
-    let layoutFor (title: string) (m: RegMap) =
-        [ $"//! Register map for the `{title}` AXI-Lite slave."
-          "//! Generated by `dotnet run -- hardware <repo-root>` in hdl/Warp11.Effects."
-          "//! Do not edit by hand — changes will be overwritten on next emit."
-          "" ]
-        @ regMapRsLines m
-
-    let layouts =
-        [ "audio_effects_layout.rs", "AudioEffectsAxi", effectsMap
-          "audio_batch_layout.rs", "AudioBatchAxi", Batch.batchMap ]
-
-    for file, title, m in layouts do
-        let path = System.IO.Path.Combine(runtimeSrc, file)
-        System.IO.File.WriteAllText(path, String.concat "\n" (layoutFor title m) + "\n")
         printfn $"wrote {path}"
 
 /// A rung on a mapping, written as its build directory — or why not.
@@ -1099,7 +1095,7 @@ let private listen (inPath: string) (outPath: string option) =
     let input = readWavFile inPath
     // Derived rather than written down: the link frames at the rate its
     // divisors make, and a number typed here would outlive the divisors.
-    let cyclesPerFrame = board.fabricHz / int stockSampleRate
+    let cyclesPerFrame = kv260.fabricHz / int stockSampleRate
 
     printfn $"in:  {input.FrameCount} frames, {input.sampleRate} Hz, {input.channels} ch"
     printfn $"     {cyclesPerFrame} cycles a frame, {input.FrameCount * cyclesPerFrame} to play it out"
@@ -1121,7 +1117,7 @@ let private listen (inPath: string) (outPath: string option) =
     let code =
         Warp11.SimView.Desktop.debugWith
             "a WAV on the codec pins"
-            audioEffectsAxi.def
+            effectsOnPins.Value.top
             [ source.Attach ]
 
     // Read once the window has closed rather than from inside it: `Output` is
@@ -1196,30 +1192,35 @@ let main argv =
         let frames = 512
 
         let cyclesFor (label: string) (mk: Sim -> SimAxiDdr) =
-            let sim = Sim Batch.audioBatchAxi.def
+            let top = multibandOnMemory.Value
+            let batch = top.batch.Value
+            let sim = Sim top.top
             let ddr = mk sim
             let src, dst = 0x1000, 0x9000
             let axi = SimAxi.clientWith sim ddr.Cycle
-            let m = Batch.batchRegs
-            axi.write32 m.srcAddr.offset (uint64 src)
-            axi.write32 m.dstAddr.offset (uint64 dst)
-            axi.write32 m.frameCount.offset (uint64 frames)
-            axi.write32 m.threshold.offset 200_000UL
-            axi.write32 m.ratio.offset 4UL
-            axi.write32 m.attack.offset (1UL <<< 14)
-            axi.write32 m.releaseRate.offset (1UL <<< 12)
-            axi.write32 m.start.offset 1UL
+            axi.write32 batch.srcAddr.offset (uint64 src)
+            axi.write32 batch.dstAddr.offset (uint64 dst)
+            axi.write32 batch.frameCount.offset (uint64 frames)
+            axi.write32 (multibandRegister "threshold") 200_000UL
+            axi.write32 (multibandRegister "ratio") 4UL
+            axi.write32 (multibandRegister "attack") (1UL <<< 14)
+            axi.write32 (multibandRegister "releaseRate") (1UL <<< 12)
+            axi.write32 batch.start.offset 1UL
 
-            let mutable c = 0
+            let mutable spins = 0
 
-            while sim.Peek "running" = 1UL && c < 400_000 do
+            while axi.read32 batch.busy.offset <> 0UL && spins < 400_000 do
                 ddr.Cycle()
-                c <- c + 1
+                spins <- spins + 1
+
+            // The fabric's own count of the batch, not the polls: a poll is a
+            // bus transaction that runs the fabric several cycles.
+            let c = int (axi.read32 batch.cycles.offset)
 
             printfn $"  %-34s{label} %6d{c} cycles   %5.2f{float c / float frames} cyc/frame"
             float c / float frames
 
-        printfn $"  {frames} frames through AudioBatchAxi\n"
+        printfn $"  {frames} frames through the multiband on the KV260's memory path\n"
         let ideal = cyclesFor "ideal DDR (0 latency, always ready)" (fun sim -> SimAxiDdr(sim, 0x20000))
         let r8 = cyclesFor "read latency 8" (fun sim -> SimAxiDdr(sim, 0x20000, rDelay = 8))
         let r32 = cyclesFor "read latency 32" (fun sim -> SimAxiDdr(sim, 0x20000, rDelay = 32))
@@ -1252,8 +1253,7 @@ let main argv =
                   |> Warp11.Catalog.poking
                       [ "threshold", 200_000UL; "ratio", 4UL; "attack", 1UL <<< 14; "releaseRate", 1UL <<< 12; "makeup", gainUnity ]
                   Warp11.Catalog.entry "Limiter" (nameof Batch.limiterStage) (fun () -> Batch.limiterStage.def)
-                  |> Warp11.Catalog.poking [ "threshold", (1UL <<< (sampleWidth - 1)) - 1UL ]
-                  Warp11.Catalog.entry "Batch accelerator" (nameof Batch.audioBatchAxi) (fun () -> Batch.audioBatchAxi.def) ]
+                  |> Warp11.Catalog.poking [ "threshold", (1UL <<< (sampleWidth - 1)) - 1UL ] ]
 
         let initial = if argv.Length > 1 then Some argv[1] else None
         // The window's own exit code is the process's, as in the other two
@@ -1349,11 +1349,25 @@ let main argv =
             |> Result.bind (Warp11.Boards.mappingOn board)
             |> Result.map (fun m -> r.design, m))
         |> buildRung dir
+    // The Sim half of `warp11_batch --sim <name> --preset <board> --fsproj
+    // …/Warp11.Effects.fsproj`: the design on that board's host memory, or
+    // its counted path, with the same driver the board run uses.
+    | [| "batchserve"; name; board |]
+    | [| "batchserve"; name; board; "count" |] ->
+        let dataPath = if argv.Length = 4 then viaCount else viaHostMemory
+
+        match rungNamed name |> Result.bind (fun r -> Warp11.Boards.mappingOn board dataPath |> Result.map (fun m -> r.design, m)) with
+        | Error why ->
+            eprintfn $"{why}"
+            1
+        | Ok(design, mapping) ->
+            BoardTop.batchServe (BoardTop.boardTopFor mapping design)
+            0
     | [| "diff"; outDir |] ->
-        writeDiff (List.map snd designs) outDir
+        writeDiff (List.map snd (designs ())) outDir
         0
     | _ ->
-        for name, design in designs do
+        for name, design in designs () do
             printfn $"{name}: {(emitDesign design).Split('\n').Length} lines of Verilog"
 
         for name, design in rungsOnIce () do

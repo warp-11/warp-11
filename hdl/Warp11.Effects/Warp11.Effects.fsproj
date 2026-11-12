@@ -7,7 +7,7 @@
     </PropertyGroup>
 
     <ItemGroup>
-        <Compile Include="Wrappers.fs"/>
+        <Compile Include="Chains.fs"/>
         <Compile Include="Rungs.fs"/>
         <Compile Include="Batch.fs"/>
         <Compile Include="Main.fs"/>

@@ -2835,6 +2835,38 @@ let private hostMemoryTop (board: Board) (path: DataPath) (d: Design) : BoardTop
               $"pub const {upperSnake sname}_MEM_SLOT_BYTES: usize = %d{1 <<< (ceilLog2 beats + beatAddrShift)};" ]
         | None -> []
 
+    // The rows' own shape, so a host that stages a table can place each
+    // field without the design file: the fields in order, and for each its
+    // first lane, its lanes, and the format a lane holds. A batch top has one
+    // row in and one out, so they are `ROW_IN` and `ROW_OUT`.
+    let rowExtras =
+        let describe (side: string) (shape: RowShape) (pins: (string * NumberFormat) list) =
+            let names = pins |> List.map fst |> String.concat ","
+
+            [ yield $"pub const ROW_{side}_FIELDS: &str = \"%s{names}\";"
+              yield $"pub const ROW_{side}_BYTES: usize = %d{shape.bytesPerRow};"
+              for (field, f), (lane, lanes) in List.zip pins (laneSpans pins) do
+                  let s = $"ROW_{side}_{upperSnake field}"
+                  yield $"pub const {s}_LANE: usize = %d{lane};"
+                  yield $"pub const {s}_LANES: usize = %d{lanes};"
+                  yield $"pub const {s}_WIDTH: u32 = %d{f.totalWidth};"
+                  yield $"pub const {s}_FRACTION: u32 = %d{f.fracBits};"
+                  yield $"pub const {s}_SIGNED: u32 = %d{if f.signed then 1 else 0};" ]
+
+        let rowsPerBurst =
+            match outShape with
+            | Some shape -> max inShape.rowsPerBurst shape.rowsPerBurst
+            | None -> inShape.rowsPerBurst
+
+        if scattered then
+            []
+        else
+            [ $"pub const ROWS_PER_BURST: usize = %d{rowsPerBurst};" ]
+            @ describe "IN" inShape (inputsOf d)
+            @ (match outShape with
+               | Some shape -> describe "OUT" shape payloadPins
+               | None -> [])
+
     { board = board
       name = name
       top = top.def
@@ -2852,7 +2884,7 @@ let private hostMemoryTop (board: Board) (path: DataPath) (d: Design) : BoardTop
       batch = Some batch
       map = map
       target = targetOf board.part
-      seamExtras = surfaceExtras }
+      seamExtras = rowExtras @ surfaceExtras }
 
 /// The design on a board, the way the path says: the converter on the pins,
 /// or the host's memory.
@@ -3241,9 +3273,11 @@ let write (dir: string) (t: BoardTop) : string list =
 /// behavioural DDR behind its AXI master, spoken to over stdin the way
 /// `SimAxi.serve` is — `R`/`W` are AXI-Lite transactions, `C <hexn>` runs
 /// free cycles, `D <hexoff> <hexlen>` dumps DDR as hex, `L <hexoff> <hex>`
-/// loads it, and `M` names the registers with their offsets. `marker` is
-/// the ready line the Rust `FsSimWindow` waits for.
-let ddrServe (top: ModuleDef) (registers: (string * RegEntry) list) (arenaBytes: int) (dataBytes: int) (marker: string) =
+/// loads it, `M` names the registers with their offsets, and `S` answers
+/// the seam's constants as `NAME=value` pairs — what a host reads from the
+/// seam file on a board, said by the bridge so the Sim needs no build.
+/// `marker` is the ready line the Rust `FsSimWindow` waits for.
+let ddrServe (top: ModuleDef) (registers: (string * RegEntry) list) (seam: string list) (arenaBytes: int) (dataBytes: int) (marker: string) =
     let sim = Sim top
 
     // Every master the top has, on one memory: a slave per channel it uses.
@@ -3283,6 +3317,23 @@ let ddrServe (top: ModuleDef) (registers: (string * RegEntry) list) (arenaBytes:
              out.WriteLine "OK"
          | [| "M" |] ->
              out.WriteLine(registers |> List.map (fun (n, e) -> sprintf "%s:%x" n e.offset) |> String.concat " ")
+         | [| "S" |] ->
+             let constants =
+                 seam
+                 |> List.choose (fun l ->
+                     let l = l.Trim()
+
+                     if l.StartsWith "pub const " then
+                         match l.Substring(10).Split(':', 2) with
+                         | [| name; rest |] ->
+                             match rest.Split('=', 2) with
+                             | [| _; value |] -> Some $"{name.Trim()}={value.Trim().TrimEnd(';').Trim().Trim('"')}"
+                             | _ -> None
+                         | _ -> None
+                     else
+                         None)
+
+             out.WriteLine(String.concat " " constants)
          | _ -> out.WriteLine "ERR")
 
         out.Flush()
@@ -3298,12 +3349,12 @@ let batchServe (t: BoardTop) =
         | Some _, Some m -> m
         | _ -> failwith $"{t.name}: the batch bridge serves a host-memory top"
 
-    ddrServe t.top t.registers memory.arenaBytes (memory.width / 8) "BATCHSERVE"
+    ddrServe t.top t.registers (seamLines t) memory.arenaBytes (memory.width / 8) "BATCHSERVE"
 
 /// The bridge for a top with regions in the host's memory: the same loop,
 /// with the `REGIONSERVE` marker. The host puts the arena at 0x1000 — a zero
 /// base is disarmed — and reaches each region at the seam's offset from it.
 let regionServe (t: BoardTop) =
     match t.board.hostMemory with
-    | Some m -> ddrServe t.top t.registers m.arenaBytes (m.width / 8) "REGIONSERVE"
+    | Some m -> ddrServe t.top t.registers (seamLines t) m.arenaBytes (m.width / 8) "REGIONSERVE"
     | None -> failwith $"{t.name}: the region bridge serves a top with regions in the host's memory"

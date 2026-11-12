@@ -55,12 +55,22 @@ let private dspTests =
               sim.Poke("out_ready", 1UL)
               let left = [ 1000UL; 2000UL; 4095UL; 7UL; 65535UL; 300UL ]
               let right = [ 11UL; 90210UL; 64UL; 123456UL; 5UL; 8191UL ]
+              // The beats that come out valid, not the cycles they take: how
+              // many registers the chain holds is the chain's business.
               let seenLeft, seenRight = ResizeArray<uint64>(), ResizeArray<uint64>()
+              let collect () =
+                  if sim.Peek "out_valid" = 1UL then
+                      seenLeft.Add(sim.Peek "out_left"); seenRight.Add(sim.Peek "out_right")
               for l, r in List.zip left right do
-                  sim.Poke("in_left", l); sim.Poke("in_right", r); sim.Tick()
-                  seenLeft.Add(sim.Peek "out_left"); seenRight.Add(sim.Peek "out_right")
-              Expect.sequenceEqual seenLeft (Seq.truncate seenLeft.Count (0UL :: left)) "Left channel should pass with pipeline latency"
-              Expect.sequenceEqual seenRight (Seq.truncate seenRight.Count (0UL :: right)) "Right channel should pass independently"
+                  sim.Poke("in_left", l); sim.Poke("in_right", r); sim.Tick(); collect ()
+              sim.Poke("in_valid", 0UL)
+              for _ in 1..16 do
+                  if seenLeft.Count < left.Length then
+                      sim.Tick()
+                      collect ()
+              Expect.sequenceEqual seenLeft left "Left channel should pass every beat unchanged"
+              Expect.sequenceEqual seenRight right "Right channel should pass independently"
+              sim.Poke("in_valid", 1UL)
               sim.Poke("mute", 1UL)
               let muted = [ for l, r in List.zip left right do sim.Poke("in_left", l); sim.Poke("in_right", r); sim.Tick(); yield sim.Peek "out_left"; yield sim.Peek "out_right" ]
               Expect.all (List.skip 4 muted) ((=) 0UL) "Mute should silence settled output"

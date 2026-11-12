@@ -789,14 +789,17 @@ let audioGainDef (name: string) : TypedModule<AudioGainPorts> =
             channel "right" io.s.inRight ==> io.s.outRight)
 
 /// One instance under `instName`, called as a function: wire the volume and
-/// mute controls, splice the stream through.
+/// mute controls, splice the stream through, and register what comes out —
+/// for the reason `audioEqBand` does: a multiply spliced straight into the
+/// next stage is one cone with it (gain into a biquad measured 11.9 ns on the
+/// KV260, WNS −2.1 ns at 100 MHz).
 let audioGain (name: string) instName =
     let io = (audioGainDef name).NewNamed instName
 
     fun (volume: Expr) (mute: Expr) (s: Stream<Expr * Expr>) ->
         volume ==> io.volume
         mute ==> io.mute
-        stereoSplice io.s s
+        stereoSplice io.s s |> streamStageFor sampleLayout
 
 /// The single-band equalizer's ports.
 type AudioEqBandPorts =
@@ -841,13 +844,19 @@ let audioEqBandDef (name: string) : TypedModule<AudioEqBandPorts> =
             section "right" io.s.inRight advance coefficients ==> io.s.outRight)
 
 /// One instance under `instName`, called as a function: wire the five
-/// coefficients, splice the stream through.
+/// coefficients, splice the stream through, and register what comes out.
+///
+/// The section is combinational from its input — five multiplies and their
+/// sum, ~7 ns on the KV260 — so chained bands with nothing between them are
+/// one cone: two three-band EQs measured 42.8 ns, WNS −33 ns at 100 MHz, while
+/// every Sim and byte comparison passed. The register makes each band its own
+/// cone however many are chained; it costs a cycle the `Stream` keeps.
 let audioEqBand (name: string) instName =
     let io = (audioEqBandDef name).NewNamed instName
 
     fun (coefficients: Expr list) (s: Stream<Expr * Expr>) ->
         List.iter2 (fun port c -> c ==> port) io.coefficients coefficients
-        stereoSplice io.s s
+        stereoSplice io.s s |> streamStageFor sampleLayout
 
 /// The hard limiter's ports.
 type AudioLimiterPorts =

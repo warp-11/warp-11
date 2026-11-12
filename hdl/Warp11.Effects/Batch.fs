@@ -1,281 +1,22 @@
-/// The batch audio accelerator: a block of frames sitting in PS DDR, read by
-/// the fabric, pushed through the multiband compressor, and written back.
-///
-/// This is the example that answers "run a file through the board". Every other
-/// audio app here is a live I2S chain, which needs a codec on the Pmod header
-/// and gives you nothing to diff; this one takes bytes in and produces bytes
-/// out, so its result can be compared against the software twin exactly, and
-/// against `Warp11.Designs -- wav` — the same DSP running in the simulator.
+/// The audio stages as bare stream designs: the twins the chains in
+/// `Chains.fs` are checked against, and one stage each so a defect the whole
+/// chain shows can be localised. Fixtures, not board designs — the board
+/// designs are `effects` and `multiband`, built for a board by a mapping.
 module Warp11.Effects.Batch
 
 open Warp11
 open Warp11.Audio
 
-// ---------------------------------------------------------------------------
-// The DDR contract.
-//
-// One frame is 8 bytes: [left i32][right i32], little-endian, the 24-bit two's
-// complement sample sign-extended into each 32-bit lane. Two frames fill a
-// 128-bit beat, which is what keeps every write 16-byte aligned — the KV260's
-// HP slave port silently drops writes that are not, and that failure looks like
-// corrupt audio rather than an error.
-//
-// A 32-bit lane for a 24-bit sample wastes a third of the bandwidth and is
-// still the right call: it makes the host side a plain `i32` array with no
-// unpacking, and this design is nowhere near memory-bound.
-
-let laneWidth = 32
-let beatWidth = 128
-let framesPerBeat = beatWidth / (2 * laneWidth)
-
-/// Beats per burst. 16 × 16 bytes = 256 B, so a 256 B-aligned base can never
-/// cross AXI's 4 KB boundary — the rule `axiMasterReaderBurst` leaves to its
-/// caller, and the cheapest way to satisfy it is to make it unreachable.
-let beatsPerBurst = 16
-let framesPerBurst = framesPerBeat * beatsPerBurst
-
-let private apertureAddrWidth = 8
-
-// ---------------------------------------------------------------------------
-// The register map. One value per entry, so the slave and the generated Rust
-// name each register exactly once and cannot drift apart.
-
-type BatchMap =
-    { id: RegEntry
-      start: RegEntry
-      busy: RegEntry
-      doneIrq: RegEntry
-      srcAddr: RegEntry
-      dstAddr: RegEntry
-      frameCount: RegEntry
-      threshold: RegEntry
-      ratio: RegEntry
-      attack: RegEntry
-      releaseRate: RegEntry
-      gains: RegEntry list }
-
-let batchRegs, batchMap =
-    buildRegMapPinned apertureAddrWidth (fun r ->
-        // The overlay word: the identity answers reads, the start pulse takes
-        // the write side.
-        let id, start = r.Word(fun w -> w.Const("id", 0xAB12C001UL), w.Pulse "start")
-
-        // Which revision of this map the fabric was built from — see GoL's
-        // and GEP's, same reason: the identity says which design, this says
-        // whether the offsets still mean what the host was compiled against.
-        r.LayoutHash "layoutHash"
-
-        { id = id
-          start = start
-          busy = r.Word(fun w -> w.Field("busy", 1))
-          doneIrq = r.Word(fun w -> w.W1c "doneIrq")
-          srcAddr = r.RwReg("srcAddr", 32, 0UL)
-          dstAddr = r.RwReg("dstAddr", 32, 0UL)
-          frameCount = r.RwReg("frameCount", 32, 0UL)
-
-          // Every DSP default is a no-op, so a freshly loaded bitstream copies
-          // its input to its output untouched — measurably bit-exact, which is
-          // what lets "did the DDR path work" stay a separate question from
-          // "did the compressor work" now that there is no bypass mux to
-          // answer it.
-          threshold = r.RwReg("threshold", sampleWidth, (1UL <<< sampleWidth) - 1UL)
-          ratio = r.RwReg("ratio", 8, 0UL)
-          attack = r.RwReg("attack", 16, 0UL)
-          releaseRate = r.RwReg("releaseRate", 16, 0UL)
-
-          // Two 16-bit band gains per 32-bit word: left band i in the low half,
-          // right band i in the high half, so a host writes one word per band.
-          gains =
-            List.init multibandBands (fun i ->
-                r.RwReg($"gain{i}", 32, gainUnity ||| (gainUnity <<< 16))) })
-
-// ---------------------------------------------------------------------------
-// Beat ↔ frame, the two width changes this design is made of.
-
-/// One 128-bit beat becomes two frames. The beat is *not* copied into a
-/// register: `ready` is asserted only as the second frame leaves, and the read
-/// master holds its payload until then, so the handshake does the storing.
-let private beatsToFrames (beats: Stream<Expr * Expr>) : Stream<Expr * Expr> =
-    let data, _last = beats.payload
-
-    let beat = wire "unpack_beat" beatWidth
-    data ==> beat
-
-    let phase = regBit "unpack_phase"
-    let outReady = wireBit "unpack_out_ready"
-    registerStreamReady outReady
-
-    let fire = beats.valid &&& outReady
-    // The beat retires as its second frame is taken.
-    (fire &&& phase) ==> beats.ready
-    If fire (fun () -> bnot phase ==> phase)
-
-    let sampleAt lo = slice (lo + sampleWidth - 1) lo beat
-
-    { payload =
-        (mux phase (sampleAt (2 * laneWidth)) (sampleAt 0),
-         mux phase (sampleAt (3 * laneWidth)) (sampleAt laneWidth))
-      valid = beats.valid
-      ready = outReady
-      layout = sampleLayout }
-
-/// Two frames become one 128-bit beat. The first frame is held in a register —
-/// unavoidable here, because the producer downstream of the DSP has already
-/// been told its frame was taken.
-let private framesToBeats (frames: Stream<Expr * Expr>) : Stream<Expr> =
-    let left, right = frames.payload
-
-    // The 24-bit sample sign-extended into its 32-bit lane, so the host reads a
-    // plain i32 and gets the number the fabric computed.
-    let lane (s: Expr) = asUInt (pad laneWidth (asSInt s))
-    let frameBits = cat (lane right) (lane left)
-
-    let held = reg "pack_held" (2 * laneWidth)
-    let phase = regBit "pack_phase"
-
-    let outValid = wireBit "pack_out_valid"
-    let outReady = wireBit "pack_out_ready"
-    registerStreamReady outReady
-
-    // Frame 0 is always accepted; frame 1 only when the beat can leave.
-    (bnot phase ||| outReady) ==> frames.ready
-    (frames.valid &&& phase) ==> outValid
-
-    let fire = frames.valid &&& (bnot phase ||| outReady)
-
-    If fire (fun () ->
-        bnot phase ==> phase
-        If (bnot phase) (fun () -> frameBits ==> held))
-
-    { payload = cat frameBits held
-      valid = outValid
-      ready = outReady
-      layout = layout1 ("data", beatWidth) }
-
-// ---------------------------------------------------------------------------
-// The design.
-
-/// Frames in DDR at `srcAddr`, through the 8-band compressor, back to DDR at
-/// `dstAddr`. `frameCount` must be a multiple of `framesPerBurst` (32) and both
-/// addresses 256-byte aligned; the host driver checks and pads, because a
-/// design that silently processed a truncated block would be worse than one
-/// that refused.
-let audioBatchAxi =
-    defModuleClocked
-        axiClock
-        "AudioBatchAxi"
-        (fun p ->
-            (axiLiteSlavePorts p batchMap.apertureAddrWidth,
-             axiReadBusPorts p "m_axi" 32 beatWidth,
-             axiWriteBusPorts p "m_axi" 32 beatWidth))
-        (fun (slavePorts, readBusPorts, writeBusPorts) ->
-        let regs = regMapSlave slavePorts batchMap
-
-        let bursts = wire "bursts" 32
-        // frameCount / framesPerBurst, and framesPerBurst is 32 — a slice.
-        pad 32 (slice 31 5 (regs.value batchRegs.frameCount)) ==> bursts
-
-        let running = regBit "running"
-        let arIssued = reg "ar_issued" 32
-        let beatsWritten = reg "beats_written" 32
-
-        // --- the read side: one descriptor per burst -------------------------
-        let reqReady = wireBit "req_ready"
-        let arMore = wireBit "ar_more"
-        (running &&& lt arIssued bursts) ==> arMore
-
-        let reqAddr = wire "req_addr" 32
-        // burst stride is beatsPerBurst * 16 bytes = 256, so shift by 8.
-        (regs.value batchRegs.srcAddr + asUInt (shl 8 (slice 23 0 arIssued))) ==> reqAddr
-
-        let requests: Stream<Expr * Expr> =
-            { payload = (reqAddr, lit (uint64 (beatsPerBurst - 1)) 8)
-              valid = arMore
-              ready = reqReady
-              layout = layout2 ("addr", 32) ("len", 8) }
-
-        If (arMore &&& reqReady) (fun () -> arIssued + lit 1UL 32 ==> arIssued)
-
-        let beats = axiMasterReaderBurstOn (axiReadBusOf readBusPorts) 4 beatsPerBurst requests
-
-        // --- the DSP ---------------------------------------------------------
-        let leftGains = batchRegs.gains |> List.map (fun g -> slice 15 0 (regs.value g))
-        let rightGains = batchRegs.gains |> List.map (fun g -> slice 31 16 (regs.value g))
-
-        let processed, _envelope =
-            beatsToFrames beats
-            |> multibandCompressor
-                "MultibandCompressor8"
-                stockSampleRate
-                "mb"
-                { threshold = regs.value batchRegs.threshold
-                  ratio = regs.value batchRegs.ratio
-                  attack = regs.value batchRegs.attack
-                  releaseRate = regs.value batchRegs.releaseRate
-                  leftGains = leftGains
-                  rightGains = rightGains }
-
-        // --- the write side --------------------------------------------------
-        let outBeats = framesToBeats processed
-
-        let wrAddr = wire "wr_addr" 32
-        (regs.value batchRegs.dstAddr + asUInt (shl 4 (slice 27 0 beatsWritten))) ==> wrAddr
-
-        let wrReady = wireBit "wr_ready"
-
-        let writeBeats: Stream<Expr * Expr * Expr> =
-            { payload = (wrAddr, outBeats.payload, lit ((1UL <<< (beatWidth / 8)) - 1UL) (beatWidth / 8))
-              valid = outBeats.valid
-              ready = wrReady
-              layout = axiWriteBeatLayout 32 beatWidth }
-
-        wrReady ==> outBeats.ready
-
-        let writerIdle = axiMasterWriterWithIdleOn (axiWriteBusOf writeBusPorts) 4 writeBeats
-
-        If (outBeats.valid &&& wrReady) (fun () -> beatsWritten + lit 1UL 32 ==> beatsWritten)
-
-        // --- control ---------------------------------------------------------
-        let beatsTotal = wire "beats_total" 32
-        asUInt (shl 4 (slice 27 0 bursts)) ==> beatsTotal
-
-        let finished = wireBit "finished"
-        (running &&& eq beatsWritten beatsTotal &&& writerIdle) ==> finished
-
-        ifElse [
-            (regs.pulse batchRegs.start, fun () ->
-                lit 1UL 1 ==> running
-                lit 0UL 32 ==> arIssued
-                lit 0UL 32 ==> beatsWritten)
-            (otherwise, fun () -> If finished (fun () -> lit 0UL 1 ==> running)) ]
-
-        regs.drive batchRegs.busy running
-        regs.setBit batchRegs.doneIrq finished
-
-        // A burst is 256 bytes and the stride is 256 bytes, so no burst can
-        // cross AXI's 4 KB boundary *provided* the bases are 256-byte aligned.
-        // That is the caller's half of the contract, and an unaligned base
-        // would corrupt audio rather than fail, so the design says so out loud:
-        // checked every cycle in simulation and by the differential in both
-        // worlds, and compiled out of the silicon.
-        let aligned (e: RegEntry) =
-            bnot running ||| eq (slice 7 0 (regs.value e)) (lit 0UL 8)
-
-        assertThat (aligned batchRegs.srcAddr) "srcAddr must be 256-byte aligned"
-        assertThat (aligned batchRegs.dstAddr) "dstAddr must be 256-byte aligned"
-
-        // Likewise the frame count: the fabric processes whole bursts, so a
-        // remainder would be silently dropped.
-        assertThat
-            (bnot running ||| eq (slice 4 0 (regs.value batchRegs.frameCount)) (lit 0UL 5))
-            "frameCount must be a multiple of framesPerBurst (32)")
-
 /// The same compressor as a bare stream stage, one frame per cycle. This is the
 /// twin the batch path is checked against: identical DSP, none of the DDR
 /// plumbing, so a mismatch localises to the plumbing rather than to the audio.
-let multibandStageRef =
+///
+/// The rate is the one the crossovers are designed for: the converter's on a
+/// pins path, `BoardTop.nominalRate` on a host path, where the design is
+/// handed the file's nominal rate rather than a converter's.
+let multibandStageAt (name: string) (rate: float) =
     defModule
-        "MultibandStageRef"
+        name
         (fun p ->
             (multibandSettingsPorts p,
              streamInputPorts p "in" sampleLayout,
@@ -283,9 +24,12 @@ let multibandStageRef =
         (fun (settings, inPorts, outPorts) ->
             let stage, _envelope =
                 streamSource inPorts
-                |> multibandCompressor "MultibandCompressor8" stockSampleRate "mb" settings
+                |> multibandCompressor "MultibandCompressor8" rate "mb" settings
 
             streamSink outPorts stage)
+
+/// The stage at the KV260 converter's rate.
+let multibandStageRef = multibandStageAt "MultibandStageRef" stockSampleRate
 
 /// The same compressor on one multiplier: the folded engine's twin, with the
 /// spatial twin's stream and law and its makeup gains in the loadable table,
