@@ -14,8 +14,14 @@
 
     <ItemGroup>
         <Compile Include="Placement.fs"/>
+        <Compile Include="ChainChecks.fs"/>
         <Compile Include="Examples.fs"/>
-        <Compile Include="GraphChecks.fs"/>
+        <Compile Include="MeetingChecks.fs"/>
+        <Compile Include="SocketChecks.fs"/>
+        <Compile Include="BoxChecks.fs"/>
+        <Compile Include="DrawnChecks.fs"/>
+        <Compile Include="ExportChecks.fs"/>
+        <Compile Include="PaletteChecks.fs"/>
         <Compile Include="Main.fs"/>
     </ItemGroup>
 

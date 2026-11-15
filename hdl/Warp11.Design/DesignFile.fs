@@ -1,21 +1,28 @@
-/// A design as a file: the `Graph` as JSON. It holds the boundary's pins
-/// with their formats, the boxes by unit name, the wires and the positions
-/// — and no types, because the graph holds none: the **palette is the type
-/// authority**, resolved by name on every load, as a Pure Data file resolves
-/// `biquad~` against the external's code. So a unit whose pins have changed
-/// refuses an old design at the exact wire, by name, rather than opening it
-/// wrong.
+/// A design as a file: the `Graph` as JSON. It holds the boundary's
+/// streams with their fields, the boxes by unit name, the edges with what
+/// each registers, and the positions — and no types, because the graph
+/// holds none: the **palette is the type authority**, resolved by name on
+/// every load, as a Pure Data file resolves `biquad~` against the
+/// external's code. A unit whose ports have changed since the file was
+/// saved opens with the edge that no longer fits still in it, judged
+/// against the unit as it is now (`Graph.edgeFit`), for an editor to show
+/// and the elaborator to refuse by name.
 ///
 /// ```json
-/// { "name": "GainPatch", "streams": 1, "sampleRate": 48000,
-///   "inputs":   [ { "name": "left", "width": 24, "fraction": 0, "signed": true }, … ],
+/// { "format": 2, "name": "GainPatch", "sampleRate": 48000,
+///   "inputs":   [ { "name": "in", "fields": [ { "name": "left", "width": 24, "fraction": 0, "signed": true }, … ] } ],
 ///   "controls": [ { "name": "volume", "width": 16, "fraction": 0, "signed": false }, … ],
-///   "outputs":  [ … ],
-///   "boxes":    [ { "name": "eq", "unit": "eq", "copies": 1,
+///   "outputs":  [ { "name": "out", "fields": [ … ] } ],
+///   "boxes":    [ { "name": "low", "unit": "eq",
 ///                   "arguments": { "shape": "lowshelf", "fc": "200", "q": "0.707", "gain": "6" } } ],
-///   "wires":    [ { "from": "input.left", "to": "gain.left" }, … ],
-///   "positions": { "input": [60, 120], "gain": [320, 120], "output": [580, 120] } }
+///   "edges":    [ { "from": "input.in", "to": "low.in" },
+///                 { "from": "low.out", "to": "mid.in", "connection": "Forward" }, … ],
+///   "positions": { "input": [60, 120], "low": [320, 120], "output": [580, 120] } }
 /// ```
+///
+/// An edge that registers nothing leaves `connection` out. `format` is 2;
+/// a file without it is a design drawn field to field, and is refused
+/// saying so.
 module Warp11.DesignFile
 
 open System.Text.Json
@@ -32,17 +39,26 @@ let private formatNode (name: string, f: NumberFormat) : JsonNode =
     o["signed"] <- JsonValue.Create f.signed
     o
 
-let private pinText (p: PinRef) = $"{p.box}.{p.pin}"
+/// The format this module writes and reads.
+let formatVersion = 2
+
+let private streamNode (stream: BoundaryStream) : JsonNode =
+    let o = JsonObject()
+    o["name"] <- JsonValue.Create stream.name
+    o["fields"] <- JsonArray(stream.fields |> List.map formatNode |> Array.ofList)
+    o
+
+let private connections = [ Connection.Wire; Connection.Forward; Connection.Backward; Connection.Both ]
 
 /// The graph as a JSON node.
 let rec private node (g: Graph) : JsonObject =
     let root = JsonObject()
+    root["format"] <- JsonValue.Create formatVersion
     root["name"] <- JsonValue.Create g.name
-    root["streams"] <- JsonValue.Create g.streams
     root["sampleRate"] <- JsonValue.Create g.sampleRate
-    root["inputs"] <- JsonArray(g.inputs |> List.map formatNode |> Array.ofList)
+    root["inputs"] <- JsonArray(g.inputs |> List.map streamNode |> Array.ofList)
     root["controls"] <- JsonArray(g.controls |> List.map formatNode |> Array.ofList)
-    root["outputs"] <- JsonArray(g.outputs |> List.map formatNode |> Array.ofList)
+    root["outputs"] <- JsonArray(g.outputs |> List.map streamNode |> Array.ofList)
 
     root["boxes"] <-
         JsonArray(
@@ -50,7 +66,12 @@ let rec private node (g: Graph) : JsonObject =
                    let o = JsonObject()
                    o["name"] <- JsonValue.Create b.name
                    o["unit"] <- JsonValue.Create b.unit
-                   o["copies"] <- JsonValue.Create b.copies
+                   if b.copies <> 1 then
+                       o["copies"] <- JsonValue.Create b.copies
+
+                   if not b.ordered then
+                       o["ordered"] <- JsonValue.Create false
+
                    let arguments = JsonObject()
 
                    for KeyValue(k, v) in b.arguments do
@@ -75,14 +96,37 @@ let rec private node (g: Graph) : JsonObject =
                    o :> JsonNode |]
         )
 
-    root["wires"] <-
+    root["edges"] <-
         JsonArray(
             [| for e in g.edges ->
                    let o = JsonObject()
-                   o["from"] <- JsonValue.Create(pinText e.from)
-                   o["to"] <- JsonValue.Create(pinText e.``to``)
+                   o["from"] <- JsonValue.Create(showPort e.from)
+                   o["to"] <- JsonValue.Create(showPort e.``to``)
+
+                   if e.connection <> Connection.Wire then
+                       o["connection"] <- JsonValue.Create(string e.connection)
+
                    o :> JsonNode |]
         )
+
+    if not g.fanOuts.IsEmpty then
+        let fanOuts = JsonObject()
+
+        for KeyValue(p, pattern) in g.fanOuts do
+            fanOuts[showPort p] <- JsonValue.Create(string pattern)
+
+        root["fanOuts"] <- fanOuts
+
+    if not g.merges.IsEmpty then
+        let merges = JsonObject()
+
+        for KeyValue(p, arbitration) in g.merges do
+            let o = JsonObject()
+            o["policy"] <- JsonValue.Create(string arbitration.policy)
+            o["timing"] <- JsonValue.Create(string arbitration.timing)
+            merges[showPort p] <- o
+
+        root["merges"] <- merges
 
     let positions = JsonObject()
 
@@ -181,10 +225,19 @@ let private readFormat (where: string) (n: JsonNode) : Result<string * NumberFor
     | _, _, Error e, _
     | _, _, _, Error e -> Error e
 
-let private readPin (where: string) (text: string) : Result<PinRef, string> =
+let private readStream (where: string) (n: JsonNode) : Result<BoundaryStream, string> =
+    match field n "name" |> Result.bind (asString $"{where}: a stream's 'name'") with
+    | Error e -> Error e
+    | Ok name ->
+        field n "fields"
+        |> Result.bind (asArray $"{where} '{name}': 'fields'")
+        |> Result.bind (each (readFormat $"{where} '{name}'"))
+        |> Result.map (fun fields -> { name = name; fields = fields })
+
+let private readPort (where: string) (text: string) : Result<PortRef, string> =
     match text.Split '.' with
-    | [| box; pin |] when box <> "" && pin <> "" -> Ok { box = box; pin = pin }
-    | _ -> Error $"{where}: '{text}' is not box.pin"
+    | [| box; port |] when box <> "" && port <> "" -> Ok { box = box; port = port }
+    | _ -> Error $"{where}: '{text}' is not box.port"
 
 let private readArguments (box: string) (factory: Factory) (n: JsonNode) : Result<Arguments, string> =
     match n with
@@ -202,9 +255,18 @@ let private readArguments (box: string) (factory: Factory) (n: JsonNode) : Resul
 let private readBox (rate: float) (designs: Map<string, Graph>) (n: JsonNode) : Result<Box, string> =
     let get name f = field n name |> Result.bind (f $"a box's '{name}'")
 
-    match get "name" asString, get "unit" asString, get "copies" asInt with
-    | Ok name, Ok unit, Ok copies ->
+    match get "name" asString, get "unit" asString with
+    | Ok name, Ok unit ->
         match (units ()).TryFind unit, designs.TryFind unit with
+        | None, None when List.contains unit structuralBoxes ->
+            // A structural box: its arguments as typed, nothing to make.
+            let arguments =
+                match field n "arguments" with
+                | Ok(:? JsonObject as o) ->
+                    o |> List.ofSeq |> each (fun (KeyValue(k, v)) -> asString $"box '{name}': argument '{k}'" v |> Result.map (fun t -> k, t)) |> Result.map Map.ofList
+                | _ -> Ok Map.empty
+
+            arguments |> Result.map (newBox name unit)
         | None, None -> Error $"box '{name}': no unit called '{unit}' in the palette or among the design's designs"
         | factory, _ ->
             let settings =
@@ -214,9 +276,13 @@ let private readBox (rate: float) (designs: Map<string, Graph>) (n: JsonNode) : 
                 | Ok _ -> Error $"box '{name}': 'settings' should be an object"
                 | Error _ -> Ok Map.empty
 
+            // Absent means the default: one copy, in order.
+            let copies = match field n "copies" |> Result.bind (asInt "copies") with Ok c -> c | Error _ -> 1
+            let ordered = match field n "ordered" |> Result.bind (asBool "ordered") with Ok o -> o | Error _ -> true
+
             match factory, settings with
             | _, Error e -> Error e
-            | None, Ok settings -> Ok { name = name; unit = unit; copies = copies; arguments = Map.empty; settings = settings }
+            | None, Ok settings -> Ok { newBox name unit Map.empty with copies = copies; ordered = ordered; settings = settings }
             | Some factory, Ok settings ->
                 // A file written before a unit had arguments has none: the defaults.
                 let arguments =
@@ -229,10 +295,9 @@ let private readBox (rate: float) (designs: Map<string, Graph>) (n: JsonNode) : 
                     // The factory's verdict, so a file never opens a box it cannot make.
                     factory.make rate arguments
                     |> Result.mapError (fun why -> $"box '{name}': {why}")
-                    |> Result.map (fun _ -> { name = name; unit = unit; copies = copies; arguments = arguments; settings = settings }))
-    | Error e, _, _
-    | _, Error e, _
-    | _, _, Error e -> Error e
+                    |> Result.map (fun _ -> { newBox name unit arguments with copies = copies; ordered = ordered; settings = settings }))
+    | Error e, _
+    | _, Error e -> Error e
 
 let private readControlBox (n: JsonNode) : Result<ControlBox, string> =
     readFormat "a control box" n
@@ -246,11 +311,60 @@ let private readControlBox (n: JsonNode) : Result<ControlBox, string> =
         | Error e, _
         | _, Error e -> Error e)
 
-let private readWire (n: JsonNode) : Result<Edge, string> =
-    let get name = field n name |> Result.bind (asString $"a wire's '{name}'") |> Result.bind (readPin $"a wire's '{name}'")
+let private readEdge (n: JsonNode) : Result<Edge, string> =
+    let get name = field n name |> Result.bind (asString $"an edge's '{name}'") |> Result.bind (readPort $"an edge's '{name}'")
 
-    match get "from", get "to" with
-    | Ok from, Ok ``to`` -> Ok { from = from; ``to`` = ``to`` }
+    let connection =
+        match field n "connection" with
+        | Error _ -> Ok Connection.Wire
+        | Ok node ->
+            asString "an edge's 'connection'" node
+            |> Result.bind (fun text ->
+                match connections |> List.tryFind (fun c -> string c = text) with
+                | Some c -> Ok c
+                | None ->
+                    let listed = connections |> List.map string |> String.concat ", "
+                    Error $"an edge's 'connection': '{text}' is not one of {listed}")
+
+    match get "from", get "to", connection with
+    | Ok from, Ok ``to``, Ok connection -> Ok { from = from; ``to`` = ``to``; connection = connection }
+    | Error e, _, _
+    | _, Error e, _
+    | _, _, Error e -> Error e
+
+let private named (what: string) (choices: 'a list) (text: string) : Result<'a, string> =
+    match choices |> List.tryFind (fun c -> string c = text) with
+    | Some c -> Ok c
+    | None ->
+        let listed = choices |> List.map string |> String.concat ", "
+        Error $"{what}: '{text}' is not one of {listed}"
+
+/// The meetings a file states, by port: absent is the default everywhere.
+let private readByPort (what: string) (read: string -> JsonNode -> Result<'a, string>) (root: JsonNode) : Result<Map<PortRef, 'a>, string> =
+    match field root what with
+    | Error _ -> Ok Map.empty
+    | Ok(:? JsonObject as o) ->
+        o
+        |> List.ofSeq
+        |> each (fun (KeyValue(k, v)) ->
+            match readPort $"'{what}'" k, read $"'{what}' at {k}" v with
+            | Ok p, Ok value -> Ok(p, value)
+            | Error e, _
+            | _, Error e -> Error e)
+        |> Result.map Map.ofList
+    | Ok _ -> Error $"'{what}': expected an object"
+
+let private readFanOut (where: string) (n: JsonNode) : Result<FanOut, string> =
+    asString where n |> Result.bind (named where [ FanOut.Broadcast; FanOut.Balance ])
+
+let private readArbitration (where: string) (n: JsonNode) : Result<Arbitration, string> =
+    let get name choices = field n name |> Result.bind (asString $"{where}: '{name}'") |> Result.bind (named $"{where}: '{name}'" choices)
+
+    match
+        get "policy" [ ArbitrationPolicy.RoundRobin; ArbitrationPolicy.Priority ],
+        get "timing" [ ArbitrationTiming.SameCycle; ArbitrationTiming.Registered ]
+    with
+    | Ok policy, Ok timing -> Ok { policy = policy; timing = timing }
     | Error e, _
     | _, Error e -> Error e
 
@@ -271,29 +385,28 @@ let private readPositions (n: JsonNode) : Result<Map<string, float * float>, str
         |> Result.map Map.ofList
     | _ -> Error "'positions': expected an object"
 
-/// Every wire's ends looked up against the palette's pins — the check that
-/// makes the palette the type authority: a pin that no longer exists, or
-/// whose format has changed, refuses the design here, naming the wire.
-let private checkWires (g: Graph) : Result<Graph, string> =
-    g.edges
-    |> each (fun e ->
-        match lookupPin g Out e.from, lookupPin g In e.``to`` with
-        | Error why, _
-        | _, Error why -> Error $"wire {pinText e.from} → {pinText e.``to``}: {why}"
-        | Ok(_, fa), Ok(_, fb) when fa <> fb ->
-            Error $"wire {pinText e.from} → {pinText e.``to``}: {pinText e.from} is {describeFormat fa}, {pinText e.``to``} is {describeFormat fb}"
-        | Ok _, Ok _ -> Ok e)
-    |> Result.map (fun _ -> g)
+/// The format a file says it is in. A design drawn field to field has no
+/// `format` and a `wires` list, and cannot be read as streams: a field
+/// that skipped a box has no stream to be.
+let private checkFormat (root: JsonNode) : Result<unit, string> =
+    match field root "format" |> Result.bind (asInt "'format'") with
+    | Ok v when v = formatVersion -> Ok()
+    | Ok v -> Error $"this file is in format %d{v}, and this reads format %d{formatVersion}"
+    | Error _ ->
+        Error
+            $"this design was drawn field to field, before boxes had stream ports (it has no 'format'; this reads format %d{formatVersion}). Redraw it: one edge per stream"
 
 /// A JSON node as a graph, or the first thing wrong with it.
 let rec private readGraph (root: JsonNode) : Result<Graph, string> =
         let get name f = field root name |> Result.bind f
         let formats name = get name (asArray $"'{name}'") |> Result.bind (each (readFormat name))
+        let streams name = get name (asArray $"'{name}'") |> Result.bind (each (readStream name))
 
         // The name first, so a file that is not a design is refused by the
         // field a person looks for first.
         get "name" (asString "'name'")
-        |> Result.bind (fun _ -> get "sampleRate" (asFloat "'sampleRate'"))
+        |> Result.bind (fun _ -> checkFormat root)
+        |> Result.bind (fun () -> get "sampleRate" (asFloat "'sampleRate'"))
         |> Result.bind (fun rate ->
             // The units written in the GUI before the boxes, since a box may
             // be one: compiled here when this head can, refused when it cannot.
@@ -325,28 +438,32 @@ let rec private readGraph (root: JsonNode) : Result<Graph, string> =
 
             match
                 get "name" (asString "'name'"),
-                get "streams" (asInt "'streams'"),
-                formats "inputs",
+                streams "inputs",
                 formats "controls",
-                formats "outputs",
+                streams "outputs",
                 units |> Result.bind (fun units -> designs |> Result.bind (fun designs -> get "boxes" (asArray "'boxes'") |> Result.bind (each (readBox rate designs)) |> Result.map (fun boxes -> boxes, designs, units))),
                 (match field root "controlBoxes" with
                  | Ok node -> asArray "'controlBoxes'" node |> Result.bind (each readControlBox)
                  | Error _ -> Ok []),
-                get "wires" (asArray "'wires'") |> Result.bind (each readWire),
-                get "positions" readPositions
+                get "edges" (asArray "'edges'") |> Result.bind (each readEdge),
+                (match readByPort "fanOuts" readFanOut root, readByPort "merges" readArbitration root, get "positions" readPositions with
+                 | Ok fanOuts, Ok merges, Ok positions -> Ok(fanOuts, merges, positions)
+                 | Error e, _, _
+                 | _, Error e, _
+                 | _, _, Error e -> Error e)
             with
-            | Ok name, Ok streams, Ok inputs, Ok controls, Ok outputs, Ok(boxes, designs, units), Ok controlBoxes, Ok wires, Ok positions ->
-                checkWires
+            | Ok name, Ok inputs, Ok controls, Ok outputs, Ok(boxes, designs, units), Ok controlBoxes, Ok edges, Ok(fanOuts, merges, positions) ->
+                Ok
                     { name = name
-                      streams = streams
                       sampleRate = rate
                       inputs = inputs
                       controls = controls
                       outputs = outputs
                       boxes = boxes
                       controlBoxes = controlBoxes
-                      edges = wires
+                      edges = edges
+                      fanOuts = fanOuts
+                      merges = merges
                       positions = positions
                       designs = designs
                       units = units
@@ -357,15 +474,14 @@ let rec private readGraph (root: JsonNode) : Result<Graph, string> =
                             | Ok m -> Some m
                             | Error _ -> None
                         | Error _ -> None }
-            | Error e, _, _, _, _, _, _, _, _
-            | _, Error e, _, _, _, _, _, _, _
-            | _, _, Error e, _, _, _, _, _, _
-            | _, _, _, Error e, _, _, _, _, _
-            | _, _, _, _, Error e, _, _, _, _
-            | _, _, _, _, _, Error e, _, _, _
-            | _, _, _, _, _, _, Error e, _, _
-            | _, _, _, _, _, _, _, Error e, _
-            | _, _, _, _, _, _, _, _, Error e -> Error e)
+            | Error e, _, _, _, _, _, _, _
+            | _, Error e, _, _, _, _, _, _
+            | _, _, Error e, _, _, _, _, _
+            | _, _, _, Error e, _, _, _, _
+            | _, _, _, _, Error e, _, _, _
+            | _, _, _, _, _, Error e, _, _
+            | _, _, _, _, _, _, Error e, _
+            | _, _, _, _, _, _, _, Error e -> Error e)
 
 /// The JSON text as a graph, or the first thing wrong with it.
 let parse (text: string) : Result<Graph, string> =

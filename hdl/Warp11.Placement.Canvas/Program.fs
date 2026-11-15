@@ -39,10 +39,10 @@ type App(o: FuncCanvas.Opening) =
 ///   the canvas over a running design;
 /// - `edit design.json [file.wav|.pgm|.csv]` — a design file (a new design
 ///   if there is no file yet), and with a source, `Open in sim` runs it;
-/// - nothing — `mac`, to look at.
+/// - nothing — the gain design, to look at.
 let private opening (argv: string[]) : FuncCanvas.Opening =
     let none: FuncCanvas.Opening =
-        { graph = macGraph 1 1 1
+        { graph = gainGraph
           live = None
           opener = None
           file = None }
@@ -62,7 +62,11 @@ let private opening (argv: string[]) : FuncCanvas.Opening =
             | Ok g -> g
             | Error why when not (System.IO.File.Exists designPath) ->
                 ignore why
-                emptyGraph (System.IO.Path.GetFileNameWithoutExtension designPath) (if argv.Length = 3 then Session.rateOf argv[2] else defaultSampleRate)
+                // A new design starts with a stereo stream in and one out.
+                emptyGraph
+                    (System.IO.Path.GetFileNameWithoutExtension designPath)
+                    (if argv.Length = 3 then Session.rateOf argv[2] else defaultSampleRate)
+                    [ "left", signedInt sampleWidth; "right", signedInt sampleWidth ]
             | Error why -> failwith why
 
         let opener = source |> Option.map (fun (source, heard) -> fun g knobs -> Session.openWith g source knobs (Some heard))

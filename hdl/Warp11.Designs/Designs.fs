@@ -2704,17 +2704,36 @@ let audioGainInPlace =
             |> audioGain "AudioGain" "gain" volume mute
             |> streamSink outPorts)
 
-/// The same stereo gain with both channels' multiplies served by one shared
-/// multiplier: the channels take turns, and nothing inside the stage knows.
-let audioGainShared =
+/// A name for an arbitration, for a module that is built once per choice.
+let arbitrationName (arbitration: Arbitration) = $"{arbitration.policy}{arbitration.timing}"
+
+/// Every arbitration a meeting can choose.
+let arbitrations =
+    [ for policy in [ ArbitrationPolicy.RoundRobin; ArbitrationPolicy.Priority ] do
+          for timing in [ ArbitrationTiming.SameCycle; ArbitrationTiming.Registered ] -> { policy = policy; timing = timing } ]
+
+/// The arbitrations other than the default, which `Fu.sharing` and
+/// `streamMerge2` already build.
+let arbitrationsBeyondDefault = arbitrations |> List.filter ((<>) Arbitration.roundRobin)
+
+/// The stereo gain with both channels' multiplies served by one shared
+/// multiplier, its clients arbitrated as the parent says: the channels take
+/// turns, and nothing inside the stage knows how.
+let audioGainSharedWith (arbitration: Arbitration) =
+    let suffix = if arbitration = Arbitration.roundRobin then "" else arbitrationName arbitration
+
     defModule
-        "AudioGainShared"
+        $"AudioGainShared{suffix}"
         (fun p -> (p.inPort "volume" 16, p.inPort "mute" 1, streamInputPorts p "in" sampleLayout, streamOutputPorts p "out" sampleLayout))
         (fun (volume, mute, inPorts, outPorts) ->
-            Fu.sharing gainMultiplier "gain_multiply" (fun multiply ->
+            Fu.sharingWith arbitration gainMultiplier "gain_multiply" (fun multiply ->
                 streamSource inPorts
                 |> audioGainWith (fun _ -> multiply) "AudioGain" "gain" volume mute)
             |> streamSink outPorts)
+
+/// The same stereo gain with both channels' multiplies served by one shared
+/// multiplier: the channels take turns, and nothing inside the stage knows.
+let audioGainShared = audioGainSharedWith Arbitration.roundRobin
 
 /// One EQ band, every one of its ten products in place: the band as it has
 /// always been.
@@ -2727,17 +2746,61 @@ let audioEqBandInPlace =
             |> audioEqBand "AudioEqBand" "eq" coefficients
             |> streamSink outPorts)
 
-/// The same band with all ten products, both channels' five, on one shared
-/// multiplier.
-let audioEqBandShared =
+/// One EQ band with all ten products, both channels' five, on one shared
+/// multiplier, its ten clients arbitrated as the parent says.
+let audioEqBandSharedWith (arbitration: Arbitration) =
+    let suffix = if arbitration = Arbitration.roundRobin then "" else arbitrationName arbitration
+
     defModule
-        "AudioEqBandShared"
+        $"AudioEqBandShared{suffix}"
         (fun p -> ([ for i in 0..4 -> p.inPort $"c{i}" biquadCoeffWidth ], streamInputPorts p "in" sampleLayout, streamOutputPorts p "out" sampleLayout))
         (fun (coefficients, inPorts, outPorts) ->
-            Fu.sharing eqMultiplier "eq_multiply" (fun multiply ->
+            Fu.sharingWith arbitration eqMultiplier "eq_multiply" (fun multiply ->
                 streamSource inPorts
                 |> audioEqBandWith (fun _ _ -> multiply) "AudioEqBand" "eq" coefficients)
             |> streamSink outPorts)
+
+/// The same band with all ten products, both channels' five, on one shared
+/// multiplier.
+let audioEqBandShared = audioEqBandSharedWith Arbitration.roundRobin
+
+/// How many streams `arbitratedMerge` merges: not a power of two, which is
+/// where a tree of two-way merges stops being fair.
+let arbitratedMergeInputs = 5
+
+/// Five streams into one, arbitrated as named. Each input is its own port
+/// group, so a check can make any subset ask and count who was served.
+let arbitratedMerge (arbitration: Arbitration) =
+    let layout = layout1 ("data", 16)
+
+    defModule
+        $"Merge{arbitrationName arbitration}"
+        (fun p -> [ for i in 0 .. arbitratedMergeInputs - 1 -> streamInputPorts p $"in%d{i}" layout ], streamOutputPorts p "out" layout)
+        (fun (inPorts, outPorts) -> inPorts |> List.map streamSource |> streamMergeWith arbitration |> streamSink outPorts)
+
+let mergeRoundRobin = arbitratedMerge Arbitration.roundRobin
+
+let mergeRoundRobinRegistered =
+    arbitratedMerge
+        { policy = ArbitrationPolicy.RoundRobin
+          timing = ArbitrationTiming.Registered }
+
+let mergePriority =
+    arbitratedMerge
+        { policy = ArbitrationPolicy.Priority
+          timing = ArbitrationTiming.SameCycle }
+
+let mergePriorityRegistered =
+    arbitratedMerge
+        { policy = ArbitrationPolicy.Priority
+          timing = ArbitrationTiming.Registered }
+
+/// The shared gain with the left channel served first and the grant from a
+/// register: the arbitration the folded multiband engine uses.
+let audioGainSharedPriority =
+    audioGainSharedWith
+        { policy = ArbitrationPolicy.Priority
+          timing = ArbitrationTiming.Registered }
 
 /// A stream through one connection of each kind: what each registers is
 /// checked by poking one side and reading the other within a cycle.

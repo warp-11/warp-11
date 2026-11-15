@@ -281,6 +281,91 @@ let mux1H (selects: Expr list) (values: Expr list) : Expr =
 
     reduceTree (|||) (List.map2 (fun sel v -> mux sel v (lit 0UL w)) selects values)
 
+/// N streams into one, a beat at a time, arbitrated as `arbitration` says.
+/// The arbiter is one pick over every input, so the share is the policy's at
+/// any count: five saturated inputs under round-robin get a fifth each, which
+/// `streamMergeTree`'s tree of pairs does not give them.
+///
+/// At one stream it is that stream. At two, round-robin in the same cycle, it
+/// is `streamMerge2`.
+///
+/// With `Registered` timing the choice is made one cycle and offered the
+/// next, so the output's `valid` and the payload mux's select come from
+/// registers. A beat offered and not taken stays offered. The cost is the
+/// idle cycle after an input's last beat, when the choice made while that
+/// beat was leaving turns out to have nothing behind it.
+let streamMergeWith (arbitration: Arbitration) (streams: Stream<'p> list) : Stream<'p> =
+    match streams, arbitration with
+    | [], _ -> failwith "merge of nothing"
+    | [ s ], _ -> s
+    | [ a; b ],
+      { policy = ArbitrationPolicy.RoundRobin
+        timing = ArbitrationTiming.SameCycle } -> streamMerge2 a b
+    | first :: _, _ ->
+        let b = current ()
+        let n = streams.Length
+        let laneW = 32 - System.Numerics.BitOperations.LeadingZeroCount(uint (n - 1))
+        let lanes = [ for l in 0 .. n - 1 -> lit (uint64 l) laneW ]
+        let valids = [ for s in streams -> s.valid ]
+        let outReady = wireBit (b.FreshName "merge_ready")
+        b.RegisterStreamReady outReady
+
+        // The lane served last, or under `Registered` the lane chosen last:
+        // round-robin starts its search one past it. A same-cycle priority
+        // pick remembers nothing.
+        let last =
+            lazy (reg (b.FreshName "mergeLast") laneW)
+
+        let anyValid, pickedLane =
+            match arbitration.policy with
+            | ArbitrationPolicy.RoundRobin ->
+                let last = last.Value
+                let after = wire (b.FreshName "mergeAfter") laneW
+                mux (eq last (lit (uint64 (n - 1)) laneW)) (lit 0UL laneW) (last + lit 1UL laneW) ==> after
+                roundRobinPick valids after laneW
+            | ArbitrationPolicy.Priority ->
+                let any, picked = priorityPick valids [ lanes ]
+                any, picked.Head
+
+        let valid = wireBit (b.FreshName "mergeValid")
+        let lane = wire (b.FreshName "mergeLane") laneW
+
+        match arbitration.timing with
+        | ArbitrationTiming.SameCycle ->
+            anyValid ==> valid
+            pickedLane ==> lane
+
+            if last.IsValueCreated then
+                If (valid &&& outReady) (fun () -> lane ==> last.Value)
+        | ArbitrationTiming.Registered ->
+            let last = last.Value
+            let chosen = regBit (b.FreshName "mergeChosen")
+            let stillAsking = mux1H [ for l in lanes -> eq last l ] valids
+            (chosen &&& stillAsking) ==> valid
+            last ==> lane
+
+            // An offered beat that was not taken keeps the output.
+            If (bnot (valid &&& bnot outReady)) (fun () ->
+                anyValid ==> chosen
+                If anyValid (fun () -> pickedLane ==> last))
+
+        let grants =
+            [ for l, s in List.zip lanes streams ->
+                  let granted = wireBit (b.FreshName "mergeGrant")
+                  (valid &&& eq lane l) ==> granted
+                  (granted &&& outReady) ==> s.ready
+                  granted ]
+
+        let fields =
+            [ for s in streams -> first.layout.pack s.payload ]
+            |> List.transpose
+            |> List.map (mux1H grants)
+
+        { payload = first.layout.unpack fields
+          valid = valid
+          ready = outReady
+          layout = first.layout }
+
 /// How many of `xs` satisfy `pred`, as a `resultWidth`-bit count through a
 /// balanced adder tree — each 1-bit verdict zero-extended to the result width
 /// before summing, so the tree cannot overflow (the caller sizes the width to
@@ -900,27 +985,13 @@ type FuSharing =
 /// this wrapper never reads it. There is no `assert` yet, so that contract
 /// lives here rather than in the design; a client that cannot honour it wants
 /// per-client skid buffers, still a wrapper-only change.
-/// How the issue arbiter announces its pick.
-type FuArbiter =
-    /// The pick and the grant in one cycle: a client that asks is served the
-    /// same cycle if it wins. The request-to-grant path is the arbiter's whole
-    /// depth plus the operand mux, which at five clients is 25 ns of iCE40 —
-    /// fine at 166 MHz on a KV260's carry, not at 24 MHz on a UP5K.
-    | Combinational
-    /// The pick registered, the grant announced the cycle after, and the core
-    /// fed only if the picked client still asks — so a request that dropped in
-    /// between costs an idle cycle rather than a stray product. Same depth,
-    /// same tags, same writeback; the grant is a register and the operand mux
-    /// selects on a register.
-    | Registered
-    /// `Registered`, picking the lowest-numbered asking client rather than the
-    /// next in turn. For clients that are not peers: one whose issues are the
-    /// design's critical path and others that can wait a few cycles. Fair only
-    /// if the first client's requests have gaps, which is the caller's to know.
-    | RegisteredPriority
-
-let private warpFuWith
-    (arbiter: FuArbiter)
+///
+/// `arbitration` is how the issue arbiter picks and when it says so. With
+/// `Registered` timing the core is fed only if the picked client still asks,
+/// so a request that dropped in between costs an idle cycle rather than a
+/// stray result; depth, tags and writeback are the same either way.
+let warpFuWith
+    (arbitration: Arbitration)
     (prefix: string)
     (respPorts: (string * int) list)
     (core: Expr list -> Expr list * int)
@@ -954,22 +1025,20 @@ let private warpFuWith
             let valids = [ for s in issues -> s.valid ]
 
             let anyValid, pickedLane =
-                match arbiter with
-                | Combinational
-                | Registered -> roundRobinPick valids rrBase laneW
-                | RegisteredPriority ->
+                match arbitration.policy with
+                | ArbitrationPolicy.RoundRobin -> roundRobinPick valids rrBase laneW
+                | ArbitrationPolicy.Priority ->
                     let any, picked = priorityPick valids [ [ for l in 0 .. n - 1 -> lit (uint64 l) laneW ] ]
                     any, picked.Head
 
             let valid = wireBit $"{prefix}_grantValid"
             let lane = wire $"{prefix}_grantLane" laneW
 
-            match arbiter with
-            | Combinational ->
+            match arbitration.timing with
+            | ArbitrationTiming.SameCycle ->
                 anyValid ==> valid
                 pickedLane ==> lane
-            | Registered
-            | RegisteredPriority ->
+            | ArbitrationTiming.Registered ->
                 // Last cycle's pick, fired this cycle if its client still asks.
                 let picked = regBit $"{prefix}_picked"
                 anyValid ==> picked
@@ -1040,13 +1109,27 @@ let private warpFuWith
             ready = rdy
             layout = wbLayout } ]
 
-let warpFu prefix respPorts core issues = warpFuWith Combinational prefix respPorts core issues
+let warpFu prefix respPorts core issues = warpFuWith Arbitration.roundRobin prefix respPorts core issues
 
-/// `warpFu` with the registered arbiter — see `FuArbiter`.
-let warpFuRegistered prefix respPorts core issues = warpFuWith Registered prefix respPorts core issues
+/// `warpFu` with the registered round-robin arbiter.
+let warpFuRegistered prefix respPorts core issues =
+    warpFuWith
+        { policy = ArbitrationPolicy.RoundRobin
+          timing = ArbitrationTiming.Registered }
+        prefix
+        respPorts
+        core
+        issues
 
-/// `warpFu` with the registered, lowest-client-first arbiter — see `FuArbiter`.
-let warpFuPriority prefix respPorts core issues = warpFuWith RegisteredPriority prefix respPorts core issues
+/// `warpFu` with the registered, lowest-client-first arbiter.
+let warpFuPriority prefix respPorts core issues =
+    warpFuWith
+        { policy = ArbitrationPolicy.Priority
+          timing = ArbitrationTiming.Registered }
+        prefix
+        respPorts
+        core
+        issues
 
 /// Neighbor set: the 8 surrounding cells (diagonals included) or the 4
 /// orthogonal ones.

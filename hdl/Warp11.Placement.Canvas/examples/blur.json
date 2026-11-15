@@ -1,29 +1,38 @@
 {
+  "format": 2,
   "name": "ImageBlur",
-  "streams": 1,
   "sampleRate": 48000,
   "inputs": [
     {
-      "name": "row",
-      "width": 512,
-      "fraction": 0,
-      "signed": false
+      "name": "in",
+      "fields": [
+        {
+          "name": "row",
+          "width": 512,
+          "fraction": 0,
+          "signed": false
+        }
+      ]
     }
   ],
   "controls": [],
   "outputs": [
     {
-      "name": "row",
-      "width": 512,
-      "fraction": 0,
-      "signed": false
+      "name": "out",
+      "fields": [
+        {
+          "name": "row",
+          "width": 512,
+          "fraction": 0,
+          "signed": false
+        }
+      ]
     }
   ],
   "boxes": [
     {
       "name": "blur",
       "unit": "blur",
-      "copies": 1,
       "arguments": {
         "columns": "64",
         "rows": "64"
@@ -32,14 +41,14 @@
     }
   ],
   "controlBoxes": [],
-  "wires": [
+  "edges": [
     {
-      "from": "input.row",
-      "to": "blur.row"
+      "from": "input.in",
+      "to": "blur.in"
     },
     {
-      "from": "blur.row",
-      "to": "output.row"
+      "from": "blur.out",
+      "to": "output.out"
     }
   ],
   "positions": {

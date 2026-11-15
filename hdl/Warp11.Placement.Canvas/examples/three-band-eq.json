@@ -1,41 +1,50 @@
 {
+  "format": 2,
   "name": "ThreeBandEq",
-  "streams": 1,
   "sampleRate": 48828,
   "inputs": [
     {
-      "name": "left",
-      "width": 24,
-      "fraction": 0,
-      "signed": true
-    },
-    {
-      "name": "right",
-      "width": 24,
-      "fraction": 0,
-      "signed": true
+      "name": "in",
+      "fields": [
+        {
+          "name": "left",
+          "width": 24,
+          "fraction": 0,
+          "signed": true
+        },
+        {
+          "name": "right",
+          "width": 24,
+          "fraction": 0,
+          "signed": true
+        }
+      ]
     }
   ],
   "controls": [],
   "outputs": [
     {
-      "name": "left",
-      "width": 24,
-      "fraction": 0,
-      "signed": true
-    },
-    {
-      "name": "right",
-      "width": 24,
-      "fraction": 0,
-      "signed": true
+      "name": "out",
+      "fields": [
+        {
+          "name": "left",
+          "width": 24,
+          "fraction": 0,
+          "signed": true
+        },
+        {
+          "name": "right",
+          "width": 24,
+          "fraction": 0,
+          "signed": true
+        }
+      ]
     }
   ],
   "boxes": [
     {
       "name": "low",
       "unit": "eq",
-      "copies": 1,
       "arguments": {
         "fc": "200",
         "gain": "6",
@@ -47,7 +56,6 @@
     {
       "name": "mid",
       "unit": "eq",
-      "copies": 1,
       "arguments": {
         "fc": "1000",
         "gain": "-4",
@@ -59,7 +67,6 @@
     {
       "name": "high",
       "unit": "eq",
-      "copies": 1,
       "arguments": {
         "fc": "5000",
         "gain": "3",
@@ -70,38 +77,24 @@
     }
   ],
   "controlBoxes": [],
-  "wires": [
+  "edges": [
     {
-      "from": "input.left",
-      "to": "low.left"
+      "from": "input.in",
+      "to": "low.in"
     },
     {
-      "from": "input.right",
-      "to": "low.right"
+      "from": "low.out",
+      "to": "mid.in",
+      "connection": "Forward"
     },
     {
-      "from": "low.left",
-      "to": "mid.left"
+      "from": "mid.out",
+      "to": "high.in",
+      "connection": "Forward"
     },
     {
-      "from": "low.right",
-      "to": "mid.right"
-    },
-    {
-      "from": "mid.left",
-      "to": "high.left"
-    },
-    {
-      "from": "mid.right",
-      "to": "high.right"
-    },
-    {
-      "from": "high.left",
-      "to": "output.left"
-    },
-    {
-      "from": "high.right",
-      "to": "output.right"
+      "from": "high.out",
+      "to": "output.out"
     }
   ],
   "positions": {

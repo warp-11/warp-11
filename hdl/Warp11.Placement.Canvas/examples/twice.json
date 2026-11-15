@@ -1,77 +1,74 @@
 {
+  "format": 2,
   "name": "Twice",
-  "streams": 1,
   "sampleRate": 48828,
   "inputs": [
     {
-      "name": "left",
-      "width": 24,
-      "fraction": 0,
-      "signed": true
-    },
-    {
-      "name": "right",
-      "width": 24,
-      "fraction": 0,
-      "signed": true
+      "name": "in",
+      "fields": [
+        {
+          "name": "left",
+          "width": 24,
+          "fraction": 0,
+          "signed": true
+        },
+        {
+          "name": "right",
+          "width": 24,
+          "fraction": 0,
+          "signed": true
+        }
+      ]
     }
   ],
   "controls": [],
   "outputs": [
     {
-      "name": "left",
-      "width": 24,
-      "fraction": 0,
-      "signed": true
-    },
-    {
-      "name": "right",
-      "width": 24,
-      "fraction": 0,
-      "signed": true
+      "name": "out",
+      "fields": [
+        {
+          "name": "left",
+          "width": 24,
+          "fraction": 0,
+          "signed": true
+        },
+        {
+          "name": "right",
+          "width": 24,
+          "fraction": 0,
+          "signed": true
+        }
+      ]
     }
   ],
   "boxes": [
     {
       "name": "ThreeBandEq",
       "unit": "ThreeBandEq",
-      "copies": 1,
       "arguments": {},
       "settings": {}
     },
     {
       "name": "ThreeBandEq2",
       "unit": "ThreeBandEq",
-      "copies": 1,
       "arguments": {},
       "settings": {}
     }
   ],
   "controlBoxes": [],
-  "wires": [
+  "edges": [
     {
-      "from": "input.left",
-      "to": "ThreeBandEq.left"
+      "from": "input.in",
+      "to": "ThreeBandEq.in"
     },
     {
-      "from": "input.right",
-      "to": "ThreeBandEq.right"
+      "from": "ThreeBandEq.out",
+      "to": "ThreeBandEq2.in",
+      "connection": "Backward"
     },
     {
-      "from": "ThreeBandEq.left",
-      "to": "ThreeBandEq2.left"
-    },
-    {
-      "from": "ThreeBandEq.right",
-      "to": "ThreeBandEq2.right"
-    },
-    {
-      "from": "ThreeBandEq2.left",
-      "to": "output.left"
-    },
-    {
-      "from": "ThreeBandEq2.right",
-      "to": "output.right"
+      "from": "ThreeBandEq2.out",
+      "to": "output.out"
     }
   ],
   "positions": {
@@ -94,43 +91,52 @@
   },
   "designs": {
     "ThreeBandEq": {
+      "format": 2,
       "name": "ThreeBandEq",
-      "streams": 1,
       "sampleRate": 48828,
       "inputs": [
         {
-          "name": "left",
-          "width": 24,
-          "fraction": 0,
-          "signed": true
-        },
-        {
-          "name": "right",
-          "width": 24,
-          "fraction": 0,
-          "signed": true
+          "name": "in",
+          "fields": [
+            {
+              "name": "left",
+              "width": 24,
+              "fraction": 0,
+              "signed": true
+            },
+            {
+              "name": "right",
+              "width": 24,
+              "fraction": 0,
+              "signed": true
+            }
+          ]
         }
       ],
       "controls": [],
       "outputs": [
         {
-          "name": "left",
-          "width": 24,
-          "fraction": 0,
-          "signed": true
-        },
-        {
-          "name": "right",
-          "width": 24,
-          "fraction": 0,
-          "signed": true
+          "name": "out",
+          "fields": [
+            {
+              "name": "left",
+              "width": 24,
+              "fraction": 0,
+              "signed": true
+            },
+            {
+              "name": "right",
+              "width": 24,
+              "fraction": 0,
+              "signed": true
+            }
+          ]
         }
       ],
       "boxes": [
         {
           "name": "low",
           "unit": "eq",
-          "copies": 1,
           "arguments": {
             "fc": "200",
             "gain": "6",
@@ -142,7 +148,6 @@
         {
           "name": "mid",
           "unit": "eq",
-          "copies": 1,
           "arguments": {
             "fc": "1000",
             "gain": "-4",
@@ -154,7 +159,6 @@
         {
           "name": "high",
           "unit": "eq",
-          "copies": 1,
           "arguments": {
             "fc": "5000",
             "gain": "3",
@@ -165,38 +169,24 @@
         }
       ],
       "controlBoxes": [],
-      "wires": [
+      "edges": [
         {
-          "from": "input.left",
-          "to": "low.left"
+          "from": "input.in",
+          "to": "low.in"
         },
         {
-          "from": "input.right",
-          "to": "low.right"
+          "from": "low.out",
+          "to": "mid.in",
+          "connection": "Forward"
         },
         {
-          "from": "low.left",
-          "to": "mid.left"
+          "from": "mid.out",
+          "to": "high.in",
+          "connection": "Forward"
         },
         {
-          "from": "low.right",
-          "to": "mid.right"
-        },
-        {
-          "from": "mid.left",
-          "to": "high.left"
-        },
-        {
-          "from": "mid.right",
-          "to": "high.right"
-        },
-        {
-          "from": "high.left",
-          "to": "output.left"
-        },
-        {
-          "from": "high.right",
-          "to": "output.right"
+          "from": "high.out",
+          "to": "output.out"
         }
       ],
       "positions": {

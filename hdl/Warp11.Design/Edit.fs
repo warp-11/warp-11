@@ -1,6 +1,6 @@
 /// Everything an editor can do to a design, as functions `Graph -> Graph`.
 /// The canvas calls one and renders what comes back; a change that cannot
-/// be made says why, naming the box or the pin, before anything is drawn.
+/// be made says why, naming the box or the port, before anything is drawn.
 /// Undo is a list of the graphs before each change.
 module Warp11.Edit
 
@@ -12,7 +12,7 @@ type Position = float * float
 
 let private boundary = [ "input"; "output" ]
 
-/// A name a box or a pin may have: an identifier, and not a boundary box's.
+/// A name a box, a stream or a control may have: an identifier, and not a boundary box's.
 let private checkName (what: string) (name: string) : Result<unit, string> =
     if name = "" then
         Error $"a {what} needs a name"
@@ -34,12 +34,13 @@ let freshBoxName (g: Graph) (unit: string) : string =
     else
         Seq.initInfinite (fun i -> $"{unit}%d{i + 2}") |> Seq.find (fun n -> not (hasBox g n))
 
-/// A box of a palette unit with the factory's default arguments, one copy,
-/// placed at `at`. The box's name comes back with the graph so the caller
+/// A box of a palette unit with the factory's default arguments, placed at
+/// `at`. The box's name comes back with the graph so the caller
 /// can select it.
 let addBox (unit: string) (at: Position) (g: Graph) : Result<Graph * string, string> =
     let arguments =
         match (units ()).TryFind unit, g.designs.TryFind unit with
+        | _ when List.contains unit structuralBoxes -> Ok Map.empty
         | Some factory, _ -> Ok(defaults factory)
         | None, Some _ -> Ok Map.empty
         | None, None -> Error $"no unit called '{unit}' in the palette or among the design's own designs"
@@ -49,7 +50,7 @@ let addBox (unit: string) (at: Position) (g: Graph) : Result<Graph * string, str
         let name = freshBoxName g unit
 
         { g with
-            boxes = g.boxes @ [ { name = name; unit = unit; copies = 1; arguments = arguments; settings = Map.empty } ]
+            boxes = g.boxes @ [ newBox name unit arguments ]
             positions = g.positions |> Map.add name at },
         name)
 
@@ -58,6 +59,7 @@ let addBox (unit: string) (at: Position) (g: Graph) : Result<Graph * string, str
 /// is a design has no arguments to refuse.
 let private checkBox (g: Graph) (rate: float) (b: Box) : Result<unit, string> =
     match (units ()).TryFind b.unit, g.designs.TryFind b.unit with
+    | _ when isStructural b -> Ok()
     | Some factory, _ -> factory.make rate (complete factory b.arguments) |> Result.map ignore |> Result.mapError (fun why -> $"{b.name}: {why}")
     | None, Some _ -> Ok()
     | None, None -> Error $"{b.name}: no unit called '{b.unit}'"
@@ -67,6 +69,24 @@ let private checkBox (g: Graph) (rate: float) (b: Box) : Result<unit, string> =
 let setArgument (name: string) (parameter: string) (value: string) (g: Graph) : Result<Graph, string> =
     match g.boxes |> List.tryFind (fun b -> b.name = name), g.boxes |> List.tryFind (fun b -> b.name = name) |> Option.bind (fun b -> (units ()).TryFind b.unit) with
     | None, _ -> Error $"no box called '{name}'"
+    | Some b, _ when isStructural b ->
+        // A structural box's argument: checked by parsing the box it makes.
+        if not (structuralParameters b.unit |> List.exists (fun p -> p.name = parameter)) then
+            Error $"{name}: a {b.unit} box has no '{parameter}'"
+        else
+            let changed = { b with arguments = b.arguments |> Map.add parameter value }
+
+            try
+                (if changed.unit = joinBox then joinInputs changed |> ignore
+                 elif changed.unit = fieldsBox then fieldPicks changed |> ignore
+                 else
+                     match System.Int32.TryParse value with
+                     | true, d when d >= 1 -> ()
+                     | _ -> failwith $"{name}: a buffer's depth is a count of at least one, not '{value}'")
+
+                Ok { g with boxes = g.boxes |> List.map (fun x -> if x.name = name then changed else x) }
+            with e ->
+                Error e.Message
     | Some _, None -> Error $"{name}: a design has no creation arguments — open it to change it"
     | Some b, Some factory ->
         if not (factory.parameters |> List.exists (fun p -> p.name = parameter)) then
@@ -115,8 +135,6 @@ let importDesign (sub: Graph) (g: Graph) : Result<Graph, string> =
         Error $"there is already a design called '{sub.name}' in this one"
     elif sub.name = g.name then
         Error $"a design cannot use itself"
-    elif sub.streams <> 1 then
-        Error $"'{sub.name}' has %d{sub.streams} streams, and a design used as a box has one"
     else
         setSampleRate g.sampleRate sub
         |> Result.mapError (fun why -> $"'{sub.name}' at %g{g.sampleRate} Hz: {why}")
@@ -166,7 +184,7 @@ let rec graphAt (path: string list) (g: Graph) : Graph option =
         |> Option.bind (fun b -> g.designs.TryFind b.unit)
         |> Option.bind (graphAt rest)
 
-/// A box — a unit's or a control's — and every wire on it.
+/// A box — a unit's or a control's — and every edge on it.
 let removeBox (name: string) (g: Graph) : Result<Graph, string> =
     if not (hasBox g name) then
         Error $"no box called '{name}'"
@@ -176,9 +194,11 @@ let removeBox (name: string) (g: Graph) : Result<Graph, string> =
                 boxes = g.boxes |> List.filter (fun b -> b.name <> name)
                 controlBoxes = g.controlBoxes |> List.filter (fun c -> c.name <> name)
                 edges = g.edges |> List.filter (fun e -> e.from.box <> name && e.``to``.box <> name)
+                fanOuts = g.fanOuts |> Map.filter (fun p _ -> p.box <> name)
+                merges = g.merges |> Map.filter (fun p _ -> p.box <> name)
                 positions = g.positions |> Map.remove name }
 
-/// The same box under a new name; its wires follow it.
+/// The same box under a new name; its edges follow it.
 let renameBox (name: string) (newName: string) (g: Graph) : Result<Graph, string> =
     if not (hasBox g name) then
         Error $"no box called '{name}'"
@@ -189,12 +209,14 @@ let renameBox (name: string) (newName: string) (g: Graph) : Result<Graph, string
     else
         checkName "box" newName
         |> Result.map (fun () ->
-            let follow (p: PinRef) = if p.box = name then { p with box = newName } else p
+            let follow (p: PortRef) = if p.box = name then { p with box = newName } else p
 
             { g with
                 boxes = g.boxes |> List.map (fun b -> if b.name = name then { b with name = newName } else b)
                 controlBoxes = g.controlBoxes |> List.map (fun c -> if c.name = name then { c with name = newName } else c)
-                edges = g.edges |> List.map (fun e -> { from = follow e.from; ``to`` = follow e.``to`` })
+                edges = g.edges |> List.map (fun e -> { e with from = follow e.from; ``to`` = follow e.``to`` })
+                fanOuts = g.fanOuts |> Map.toList |> List.map (fun (p, v) -> follow p, v) |> Map.ofList
+                merges = g.merges |> Map.toList |> List.map (fun (p, v) -> follow p, v) |> Map.ofList
                 positions =
                     match g.positions |> Map.tryFind name with
                     | Some at -> g.positions |> Map.remove name |> Map.add newName at
@@ -204,18 +226,8 @@ let renameBox (name: string) (newName: string) (g: Graph) : Result<Graph, string
 let moveBox (name: string) (at: Position) (g: Graph) : Graph =
     { g with positions = g.positions |> Map.add name at }
 
-/// How many copies of its unit a box may spend.
-let setCopies (name: string) (n: int) (g: Graph) : Result<Graph, string> =
-    if not (hasBox g name) then
-        Error $"no box called '{name}'"
-    elif n < 1 then
-        Error $"{name}: copies is at least 1, not %d{n}"
-    else
-        Ok { g with boxes = g.boxes |> List.map (fun b -> if b.name = name then { b with copies = n } else b) }
-
-/// A second box of the same unit with the same copies, arguments and
-/// settings, unwired — every input takes exactly one wire, so the copy
-/// starts with none. A control box copies with its value.
+/// A second box of the same unit with the same arguments and settings,
+/// unconnected. A control box copies with its value.
 let duplicateBox (name: string) (at: Position) (g: Graph) : Result<Graph * string, string> =
     match g.boxes |> List.tryFind (fun b -> b.name = name), controlBoxOf g name with
     | Some b, _ ->
@@ -239,15 +251,9 @@ let duplicateBox (name: string) (at: Position) (g: Graph) : Result<Graph * strin
         )
     | None, None -> Error $"no box called '{name}'"
 
-/// A value as a control's bits: a whole number that fits the format.
-let private controlBits (what: string) (f: NumberFormat) (text: string) : Result<uint64, string> =
-    match System.UInt64.TryParse text with
-    | true, v when f.totalWidth >= 64 || v < (1UL <<< f.totalWidth) -> Ok v
-    | true, v -> Error $"{what}: %d{v} does not fit %d{f.totalWidth} bits"
-    | _ -> Error $"{what}: '{text}' is not a whole number"
-
-/// The value a box's unwired control inlet holds. Checked against the
-/// inlet's format; a wired inlet takes its value from the wire, not here.
+/// The value a box's unwired control inlet holds: the literal the design
+/// is built with. Checked against the inlet's format; a wired inlet takes
+/// its value from the edge, not here.
 let setSetting (name: string) (inlet: string) (value: string) (g: Graph) : Result<Graph, string> =
     match g.boxes |> List.tryFind (fun b -> b.name = name) with
     | None -> Error $"no box called '{name}'"
@@ -255,15 +261,9 @@ let setSetting (name: string) (inlet: string) (value: string) (g: Graph) : Resul
         match controlsOf g name |> List.tryFind (fun (n, _) -> n = inlet) with
         | None -> Error $"{name}: no control inlet called '{inlet}'"
         | Some(_, f) ->
-            controlBits (showPin (pin name inlet)) f value
+            controlBits (showPort (port name inlet)) f value
             |> Result.map (fun _ ->
                 { g with boxes = g.boxes |> List.map (fun x -> if x.name = name then { b with settings = b.settings |> Map.add inlet value } else x) })
-
-/// The setting's value as bits, or the format's zero when nothing was typed.
-let settingBits (b: Box) (inlet: string, f: NumberFormat) : uint64 =
-    match b.settings |> Map.tryFind inlet |> Option.map (controlBits inlet f) with
-    | Some(Ok v) -> v
-    | _ -> 0UL
 
 /// A control box: a number box, a toggle (a one-bit number box) or a
 /// constant, of a format, starting at a value.
@@ -292,110 +292,173 @@ let setControlValue (name: string) (value: string) (g: Graph) : Result<Graph, st
         controlBits name c.format value
         |> Result.map (fun _ -> { g with controlBoxes = g.controlBoxes |> List.map (fun x -> if x.name = name then { c with value = value } else x) })
 
-let controlValueBits (c: ControlBox) : uint64 =
-    match controlBits c.name c.format c.value with
-    | Ok v -> v
-    | Error _ -> 0UL
-
-/// What the design's own control ports start at: each number box's value
-/// and each unwired inlet's setting — and for an inlet of a box that is a
-/// design, nothing typed here means the value that design starts its own
-/// port at. The design's own controls are the mapping's to give.
-let rec startingValues (g: Graph) : (string * uint64) list =
+/// What the design's own control ports start at: each number box's value.
+/// The design's own controls are the mapping's to give.
+let startingValues (g: Graph) : (string * uint64) list =
     [ for c in g.controlBoxes do
           if c.kind = NumberBox then
-              yield c.name, controlValueBits c
-      for b, n, f in implicitControls g ->
-          let value =
-              match b.settings |> Map.tryFind n, designOf g b with
-              | Some _, _ -> settingBits b (n, f)
-              | None, Some sub -> startingValues sub |> List.tryFind (fun (port, _) -> port = n) |> Option.map snd |> Option.defaultValue 0UL
-              | None, None -> 0UL
+              yield c.name, controlValueBits c ]
 
-          implicitPortName b.name n, value ]
-
-/// A wire between two pins, either end first: the edge always runs from
-/// the output to the input. Refused, naming the pin, when the ends are the
-/// same side, the same box, different kinds or formats, or the input
-/// already has its one wire — everything the elaborator would refuse,
-/// said before the wire exists.
-let addWire (a: PinRef, sideA: Side) (b: PinRef, sideB: Side) (g: Graph) : Result<Graph, string> =
+/// An edge between two ports, either end first: it always runs from the
+/// output to the input, and starts as a wire. Refused, naming the port,
+/// when the ends are the same side or the same box, when they do not fit,
+/// when the edge is already drawn, or when a control inlet already has its
+/// one — everything the elaborator would refuse, said before the edge
+/// exists. A second edge at a stream port is a meeting: the port's pattern
+/// decides what it does, `Broadcast` and round-robin until set.
+let addEdge (a: PortRef, sideA: Side) (b: PortRef, sideB: Side) (g: Graph) : Result<Graph, string> =
     if sideA = sideB then
-        Error(if sideA = In then "both pins are inputs" else "both pins are outputs")
+        Error(if sideA = In then "both ports are inputs" else "both ports are outputs")
     elif a.box = b.box then
         Error $"{a.box}: a box cannot feed itself"
     else
         let src, dst = if sideA = In then b, a else a, b
+        let e = wire src dst
+        let source = lookupPort g Out src
+        let isControl = match source with Ok(ControlOut _) -> true | _ -> false
+        let isSocket = match source with Ok(SocketOut _) -> true | _ -> false
 
-        match lookupPin g Out src, lookupPin g In dst with
-        | Error why, _
-        | _, Error why -> Error why
-        | Ok(ka, fa), Ok(kb, fb) ->
-            let kindsAgree =
-                match ka, kb with
-                | SignalOut, SignalIn
-                | ControlOut, ControlIn -> true
-                | _ -> false
-
-            let kindName k =
-                match k with
-                | SignalIn
-                | SignalOut -> "signal"
-                | ControlIn
-                | ControlOut -> "control"
-
-            if not kindsAgree then
-                Error $"{showPin src} is a {kindName ka}, {showPin dst} takes a {kindName kb}"
-            elif fa <> fb then
-                Error $"{showPin src} is {describeFormat fa}, {showPin dst} is {describeFormat fb}"
-            elif g.edges |> List.exists (fun e -> e.``to`` = dst) then
-                Error $"{showPin dst} already has a wire"
+        match edgeFit g e with
+        | DoesNotFit why -> Error $"{showEdge e}: {why}"
+        | Fits
+        | FitsNamesDiffer _ ->
+            if g.edges |> List.exists (fun x -> x.from = src && x.``to`` = dst) then
+                Error $"{showEdge e} is already drawn"
+            elif isControl && g.edges |> List.exists (fun x -> x.``to`` = dst) then
+                Error $"{showPort dst} already has an edge, and a control inlet takes one"
+            elif isSocket && g.edges |> List.exists (fun x -> x.from = src) then
+                Error $"{showPort src} already has an edge, and a socket connects to one service"
             else
-                Ok { g with edges = g.edges @ [ { from = src; ``to`` = dst } ] }
+                Ok { g with edges = g.edges @ [ e ] }
 
-let removeWire (e: Edge) (g: Graph) : Graph =
+/// What a stream edge registers: the parent's choice, made on the edge.
+let setConnection (e: Edge) (connection: Connection) (g: Graph) : Result<Graph, string> =
+    if not (List.contains e g.edges) then
+        Error $"{showEdge e}: no such edge"
+    else
+        let changed = { e with connection = connection }
+
+        match edgeFit g changed with
+        | DoesNotFit why -> Error $"{showEdge e}: {why}"
+        | Fits
+        | FitsNamesDiffer _ -> Ok { g with edges = g.edges |> List.map (fun x -> if x = e then changed else x) }
+
+/// The pattern at a stream port several edges leave.
+let setFanOut (p: PortRef) (pattern: FanOut) (g: Graph) : Result<Graph, string> =
+    match lookupPort g Out p with
+    | Ok(StreamOut _) ->
+        Ok
+            { g with
+                fanOuts = if pattern = FanOut.Broadcast then g.fanOuts |> Map.remove p else g.fanOuts |> Map.add p pattern }
+    | Ok _ -> Error $"{showPort p}: a pattern is chosen where streams leave, and this is a control"
+    | Error why -> Error why
+
+/// The arbitration at a stream port several edges arrive at, or at a
+/// service several sockets share.
+let setMerge (p: PortRef) (arbitration: Arbitration) (g: Graph) : Result<Graph, string> =
+    match lookupPort g In p with
+    | Ok(StreamIn _)
+    | Ok(ServiceIn _) ->
+        Ok
+            { g with
+                merges =
+                    if arbitration = Arbitration.roundRobin then
+                        g.merges |> Map.remove p
+                    else
+                        g.merges |> Map.add p arbitration }
+    | Ok _ -> Error $"{showPort p}: an arbitration is chosen where streams arrive, and this is a control"
+    | Error why -> Error why
+
+/// An edge moved ahead of the others: first among the edges it meets at
+/// either end, so the first lane, and the one `Priority` serves first.
+let raiseEdge (e: Edge) (g: Graph) : Result<Graph, string> =
+    if not (List.contains e g.edges) then
+        Error $"{showEdge e}: no such edge"
+    else
+        Ok { g with edges = e :: (g.edges |> List.filter ((<>) e)) }
+
+/// How many copies of its unit a box is, and whether beats leave them in
+/// the order they came.
+let setCopies (name: string) (n: int) (g: Graph) : Result<Graph, string> =
+    if not (g.boxes |> List.exists (fun b -> b.name = name)) then
+        Error $"no box called '{name}'"
+    elif n < 1 then
+        Error $"{name}: copies is at least 1, not %d{n}"
+    else
+        Ok { g with boxes = g.boxes |> List.map (fun b -> if b.name = name then { b with copies = n } else b) }
+
+let setOrdered (name: string) (ordered: bool) (g: Graph) : Result<Graph, string> =
+    if not (g.boxes |> List.exists (fun b -> b.name = name)) then
+        Error $"no box called '{name}'"
+    else
+        Ok { g with boxes = g.boxes |> List.map (fun b -> if b.name = name then { b with ordered = ordered } else b) }
+
+let removeEdge (e: Edge) (g: Graph) : Graph =
     { g with edges = g.edges |> List.filter (fun x -> x <> e) }
 
-/// The design's boundary: a signal pin in, a control, a signal pin out. An
-/// input signal and a control share the input box, so they cannot share a
-/// name; an output may be called what an input is, as `left` is.
-let private addTo (what: string) (taken: string list) (name: string, format: NumberFormat) (pins: (string * NumberFormat) list) =
+/// The design's boundary: a stream in, a control, a stream out. An input
+/// stream and a control share the input box, so they cannot share a name;
+/// an output may be called what an input is.
+let private checkFree (what: string) (taken: string list) (name: string) : Result<unit, string> =
     checkName what name
     |> Result.bind (fun () ->
         if List.contains name taken then
-            Error $"there is already a pin called '{name}' on that box"
+            Error $"there is already a port called '{name}' on that box"
         else
-            Ok(pins @ [ name, format ]))
+            Ok())
 
-let addInputPin (name: string, format: NumberFormat) (g: Graph) : Result<Graph, string> =
-    addTo "pin" (List.map fst (g.inputs @ g.controls)) (name, format) g.inputs
-    |> Result.map (fun inputs -> { g with inputs = inputs })
+let private checkFields (fields: Fields) : Result<unit, string> =
+    let names = List.map fst fields
+
+    if fields.IsEmpty then
+        Error "a stream carries at least one field"
+    elif List.distinct names <> names then
+        Error "a stream's fields have different names"
+    else
+        (Ok(), names) ||> List.fold (fun acc n -> acc |> Result.bind (fun () -> checkName "field" n))
+
+let private inputNames (g: Graph) = [ for s in g.inputs -> s.name ] @ List.map fst g.controls
+
+let addInputStream (name: string) (fields: Fields) (g: Graph) : Result<Graph, string> =
+    checkFree "stream" (inputNames g) name
+    |> Result.bind (fun () -> checkFields fields)
+    |> Result.map (fun () -> { g with inputs = g.inputs @ [ { name = name; fields = fields } ] })
+
+let addOutputStream (name: string) (fields: Fields) (g: Graph) : Result<Graph, string> =
+    checkFree "stream" [ for s in g.outputs -> s.name ] name
+    |> Result.bind (fun () -> checkFields fields)
+    |> Result.map (fun () -> { g with outputs = g.outputs @ [ { name = name; fields = fields } ] })
 
 let addControl (name: string, format: NumberFormat) (g: Graph) : Result<Graph, string> =
-    addTo "control" (List.map fst (g.inputs @ g.controls)) (name, format) g.controls
-    |> Result.map (fun controls -> { g with controls = controls })
+    checkFree "control" (inputNames g) name
+    |> Result.map (fun () -> { g with controls = g.controls @ [ name, format ] })
 
-let addOutputPin (name: string, format: NumberFormat) (g: Graph) : Result<Graph, string> =
-    addTo "pin" (List.map fst g.outputs) (name, format) g.outputs
-    |> Result.map (fun outputs -> { g with outputs = outputs })
+/// The fields a boundary stream carries. Its edge stays where it is and is
+/// judged again against the new fields.
+let setFields (p: PortRef) (fields: Fields) (g: Graph) : Result<Graph, string> =
+    let change (streams: BoundaryStream list) =
+        streams |> List.map (fun s -> if s.name = p.port then { s with fields = fields } else s)
 
-/// A boundary pin, and the wires from or to it.
-let removeBoundaryPin (p: PinRef) (g: Graph) : Result<Graph, string> =
-    let without pins = pins |> List.filter (fun (n, _) -> n <> p.pin)
-    let unwired = g.edges |> List.filter (fun e -> e.from <> p && e.``to`` <> p)
+    checkFields fields
+    |> Result.bind (fun () ->
+        match p.box with
+        | "input" when g.inputs |> List.exists (fun s -> s.name = p.port) -> Ok { g with inputs = change g.inputs }
+        | "output" when g.outputs |> List.exists (fun s -> s.name = p.port) -> Ok { g with outputs = change g.outputs }
+        | _ -> Error $"{showPort p}: not a stream on the design's boundary")
+
+/// A boundary stream or control, and the edges from or to it.
+let removeBoundaryPort (p: PortRef) (g: Graph) : Result<Graph, string> =
+    let without (streams: BoundaryStream list) = streams |> List.filter (fun s -> s.name <> p.port)
+    let unconnected = g.edges |> List.filter (fun e -> e.from <> p && e.``to`` <> p)
 
     match p.box with
-    | "input" when g.inputs |> List.exists (fun (n, _) -> n = p.pin) -> Ok { g with inputs = without g.inputs; edges = unwired }
-    | "input" when g.controls |> List.exists (fun (n, _) -> n = p.pin) -> Ok { g with controls = without g.controls; edges = unwired }
-    | "output" when g.outputs |> List.exists (fun (n, _) -> n = p.pin) -> Ok { g with outputs = without g.outputs; edges = unwired }
+    | "input" when g.inputs |> List.exists (fun s -> s.name = p.port) -> Ok { g with inputs = without g.inputs; edges = unconnected }
+    | "input" when g.controls |> List.exists (fun (n, _) -> n = p.port) ->
+        Ok { g with controls = g.controls |> List.filter (fun (n, _) -> n <> p.port); edges = unconnected }
+    | "output" when g.outputs |> List.exists (fun s -> s.name = p.port) -> Ok { g with outputs = without g.outputs; edges = unconnected }
     | "input"
-    | "output" -> Error $"{showPin p}: no such pin"
-    | _ -> Error $"{p.box}: a box's pins are its unit's; only the design's own pins are added and removed"
-
-/// How many streams the design carries through every box: a beat on each,
-/// the boxes' copies counted against them. A mapping drives all of them.
-let setStreams (n: int) (g: Graph) : Result<Graph, string> =
-    if n < 1 then Error $"a design has at least one stream, not %d{n}" else Ok { g with streams = n }
+    | "output" -> Error $"{showPort p}: no such port"
+    | _ -> Error $"{p.box}: a box's ports are its unit's; only the design's own are added and removed"
 
 let rename (name: string) (g: Graph) : Result<Graph, string> =
     checkName "design" name |> Result.map (fun () -> { g with name = name })

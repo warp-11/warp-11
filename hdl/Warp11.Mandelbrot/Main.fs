@@ -324,8 +324,8 @@ let private debuggable =
 [<EntryPoint>]
 let main argv =
     // This project's units, then the verbs every drawn design answers to —
-    // which is all a project has to do to get `emit`, `export`, `frame`,
-    // `board`, `build` and `batchserve` over designs that name them.
+    // which is all a project has to do to get `emit`, `frame`, `board`,
+    // `build` and `batchserve` over designs that name them.
     Units.register ()
 
     match Warp11.Design.Verbs.run argv with

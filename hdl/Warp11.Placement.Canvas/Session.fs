@@ -22,11 +22,10 @@ type Source =
       /// The speaker, when the source is a recording and there is one.
       audio: AudioSink.AudioSink option }
 
-/// A recording into every stream; with a speaker, the first stream's device
-/// is the one that also plays.
+/// A recording into the design's stream; with a speaker, it also plays.
 let wavSource (g: Graph) (recording: WavData) (audible: bool) : Source =
     let sink = if audible then Some(AudioSink.AudioSink recording.sampleRate) else None
-    let inPins, outPins = Warp11.Devices.streamPinsOf g 1
+    let inPins, outPins = Warp11.Devices.streamPinsOf g
 
     let first, offered, remaining, heard =
         match sink with
@@ -37,12 +36,7 @@ let wavSource (g: Graph) (recording: WavData) (audible: bool) : Source =
             let src = WavStreamSource(inPins, outPins, recording)
             src.Attach, (fun () -> src.FramesOffered), (fun () -> src.Remaining), (fun () -> src.Output)
 
-    let others =
-        [ for i in 2 .. g.streams ->
-              let inPins, outPins = Warp11.Devices.streamPinsOf g i
-              WavStreamSource(inPins, outPins, recording).Attach ]
-
-    { attach = first :: others
+    { attach = [ first ]
       framesOffered = offered
       remaining = remaining
       save =
@@ -60,14 +54,14 @@ let wavSource (g: Graph) (recording: WavData) (audible: bool) : Source =
 let private beatSource (g: Graph) (beats: System.Numerics.BigInteger list list) (wanted: int) (write: string -> System.Numerics.BigInteger list list -> string) : Source =
     let devices = System.Collections.Generic.List<Warp11.Devices.BeatStreamDevice>()
 
-    let attach i =
+    let attach =
         fun (sim: Sim) ->
-            let input, output = Warp11.Devices.streamPinsOf g i
+            let input, output = Warp11.Devices.streamPinsOf g
             let d = Warp11.Devices.BeatStreamDevice(sim, input, output, beats, wanted)
             devices.Add d
             d :> ISimDevice
 
-    { attach = [ for i in 1 .. g.streams -> attach i ]
+    { attach = [ attach ]
       framesOffered = fun () -> if devices.Count = 0 then 0 else devices[0].FramesOffered
       remaining = fun () -> if devices.Count = 0 then beats.Length else devices[0].Remaining
       save = fun path -> if devices.Count = 0 then "nothing heard yet" else write path devices[0].Heard
@@ -88,9 +82,11 @@ let imageSource (g: Graph) (image: Grey) : Source =
 /// out is saved as a CSV of the output pins.
 let csvSource (g: Graph) (table: Table) : Source =
     beatSource g (Warp11.Devices.csvBeats g table) table.rows.Length (fun path heard ->
+        let written = (snd (Warp11.Devices.boundaryOf g)).fields
+
         let out =
-            { columns = g.outputs |> List.map fst
-              rows = heard |> List.map (fun beat -> List.map2 (fun (_, f) bits -> formatCell f bits) g.outputs beat) }
+            { columns = written |> List.map fst
+              rows = heard |> List.map (fun beat -> List.map2 (fun (_, f) bits -> formatCell f bits) written beat) }
 
         writeCsv path out
         $"wrote {path}: %d{out.rows.Length} rows")
@@ -117,15 +113,11 @@ let rec openWith (g: Graph) (source: Graph -> Source) (controls: (string * uint6
     for name in probeNames g do
         session.Watch name
 
-    for i in 1 .. g.streams do
-        for name, _ in g.inputs do
-            session.Watch $"in%d{i}_{name}"
+    for stream in g.inputs @ g.outputs do
+        for name, _ in stream.fields do
+            session.Watch $"{stream.name}_{name}"
 
-        for name, _ in g.outputs do
-            session.Watch $"out%d{i}_{name}"
-
-        session.Watch $"in%d{i}_valid"
-        session.Watch $"out%d{i}_valid"
+        session.Watch $"{stream.name}_valid"
 
     for name, _ in controlPorts g do
         session.Watch name
@@ -143,11 +135,11 @@ let rec openWith (g: Graph) (source: Graph -> Source) (controls: (string * uint6
       controls = g.controls
       signalsOf =
         fun box ->
-            // The stage's own nets are `{box}{i}_…`, its instance's
-            // `{box}{i}_{unit}_…`; the probes are listed with the pins instead.
+            // The box's instance's nets are `{box}_…`; the probes are
+            // listed with the ports instead.
             inventory.signals
             |> List.map (fun s -> s.name)
-            |> List.filter (fun n -> n.StartsWith box && not (probes.Contains n) && not (n.StartsWith $"{box}_"))
+            |> List.filter (fun n -> n.StartsWith $"{box}_" && not (probes.Contains n))
             |> List.sort
       savePath = savePath
       framesPerSecond = src.framesPerSecond
@@ -158,10 +150,11 @@ let rec openWith (g: Graph) (source: Graph -> Source) (controls: (string * uint6
 /// index, so a view is the design's own controls.
 let frameSource (g: Graph) (width: int) (height: int) : Source =
     let m: Warp11.Devices.FrameMapping = { width = width; height = height; controls = []; outputPath = None }
-    let beats = Warp11.Devices.frameBeats m g.outputs
+    let drawn = (snd (Warp11.Devices.boundaryOf g)).fields
+    let beats = Warp11.Devices.frameBeats m drawn
 
     beatSource g (Warp11.Devices.countBeats beats) beats (fun path heard ->
-        let out = ofChunks width (Warp11.Devices.pixelsPerBeatOf g.outputs) (heard |> List.truncate beats |> List.map List.head)
+        let out = ofChunks width (Warp11.Devices.pixelsPerBeatOf drawn) (heard |> List.truncate beats |> List.map List.head)
         writePgm path out
         $"wrote {path}: %d{out.height} rows")
 

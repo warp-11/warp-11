@@ -518,7 +518,11 @@ let private gainChannelTests =
 
           testCase "stereo, each channel's multiply in place, matches the formula" <| fun _ -> stereoAgrees audioGainInPlace.def
 
-          testCase "stereo, one shared multiply, matches the formula" <| fun _ -> stereoAgrees audioGainShared.def ]
+          testCase "stereo, one shared multiply, matches the formula" <| fun _ -> stereoAgrees audioGainShared.def
+
+          testCase "stereo, one shared multiply, matches the formula under every arbitration" <| fun _ ->
+              for arbitration in arbitrationsBeyondDefault do
+                  stereoAgrees (audioGainSharedWith arbitration).def ]
 
 /// The biquad as integers: `biquadDef`'s arithmetic, one sample at a time.
 /// Checked against `biquadSectionDef` before anything is checked against it.
@@ -586,7 +590,11 @@ let private eqBandTests =
 
           testCase "every product in place matches the biquad" <| fun _ -> bandAgrees audioEqBandInPlace.def
 
-          testCase "all ten products on one shared multiply match the biquad" <| fun _ -> bandAgrees audioEqBandShared.def ]
+          testCase "all ten products on one shared multiply match the biquad" <| fun _ -> bandAgrees audioEqBandShared.def
+
+          testCase "ten clients of one multiply match the biquad under every arbitration" <| fun _ ->
+              for arbitration in arbitrationsBeyondDefault do
+                  bandAgrees (audioEqBandSharedWith arbitration).def ]
 
 let tests =
     testList "Audio" [ dspTests; gainChannelTests; eqBandTests; gainTableTests; gainExpTests; bandTableTests; integrationTests ]

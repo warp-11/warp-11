@@ -35,6 +35,35 @@ type Parameter =
 /// A box's arguments, by parameter name, as typed.
 type Arguments = Map<string, string>
 
+/// What serves one of a box's sockets, as the unit is handed it: a stage
+/// from the socket's operands to its results.
+type Server = Stream<Expr list> -> Stream<Expr list>
+
+/// A box's socket port: `count` places where its unit needs another unit's
+/// work and does not provide it, all of one kind. One edge from the port to
+/// a service connects every one of them, in the unit's own order.
+type Sockets =
+    { name: string
+      count: int
+      /// The unit that serves one: its operands and results are the
+      /// socket's, and with nothing connected each socket gets a copy of it
+      /// in place.
+      needs: ErasedFu
+      /// That unit as F# source.
+      needsSymbol: string }
+
+/// The half of a factory that a unit with sockets adds: the unit made with
+/// its sockets served by someone else.
+type Served =
+    { sockets: Sockets list
+      /// The unit with each socket port served by what `serve` answers for
+      /// its name — told which of the port's sockets it is serving — or in
+      /// place where it answers nothing.
+      make: float -> Arguments -> (string -> (int -> Server) option) -> Result<ErasedFu, string>
+      /// The same call as F# source, each served port given the name of the
+      /// stage that serves it.
+      print: float -> Arguments -> (string -> string option) -> Result<string, string> }
+
 type Factory =
     { name: string
       parameters: Parameter list
@@ -56,7 +85,10 @@ type Factory =
       /// a design that uses it when the design is exported, and carried by
       /// the design's file so the design can be opened again where there is
       /// a compiler. `None` for the units the library ships.
-      definition: string option }
+      definition: string option
+      /// For a unit with sockets: how it is made with them served. `None`
+      /// for a unit that needs nothing but its stream and its controls.
+      served: Served option }
 
 /// What a fresh box of the factory holds.
 let defaults (f: Factory) : Arguments =
@@ -77,7 +109,8 @@ let plain (symbol: string) (unit: Fu<'a, 'r>) : Factory =
       opens = []
       make = fun _ _ -> Ok erased
       print = fun _ _ -> Ok symbol
-      definition = None }
+      definition = None
+      served = None }
 
 /// A factory over a typed constructor: `parse` reads the arguments once,
 /// `build` makes the unit from what it read, `show` prints the same call.
@@ -88,7 +121,8 @@ let factory (name: string) (parameters: Parameter list) (parse: float -> Argumen
       opens = []
       make = fun rate args -> parse rate args |> Result.map (build rate >> erase)
       print = fun rate args -> parse rate args |> Result.map show
-      definition = None }
+      definition = None
+      served = None }
 
 /// A float as F# source, always with a point so it reads as a float.
 let showFloat (x: float) : string =
@@ -150,6 +184,31 @@ let belowNyquist (name: string) (rate: float) (v: float) : Result<float, string>
 let private stereo = pins2 ("left", signedInt sampleWidth) ("right", signedInt sampleWidth)
 
 let private literals (width: int) (values: uint64 list) = values |> List.map (fun v -> lit v width)
+
+/// A server over bare nets as the typed stage a unit's socket takes.
+let private typedServer (operands: Layout<'a>) (results: Layout<'r>) (serve: Server) : Stream<'a> -> Stream<'r> =
+    streamMapTo (layoutOfList operands.fields) operands.pack >> serve >> streamMapTo results results.unpack
+
+let private channelNames = stereo.fields |> List.map fst
+
+/// The gain's sockets: a multiply a channel.
+let private gainSockets: Sockets =
+    { name = "multiply"
+      count = channelNames.Length
+      needs = erase gainMultiplier
+      needsSymbol = "gainMultiplier" }
+
+/// The eq band's sockets: five products a channel.
+let private eqSockets: Sockets =
+    { name = "multiply"
+      count = channelNames.Length * biquadTerms.Length
+      needs = erase eqMultiplier
+      needsSymbol = "eqMultiplier" }
+
+/// `eqSection` with every product served by `multiply channel term`.
+let eqSectionWith (multiply: string -> string -> Stream<Expr * Expr> -> Stream<Expr>) (shape: EqType) (fc: float) (q: float) (gainDb: float) (rate: float) : Fu<Expr * Expr, Expr * Expr> =
+    let coefficients = toQ230 (rbjDesign shape fc q gainDb rate)
+    moduleUnit "eq" stereo stereo [] (fun instance _ s -> audioEqBandWith multiply "AudioEqBand" instance (literals biquadCoeffWidth coefficients) s)
 
 /// A biquad section per channel with its coefficients designed for `rate`
 /// from the shape, corner, Q and gain — no coefficient inlets, only the
@@ -261,6 +320,39 @@ let eq: Factory =
             | _, _, _, Error e -> Error e)
         (fun rate (shape, fc, q, gain) -> eqSection (eqShape shape) fc q gain rate)
         (fun (shape, fc, q, gain) -> $"eqSection {eqShapeSymbol shape} {showFloat fc} {showFloat q} {showFloat gain} sampleRate")
+    |> fun unserved ->
+        let parse (rate: float) (args: Arguments) =
+            match choiceArg "shape" eqShapes args, floatArg "fc" args |> Result.bind (belowNyquist "fc" rate), floatArg "q" args |> Result.bind (positive "q"), floatArg "gain" args with
+            | Ok shape, Ok fc, Ok q, Ok gain -> Ok(shape, fc, q, gain)
+            | Error e, _, _, _
+            | _, Error e, _, _
+            | _, _, Error e, _
+            | _, _, _, Error e -> Error e
+
+        { unserved with
+            served =
+                Some
+                    { sockets = [ eqSockets ]
+                      make =
+                        fun rate args serve ->
+                            match serve eqSockets.name with
+                            | None -> unserved.make rate args
+                            | Some server ->
+                                parse rate args
+                                |> Result.map (fun (shape, fc, q, gain) ->
+                                    let multiply (channel: string) (term: string) =
+                                        let at = List.findIndex ((=) channel) channelNames * biquadTerms.Length + List.findIndex ((=) term) biquadTerms
+                                        typedServer biquadOperands biquadProduct (server at)
+
+                                    eqSectionWith multiply (eqShape shape) fc q gain rate |> erase)
+                      print =
+                        fun rate args serve ->
+                            match serve eqSockets.name with
+                            | None -> unserved.print rate args
+                            | Some stage ->
+                                parse rate args
+                                |> Result.map (fun (shape, fc, q, gain) ->
+                                    $"eqSectionWith (fun _ _ -> {stage}) {eqShapeSymbol shape} {showFloat fc} {showFloat q} {showFloat gain} sampleRate") } }
 
 let limiter: Factory = plain "limiterUnit" limiterUnit
 
@@ -359,7 +451,8 @@ let written (symbol: string) (unit: ErasedFu) (definition: string) : Factory =
       opens = []
       make = fun _ _ -> Ok unit
       print = fun _ _ -> Ok symbol
-      definition = Some definition }
+      definition = Some definition
+      served = None }
 
 /// The units this library ships — the general ones any design may reach for.
 /// `erase` is the only way a unit gets in, so a palette cannot disagree with
@@ -370,7 +463,25 @@ let builtIn: Map<string, Factory> =
     [ plain "multiply16" multiply16
       plain "add32" add32
       plain "shiftAddMultiply16" shiftAddMultiply16
-      plain "gainModule" gainModule
+      { plain "gainModule" gainModule with
+          served =
+              Some
+                  { sockets = [ gainSockets ]
+                    make =
+                      fun _ _ serve ->
+                          match serve gainSockets.name with
+                          | None -> Ok(erase gainModule)
+                          | Some server ->
+                              gainModuleWith (fun channel -> typedServer gainOperands gainProduct (server (List.findIndex ((=) channel) channelNames)))
+                              |> erase
+                              |> Ok
+                    print =
+                      fun _ _ serve ->
+                          match serve gainSockets.name with
+                          | None -> Ok "gainModule"
+                          | Some stage -> Ok $"gainModuleWith (fun _ -> {stage})" } }
+      plain "gainMultiplier" gainMultiplier
+      plain "eqMultiplier" eqMultiplier
       eq
       limiter
       echo

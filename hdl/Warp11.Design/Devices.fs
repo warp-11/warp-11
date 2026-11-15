@@ -1,7 +1,7 @@
 /// What satisfies a graph's boundary in a given world.
 ///
-/// A graph declares what it needs — so many stream pins in and out, of such
-/// formats, and these controls. It says nothing about where the beats come
+/// A graph declares what it needs — a stream in and a stream out, of such
+/// fields, and these controls. It says nothing about where the beats come
 /// from. A *mapping* says that, per world: in the simulator a WAV file plays
 /// into the input box and what leaves the output box is a WAV file; on a
 /// board the same boundary would be I2S pins. The graph is the same data in
@@ -85,24 +85,30 @@ type SimMapping =
       /// Written when the run ends, if given; the result comes back either way.
       outputPath: string option }
 
-/// What a stereo WAV device needs the boundary to be: one stream, two signed
-/// sample pins each way.
+/// The one stream in and the one stream out a device drives. A design with
+/// more on its boundary has no device yet, and says so.
+let boundaryOf (g: Graph) : BoundaryStream * BoundaryStream =
+    match g.inputs, g.outputs with
+    | [ input ], [ output ] -> input, output
+    | ins, outs -> failwith $"{g.name}: a device drives one stream in and one out, and the design has %d{ins.Length} in and %d{outs.Length} out"
+
+/// What a stereo WAV device needs the boundary to be: two signed samples
+/// each way.
 let private stereo = [ "left", signedInt sampleWidth; "right", signedInt sampleWidth ]
 
 /// Does the mapping fit what the graph declares? Said before anything runs,
 /// naming the side that does not.
 let private check (g: Graph) (m: SimMapping) =
-    if g.streams < 1 then
-        failwith $"{g.name}: a design has at least one stream"
-
     // A WAV's header holds a whole number of hertz; the design's rate need not
     // be one, so the two agree when they round to the same.
     if round g.sampleRate <> float m.source.sampleRate then
         failwith $"{g.name}: the design is made for %g{g.sampleRate} Hz and the recording is %d{m.source.sampleRate} Hz"
 
-    for side, pins in [ "input", g.inputs; "output", g.outputs ] do
-        if pins <> stereo then
-            failwith $"{g.name}: a WAV device needs the {side} box to be [{describePins stereo}], and it is [{describePins pins}]"
+    let input, output = boundaryOf g
+
+    for stream in [ input; output ] do
+        if stream.fields <> stereo then
+            failwith $"{g.name}: a WAV device needs '{stream.name}' to be [{describePins stereo}], and it is [{describePins stream.fields}]"
 
     let ports = controlPorts g
 
@@ -111,21 +117,20 @@ let private check (g: Graph) (m: SimMapping) =
             failwith $"{g.name}: no control called '{name}' — it has [{describePins ports}]"
 
     // The design's own controls come from outside, so the mapping must say;
-    // a number box and an unwired inlet hold their own values.
+    // a number box holds its own value.
     for name, _ in g.controls do
         if not (m.controls |> List.exists (fun (n, _) -> n = name)) then
             failwith $"{g.name}: the mapping gives no value for control '{name}'"
 
-/// The stream pins of the design's `i`th stream, in and out.
-let streamPinsOf (g: Graph) (i: int) : StreamPins * StreamPins =
-    streamPins $"in%d{i}" (layoutOfList g.inputs), streamPins $"out%d{i}" (layoutOfList g.outputs)
+/// The pins of the design's stream in and its stream out.
+let streamPinsOf (g: Graph) : StreamPins * StreamPins =
+    let input, output = boundaryOf g
+    streamPins input.name (layoutOfList input.fields), streamPins output.name (layoutOfList output.fields)
 
 /// Play the mapping's recording through the graph's design in the simulator
-/// — into every stream the design has, the same recording each — and return
-/// what each output box heard, stream by stream. `idleLimit` bounds the wait
-/// for a beat that never comes, so a design that deadlocks fails rather than
-/// hangs.
-let runInSimAll (idleLimit: int) (g: Graph) (m: SimMapping) : WavData list =
+/// and return what came out. `idleLimit` bounds the wait for a beat that
+/// never comes, so a design that deadlocks fails rather than hangs.
+let runInSim (idleLimit: int) (g: Graph) (m: SimMapping) : WavData =
     check g m
     let design = elaborate g
     let sim = Sim design.def
@@ -133,33 +138,26 @@ let runInSimAll (idleLimit: int) (g: Graph) (m: SimMapping) : WavData list =
     for name, value in startingValues g @ m.controls do
         sim.Poke(name, value)
 
-    let devices =
-        [ for i in 1 .. g.streams ->
-              let input, output = streamPinsOf g i
-              WavStreamDevice(sim, input, output, m.source) ]
-
-    let driven = devices |> List.map (fun d -> d :> ISimDevice)
-    let heardSoFar () = devices |> List.sumBy (fun d -> d.FramesHeard)
+    let input, output = streamPinsOf g
+    let device = WavStreamDevice(sim, input, output, m.source)
+    let driven = device :> ISimDevice
     let mutable idle = 0
     let mutable lastHeard = 0
 
-    while devices |> List.exists (fun d -> d.FramesHeard < m.source.FrameCount) && idle < idleLimit do
-        driven |> List.iter (fun d -> d.Drive())
+    while device.FramesHeard < m.source.FrameCount && idle < idleLimit do
+        driven.Drive()
         sim.Tick()
-        driven |> List.iter (fun d -> d.Sample())
+        driven.Sample()
 
-        if heardSoFar () = lastHeard then
+        if device.FramesHeard = lastHeard then
             idle <- idle + 1
         else
             idle <- 0
-            lastHeard <- heardSoFar ()
+            lastHeard <- device.FramesHeard
 
-    let heard = devices |> List.map (fun d -> d.Output)
-    m.outputPath |> Option.iter (fun path -> writeWavFile path heard.Head)
+    let heard = device.Output
+    m.outputPath |> Option.iter (fun path -> writeWavFile path heard)
     heard
-
-/// `runInSimAll`, the first stream's hearing.
-let runInSim (idleLimit: int) (g: Graph) (m: SimMapping) : WavData = (runInSimAll idleLimit g m).Head
 
 // ---------------------------------------------------------------------------
 // An image on the boundary: rows in, rows out.
@@ -175,12 +173,11 @@ type ImageMapping =
 let rowPin (width: int) : string * NumberFormat = "row", unsignedInt (width * 8)
 
 let private checkImage (g: Graph) (m: ImageMapping) =
-    if g.streams < 1 then
-        failwith $"{g.name}: a design has at least one stream"
+    let input, output = boundaryOf g
 
-    for side, pins in [ "input", g.inputs; "output", g.outputs ] do
-        if pins <> [ rowPin m.image.width ] then
-            failwith $"{g.name}: an image %d{m.image.width} pixels wide needs the {side} box to be [{describePins [ rowPin m.image.width ]}], and it is [{describePins pins}]"
+    for stream in [ input; output ] do
+        if stream.fields <> [ rowPin m.image.width ] then
+            failwith $"{g.name}: an image %d{m.image.width} pixels wide needs '{stream.name}' to be [{describePins [ rowPin m.image.width ]}], and it is [{describePins stream.fields}]"
 
     for name, _ in g.controls do
         failwith $"{g.name}: the image mapping gives no value for control '{name}'"
@@ -189,8 +186,8 @@ let private checkImage (g: Graph) (m: ImageMapping) =
 let imageBeats (m: ImageMapping) : BigInteger list list =
     [ for r in 0 .. m.image.height - 1 -> [ rowBits (m.image.Row r) ] ]
 
-/// Play the image through the design's rows, every stream the same, and
-/// return what the first output box drew: as many rows as went in.
+/// Play the image through the design's rows and return what it drew: as
+/// many rows as went in.
 let runImageInSim (idleLimit: int) (g: Graph) (m: ImageMapping) : Grey =
     checkImage g m
     let sim = Sim (elaborate g).def
@@ -200,10 +197,8 @@ let runImageInSim (idleLimit: int) (g: Graph) (m: ImageMapping) : Grey =
 
     let beats = imageBeats m
 
-    let devices =
-        [ for i in 1 .. g.streams ->
-              let input, output = streamPinsOf g i
-              BeatStreamDevice(sim, input, output, beats, m.image.height) ]
+    let input, output = streamPinsOf g
+    let devices = [ BeatStreamDevice(sim, input, output, beats, m.image.height) ]
 
     drive sim devices idleLimit
     let heard = devices.Head.Heard |> List.truncate m.image.height |> List.map List.head
@@ -237,14 +232,13 @@ let frameBeats (m: FrameMapping) (outputs: (string * NumberFormat) list) : int =
     m.height * ((m.width + perBeat - 1) / perBeat)
 
 let private checkFrame (g: Graph) (m: FrameMapping) =
-    if g.streams < 1 then
-        failwith $"{g.name}: a design has at least one stream"
+    let input, output = boundaryOf g
 
-    match g.inputs with
+    match input.fields with
     | [ _ ] -> ()
-    | pins -> failwith $"{g.name}: a counted input is one field, the beat index, and the input box is [{describePins pins}]"
+    | pins -> failwith $"{g.name}: a counted input is one field, the beat index, and '{input.name}' is [{describePins pins}]"
 
-    pixelsPerBeatOf g.outputs |> ignore
+    pixelsPerBeatOf output.fields |> ignore
     let ports = controlPorts g
 
     for name, _ in m.controls do
@@ -266,16 +260,15 @@ let runFrameInSim (idleLimit: int) (g: Graph) (m: FrameMapping) : Grey =
     for name, value in startingValues g @ m.controls do
         sim.Poke(name, value)
 
-    let beats = frameBeats m g.outputs
+    let _, drawn = boundaryOf g
+    let beats = frameBeats m drawn.fields
 
-    let devices =
-        [ for i in 1 .. g.streams ->
-              let input, output = streamPinsOf g i
-              BeatStreamDevice(sim, input, output, countBeats beats, beats) ]
+    let input, output = streamPinsOf g
+    let devices = [ BeatStreamDevice(sim, input, output, countBeats beats, beats) ]
 
     drive sim devices idleLimit
     let heard = devices.Head.Heard |> List.truncate beats |> List.map List.head
-    let out = ofChunks m.width (pixelsPerBeatOf g.outputs) heard
+    let out = ofChunks m.width (pixelsPerBeatOf drawn.fields) heard
     m.outputPath |> Option.iter (fun path -> writePgm path out)
     out
 
@@ -288,14 +281,11 @@ type CsvMapping =
       outputPath: string option }
 
 let private checkCsv (g: Graph) (m: CsvMapping) =
-    if g.streams < 1 then
-        failwith $"{g.name}: a design has at least one stream"
-
     let columns = String.concat ", " m.table.columns
 
-    for name, _ in g.inputs do
+    for name, _ in (fst (boundaryOf g)).fields do
         if not (List.contains name m.table.columns) then
-            failwith $"{g.name}: the table has no column '{name}' for the input box's pin — its columns are [{columns}]"
+            failwith $"{g.name}: the table has no column '{name}' for the input stream's field — its columns are [{columns}]"
 
     let ports = controlPorts g
 
@@ -311,7 +301,7 @@ let private checkCsv (g: Graph) (m: CsvMapping) =
 /// format. Refused naming the row, the column and the cell.
 let csvBeats (g: Graph) (t: Table) : BigInteger list list =
     [ for r, row in List.indexed t.rows ->
-          [ for name, f in g.inputs ->
+          [ for name, f in (fst (boundaryOf g)).fields ->
                 let at = List.findIndex ((=) name) t.columns
 
                 if at >= row.Length then
@@ -322,7 +312,7 @@ let csvBeats (g: Graph) (t: Table) : BigInteger list list =
                 | Error why -> failwith $"row %d{r + 1}, '{name}': {why}" ] ]
 
 /// Play the table through the design, a row a beat, and return the table
-/// the output box wrote: the output pins as columns, one row a beat heard.
+/// the output stream wrote: its fields as columns, one row a beat heard.
 let runCsvInSim (idleLimit: int) (g: Graph) (m: CsvMapping) : Table =
     checkCsv g m
     let sim = Sim (elaborate g).def
@@ -332,16 +322,15 @@ let runCsvInSim (idleLimit: int) (g: Graph) (m: CsvMapping) : Table =
 
     let beats = csvBeats g m.table
 
-    let devices =
-        [ for i in 1 .. g.streams ->
-              let input, output = streamPinsOf g i
-              BeatStreamDevice(sim, input, output, beats, beats.Length) ]
+    let input, output = streamPinsOf g
+    let devices = [ BeatStreamDevice(sim, input, output, beats, beats.Length) ]
 
     drive sim devices idleLimit
+    let _, written = boundaryOf g
 
     let out =
-        { columns = g.outputs |> List.map fst
-          rows = devices.Head.Heard |> List.map (fun beat -> List.map2 (fun (_, f) bits -> formatCell f bits) g.outputs beat) }
+        { columns = written.fields |> List.map fst
+          rows = devices.Head.Heard |> List.map (fun beat -> List.map2 (fun (_, f) bits -> formatCell f bits) written.fields beat) }
 
     m.outputPath |> Option.iter (fun path -> writeCsv path out)
     out

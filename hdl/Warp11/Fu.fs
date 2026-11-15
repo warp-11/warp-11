@@ -239,7 +239,7 @@ let private clientStage
 /// once. The core is the law between operand registers and result
 /// registers — the shape a DSP block absorbs — and it reports that depth to
 /// `warpFu` rather than being asked for it.
-let private pool (unit: Fu<'a, 'r>) (law: 'a -> 'r) (name: string) (clients: Client list) =
+let private pool (arbitration: Arbitration) (unit: Fu<'a, 'r>) (law: 'a -> 'r) (name: string) (clients: Client list) =
     let tagWidth = 1
     let operandPorts = [ for n, f in unit.operands.fields -> n, f.totalWidth ]
     let resultPorts = [ for n, f in unit.results.fields -> n, f.totalWidth ]
@@ -269,7 +269,7 @@ let private pool (unit: Fu<'a, 'r>) (law: 'a -> 'r) (name: string) (clients: Cli
               r ],
         2
 
-    let results = warpFu name resultPorts core issues
+    let results = warpFuWith arbitration name resultPorts core issues
 
     for c, r in List.zip clients results do
         List.iter2 (fun w v -> v ==> w) c.results r.payload.fields
@@ -285,6 +285,29 @@ let private checkOperands (unit: Fu<'a, 'r>) (what: string) (s: Stream<'a>) =
     if arriving <> expected then
         failwith $"'{unit.name}' {what}: operands arrive as %A{arriving}, the unit takes %A{expected}"
 
+/// A unit as one stage of a pipeline: the call a drawn box is. A module
+/// unit is its instance, named `instance`, with `controls` beside the
+/// stream; a combinational unit is its law over each beat, `valid` and
+/// `ready` straight through. Nothing is added around either, so
+/// `s |> stage [ volume; mute ] gainModule "gain"` is
+/// `s |> audioGain "AudioGain" "gain" volume mute`.
+///
+/// One copy: how many there are, and what arbitrates them, is the parent's
+/// to say where the streams meet.
+let stage (controls: Expr list) (unit: Fu<'a, 'r>) (instance: string) : Stream<'a> -> Stream<'r> =
+    if controls.Length <> unit.controls.Length then
+        failwith $"'{instance}': unit '{unit.name}' has %d{unit.controls.Length} control(s), given %d{controls.Length}"
+
+    if unit.copies <> 1 then
+        failwith $"'{instance}': unit '{unit.name}' has %d{unit.copies} copies, and a stage is one"
+
+    match unit.law with
+    | Sequential law -> law instance controls
+    | Combinational law ->
+        fun s ->
+            checkOperands unit $"as the stage '{instance}'" s
+            streamMapTo unit.results (law controls) s
+
 /// One copy of a combinational unit, shared by every stage `body` makes
 /// from it. `body` is handed a stage, `Stream<operands> -> Stream<results>`,
 /// of the same type `inPlace` returns; each place it is applied is one
@@ -296,7 +319,16 @@ let private checkOperands (unit: Fu<'a, 'r>) (what: string) (s: Stream<'a>) =
 /// one manages a beat every few cycles. The clients must be made in the
 /// module that shares the unit: a socket in a child reaches it by being
 /// passed up to this module's boundary, not by the child reaching out.
-let sharing (unit: Fu<'a, 'r>) (name: string) (body: (Stream<'a> -> Stream<'r>) -> 'x) : 'x =
+///
+/// `arbitration` is who is served next and when the arbiter says so; the
+/// clients are numbered in the order `body` made them, which is the order
+/// `Priority` serves them in.
+let sharingWith
+    (arbitration: Arbitration)
+    (unit: Fu<'a, 'r>)
+    (name: string)
+    (body: (Stream<'a> -> Stream<'r>) -> 'x)
+    : 'x =
     let law =
         match unit.law with
         | Sequential _ -> failwith $"'{unit.name}' is sequential: sharing one is not built yet"
@@ -322,8 +354,12 @@ let sharing (unit: Fu<'a, 'r>) (name: string) (body: (Stream<'a> -> Stream<'r>) 
     if clients.Count = 0 then
         failwith $"'{name}': a shared '{unit.name}' with no clients"
 
-    pool unit law name (List.ofSeq clients)
+    pool arbitration unit law name (List.ofSeq clients)
     result
+
+/// `sharingWith`, round-robin in the same cycle.
+let sharing (unit: Fu<'a, 'r>) (name: string) (body: (Stream<'a> -> Stream<'r>) -> 'x) : 'x =
+    sharingWith Arbitration.roundRobin unit name body
 
 /// The same layout under prefixed field names, so two layouts that both
 /// call a field `a` can be joined side by side.
@@ -355,6 +391,55 @@ let private unorderedFarm (name: string) (n: int) (worker: int -> Stream<'p> -> 
         worker 0 s
     else
         streamBalanceClustered n s |> List.mapi worker |> streamMergeClustered
+
+/// Whether a farm hands beats on in the order they came.
+[<RequireQualifiedAccess>]
+type Farm =
+    /// Beat `i` leaves before beat `i + 1`, whatever the copies cost.
+    | InOrder
+    /// A beat leaves when its copy is done. For beats that say where they
+    /// belong; a sample stream cannot use it.
+    | AsDone
+
+/// `copies` of a unit over one stream: the call a drawn box with copies is.
+/// A beat goes to whichever copy is free; the copies are instances
+/// `{name}0`, `{name}1`, …. At one copy it is `stage controls unit name`,
+/// and nothing else is built.
+///
+/// A combinational unit is refused above one copy: it answers in the cycle
+/// it is asked, so there is nothing for a second copy to do.
+///
+/// Each copy sits between two registers: `ready` registered where the beat
+/// is handed to it (`Connection.Backward`) and a register stage on its
+/// result (`Connection.Forward`). A unit never knows it is farmed, so its
+/// `ready` may wait on its `valid` and its `valid` on its `ready` — and the
+/// dispatch offers a beat to a lane that is ready while the merge is ready
+/// for a lane that offers, which through such a unit is a loop either way
+/// round. The registers are what let any unit be scaled.
+///
+/// Both, because one is not enough in order: the `ready` register holds a
+/// second beat behind a busy copy, and without somewhere for a finished
+/// result to wait the ordered merge serialises the lanes. Measured, 64
+/// products on four sixteen-cycle multipliers: 276 cycles with nothing, 593
+/// with `ready` registered alone, 283 with both.
+let farm (order: Farm) (controls: Expr list) (unit: Fu<'a, 'r>) (name: string) (copies: int) : Stream<'a> -> Stream<'r> =
+    if copies < 1 then
+        failwith $"'{name}': copies is at least 1, not %d{copies}"
+    elif copies = 1 then
+        stage controls unit name
+    else
+        match unit.law with
+        | Combinational _ ->
+            failwith $"'{name}': unit '{unit.name}' is combinational, and %d{copies} copies of it over one stream have nothing to wait for"
+        | Sequential _ ->
+            let worker (i: int) =
+                connectAs Connection.Backward
+                >> stage controls unit $"{name}%d{i}"
+                >> connectAs Connection.Forward
+
+            match order with
+            | Farm.InOrder -> orderedFarm name copies unit.answers worker
+            | Farm.AsDone -> unorderedFarm name copies worker
 
 /// A stage over a sequential unit, `k` copies for this stream. The unit sees
 /// only its operands; the rest of the beat waits beside it in a context FIFO
@@ -427,7 +512,7 @@ let private fuStagesOrderedBy
         let staged =
             streams |> List.mapi (fun i s -> clientStage unit $"{name}%d{i}" outPins operands finish s)
 
-        pool unit (law controls) $"{name}_pool" (List.map snd staged)
+        pool Arbitration.roundRobin unit (law controls) $"{name}_pool" (List.map snd staged)
         List.map fst staged
     | Combinational _ when n > m ->
         failwith

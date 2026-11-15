@@ -115,10 +115,133 @@ let private verifyStallIndependence ordered label design inputFields outputField
         let stalled = runStreamStalled $"{label}, seed {seed}" design inputFields outputFields beats (Some seed)
         Expect.equal (canonicalize stalled) (canonicalize baseline) $"Stalls changed {label} output for seed {seed}"
 
+/// What one run of `arbitratedMerge` saw: beats served per input, and whether
+/// a beat that was offered and not taken was still the one offered next cycle.
+type private MergeRun = { served: int list; offersHeld: bool }
+
+/// Drive `arbitratedMerge`: each input in `asking` raises a beat with
+/// probability `askRate` whenever it has none waiting and holds it until
+/// taken; the output is ready with probability `readyRate`. Every beat
+/// carries its input and that input's running count, so a beat lost,
+/// repeated, reordered within its input or granted to the wrong input fails
+/// here, whatever the arbitration.
+let private runMerge (arbitration: Arbitration) (asking: int list) (askRate: float) (readyRate: float) (cycles: int) : MergeRun =
+    let design = (arbitratedMerge arbitration).def
+    let name = design.name
+    let n = arbitratedMergeInputs
+    let sim = Sim design
+    let random = System.Random 2026_11_14
+    let sent = Array.zeroCreate n
+    let served = Array.zeroCreate n
+    let waiting = Array.create n false
+    let mutable offered = None
+    let mutable offersHeld = true
+
+    for cycle in 1..cycles do
+        for i in asking do
+            if not waiting[i] && random.NextDouble() < askRate then
+                waiting[i] <- true
+                sim.Poke($"in%d{i}_data", (uint64 i <<< 12) ||| uint64 (sent[i] % 4096))
+
+        for i in 0 .. n - 1 do
+            sim.Poke($"in%d{i}_valid", if waiting[i] then 1UL else 0UL)
+
+        sim.Poke("out_ready", if random.NextDouble() < readyRate then 1UL else 0UL)
+
+        let valid = sim.Peek "out_valid" = 1UL
+        let ready = sim.Peek "out_ready" = 1UL
+        let data = sim.Peek "out_data"
+        let taken = [ for i in 0 .. n - 1 -> waiting[i] && sim.Peek $"in%d{i}_ready" = 1UL ]
+
+        match offered with
+        | Some earlier when not valid || data <> earlier -> offersHeld <- false
+        | _ -> ()
+
+        offered <- if valid && not ready then Some data else None
+
+        if valid && ready then
+            let lane = int (data >>> 12)
+            Expect.equal (int (data &&& 0xFFFUL)) (sent[lane] % 4096) $"{name}: input {lane}'s beats out of order at cycle {cycle}"
+            Expect.equal taken [ for i in 0 .. n - 1 -> i = lane ] $"{name}: exactly the served input should be taken at cycle {cycle}"
+            served[lane] <- served[lane] + 1
+        else
+            Expect.isFalse (List.exists id taken) $"{name}: an input was taken with no beat leaving at cycle {cycle}"
+
+        sim.Tick()
+
+        for i in 0 .. n - 1 do
+            if taken[i] then
+                waiting[i] <- false
+                sent[i] <- sent[i] + 1
+
+    { served = List.ofArray served
+      offersHeld = offersHeld }
+
 let tests =
     testList
         "Streams"
-        [ testCase "every connection delivers every beat once and in order under stalls" <| fun _ ->
+        [ testCase "a merge delivers every beat once, each input's in order, under every arbitration" <| fun _ ->
+              for arbitration in arbitrations do
+                  let run = runMerge arbitration [ 0 .. arbitratedMergeInputs - 1 ] 0.3 0.6 6000
+                  Expect.isGreaterThan (List.sum run.served) 1000 $"{arbitrationName arbitration}: the merge should keep moving"
+
+          testCase "round-robin gives every asker the same share, at a count that is not a power of two" <| fun _ ->
+              for timing in [ ArbitrationTiming.SameCycle; ArbitrationTiming.Registered ] do
+                  let arbitration = { policy = ArbitrationPolicy.RoundRobin; timing = timing }
+                  let name = arbitrationName arbitration
+
+                  // Every input asking flat out: a fifth each, and a beat a cycle.
+                  let all = runMerge arbitration [ 0 .. arbitratedMergeInputs - 1 ] 1.0 1.0 3000
+                  Expect.isGreaterThanOrEqual (List.sum all.served) 2999 $"{name}: saturated, a beat a cycle"
+                  Expect.isLessThanOrEqual (List.max all.served - List.min all.served) 1 $"{name}: saturated shares {all.served}"
+
+                  // Three of the five: a third each, nothing for the idle two.
+                  let some = runMerge arbitration [ 0; 2; 3 ] 1.0 1.0 3000
+                  let asked = [ some.served[0]; some.served[2]; some.served[3] ]
+                  Expect.isLessThanOrEqual (List.max asked - List.min asked) 1 $"{name}: three askers' shares {some.served}"
+                  Expect.equal (some.served[1], some.served[4]) (0, 0) $"{name}: an idle input is never served"
+
+                  // Under stalls and gaps, nobody is left behind.
+                  let loaded = runMerge arbitration [ 0 .. arbitratedMergeInputs - 1 ] 0.9 0.5 6000
+                  Expect.isLessThanOrEqual (List.max loaded.served - List.min loaded.served) 2 $"{name}: loaded shares {loaded.served}"
+
+          testCase "priority serves the lowest-numbered asker" <| fun _ ->
+              for timing in [ ArbitrationTiming.SameCycle; ArbitrationTiming.Registered ] do
+                  let arbitration = { policy = ArbitrationPolicy.Priority; timing = timing }
+                  let name = arbitrationName arbitration
+
+                  let all = runMerge arbitration [ 0 .. arbitratedMergeInputs - 1 ] 1.0 1.0 3000
+                  Expect.equal all.served.Tail [ 0; 0; 0; 0 ] $"{name}: with input 0 asking flat out, nobody else is served"
+                  Expect.isGreaterThanOrEqual all.served.Head 2999 $"{name}: and it gets a beat a cycle"
+
+                  let rest = runMerge arbitration [ 1 .. arbitratedMergeInputs - 1 ] 1.0 1.0 3000
+                  Expect.equal (rest.served[0], rest.served[2], rest.served[3], rest.served[4]) (0, 0, 0, 0) $"{name}: with input 0 idle, input 1 is the lowest"
+
+                  // With gaps in the high inputs, the low ones are still served, in order of rank.
+                  let gaps = runMerge arbitration [ 0 .. arbitratedMergeInputs - 1 ] 0.3 0.6 6000
+                  Expect.equal gaps.served (List.sortDescending gaps.served) $"{name}: served by rank {gaps.served}"
+                  Expect.isGreaterThan (List.last gaps.served) 0 $"{name}: the last input is served when the others have gaps"
+
+          testCase "a registered merge offers from registers and holds what it offers" <| fun _ ->
+              for arbitration in arbitrations do
+                  let name = arbitrationName arbitration
+                  let registered = arbitration.timing = ArbitrationTiming.Registered
+
+                  let run = runMerge arbitration [ 0 .. arbitratedMergeInputs - 1 ] 0.3 0.6 6000
+
+                  if registered then
+                      Expect.isTrue run.offersHeld $"{name}: a beat offered and not taken stays offered"
+
+                  // Within one cycle: does the output's valid follow an input's?
+                  let sim = Sim (arbitratedMerge arbitration).def
+                  sim.Poke("in2_data", 7UL)
+                  sim.Poke("in2_valid", 1UL)
+                  Expect.equal (sim.Peek "out_valid" = 1UL) (not registered) $"{name}: whether valid crosses the merge within a cycle"
+                  sim.Tick()
+                  Expect.equal (sim.Peek "out_valid") 1UL $"{name}: the beat is offered by the cycle after"
+                  Expect.equal (sim.Peek "out_data") 7UL $"{name}: and it is the asker's"
+
+          testCase "every connection delivers every beat once and in order under stalls" <| fun _ ->
               let beats = [ for i in 1..300 -> [ uint64 (i * 37 % 65536) ] ]
               for design in [ connectionWire; connectionForward; connectionBackward; connectionBoth ] do
                   for seed in 1..6 do

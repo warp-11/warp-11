@@ -4,7 +4,13 @@ module Warp11.Placement.Main
 
 open Warp11
 open Warp11.Placement.Placement
-open Warp11.Placement.GraphChecks
+open Warp11.Placement.ChainChecks
+open Warp11.Placement.MeetingChecks
+open Warp11.Placement.SocketChecks
+open Warp11.Placement.BoxChecks
+open Warp11.Placement.DrawnChecks
+open Warp11.Placement.ExportChecks
+open Warp11.Placement.PaletteChecks
 open Warp11.Devices
 
 let private run (name: string) (check: unit -> bool) =
@@ -12,7 +18,7 @@ let private run (name: string) (check: unit -> bool) =
         try
             if check () then "ok" else "FAIL"
         with e ->
-            $"stopped — {e.Message}"
+            $"stopped — {e.GetBaseException().Message}"
 
     printfn $"%-44s{name} {verdict}"
 
@@ -43,12 +49,9 @@ let main argv =
         let peak (w: WavData) = w.samples |> Array.map (fun s -> abs (int s)) |> Array.max
         printfn $"{inPath}: %d{source.FrameCount} frames, peak %d{peak source} → {outPath}: %d{heard.FrameCount} frames, peak %d{peak heard}, volume %d{volume}/256"
         0
-    // The Verilog of a saved design, or of the typed gain patch — so the two
-    // can be diffed: `emit design.json`, `emit gain`.
-    // The example designs as files: `examples <dir>`.
     // The typed gain design's Verilog, to diff a drawn one against.
     | [| "emit"; "gain" |] ->
-        printf $"{Warp11.Verilog.emitDesign gainPatch.def}"
+        printf $"{Warp11.Verilog.emitDesign gainPipeline.def}"
         0
     | [| "examples"; dir |] ->
         Warp11.Placement.Examples.write dir
@@ -69,19 +72,34 @@ let main argv =
     run "UC5 counts are independent" countsAreIndependent
     run "UC6 parameter tracks" parameterTracks
     run "UC7 gain module scales" gainScales
-    run "UD1 data is the typed design" dataIsTheTypedDesign
-    run "UD2 bad wires refuse" badWiresRefuse
+    run "CD1 the drawn gain is the typed pipeline" drawnGainIsThePipeline
+    run "CD2 an edge is its connection" edgeIsItsConnection
+    run "CD3 a design is a box" designIsABox
+    run "CD4 controls hold values" controlsHoldValues
+    run "CD5 beats through the drawn gain" beatsThroughTheDrawnGain
+    run "CD6 an edge fits, fits by another name, or does not" edgeFits
+    run "CD7 a side that changes leaves its edge" changedSideLeavesItsEdge
+    run "CD8 bad edges refuse" badEdgesRefuse
+    run "MD1 a fan-out, then a merge" fanOutThenMerge
+    run "MD2 a merge is the port's arbitration" mergeIsThePortsArbitration
+    run "MD3 copies are a farm" copiesAreAFarm
+    run "MD4 a design takes copies" designTakesCopies
+    run "MD5 meetings are edits" meetingsAreEdits
+    run "SD1 sockets share a unit" socketsShareAUnit
+    run "SD2 bands share multipliers" bandsShareMultipliers
+    run "SD3 a socket fits its service" socketsFitTheirService
+    run "SD4 sharing is an edit" sharingIsAnEdit
+    run "BD1 joins make the beat" joinsMakeTheBeat
+    run "BD2 fields are regrouped" fieldsAreRegrouped
+    run "BD3 a buffer is a box" bufferIsABox
+    run "BD4 the boxes are edits" boxesAreEdits
     run "UD3 palette is the units" paletteIsTheUnits
-    run "UD4 gain graph is the gain patch" gainGraphIsTheGainPatch
     run "UD5 wav plays through the graph" wavPlaysThroughTheGraph
-    run "UD6 edits build the gain design" editsBuildTheGainDesign
+    run "UD6 edits build the designs" editsBuildTheDesigns
     run "UD7 a saved design opens as it was" savedDesignOpensAsItWas
     run "UD8 arguments make the unit" argumentsMakeTheUnit
     run "UD9 the pedal units do what they say" pedalUnitsDoWhatTheySay
-    run "UD10 controls hold values, boxes share them" controlsHoldValues
     run "UD11 the export is the design" exportIsTheDesign
-    run "UD12 a design is a box" designIsABox
-    run "UD13 streams are stages" streamsAreStages
     run "UD14 an image on the boundary" imageOnTheBoundary
     run "UD15 a table on the boundary" tableOnTheBoundary
     // Exactly the built-in units: the check is about a design naming one

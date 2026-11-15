@@ -1,0 +1,139 @@
+{
+  "format": 2,
+  "name": "Mac",
+  "sampleRate": 48000,
+  "inputs": [
+    {
+      "name": "a",
+      "fields": [
+        {
+          "name": "a",
+          "width": 16,
+          "fraction": 0,
+          "signed": false
+        }
+      ]
+    },
+    {
+      "name": "b",
+      "fields": [
+        {
+          "name": "b",
+          "width": 16,
+          "fraction": 0,
+          "signed": false
+        }
+      ]
+    },
+    {
+      "name": "c",
+      "fields": [
+        {
+          "name": "c",
+          "width": 32,
+          "fraction": 0,
+          "signed": false
+        }
+      ]
+    }
+  ],
+  "controls": [],
+  "outputs": [
+    {
+      "name": "out",
+      "fields": [
+        {
+          "name": "sum",
+          "width": 33,
+          "fraction": 0,
+          "signed": false
+        }
+      ]
+    }
+  ],
+  "boxes": [
+    {
+      "name": "factors",
+      "unit": "join",
+      "arguments": {},
+      "settings": {}
+    },
+    {
+      "name": "product",
+      "unit": "mul16",
+      "arguments": {},
+      "settings": {}
+    },
+    {
+      "name": "terms",
+      "unit": "join",
+      "arguments": {},
+      "settings": {}
+    },
+    {
+      "name": "sum",
+      "unit": "add32",
+      "arguments": {},
+      "settings": {}
+    }
+  ],
+  "controlBoxes": [],
+  "edges": [
+    {
+      "from": "input.a",
+      "to": "factors.in0"
+    },
+    {
+      "from": "input.b",
+      "to": "factors.in1"
+    },
+    {
+      "from": "factors.out",
+      "to": "product.in"
+    },
+    {
+      "from": "product.out",
+      "to": "terms.in0"
+    },
+    {
+      "from": "input.c",
+      "to": "terms.in1"
+    },
+    {
+      "from": "terms.out",
+      "to": "sum.in"
+    },
+    {
+      "from": "sum.out",
+      "to": "output.out"
+    }
+  ],
+  "positions": {
+    "factors": [
+      320,
+      120
+    ],
+    "input": [
+      60,
+      120
+    ],
+    "output": [
+      1360,
+      120
+    ],
+    "product": [
+      580,
+      120
+    ],
+    "sum": [
+      1100,
+      120
+    ],
+    "terms": [
+      840,
+      120
+    ]
+  },
+  "designs": {},
+  "units": {}
+}

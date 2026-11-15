@@ -1,22 +1,24 @@
 /// A design as F# source: the typed form, the one a person would have
-/// written — a `defModule` with one `fuStagesWith` per box, tuple beats
-/// named after the pins, units by their F# names with their creation
-/// arguments as values. One way: the in-place row dissolves into an
-/// expression, so no graph can be read back from it, which is why the design
-/// file is JSON and this is an export.
+/// written. A box is its unit applied once (`stage`, or `farm` with
+/// copies), an edge is `connectAs` its connection, a meeting is the library
+/// call for its pattern, a shared service is `sharingWith` around the
+/// stages that use it — the calls `Elaborate` makes, in the order it makes
+/// them. One way: no graph can be read back from it, which is why the
+/// design file is JSON and this is an export.
 ///
 /// The printer is honest only if what it prints elaborates to the bytes the
 /// graph does, and that is its one check (UD11): the source is compiled and
-/// its Verilog compared. It walks the beat exactly as `Elaborate` does.
+/// its Verilog compared.
 module Warp11.Export
 
+open Warp11
 open Warp11.Fu
 open Warp11.Factories
 open Warp11.Graph
 open Warp11.Edit
 open Warp11.Elaborate
 
-/// F# keywords a pin or port may be called, escaped in the source.
+/// F# keywords a field, a stream or a port may be called, escaped in the source.
 let private keywords =
     set
         [ "abstract"; "and"; "as"; "assert"; "base"; "begin"; "class"; "default"; "delegate"; "do"; "done"; "downcast"; "downto"; "elif"; "else"; "end"
@@ -58,165 +60,257 @@ let private tupleValue (names: string list) =
 let private valueName (name: string) =
     ident (string (System.Char.ToLowerInvariant name[0]) + name.Substring 1)
 
-/// The names a design's io tuple binds: `in1 … inM, out1 … outM`, then a
-/// port per control. What its own module destructures, and what a parent
-/// destructures to reach the streams and controls of an instance.
+/// The names a design's io tuple binds: a stream each for its inputs and
+/// outputs, under the streams' own names (an output called what an input is
+/// gets `_out`), then a port per control. What its own module destructures,
+/// and what a parent destructures to reach an instance's.
 let private ioNames (g: Graph) =
-    [ for i in 1 .. g.streams -> $"in%d{i}" ], [ for i in 1 .. g.streams -> $"out%d{i}" ], [ for n, _ in controlPorts g -> ident n ]
+    let ins = [ for s in g.inputs -> s.name ]
+    let controls = [ for n, _ in controlPorts g -> n ]
+    let outs = [ for s in g.outputs -> if List.contains s.name (ins @ controls) then $"{s.name}_out" else s.name ]
+    List.map ident ins, List.map ident outs, List.map ident controls
+
+let private showArbitration (a: Arbitration) =
+    if a = Arbitration.roundRobin then
+        "Arbitration.roundRobin"
+    else
+        $"{{ policy = ArbitrationPolicy.{a.policy}; timing = ArbitrationTiming.{a.timing} }}"
+
+let private collect (rs: Result<'a, string> list) : Result<'a list, string> =
+    (Ok [], rs)
+    ||> List.fold (fun acc r ->
+        match acc, r with
+        | Ok xs, Ok x -> Ok(x :: xs)
+        | Error e, _
+        | _, Error e -> Error e)
+    |> Result.map List.rev
 
 /// One design as a `let`: the typed form, its sub-designs already printed
 /// above it under their own names.
 let rec private printDesign (g: Graph) : Result<string, string> =
     try
         checkEdges g
-        let order = wireOrder g
-        let ports = controlPorts g
+        let order = edgeOrder g
+        let services = g.boxes |> List.filter (isService g)
 
-        let collect (rs: Result<'a, string> list) : Result<'a list, string> =
-            (Ok [], rs) ||> List.fold (fun acc r -> match acc, r with | Ok xs, Ok x -> Ok(x :: xs) | Error e, _ | _, Error e -> Error e) |> Result.map List.rev
+        // Which boxes read their operands at their formats, and which
+        // operands: found by elaborating, so the print cannot disagree.
+        let reads = System.Collections.Generic.Dictionary<string, bool list>()
+        Warp11.Verilog.emitDesign (elaborateTracing (fun box unread -> reads[box] <- unread) g).def |> ignore
 
-        // One `let` per box: the unit, its arguments as values, and its copies —
-        // or, for a box that is a design, that design's module as a unit.
-        let units =
-            order
-            |> List.map (fun b ->
-                let printed =
-                    match designOf g b with
-                    | Some sub ->
-                        let ins, outs, controls = ioNames sub
-                        let ctlFormats = [ for n, f in controlPorts sub -> $"\"{n}\", {showFormat f}" ] |> String.concat "; "
-                        let ctlList = if ctlFormats = "" then "[]" else $"[ {ctlFormats} ]"
-                        let ctlNames = if controls.IsEmpty then "[]" else "[ " + String.concat "; " controls + " ]"
+        let ins, outs, controls = ioNames g
+        let controlName = Map.ofList (List.zip (List.map fst (controlPorts g)) controls)
 
-                        let inList = String.concat "; " ins
-                        let outList = String.concat "; " outs
-                        let pattern = tuple (ins @ outs @ controls)
-                        let value = valueName sub.name
+        // A stream's name where it leaves a port, and each edge's branch.
+        let leavingName (p: PortRef) = ident $"{p.box}_{p.port}"
+        let branchesName (p: PortRef) = ident $"{p.box}_{p.port}_branches"
+        let reachName (stream: string) = ident $"output_{stream}"
+        let outputBox = "output"
 
-                        match showPins $"{sub.name}'s inputs" sub.inputs, showPins $"{sub.name}'s outputs" sub.outputs with
+        let branch (e: Edge) =
+            match edgesFrom g e.from with
+            | [ _ ] -> leavingName e.from
+            | edges -> $"{branchesName e.from}[%d{List.findIndex ((=) e) edges}]"
+
+        // The lines that name a stream leaving a port: the stream, and its
+        // fan-out where several edges leave.
+        let leaving (p: PortRef) (expression: string list) =
+            let named =
+                match expression with
+                | [ one ] -> [ $"let {leavingName p} = {one}" ]
+                | first :: rest -> [ $"let {leavingName p} ="; "    " + first ] @ [ for line in rest -> "    " + line ]
+                | [] -> []
+
+            match edgesFrom g p with
+            | [ _ ] -> named
+            | edges ->
+                let call =
+                    match fanOutAt g p with
+                    | FanOut.Broadcast -> "streamForkEager"
+                    | FanOut.Balance -> "streamBalance"
+
+                named @ [ $"let {branchesName p} = {leavingName p} |> {call} %d{edges.Length}" ]
+
+        // The stream that reaches a port, as an expression.
+        let arriving (sink: PortRef) =
+            let through (e: Edge) =
+                if e.connection = Connection.Wire then branch e else $"{branch e} |> connectAs Connection.{e.connection}"
+
+            match edgesInto g sink |> List.map through with
+            | [ one ] -> one
+            | several ->
+                let listed = several |> List.map (fun s -> if s.Contains "|>" then $"({s})" else s) |> String.concat "; "
+                $"streamMergeWith {showArbitration (mergeAt g sink)} [ {listed} ]"
+
+        // A structural box: the call code makes between stages.
+        let structuralOf (b: Box) : Result<string list, string> =
+            let outFields = (snd (streamsOf g b.name)).Head.fields
+            let wrapped (expression: string) = if expression.Contains "|>" then $"({expression})" else expression
+
+            match showPins $"{b.name}'s fields" outFields with
+            | Error e -> Error e
+            | Ok outPins ->
+                if b.unit = fifoBox then
+                    let depth = structuralArgument b "depth"
+                    Ok(leaving (port b.name streamOutlet) [ arriving (port b.name streamInlet); $"|> streamFifo \"{b.name}\" {depth}" ])
+                elif b.unit = fieldsBox then
+                    let arrive = (fst (streamsOf g b.name)).Head.fields |> List.map fst
+                    let picked = fieldPicks b |> List.map snd
+                    let pattern = arrive |> List.map (fun n -> if List.contains n picked then ident n else "_")
+
+                    Ok(
+                        leaving
+                            (port b.name streamOutlet)
+                            [ arriving (port b.name streamInlet)
+                              $"|> streamMapTo ({outPins}) (fun {tuple pattern} -> {tupleValue (List.map ident picked)})" ]
+                    )
+                else
+                    let sides = joinInputs b |> List.map (fun side -> wrapped (arriving (port b.name side))) |> String.concat "; "
+                    Ok(leaving (port b.name streamOutlet) [ $"streamJoin ({outPins}) [ {sides} ]" ])
+
+        let stageOf (b: Box) : Result<string list, string> =
+            if isStructural b then structuralOf b else
+
+            let unit =
+                match designOf g b with
+                | Some sub ->
+                    let subIns, subOuts, subControls = ioNames sub
+
+                    match sub.inputs, sub.outputs with
+                    | [ input ], [ output ] ->
+                        match showPins $"{sub.name}'s input" input.fields, showPins $"{sub.name}'s output" output.fields with
                         | Ok inPins, Ok outPins ->
-                            Ok $"designUnit \"{sub.name}\" ({inPins}) ({outPins}) {ctlList} {value} (fun {pattern} -> [ {inList} ], [ {outList} ], {ctlNames})"
+                            let formats = [ for n, f in controlPorts sub -> $"\"{n}\", {showFormat f}" ] |> String.concat "; "
+                            let formatList = if formats = "" then "[]" else $"[ {formats} ]"
+                            let ports = if subControls.IsEmpty then "[]" else "[ " + String.concat "; " subControls + " ]"
+                            let pattern = tuple (subIns @ subOuts @ subControls)
+                            Ok $"designUnit \"{sub.name}\" ({inPins}) ({outPins}) {formatList} {valueName sub.name} (fun {pattern} -> {subIns.Head}, {subOuts.Head}, {ports})"
                         | Error e, _
                         | _, Error e -> Error e
-                    | None ->
-                        let factory = (units ())[b.unit]
-                        factory.print g.sampleRate (complete factory b.arguments)
+                    | _ -> Error $"export: {sub.name} as a box has one stream in and one out"
+                | None ->
+                    let factory = (units ())[b.unit]
+                    let arguments = complete factory b.arguments
 
-                printed
-                |> Result.map (fun printed ->
-                    let unit = if b.copies = 1 then printed else $"copies %d{b.copies} ({printed})"
-                    $"    let {ident b.name}Unit = {unit}"))
-            |> collect
+                    match factory.served with
+                    | Some served ->
+                        served.print g.sampleRate arguments (fun socket ->
+                            edgesFrom g (port b.name socket) |> List.tryHead |> Option.map (fun e -> ident e.``to``.box))
+                    | None -> factory.print g.sampleRate arguments
 
-        let inPins = showPins "the input box" g.inputs
-        let outPins = showPins "the output box" g.outputs
+            let controlValues =
+                [ for n, f in controlsOf g b.name ->
+                      match g.edges |> List.tryFind (fun e -> e.``to`` = port b.name n) with
+                      | None -> $"lit %d{settingBits g b (n, f)}UL %d{f.totalWidth}"
+                      | Some e when e.from.box = "input" -> controlName[e.from.port]
+                      | Some e ->
+                          match controlBoxOf g e.from.box with
+                          | Some c when c.kind = NumberBox -> controlName[c.name]
+                          | Some c -> $"lit %d{controlValueBits c}UL %d{f.totalWidth}"
+                          | None -> failwith $"{showEdge e}: a control wired from a unit's box is not built" ]
 
-        match units, inPins, outPins with
+            let controlList = if controlValues.IsEmpty then "[]" else "[ " + String.concat "; " controlValues + " ]"
+
+            unit
+            |> Result.bind (fun unit ->
+                match streamsOf g b.name with
+                | [ input ], [ output ] ->
+                    let call =
+                        if b.copies = 1 then
+                            $"stage {controlList} ({unit}) \"{b.name}\""
+                        else
+                            let order = if b.ordered then "Farm.InOrder" else "Farm.AsDone"
+                            $"farm {order} {controlList} ({unit}) \"{b.name}\" %d{b.copies}"
+
+                    // The operands read at their formats, where the
+                    // elaboration read them.
+                    let read =
+                        match reads.TryGetValue b.name with
+                        | true, unread ->
+                            let fields = (unitOf g b).operands.fields
+                            let names = fields |> List.map (fst >> ident)
+
+                            let values =
+                                List.zip3 names fields unread
+                                |> List.map (fun (n, (_, f), u) -> if not u then n elif f.signed then $"asSInt {n}" else $"asUInt {n}")
+
+                            match showPins $"{b.name}'s operands" fields with
+                            | Ok pins -> Ok [ $"|> streamMapTo ({pins}) (fun {tuple names} -> {tupleValue values})" ]
+                            | Error e -> Error e
+                        | _ -> Ok []
+
+                    read
+                    |> Result.map (fun read ->
+                        leaving (port b.name output.name) ([ arriving (port b.name input.name) ] @ read @ [ $"|> {call}" ]))
+                | _ -> Error $"export: {b.name} has more than one stream in or out")
+
+        let inPins = g.inputs |> List.map (fun s -> showPins $"the stream '{s.name}'" s.fields) |> collect
+        let outPins = g.outputs |> List.map (fun s -> showPins $"the stream '{s.name}'" s.fields) |> collect
+
+        match inPins, outPins, order |> List.map stageOf |> collect with
         | Error e, _, _
         | _, Error e, _
         | _, _, Error e -> Error e
-        | Ok units, Ok inPins, Ok outPins ->
-            let ins, outs, _ = ioNames g
-
+        | Ok inPins, Ok outPins, Ok stages ->
             let ioFactory =
-                [ for i in ins -> $"streamInputPorts p \"{i}\" ({inPins})" ]
-                @ [ for o in outs -> $"streamOutputPorts p \"{o}\" ({outPins})" ]
-                @ [ for n, f in ports -> $"p.inPort \"{n}\" %d{f.totalWidth}" ]
+                [ for s, pins in List.zip g.inputs inPins -> $"streamInputPorts p \"{s.name}\" ({pins})" ]
+                @ [ for s, pins in List.zip g.outputs outPins -> $"streamOutputPorts p \"{s.name}\" ({pins})" ]
+                @ [ for n, f in controlPorts g -> $"p.inPort \"{n}\" %d{f.totalWidth}" ]
 
-            let ioPattern = tuple (ins @ outs @ [ for n, _ in ports -> ident n ])
+            let sources =
+                [ for s, name in List.zip g.inputs ins do
+                      yield! leaving (port "input" s.name) [ $"streamSource {name}" ] ]
 
-            // The beat, as the elaborator walks it: names and the pin each came from.
-            let sourceOf (sink: PinRef) = (g.edges |> List.find (fun e -> e.``to`` = sink)).from
+            let reaching = [ for s in g.outputs -> (let reaches = arriving (port outputBox s.name) in $"let {reachName s.name} = {reaches}") ]
+            let reached = [ for s in g.outputs -> reachName s.name ]
+            let inner = sources @ List.concat stages @ reaching
 
-            let neededAfter (b: Box) (source: PinRef) =
-                let later = order |> List.skipWhile (fun x -> x.name <> b.name) |> List.tail |> List.map (fun x -> x.name) |> set
-                g.edges |> List.exists (fun e -> e.from = source && (e.``to``.box = "output" || later.Contains e.``to``.box))
+            // The services around the stages, outermost first: in place a
+            // `let`, shared a `sharingWith` whose body is everything inside.
+            let rec serving (remaining: Box list) (indent: string) : string list =
+                match remaining with
+                | [] -> [ for line in inner -> indent + line ] @ [ indent + tupleValue reached ]
+                | service :: rest ->
+                    let factory = (units ())[service.unit]
 
-            let firstBeat = [ for n, f in g.inputs -> n, f, pin "input" n ]
+                    match factory.print g.sampleRate (complete factory service.arguments) with
+                    | Error e -> failwith e
+                    | Ok unit ->
+                        if clientsOf g service = 1 then
+                            [ $"{indent}let {ident service.name} = inPlace ({unit})" ] @ serving rest indent
+                        else
+                            let arbitration = showArbitration (mergeAt g (port service.name servicePort))
 
-            let stages, slots =
-                (((Ok []: Result<string list, string>), firstBeat), order)
-                ||> List.fold (fun (lines, slots) b ->
-                    let unit = unitOf g b
-                    let names = slots |> List.map (fun (n, _, _) -> n)
+                            [ $"{indent}sharingWith {arbitration} ({unit}) \"{service.name}\" (fun {ident service.name} ->" ]
+                            @ serving rest (indent + "    ")
+                            |> fun lines -> (lines |> List.take (lines.Length - 1)) @ [ List.last lines + ")" ]
 
-                    let indexOf (source: PinRef) =
-                        slots |> List.findIndex (fun (_, _, s) -> s = source)
+            let bodyIndent = "            "
 
-                    let operandIdx = [ for n, _ in unit.operands.fields -> indexOf (sourceOf (pin b.name n)) ]
+            let body =
+                if services.IsEmpty then
+                    [ for line in inner -> bodyIndent + line ]
+                    @ [ for s, out in List.zip g.outputs outs -> $"{bodyIndent}streamSink {out} {reachName s.name}" ]
+                else
+                    [ $"{bodyIndent}let {tuple reached} =" ]
+                    @ serving services (bodyIndent + "    ")
+                    @ [ "" ]
+                    @ [ for s, out in List.zip g.outputs outs -> $"{bodyIndent}streamSink {out} {reachName s.name}" ]
 
-                    let controls =
-                        [ for n, f in unit.controls ->
-                              match g.edges |> List.tryFind (fun e -> e.``to`` = pin b.name n) with
-                              | None -> ident (implicitPortName b.name n)
-                              | Some e when e.from.box = "input" -> ident e.from.pin
-                              | Some e ->
-                                  match controlBoxOf g e.from.box with
-                                  | Some c when c.kind = NumberBox -> ident c.name
-                                  | Some c -> $"lit %d{controlValueBits c}UL %d{f.totalWidth}"
-                                  | None -> failwith $"{showPin e.from}: a control wired from a unit's box is not built" ]
+            // The last sink closes the body.
+            let body = (body |> List.take (body.Length - 1)) @ [ List.last body + ")" ]
 
-                    let carried = slots |> List.indexed |> List.filter (fun (_, (_, _, s)) -> neededAfter b s)
-                    let results = [ for n, f in unit.results.fields -> n, f, pin b.name n ]
-                    let nextSlots = results @ List.map snd carried
-                    let carriedIdx = carried |> List.map fst |> set
-
-                    let operandsLambda =
-                        let pattern = names |> List.mapi (fun i n -> if List.contains i operandIdx then ident n else "_")
-                        $"(fun {tuple pattern} -> {tupleValue [ for i in operandIdx -> ident names[i] ]})"
-
-                    let finishLambda =
-                        let resultNames = [ for n, _, _ in results -> ident n ]
-                        let beatPattern = names |> List.mapi (fun i n -> if carriedIdx.Contains i then ident n else "_")
-                        let beat = if carriedIdx.IsEmpty then "_" else tuple beatPattern
-                        $"(fun {tuple resultNames} {beat} -> {tupleValue (resultNames @ [ for i in carried |> List.map fst -> ident names[i] ])})"
-
-                    let controlsList = if controls.IsEmpty then "[]" else "[ " + String.concat "; " controls + " ]"
-
-                    let line =
-                        showPins $"the beat after {b.name}" [ for n, f, _ in nextSlots -> n, f ]
-                        |> Result.map (fun outPins ->
-                            $"            |> fuStagesWith {controlsList} {ident b.name}Unit \"{b.name}\" ({outPins}) {operandsLambda} {finishLambda}")
-
-                    (match lines, line with
-                     | Ok ls, Ok l -> Ok(ls @ [ l ])
-                     | Error e, _
-                     | _, Error e -> Error e),
-                    nextSlots)
-
-            stages
-            |> Result.map (fun stages ->
-                // The design's outputs picked out of the last beat, unless it is already in order.
-                let names = slots |> List.map (fun (n, _, _) -> n)
-
-                let outIdx =
-                    [ for n, _ in g.outputs ->
-                          let src = sourceOf (pin "output" n)
-                          slots |> List.findIndex (fun (_, _, s) -> s = src) ]
-
-                let projection =
-                    if outIdx = [ 0 .. slots.Length - 1 ] then
-                        []
-                    else
-                        let pattern = names |> List.mapi (fun i n -> if List.contains i outIdx then ident n else "_")
-                        [ $"            |> List.map (streamMapTo ({outPins}) (fun {tuple pattern} -> {tupleValue [ for i in outIdx -> ident names[i] ]}))" ]
-
-                let sources = ins |> List.map (fun i -> $"streamSource {i}") |> String.concat "; "
-                let sinks = String.concat "; " outs
-
+            Ok(
                 String.concat
                     "\n"
-                    ([ $"let {valueName g.name} =" ]
-                     @ units
-                     @ [ (if units.IsEmpty then "    defModule" else "\n    defModule")
-                         $"        \"{g.name}\""
-                         "        (fun p ->"
-                         "            " + String.concat ",\n            " ioFactory + ")"
-                         $"        (fun {ioPattern} ->"
-                         $"            [ {sources} ]" ]
-                     @ stages
-                     @ projection
-                     @ [ $"            |> List.iter2 streamSink [ {sinks} ])" ]))
+                    ([ $"let {valueName g.name} ="
+                       "    defModule"
+                       $"        \"{g.name}\""
+                       "        (fun p ->"
+                       "            " + String.concat ",\n            " ioFactory + ")"
+                       $"        (fun {tuple (ins @ outs @ controls)} ->" ]
+                     @ body)
+            )
     with e ->
         Error e.Message
 
@@ -270,6 +364,12 @@ let exportWith (mapping: Warp11.Mapping.Mapping option) (g: Graph) : Result<stri
 
             let ins, outs, controls = ioNames g
             let ports = controlPorts g
+
+            let input, output =
+                match g.inputs, g.outputs with
+                | [ input ], [ output ] -> input, output
+                | _ -> failwith $"export: {g.name} on a board carries one stream in and one out"
+
             let q (text: string) = "\"" + text + "\""
             let fmtList (pins: (string * NumberFormat) list) = pins |> List.map (fun (n, f) -> q n + ", " + showFormat f) |> String.concat "; "
             let listOf (items: string) = if items = "" then "[]" else "[ " + items + " ]"
@@ -277,10 +377,10 @@ let exportWith (mapping: Warp11.Mapping.Mapping option) (g: Graph) : Result<stri
             let needValues =
                 [ for n, f in ports ->
                       "Warp11.BoardTop.valueFrom " + q n + " (" + showFormat f + ") " + string (startingOf |> Map.tryFind n |> Option.defaultValue 0UL) + "UL" ]
-            let fieldsIn = [ for i in 0 .. g.inputs.Length - 1 -> "fields[" + string i + "]" ]
-            let outNames = [ for n, _ in g.outputs -> ident n ]
+            let fieldsIn = [ for i in 0 .. input.fields.Length - 1 -> "fields[" + string i + "]" ]
+            let outNames = [ for n, _ in output.fields -> ident n ]
             let portList = [ for (n, _), v in List.zip ports controls -> q n + ", " + v ] |> String.concat "; "
-            let inPins = match showPins "the input box" g.inputs with Ok p -> p | Error e -> failwith e
+            let inPins = match showPins "the input stream" input.fields with Ok p -> p | Error e -> failwith e
             let ioPattern = tuple (ins @ outs @ controls)
             let outList = "[ " + String.concat "; " outNames + " ]"
 
@@ -295,14 +395,14 @@ let exportWith (mapping: Warp11.Mapping.Mapping option) (g: Graph) : Result<stri
               "/// instance under a name."
               "let design: Warp11.BoardTop.Design ="
               "    let needs ="
-              "        [ Warp11.BoardTop.streamIn \"in\" " + listOf (fmtList g.inputs)
-              "          Warp11.BoardTop.streamOut \"out\" " + listOf (fmtList g.outputs) + (if needValues = [] then " ]" else "")
+              "        [ Warp11.BoardTop.streamIn \"in\" " + listOf (fmtList input.fields)
+              "          Warp11.BoardTop.streamOut \"out\" " + listOf (fmtList output.fields) + (if needValues = [] then " ]" else "")
             ]
             @ [ for i, v in List.indexed needValues -> "          " + v + (if i = needValues.Length - 1 then " ]" else "") ]
             @ [ ""
                 "    { name = " + q g.name
                 "      sampleRate = sampleRate"
-                "      streams = " + string g.streams
+                "      streams = 1"
                 "      needs = needs"
                 "      answers = " + string (answersOf g)
                 "      atClocking = None"
@@ -315,7 +415,7 @@ let exportWith (mapping: Warp11.Mapping.Mapping option) (g: Graph) : Result<stri
                 "                    s"
                 "                    |> streamMapTo (" + inPins + ") (fun fields -> " + tupleValue fieldsIn + ")"
                 "                    |> streamThroughInstance " + ins.Head + " " + outs.Head
-                "                    |> streamMapTo (layoutOfList " + listOf (fmtList g.outputs) + ") (fun " + tuple outNames + " -> " + outList + ")"
+                "                    |> streamMapTo (layoutOfList " + listOf (fmtList output.fields) + ") (fun " + tuple outNames + " -> " + outList + ")"
                 "              ports = " + listOf portList
                 "              readbacks = [] }) }"
                 ""
@@ -342,6 +442,7 @@ let exportWith (mapping: Warp11.Mapping.Mapping option) (g: Graph) : Result<stri
                "open Warp11.Pedal"
                "open Warp11.Factories"
                "open Warp11.Elaborate"
+               "open Warp11.Audio"
                // What the units this design names came from, so the source
                // compiles where they live rather than only where it was
                // written.

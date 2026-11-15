@@ -125,6 +125,10 @@ let private diffDesignsAtDefault () =
       audioGainShared.def
       audioEqBandInPlace.def
       audioEqBandShared.def
+      for arbitration in arbitrations do
+          (arbitratedMerge arbitration).def
+      for arbitration in arbitrationsBeyondDefault do
+          (audioGainSharedWith arbitration).def
       audioTone.def
       i2sLoopback.def
       i2sLinkPassthru.def

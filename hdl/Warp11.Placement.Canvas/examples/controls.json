@@ -1,48 +1,63 @@
 {
+  "format": 2,
   "name": "Controls",
-  "streams": 1,
   "sampleRate": 48828,
   "inputs": [
     {
-      "name": "left",
-      "width": 24,
-      "fraction": 0,
-      "signed": true
-    },
-    {
-      "name": "right",
-      "width": 24,
-      "fraction": 0,
-      "signed": true
+      "name": "in",
+      "fields": [
+        {
+          "name": "left",
+          "width": 24,
+          "fraction": 0,
+          "signed": true
+        },
+        {
+          "name": "right",
+          "width": 24,
+          "fraction": 0,
+          "signed": true
+        }
+      ]
     }
   ],
   "controls": [],
   "outputs": [
     {
-      "name": "left",
-      "width": 24,
-      "fraction": 0,
-      "signed": true
-    },
-    {
-      "name": "right",
-      "width": 24,
-      "fraction": 0,
-      "signed": true
+      "name": "out",
+      "fields": [
+        {
+          "name": "left",
+          "width": 24,
+          "fraction": 0,
+          "signed": true
+        },
+        {
+          "name": "right",
+          "width": 24,
+          "fraction": 0,
+          "signed": true
+        }
+      ]
     }
   ],
   "boxes": [
     {
       "name": "gain",
       "unit": "gain",
-      "copies": 1,
       "arguments": {},
-      "settings": {
-        "volume": "256"
-      }
+      "settings": {}
     }
   ],
   "controlBoxes": [
+    {
+      "name": "volume",
+      "width": 16,
+      "fraction": 0,
+      "signed": false,
+      "kind": "number",
+      "value": "256"
+    },
     {
       "name": "toggle",
       "width": 1,
@@ -52,22 +67,18 @@
       "value": "0"
     }
   ],
-  "wires": [
+  "edges": [
     {
-      "from": "input.left",
-      "to": "gain.left"
+      "from": "input.in",
+      "to": "gain.in"
     },
     {
-      "from": "input.right",
-      "to": "gain.right"
+      "from": "gain.out",
+      "to": "output.out"
     },
     {
-      "from": "gain.left",
-      "to": "output.left"
-    },
-    {
-      "from": "gain.right",
-      "to": "output.right"
+      "from": "volume.out",
+      "to": "gain.volume"
     },
     {
       "from": "toggle.out",
@@ -89,6 +100,10 @@
     ],
     "toggle": [
       320,
+      320
+    ],
+    "volume": [
+      60,
       320
     ]
   },

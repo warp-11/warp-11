@@ -30,6 +30,43 @@ let streamBroadcast (n: int) (s: Stream<'p>) : Stream<'p> list =
               valid = s.valid &&& othersReady
               ready = readies[i] } ]
 
+/// Who goes next where several askers meet one taker.
+[<RequireQualifiedAccess>]
+type ArbitrationPolicy =
+    /// The asker after the one served last, so every asker under continuous
+    /// load gets the same share and none waits more than one round.
+    | RoundRobin
+    /// The lowest-numbered asker. For askers that are not peers: one on the
+    /// design's critical path and others that can wait. Fair only if the
+    /// first asker's requests have gaps, which is the caller's to know.
+    | Priority
+
+/// When the choice is announced.
+[<RequireQualifiedAccess>]
+type ArbitrationTiming =
+    /// Chosen and granted in one cycle. The request-to-grant path is the
+    /// whole pick plus the mux behind it: at five askers 25 ns of an iCE40,
+    /// fine at 166 MHz on a KV260's carry.
+    | SameCycle
+    /// Chosen one cycle, granted the next if the chosen asker still asks.
+    /// The grant and the mux's select are registers; a request withdrawn in
+    /// between costs an idle cycle.
+    | Registered
+
+/// How a meeting of several askers is arbitrated: a merge of streams
+/// (`streamMergeWith`) and a shared unit's clients (`Fu.sharingWith`,
+/// `warpFuWith`) choose from this one record.
+type Arbitration =
+    { policy: ArbitrationPolicy
+      timing: ArbitrationTiming }
+
+module Arbitration =
+    /// Round-robin, same cycle: what `streamMerge2`, `warpFu` and
+    /// `Fu.sharing` build.
+    let roundRobin =
+        { policy = ArbitrationPolicy.RoundRobin
+          timing = ArbitrationTiming.SameCycle }
+
 /// Two-to-one round-robin merge: when both offer, the side not served last wins.
 /// Arrival order across inputs is arbitration order — beats should carry their
 /// coordinates (the pixel-beat rule) rather than lean on it.
@@ -53,6 +90,9 @@ let streamMerge2 (sa: Stream<'p>) (sb: Stream<'p>) : Stream<'p> =
       layout = sa.layout }
 
 /// N→1 as a balanced tree of round-robin pairs — Mandelbrot's lane-results shape.
+/// Each pair is fair; the tree is fair only at a power-of-two count with every
+/// input asking. Five saturated inputs get an eighth each and the odd one a
+/// half. Where the share matters, `streamMergeWith`.
 let rec streamMergeTree (streams: Stream<'p> list) : Stream<'p> =
     match streams with
     | [] -> failwith "merge of nothing"

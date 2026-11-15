@@ -44,29 +44,50 @@ let pinRadius = 6.0
 let pinHitRadius = 10.0
 let wireHitDistance = 6.0
 
-/// One row of pins on a box's side: signal pins first, then the controls —
-/// control inlets on a box's left, the design's controls as outlets on the
-/// input box's right. Pure Data's two kinds of inlet, one under the other.
+/// One row on a box's side: a port. Stream ports first, then the sockets
+/// (out) or the service (in), then the controls — control inlets on a
+/// box's left, the design's controls as outlets on the input box's right.
 type PinRow =
-    { pin: string
+    { port: string
+      /// A control's format; a stream's first field's, for reading a level.
       format: NumberFormat
-      control: bool }
+      control: bool
+      /// A stream port's fields; empty for anything else.
+      fields: Fields
+      /// A socket port or a service port.
+      socket: bool }
 
 let pinRows (g: Graph) (box: string) (side: Side) : PinRow list =
-    let inputs, outputs = pinsOf g box
+    let inputs, outputs = streamsOf g box
     let controls = controlsOf g box
 
-    let signals, controls =
-        match side, box, controlBoxOf g box with
-        | Out, _, Some c -> [], [ controlOutlet, c.format ]
-        | In, _, Some _ -> [], []
-        | In, "input", _ -> [], []
-        | In, _, _ -> inputs, controls
-        | Out, "input", _ -> outputs, controls
-        | Out, _, _ -> outputs, []
+    let stream (s: BoundaryStream) =
+        { port = s.name
+          format = (match s.fields with (_, f) :: _ -> f | [] -> unsignedInt 1)
+          control = false
+          fields = s.fields
+          socket = false }
 
-    [ for n, f in signals -> { pin = n; format = f; control = false } ]
-    @ [ for n, f in controls -> { pin = n; format = f; control = true } ]
+    let control (n: string, f: NumberFormat) =
+        { port = n; format = f; control = true; fields = []; socket = false }
+
+    let socket (n: string) =
+        { port = n; format = unsignedInt 1; control = false; fields = []; socket = true }
+
+    let serving = g.boxes |> List.exists (fun b -> b.name = box && isService g b)
+
+    match side, box, controlBoxOf g box with
+    | Out, _, Some c -> [ control (controlOutlet, c.format) ]
+    | In, _, Some _ -> []
+    | In, "input", _ -> []
+    | In, _, _ ->
+        // A box that sockets are connected to is a service: its stream
+        // ports are not there to connect.
+        (if serving then [] else List.map stream inputs)
+        @ (if (servesAs g box).IsSome then [ socket servicePort ] else [])
+        @ List.map control controls
+    | Out, "input", _ -> List.map stream outputs @ List.map control controls
+    | Out, _, _ -> (if serving then [] else List.map stream outputs) @ [ for s in socketsOf g box -> socket s.name ]
 
 let controlBoxWidth = 120.0
 
@@ -74,22 +95,22 @@ let controlBoxWidth = 120.0
 let boxWidthOf (g: Graph) (box: string) =
     if (controlBoxOf g box).IsSome then controlBoxWidth else boxWidth
 
-/// A box's height, from its taller pin column; a control box is one row.
+/// A box's height, from its taller port column; a control box is one row.
 let boxHeight (g: Graph) (box: string) =
     if (controlBoxOf g box).IsSome then
         headerHeight + rowHeight
     else
         headerHeight + float (max (pinRows g box In).Length (pinRows g box Out).Length) * rowHeight + 10.0
 
-/// Where a pin sits, relative to its box's top-left: inputs down the left
+/// Where a port sits, relative to its box's top-left: inputs down the left
 /// edge, outputs down the right.
-let private pinOffset (g: Graph) (p: PinRef) (side: Side) : (float * float) option =
-    let row = pinRows g p.box side |> List.tryFindIndex (fun r -> r.pin = p.pin)
+let private pinOffset (g: Graph) (p: PortRef) (side: Side) : (float * float) option =
+    let row = pinRows g p.box side |> List.tryFindIndex (fun r -> r.port = p.port)
     let x = match side with In -> 0.0 | Out -> boxWidthOf g p.box
     row |> Option.map (fun r -> x, headerHeight + float r * rowHeight + rowHeight / 2.0)
 
 /// A pin's centre in world coordinates.
-let pinCentre (g: Graph) (p: PinRef) (side: Side) : (float * float) option =
+let pinCentre (g: Graph) (p: PortRef) (side: Side) : (float * float) option =
     match Map.tryFind p.box g.positions, pinOffset g p side with
     | Some(bx, by), Some(dx, dy) -> Some(bx + dx, by + dy)
     | _ -> None
@@ -120,17 +141,17 @@ type Drag =
     /// history entry on release rather than one per pixel.
     | MovingBox of box: string * grabOffset: (float * float) * before: Graph
     | Panning of lastScreen: (float * float)
-    | Wiring of from: (PinRef * Side) * atWorld: (float * float)
+    | Wiring of from: (PortRef * Side) * atWorld: (float * float)
 
 type Selection =
     | SelectedBox of string
     | SelectedWire of Edge
 
-/// A pin under the pointer, or a wire, or a box, or nothing — pins first,
-/// because a pin sits on its box's edge and a wire is the rarer, more
+/// A port under the pointer, or a wire, or a box, or nothing — pins first,
+/// because a port sits on its box's edge and a wire is the rarer, more
 /// deliberate gesture; wires before boxes because a wire is thin.
 type Hit =
-    | HitPin of PinRef * Side
+    | HitPin of PortRef * Side
     | HitWire of Edge
     | HitBox of string
     | HitNothing
@@ -155,7 +176,7 @@ let hitTest (g: Graph) (wx: float, wy: float) : Hit =
         [ for box in boxOrder g do
               for side in [ In; Out ] do
                   for r in pinRows g box side do
-                      let p = pin box r.pin
+                      let p = port box r.port
 
                       match pinCentre g p side with
                       | Some(px, py) when (px - wx) ** 2.0 + (py - wy) ** 2.0 <= pinHitRadius ** 2.0 -> yield p, side
@@ -187,7 +208,7 @@ let hitTest (g: Graph) (wx: float, wy: float) : Hit =
 
 let private inv (x: float) = x.ToString("0.##", CultureInfo.InvariantCulture)
 
-/// A wire from an output pin to an input pin: a cubic that leaves and arrives
+/// A wire from an output port to an input pin: a cubic that leaves and arrives
 /// horizontally, with a bend that grows with the distance.
 let wirePath (x1: float, y1: float) (x2: float, y2: float) =
     let dx = max 40.0 (abs (x2 - x1) / 2.0)
@@ -220,7 +241,7 @@ let private boxView (g: Graph) (selected: Selection option) (name: string) (bx: 
 
     let title, subtitle =
         match name, controlBoxOf g name with
-        | "input", _ -> "input", $"%d{g.streams} stream(s), %d{g.controls.Length} control(s)"
+        | "input", _ -> "input", $"%d{g.inputs.Length} stream(s), %d{g.controls.Length} control(s)"
         | "output", _ -> "output", ""
         | _, Some c ->
             let kind =
@@ -235,6 +256,10 @@ let private boxView (g: Graph) (selected: Selection option) (name: string) (bx: 
 
             match designOf g b with
             | Some sub -> name, $"design {sub.name} × %d{b.copies} — double-click to open"
+            | None when isService g b -> name, $"{b.unit}: a service, %d{clientsOf g b} socket(s) on it"
+            | None when isStructural b ->
+                let arguments = structuralParameters b.unit |> List.map (fun p -> structuralArgument b p.name) |> String.concat " "
+                name, $"{b.unit} {arguments}"
             | None ->
 
             let u = unitOf g b
@@ -284,7 +309,7 @@ let private boxView (g: Graph) (selected: Selection option) (name: string) (bx: 
                   let px = bx + (if isInput then 0.0 else width)
                   let py = by + headerHeight + float row * rowHeight + rowHeight / 2.0
 
-                  // A signal pin is a circle; a control pin a square, as a
+                  // A signal port is a circle; a control port a square, as a
                   // control wire is the thinner one.
                   if r.control then
                       yield
@@ -315,10 +340,10 @@ let private boxView (g: Graph) (selected: Selection option) (name: string) (bx: 
                   // control inlet nobody wired, the value it holds.
                   let text =
                       match g.boxes |> List.tryFind (fun b -> b.name = name) with
-                      | Some b when r.control && isInput && not (g.edges |> List.exists (fun e -> e.``to`` = pin name r.pin)) ->
-                          let held = b.settings |> Map.tryFind r.pin |> Option.defaultValue "0"
-                          $"{r.pin} = {held}"
-                      | _ -> r.pin
+                      | Some b when r.control && isInput && not (g.edges |> List.exists (fun e -> e.``to`` = port name r.port)) ->
+                          let held = b.settings |> Map.tryFind r.port |> Option.defaultValue "0"
+                          $"{r.port} = {held}"
+                      | _ -> r.port
 
                   yield
                       TextBlock.create
@@ -345,7 +370,7 @@ type Recording =
 
 /// What the canvas needs to paint a design that is running: the session to
 /// drive and read, the recording playing into it (if one is), a speaker (if
-/// there is one), the design's controls, and the nets each pin rides on.
+/// there is one), the design's controls, and the nets each port rides on.
 type Live =
     { session: Warp11.Debug.IDebugSession
       recording: Recording option
@@ -397,15 +422,46 @@ let private showValue (f: NumberFormat) (v: System.Numerics.BigInteger) =
     else
         (float signed / float (1L <<< f.fracBits)).ToString("0.####", CultureInfo.InvariantCulture)
 
-let private formatOfPin (g: Graph) (p: PinRef) (side: Side) : NumberFormat option =
-    match lookupPin g side p with
-    | Ok(_, f) -> Some f
-    | Error _ -> None
+/// The format a port's value reads at: a control's own, a stream's first
+/// field's — what a level or a one-line value is taken from.
+let private formatOfPin (g: Graph) (p: PortRef) (side: Side) : NumberFormat option =
+    match lookupPort g side p with
+    | Ok(ControlIn f)
+    | Ok(ControlOut f) -> Some f
+    | Ok(StreamIn((_, f) :: _))
+    | Ok(StreamOut((_, f) :: _)) -> Some f
+    | _ -> None
 
 let private isControlWire (g: Graph) (e: Edge) =
-    match lookupPin g In e.``to`` with
-    | Ok(ControlIn, _) -> true
+    match lookupPort g In e.``to`` with
+    | Ok(ControlIn _) -> true
     | _ -> false
+
+let private isSocketWire (g: Graph) (e: Edge) =
+    match lookupPort g In e.``to`` with
+    | Ok(ServiceIn _) -> true
+    | _ -> false
+
+/// A box's stream fields on one side, each with the net it rides on in a
+/// design elaborated with probes: `left`, or `side.left` where the box has
+/// more than one stream there.
+let private fieldNets (g: Graph) (box: string) (side: Side) : (string * NumberFormat * string) list =
+    let ins, outs = streamsOf g box
+    let streams = match side with In -> ins | Out -> outs
+
+    [ for s in streams do
+          for (n, f), (net, _) in List.zip s.fields (fieldProbes g (port box s.name) side) ->
+              (if streams.Length = 1 then n else $"{s.name}.{n}"), f, net ]
+
+/// How an edge is drawn for what it registers: nothing for a wire.
+let private connectionMark (c: Connection) =
+    match c with
+    | Connection.Wire -> ""
+    | Connection.Forward -> "forward"
+    | Connection.Backward -> "backward"
+    | Connection.Both -> "both"
+
+let private connections = [ Connection.Wire; Connection.Forward; Connection.Backward; Connection.Both ]
 
 // ---------------------------------------------------------------------------
 // The component.
@@ -413,7 +469,8 @@ let private isControlWire (g: Graph) (e: Edge) =
 let private mono = FontFamily "monospace"
 
 let private button (label: string) (act: unit -> unit) =
-    Button.create [ Button.content label; Button.margin (Thickness(2.0, 0.0)); Button.onClick ((fun _ -> act ()), SubPatchOptions.Always) ]
+    // An underscore in a button's text is an access key; a unit's name is not.
+    Button.create [ Button.content (label.Replace("_", "__")); Button.margin (Thickness(2.0, 0.0)); Button.onClick ((fun _ -> act ()), SubPatchOptions.Always) ]
     :> Types.IView
 
 let private label (text: string) =
@@ -541,7 +598,6 @@ let view (opening: Opening) : Control =
         /// signals, refreshed each tick while a design runs.
         let slice = ctx.useState<Warp11.Debug.Trace> { firstCycle = 0; signals = [] }
         let breakText = ctx.useState ""
-        let streamsText = ctx.useState (string opening.graph.streams)
 
         // The target: the design's default mapping, loaded from beside its
         // file; edited here row by row; saved beside it again.
@@ -662,8 +718,17 @@ let view (opening: Opening) : Control =
                 | None -> ""
 
         let prefix = prefixFor root path.Current
-        let probeOf (p: PinRef) (side: Side) = probeName g p side |> Option.map (fun n -> prefix + n)
-        let validOf (box: string) (side: Side) = prefix + validName g box side
+        // The net a port's value rides on: a control's, or a stream's first
+        // field's. And the net that says a box's stream carries a beat.
+        let probeOf (p: PortRef) (side: Side) =
+            match fieldProbes g p side with
+            | (net, _) :: _ -> Some(prefix + net)
+            | [] -> controlProbe g p side |> Option.map (fun n -> prefix + n)
+
+        let validOf (box: string) (side: Side) =
+            let ins, outs = streamsOf g box
+            let stream = (match side with In -> ins | Out -> outs) |> List.tryHead |> Option.map (fun s -> s.name) |> Option.defaultValue ""
+            prefix + validName box side stream
 
         let stopLive () =
             live
@@ -733,9 +798,9 @@ let view (opening: Opening) : Control =
                     message.Set $"removed {name}"
             | Some(SelectedBox name) -> message.Set $"the {name} box is the design's own boundary"
             | Some(SelectedWire e) ->
-                if change (removeWire e >> Ok) then
+                if change (removeEdge e >> Ok) then
                     select None
-                    message.Set $"removed the wire {showPin e.from} → {showPin e.``to``}"
+                    message.Set $"removed the wire {showPort e.from} → {showPort e.``to``}"
             | None -> ()
 
         let stepHistory (what: string) (step: History -> History) =
@@ -807,10 +872,10 @@ let view (opening: Opening) : Control =
                 match hitTest g world with
                 | HitPin(p, side) ->
                     drag.Set(Some(Wiring((p, side), world)))
-                    message.Set $"wiring from {p.box}.{p.pin}"
+                    message.Set $"wiring from {p.box}.{p.port}"
                 | HitWire edge ->
                     select (Some(SelectedWire edge))
-                    message.Set $"wire {showPin edge.from} → {showPin edge.``to``}"
+                    message.Set $"wire {showPort edge.from} → {showPort edge.``to``}"
                 | HitBox name ->
                     let isDesign = g.boxes |> List.tryFind (fun b -> b.name = name) |> Option.bind (designOf g) |> Option.isSome
 
@@ -856,8 +921,8 @@ let view (opening: Opening) : Control =
             | Some(Wiring(from, _)), Some(_, _, world) ->
                 match hitTest g world with
                 | HitPin(target, side) ->
-                    if change (addWire from (target, side)) then
-                        message.Set $"wired {showPin (fst from)} — {showPin target}"
+                    if change (addEdge from (target, side)) then
+                        message.Set $"connected {showPort (fst from)} — {showPort target}"
                 | _ -> message.Set "wire dropped"
             | Some(MovingBox(name, _, before)), _ ->
                 let h = history.Current
@@ -973,13 +1038,31 @@ let view (opening: Opening) : Control =
                       let isSelected = selection.Current = Some(SelectedWire e)
                       let thickness = if isControlWire g e then 1.2 else 2.0
 
-                      // One strand per stream: the same wire carries a beat on
-                      // each, and the elaborator places a stage on each.
-                      for k in 1 .. g.streams - 1 do
-                          let (ax, ay), (bx, by) = a, b
-                          yield wireView faintBrush 1.0 (ax, ay + 3.0 * float k) (bx, by + 3.0 * float k)
+                      // An edge that does not fit is red and broken; one whose
+                      // fields go by other names on the two sides is amber.
+                      let brush =
+                          match edgeFit g e with
+                          | DoesNotFit _ -> Brushes.Red :> IBrush
+                          | FitsNamesDiffer _ when live.IsNone -> Brushes.DarkOrange :> IBrush
+                          | _ -> brush
+
+                      let thickness = if isSocketWire g e then 1.2 else thickness
 
                       yield wireView (if isSelected then selectedWireBrush :> IBrush else brush) (if isSelected then thickness + 1.5 else thickness) a b
+
+                      // What the edge registers, at its middle.
+                      if e.connection <> Connection.Wire then
+                          let (ax, ay), (bx, by) = a, b
+
+                          yield
+                              TextBlock.create
+                                  [ Canvas.left ((ax + bx) / 2.0 - 22.0)
+                                    Canvas.top ((ay + by) / 2.0 - 30.0)
+                                    TextBlock.text (connectionMark e.connection)
+                                    TextBlock.fontSize 10.0
+                                    TextBlock.foreground Brushes.DarkSlateBlue
+                                    TextBlock.isHitTestVisible false ]
+                              :> Types.IView
 
                       // The level, as a bar under the wire's middle: green to
                       // red as it nears full scale.
@@ -1027,6 +1110,48 @@ let view (opening: Opening) : Control =
                 | None -> []
             | _ -> []
 
+        // Where several edges meet at one stream port, the port says what
+        // it does with them: its pattern, beside the pin.
+        let meetings =
+            let mark (p: PortRef) (side: Side) (text: string) =
+                match pinCentre g p side with
+                | Some(x, y) ->
+                    [ TextBlock.create
+                          [ Canvas.left (if side = Out then x + 10.0 else x + 12.0)
+                            Canvas.top (if side = Out then y - 20.0 else y + 9.0)
+                            TextBlock.text text
+                            TextBlock.fontSize 10.0
+                            TextBlock.fontWeight FontWeight.Bold
+                            TextBlock.foreground Brushes.DarkSlateBlue
+                            TextBlock.isHitTestVisible false ]
+                      :> Types.IView ]
+                | None -> []
+
+            let arbitrationText (a: Arbitration) =
+                (match a.policy with ArbitrationPolicy.RoundRobin -> "round-robin" | ArbitrationPolicy.Priority -> "priority")
+                + (match a.timing with ArbitrationTiming.SameCycle -> "" | ArbitrationTiming.Registered -> ", registered")
+
+            [ for box in boxOrder g do
+                  let ins, outs = streamsOf g box
+
+                  for s in outs do
+                      let p = port box s.name
+
+                      if (edgesFrom g p).Length > 1 then
+                          yield! mark p Out (match fanOutAt g p with FanOut.Broadcast -> "broadcast" | FanOut.Balance -> "balance")
+
+                  for s in ins do
+                      let p = port box s.name
+
+                      if (edgesInto g p).Length > 1 then
+                          yield! mark p In ("merge: " + arbitrationText (mergeAt g p))
+
+                  // A service several sockets share.
+                  match g.boxes |> List.tryFind (fun b -> b.name = box) with
+                  | Some b when isService g b && clientsOf g b > 1 ->
+                      yield! mark (port box servicePort) In ("shared: " + arbitrationText (mergeAt g (port box servicePort)))
+                  | _ -> () ]
+
         let boxes = [ for name in boxOrder g do yield! boxView g selection.Current name g.positions[name] ]
 
         // ---- type to create: a box at the double-click, named from the
@@ -1036,7 +1161,7 @@ let view (opening: Opening) : Control =
             | None -> []
             | Some((wx, wy), text) ->
                 let matches =
-                    Seq.append (units ()).Keys g.designs.Keys
+                    Seq.append (Seq.append (units ()).Keys g.designs.Keys) structuralBoxes
                     |> Seq.filter (fun n -> text = "" || n.StartsWith(text, System.StringComparison.OrdinalIgnoreCase))
                     |> Seq.sort
                     |> List.ofSeq
@@ -1092,9 +1217,9 @@ let view (opening: Opening) : Control =
                 [ StackPanel.margin (Thickness 6.0)
                   StackPanel.children (
                       [ TextBlock.create [ TextBlock.text "palette"; TextBlock.fontWeight FontWeight.Bold; TextBlock.margin (Thickness(4.0, 2.0)) ] :> Types.IView ]
-                      @ [ for name in (units ()).Keys |> Seq.sort ->
+                      @ [ for name in Seq.append ((units ()).Keys |> Seq.sort) structuralBoxes ->
                               Button.create
-                                  [ Button.content name
+                                  [ Button.content (name.Replace("_", "__"))
                                     Button.horizontalAlignment Layout.HorizontalAlignment.Stretch
                                     Button.margin (Thickness(2.0, 1.0))
                                     Button.onClick ((fun _ -> placeBox name (somewhereVisible ())), SubPatchOptions.Always) ]
@@ -1102,7 +1227,7 @@ let view (opening: Opening) : Control =
                       @ [ TextBlock.create [ TextBlock.text "designs"; TextBlock.fontWeight FontWeight.Bold; TextBlock.margin (Thickness(4.0, 8.0, 4.0, 2.0)) ] :> Types.IView ]
                       @ [ for name in g.designs.Keys |> Seq.sort ->
                               Button.create
-                                  [ Button.content name
+                                  [ Button.content (name.Replace("_", "__"))
                                     Button.horizontalAlignment Layout.HorizontalAlignment.Stretch
                                     Button.margin (Thickness(2.0, 1.0))
                                     Button.onClick ((fun _ -> placeBox name (somewhereVisible ())), SubPatchOptions.Always) ]
@@ -1247,7 +1372,7 @@ let view (opening: Opening) : Control =
 
         let newDesign () =
             stopLive ()
-            history.Set(Warp11.Edit.history (withLayout (emptyGraph "Untitled" g.sampleRate)))
+            history.Set(Warp11.Edit.history (withLayout (emptyGraph "Untitled" g.sampleRate [ "left", signedInt sampleWidth; "right", signedInt sampleWidth ])))
             path.Set []
             designName.Set "Untitled"
             filePath.Set ""
@@ -1678,27 +1803,22 @@ let view (opening: Opening) : Control =
             match live with
             | None -> []
             | Some l ->
-                let ins, outs = pinsOf g box
+                let outs = fieldNets g box Out
                 let controls = controlsOf g box
 
                 let pinRows =
-                    [ for pins, side, tag in [ ins, In, "in"; outs, Out, "out" ] do
+                    [ for side, tag in [ In, "in"; Out, "out" ] do
                           match box with
                           | "input"
                           | "output" -> ()
                           | _ -> yield $"{tag} valid", (valueOf snap (validOf box side) |> Option.map string |> Option.defaultValue "—")
 
-                          for n, f in pins do
-                              let shown =
-                                  match probeOf (pin box n) side with
-                                  | Some net -> valueOf snap net |> Option.map (showValue f) |> Option.defaultValue "—"
-                                  | None -> "—"
-
-                              yield $"{tag} {n}", shown
+                          for n, f, net in fieldNets g box side do
+                              yield $"{tag} {n}", (valueOf snap (prefix + net) |> Option.map (showValue f) |> Option.defaultValue "—")
                       for n, f in controls do
                           if box <> "input" then
                               let shown =
-                                  match probeOf (pin box n) In with
+                                  match probeOf (port box n) In with
                                   | Some net -> valueOf snap net |> Option.map (showValue f) |> Option.defaultValue "—"
                                   | None -> "—"
 
@@ -1711,12 +1831,10 @@ let view (opening: Opening) : Control =
                 // each: the waveform, full scale the lane's height.
                 let lane =
                     let traces =
-                        [ for i, (n, f) in List.indexed outs do
-                              match probeOf (pin box n) Out with
-                              | Some net when i < Scope.colours.Length ->
-                                  let values = Scope.beats slice.Current (validOf box Out) net
-                                  if values.Length > 0 then yield values, Scope.colours[i], f.totalWidth
-                              | _ -> () ]
+                        [ for i, (_, f, net) in List.indexed outs do
+                              if i < Scope.colours.Length then
+                                  let values = Scope.beats slice.Current (validOf box Out) (prefix + net)
+                                  if values.Length > 0 then yield values, Scope.colours[i], f.totalWidth ]
 
                     match traces with
                     | [] -> []
@@ -1732,7 +1850,7 @@ let view (opening: Opening) : Control =
                           TextBlock.create
                               [ TextBlock.fontSize 10.0
                                 TextBlock.foreground Brushes.Gray
-                                TextBlock.text (String.concat ", " [ for i, (n, _) in List.indexed outs do if i < Scope.colours.Length then yield n ]) ]
+                                TextBlock.text (String.concat ", " [ for i, (n, _, _) in List.indexed outs do if i < Scope.colours.Length then yield n ]) ]
                           :> Types.IView ]
 
                 lane @ [ heading "this cycle" ] @ (pinRows |> List.map row) @ (ownRows |> List.map row)
@@ -1751,28 +1869,57 @@ let view (opening: Opening) : Control =
             | Error why -> message.Set $"refused: {why}"
 
         let boundaryRows (box: string) =
-            let pinRow (kind: string) (n: string, f: NumberFormat) =
-                StackPanel.create
-                    [ StackPanel.orientation Layout.Orientation.Horizontal
-                      StackPanel.children
-                          [ button "×" (fun () -> if change (removeBoundaryPin (pin box n)) then message.Set $"removed {box}.{n}")
-                            TextBlock.create
-                                [ TextBlock.fontFamily mono
-                                  TextBlock.fontSize 12.0
-                                  TextBlock.verticalAlignment Layout.VerticalAlignment.Center
-                                  TextBlock.text $"{kind} {n}: {describeFormat f}" ] ] ]
-                :> Types.IView
-
-            let signals, controls =
+            let streams, controls =
                 match box with
                 | "input" -> g.inputs, g.controls
                 | _ -> g.outputs, []
 
-            // The form before the list, so adding a pin does not move the form
+            let line (text: string) (remove: unit -> unit) =
+                StackPanel.create
+                    [ StackPanel.orientation Layout.Orientation.Horizontal
+                      StackPanel.children
+                          [ button "×" remove
+                            TextBlock.create
+                                [ TextBlock.fontFamily mono
+                                  TextBlock.fontSize 12.0
+                                  TextBlock.verticalAlignment Layout.VerticalAlignment.Center
+                                  TextBlock.text text ] ] ]
+                :> Types.IView
+
+            // A stream, then its fields: a field is removed from the stream,
+            // and the form's field is added to it. The stream's edge stays
+            // and is judged again.
+            let streamRows (stream: BoundaryStream) =
+                let p = port box stream.name
+
+                [ line $"stream {stream.name}" (fun () -> if change (removeBoundaryPort p) then message.Set $"removed {box}.{stream.name}") ]
+                @ [ for n, f in stream.fields ->
+                        line $"    {n}: {describeFormat f}" (fun () ->
+                            if change (setFields p (stream.fields |> List.filter (fun (x, _) -> x <> n))) then
+                                message.Set $"removed {n} from {stream.name}") ]
+                @ [ button $"add the field to {stream.name}" (fun () ->
+                        match pinFormat () with
+                        | Ok f ->
+                            if change (setFields p (stream.fields @ [ pinName.Current, f ])) then
+                                message.Set $"added {pinName.Current} to {stream.name}"
+                                pinName.Set ""
+                        | Error why -> message.Set $"refused: {why}") ]
+
+            let addStream () =
+                match pinFormat () with
+                | Ok f ->
+                    let add = if box = "input" then addInputStream else addOutputStream
+
+                    if change (add pinName.Current [ "data", f ]) then
+                        message.Set $"added the stream {pinName.Current}"
+                        pinName.Set ""
+                | Error why -> message.Set $"refused: {why}"
+
+            // The form before the list, so adding a port does not move the form
             // under the pointer — or under the view diff, which patches by
             // position and would hand one entry's text to another.
             ([
-                heading "add a pin"
+                heading "a stream, a field or a control to add"
                 StackPanel.create
                     [ StackPanel.orientation Layout.Orientation.Horizontal
                       StackPanel.children
@@ -1797,34 +1944,147 @@ let view (opening: Opening) : Control =
                                           | _ -> ()),
                                       SubPatchOptions.Always
                                   ) ]
-                            (if box = "input" then
-                                 button "add signal" (fun () -> addPin addInputPin)
-                             else
-                                 button "add signal" (fun () -> addPin addOutputPin))
+                            button "add stream" addStream
                             (if box = "input" then
                                  button "add control" (fun () -> addPin addControl)
                              else
                                  TextBlock.create [] :> Types.IView) ] ]
                 :> Types.IView
-                heading "pins" ])
-            @ (signals |> List.map (pinRow "signal"))
-            @ (controls |> List.map (pinRow "control"))
+                heading "streams" ])
+            @ (streams |> List.collect streamRows)
+            @ (if controls.IsEmpty then [] else [ heading "controls" ])
+            @ (controls |> List.map (fun (n, f) -> line $"control {n}: {describeFormat f}" (fun () -> if change (removeBoundaryPort (port box n)) then message.Set $"removed {box}.{n}")))
 
-        /// What the placement decided for a box: how its copies sit against
-        /// the design's streams, and what the stage puts around the unit.
+        /// What a box is, by what is connected to it and how many it is.
         let placementOf (b: Box) (u: ErasedFu) =
-            let m, n = g.streams, b.copies
+            if isService g b then
+                match clientsOf g b with
+                | 1 -> "a service for one socket: the unit in place"
+                | n -> $"a service shared by %d{n} sockets, behind an arbiter"
+            else
+                match u.law, b.copies with
+                | Combinational _, 1 -> "a stage: the law inside the beat, no net declared"
+                | Sequential _, 1 -> "a stage: one instance, the stream through it"
+                | Combinational _, n -> $"%d{n} copies of a combinational unit: the elaborator will refuse this"
+                | Sequential _, n when b.ordered -> $"a farm of %d{n} copies, beats leaving in the order they came"
+                | Sequential _, n -> $"a farm of %d{n} copies, a beat leaving when its copy is done"
 
-            match u.law with
-            | Combinational _ when n = m -> "in place: the law inside the beat, no net declared"
-            | Combinational _ when n = 1 -> $"shared: %d{m} streams on one copy behind an arbiter, a client stage each"
-            | Combinational _ -> $"%d{n} copies for %d{m} streams: the elaborator will refuse this"
-            | Sequential _ when n = m -> "one copy per stream, a context FIFO holding the rest of the beat beside it"
-            | Sequential _ when n > m && n % m = 0 -> $"a farm of %d{n / m} copies per stream, in order, a context FIFO each"
-            | Sequential _ -> $"%d{n} copies over %d{m} streams: the elaborator will refuse this"
+        /// A choice among a few values: the one held is disabled.
+        let choice (current: 'a) (values: 'a list) (pick: 'a -> unit) =
+            StackPanel.create
+                [ StackPanel.orientation Layout.Orientation.Horizontal
+                  StackPanel.margin (Thickness(0.0, 2.0))
+                  StackPanel.children
+                      [ for v in values ->
+                            Button.create
+                                [ Button.content (string v)
+                                  Button.margin (Thickness(2.0, 0.0))
+                                  Button.isEnabled (v <> current)
+                                  Button.onClick ((fun _ -> pick v), SubPatchOptions.Always) ]
+                            :> Types.IView ] ]
+            :> Types.IView
+
+        /// An edge: what it joins, whether it fits, what it registers, and
+        /// the pattern at each end where it is one of several.
+        let edgeRows (e: Edge) =
+            let isStream = not (isControlWire g e || isSocketWire g e)
+            let leavingWith = edgesFrom g e.from
+            let arrivingWith = edgesInto g e.``to``
+
+            let fit =
+                match edgeFit g e with
+                | Fits -> "fits"
+                | FitsNamesDiffer pairs -> "fits; names differ: " + (pairs |> List.map (fun (a, b) -> $"{a} → {b}") |> String.concat ", ")
+                | DoesNotFit why -> $"does not fit: {why}"
+
+            [ row ("from", showPort e.from); row ("to", showPort e.``to``); row ("fit", fit) ]
+            @ (if not isStream then
+                   []
+               else
+                   [ heading "the connection registers"
+                     choice e.connection connections (fun c ->
+                         if change (setConnection e c) then
+                             select (Some(SelectedWire { e with connection = c }))
+                             message.Set $"{showEdge e}: {c}") ])
+            @ (if isStream && leavingWith.Length > 1 then
+                   [ heading $"%d{leavingWith.Length} edges leave {showPort e.from}"
+                     choice (fanOutAt g e.from) [ FanOut.Broadcast; FanOut.Balance ] (fun pattern ->
+                         if change (setFanOut e.from pattern) then
+                             message.Set $"{showPort e.from}: {pattern}") ]
+               else
+                   [])
+            @ (if not (isControlWire g e) && (arrivingWith.Length > 1 || isSocketWire g e) then
+                   let at = mergeAt g e.``to``
+
+                   [ heading (if isSocketWire g e then $"{showPort e.``to``} is shared by" else $"%d{arrivingWith.Length} edges arrive at {showPort e.``to``}")
+                     choice at.policy [ ArbitrationPolicy.RoundRobin; ArbitrationPolicy.Priority ] (fun policy ->
+                         if change (setMerge e.``to`` { at with policy = policy }) then
+                             message.Set $"{showPort e.``to``}: {policy}")
+                     choice at.timing [ ArbitrationTiming.SameCycle; ArbitrationTiming.Registered ] (fun timing ->
+                         if change (setMerge e.``to`` { at with timing = timing }) then
+                             message.Set $"{showPort e.``to``}: {timing}")
+                     button "Raise: first among them" (fun () ->
+                         if change (raiseEdge e) then
+                             message.Set $"{showEdge e} is first") ]
+               else
+                   [])
+            @ [ button "Delete" deleteSelection ]
+
+        /// A join, a fields box or a buffer: its name, its arguments, and
+        /// the fields it carries, which are what is connected to it.
+        let structuralRows (b: Box) =
+            let ins, outs = streamsOf g b.name
+
+            let argumentRow (p: Parameter) =
+                let text = argumentText.Current |> Map.tryFind p.name |> Option.defaultValue (structuralArgument b p.name)
+
+                StackPanel.create
+                    [ StackPanel.orientation Layout.Orientation.Horizontal
+                      StackPanel.margin (Thickness(0.0, 2.0))
+                      StackPanel.children
+                          [ TextBlock.create
+                                [ TextBlock.text p.name
+                                  TextBlock.width 80.0
+                                  TextBlock.fontFamily mono
+                                  TextBlock.fontSize 12.0
+                                  TextBlock.verticalAlignment Layout.VerticalAlignment.Center ]
+                            entry 150.0 text (fun t -> argumentText.Set(argumentText.Current |> Map.add p.name t)) (fun typed ->
+                                if change (setArgument b.name p.name typed) then
+                                    message.Set $"{b.name}: {p.name} = {typed}")
+                            TextBlock.create
+                                [ TextBlock.text p.about
+                                  TextBlock.fontSize 10.0
+                                  TextBlock.foreground Brushes.Gray
+                                  TextBlock.textWrapping TextWrapping.Wrap
+                                  TextBlock.width 120.0
+                                  TextBlock.margin (Thickness(6.0, 0.0, 0.0, 0.0))
+                                  TextBlock.verticalAlignment Layout.VerticalAlignment.Center ] ] ]
+                :> Types.IView
+
+            let carried (stream: BoundaryStream) =
+                row (stream.name, (if stream.fields.IsEmpty then "nothing connected" else describePins stream.fields))
+
+            [ StackPanel.create
+                  [ StackPanel.orientation Layout.Orientation.Horizontal
+                    StackPanel.children
+                        [ label "name"
+                          entry 120.0 nameText.Current nameText.Set (fun typed ->
+                              if change (renameBox b.name typed) then
+                                  select (Some(SelectedBox typed))
+                                  message.Set $"renamed {b.name} to {typed}") ] ]
+              :> Types.IView
+              row ("box", b.unit) ]
+            @ (structuralParameters b.unit |> List.map argumentRow)
+            @ [ heading "streams in" ]
+            @ List.map carried ins
+            @ [ heading "stream out" ]
+            @ List.map carried outs
 
         let boxRows (name: string) =
             let b = g.boxes |> List.find (fun b -> b.name = name)
+
+            if isStructural b then structuralRows b else
+
             let u = unitOf g b
 
             match designOf g b with
@@ -1846,9 +2106,9 @@ let view (opening: Opening) : Control =
                       select None
                       message.Set $"in {name}")
                   heading "signal inlets" ]
-                @ (sub.inputs |> List.map (fun (n, f) -> row (n, describeFormat f)))
+                @ (sub.inputs |> List.map (fun s -> row (s.name, describePins s.fields)))
                 @ [ heading "signal outlets" ]
-                @ (sub.outputs |> List.map (fun (n, f) -> row (n, describeFormat f)))
+                @ (sub.outputs |> List.map (fun s -> row (s.name, describePins s.fields)))
                 @ [ heading "control inlets — the design's own ports" ]
                 @ (controlPorts sub |> List.map (fun (n, f) -> row (n, describeFormat f)))
             | None ->
@@ -1898,8 +2158,8 @@ let view (opening: Opening) : Control =
             // A wired inlet says where from; an unwired one holds a value,
             // typed here — poked live when the design is running.
             let controlRow (n: string, f: NumberFormat) =
-                match g.edges |> List.tryFind (fun e -> e.``to`` = pin name n) with
-                | Some e -> row (n, $"{describeFormat f}  from {showPin e.from}")
+                match g.edges |> List.tryFind (fun e -> e.``to`` = port name n) with
+                | Some e -> row (n, $"{describeFormat f}  from {showPort e.from}")
                 | None ->
                     let key = $"setting:{n}"
                     let text = argumentText.Current |> Map.tryFind key |> Option.defaultValue (b.settings |> Map.tryFind n |> Option.defaultValue "0")
@@ -1915,14 +2175,12 @@ let view (opening: Opening) : Control =
                                       TextBlock.fontSize 12.0
                                       TextBlock.verticalAlignment Layout.VerticalAlignment.Center ]
                                 entry 100.0 text (fun t -> argumentText.Set(argumentText.Current |> Map.add key t)) (fun typed ->
-                                    let bits =
-                                        match System.UInt64.TryParse typed with
-                                        | true, v -> Some(implicitPortName name n, v)
-                                        | _ -> None
-
-                                    changeValue (setSetting name n typed) bits |> ignore)
+                                    // A setting is a literal in the design:
+                                    // a change of it is a new design.
+                                    if change (setSetting name n typed) then
+                                        message.Set $"{name}.{n} = {typed}")
                                 TextBlock.create
-                                    [ TextBlock.text $"{describeFormat f}, unwired"
+                                    [ TextBlock.text $"{describeFormat f}, unwired: a literal"
                                       TextBlock.fontSize 10.0
                                       TextBlock.foreground Brushes.Gray
                                       TextBlock.margin (Thickness(6.0, 0.0, 0.0, 0.0))
@@ -1946,7 +2204,20 @@ let view (opening: Opening) : Control =
                           entry 50.0 copiesText.Current copiesText.Set (fun typed ->
                               match System.Int32.TryParse typed with
                               | true, n -> if change (setCopies name n) then message.Set $"{name}: %d{n} copies"
-                              | _ -> message.Set $"refused: copies is a number, not '{typed}'") ] ]
+                              | _ -> message.Set $"refused: copies is a number, not '{typed}'")
+                          CheckBox.create
+                              [ CheckBox.content "in order"
+                                CheckBox.isChecked b.ordered
+                                CheckBox.onIsCheckedChanged (
+                                    (fun e ->
+                                        match e.Source with
+                                        | :? Avalonia.Controls.Primitives.ToggleButton as t ->
+                                            let ordered = t.IsChecked.GetValueOrDefault()
+                                            if ordered <> b.ordered && change (setOrdered name ordered) then
+                                                message.Set(if ordered then $"{name}: beats leave in order" else $"{name}: a beat leaves when its copy is done")
+                                        | _ -> ()),
+                                    SubPatchOptions.Always
+                                ) ] ] ]
               :> Types.IView
               row ("unit", $"{b.unit}, {lawText}")
               row ("placement", placementOf b u) ]
@@ -2076,9 +2347,7 @@ let view (opening: Opening) : Control =
                 | Some(SelectedWire e) ->
                     "wire",
                     "wire",
-                    [ row ("from", showPin e.from)
-                      row ("to", showPin e.``to``)
-                      button "Delete" deleteSelection ]
+                    edgeRows e
                 | None ->
                     // Nothing selected: the design itself.
                     let where = String.concat "/" path.Current
@@ -2104,16 +2373,6 @@ let view (opening: Opening) : Control =
                                               message.Set $"the design is made for %g{rate} Hz"
                                       | _ -> message.Set $"refused: '{typed}' is not a rate")
                                   label "Hz" ] ]
-                      :> Types.IView
-                      StackPanel.create
-                          [ StackPanel.orientation Layout.Orientation.Horizontal
-                            StackPanel.margin (Thickness(0.0, 4.0))
-                            StackPanel.children
-                                [ label "streams"
-                                  entry 50.0 streamsText.Current streamsText.Set (fun typed ->
-                                      match System.Int32.TryParse typed with
-                                      | true, n -> if change (setStreams n) then message.Set $"%d{n} streams — a sequential box needs a copy per stream"
-                                      | _ -> message.Set $"refused: '{typed}' is not a count") ] ]
                       :> Types.IView
                       TextBlock.create
                           [ TextBlock.margin (Thickness(0.0, 12.0, 0.0, 0.0))
@@ -2193,7 +2452,7 @@ let view (opening: Opening) : Control =
                                         [ Canvas.renderTransformOrigin (RelativePoint(0.0, 0.0, RelativeUnit.Absolute))
                                           Canvas.renderTransform transform
                                           // Wires over boxes, as a design is read.
-                                          Canvas.children (boxes @ wires @ pending) ]
+                                          Canvas.children (boxes @ wires @ meetings @ pending) ]
                                     :> Types.IView ]
                                   @ typingView
                               ) ]
@@ -2212,8 +2471,11 @@ let view (opening: Opening) : Control =
                           TextBlock.foreground (if message.Current.StartsWith "refused" then Brushes.DarkRed else Brushes.Black)
                           TextBlock.text (if message.Current = "" then " " else message.Current) ]
                     :> Types.IView
-                    viewRow ]
-                  @ runRow
+                    viewRow
+                    // Always here, empty until a design runs: the grid below
+                    // holds its column definitions, and a view that moved in
+                    // this list would be made again around the same ones.
+                    StackPanel.create [ DockPanel.dock Dock.Top; StackPanel.children runRow ] :> Types.IView ]
                   @ [ Grid.create
                           [ Grid.columnDefinitions columns.Current
                             Grid.children [ paletteView; splitter 1; canvasView; splitter 3; propertyPanel ] ]

@@ -5,7 +5,8 @@
 > one to build on; the canvas is a preview of a direction, not a tool to
 > depend on yet.
 
-*Rough draft, 2026-09-17. Everything here is a day or two old and will move;
+*Rough draft, 2026-09-17; the model in §1–§3 rewritten 2026-11-15 for boxes with
+ports (`notes/CANVAS_MODEL.md`). Everything here will move;
 `notes/DESIGN_EDITOR.md` and `notes/BUILD.md` are the plans it was built
 from, with the findings.*
 
@@ -29,13 +30,28 @@ toolbar to hear the tone at twice its level.
 
 ## 1. The canvas
 
+A drawing is boxes with **ports** and **edges** between ports. An edge is one
+stream, or one control value, and nothing else: whatever code does between
+two stages is a box. So a drawn chain is the typed pipeline, call for call —
+
+```fsharp
+streamSource inPorts
+|> stage [] lowBand "low"
+|> connectAs Connection.Forward
+|> stage [] midBand "mid"
+|> streamSink outPorts
+```
+
+— each box its unit applied once, each edge `connectAs` what the edge says
+it registers.
+
 ### What is on the screen
 
 | region | what |
 |---|---|
-| **palette** (left) | every unit the library offers, the designs imported into this one, and the control boxes. Click one to add it, or double-click the canvas and type its name |
-| **canvas** (middle) | boxes and wires. Drag a box to move it; drag from a pin to a pin to wire them; click to select; pan on empty space; wheel to zoom, Shift+wheel to scroll down the design, Ctrl+wheel across it. Scrollbars appear when a box is out of view and span the design |
-| **panel** (right) | the selection's properties: a box's name, copies and arguments; a boundary box's pins; the design itself when nothing is selected — name, sample rate, streams, and the **target** section |
+| **palette** (left) | every unit the library offers, the boxes that sit between stages (`join`, `fields`, `fifo`), the designs imported into this one, and the control boxes. Click one to add it, or double-click the canvas and type its name |
+| **canvas** (middle) | boxes and edges. Drag a box to move it; drag from a port to a port to connect them; click to select; pan on empty space; wheel to zoom, Shift+wheel to scroll down the design, Ctrl+wheel across it. Scrollbars appear when a box is out of view and span the design |
+| **panel** (right) | the selection's properties: a box's name, copies and arguments; an edge's connection and, where several edges meet, the port's pattern; a boundary box's streams, fields and controls; the design itself when nothing is selected — name, sample rate, and the **target** section |
 | **menus** (top) | **File**: New, Open…, Import Design…, Save, Save As… — the platform's own pickers. **Edit**: Undo, Redo, Delete. **Build**: Build…, Export to F#… |
 | **toolbar** | **Open in sim**, then Play / Run / Step / Reset / Stop; a number box per control; the breakpoint entry; where the view is, and the file it is over |
 | **status line** | what just happened, or why something was refused |
@@ -43,53 +59,108 @@ toolbar to hear the tone at twice its level.
 Keys: Delete or Backspace removes the selection, Ctrl+Z / Ctrl+Y undo and
 redo, Ctrl+D duplicates a box, Ctrl+N / Ctrl+O / Ctrl+S / Ctrl+Shift+S are
 the File menu. The three areas are resizable: drag the divider on either
-side of the canvas. Every change is one history entry, and a
-change the elaborator would refuse is refused before it lands, naming the
-pin.
+side of the canvas. Every change is one history entry, and a change the
+elaborator would refuse is refused before it lands, naming the port.
+
+### Ports
+
+| port | drawn | carries |
+|---|---|---|
+| **stream** in or out | a circle, `in` / `out` | one stream: its fields together, with their formats (width, fraction bits, signedness) |
+| **control** in or out | a square, italic | one value held between beats — `volume`, a threshold |
+| **socket** | on a box's right, `multiply` | what the box's unit needs done for it and does not do itself: the gain's two channel multiplies, an `eq`'s ten products |
+| **service** | on a unit's left, `service` | the unit itself, offered to sockets |
 
 ### Boxes
 
 A **box** is a unit from the palette — `gain`, `eq`, `compressor`, `mixer`,
-`tremolo`, `blur`, `add32` and so on — with:
+`tremolo`, `blur`, `add32` and so on — with one stream in, one stream out,
+and:
 
-- **signal inlets and outlets** (circles): the beat's fields. Every signal
-  inlet must be wired.
-- **control inlets** (squares, italic): values the unit holds between beats
-  — `volume`, a threshold. Wire one from a control box or from the design's
-  own control port, or leave it unwired and type its value in the panel,
-  which the elaborator turns into an implicit control port named
-  `{box}_{pin}`.
+- **control inlets**: wire one from a control box or from the design's own
+  control port. Left unwired, it is the value typed for it in the panel,
+  **fixed when the design is built**, as an argument written in code is. A
+  value the host should be able to change is a number box.
 - **creation arguments** (in the panel): an `eq`'s shape, frequency, Q and
   gain; a `blur`'s columns and rows. They configure the unit at elaboration,
   so changing one is a new design and the running session stops.
-- **copies**: how many instances of a sequential unit run side by side. A
-  design with two streams needs two copies of each sequential box; more
-  copies than streams is a **farm** — a beat goes to whichever copy is
-  free and the beats leave in the order they came, clustered above sixteen
-  so the fan clocks. Warp 11's Mandelbrot spends its `mandelChunk` unit 104
-  times that way, one per lane the part's DSPs hold.
+- **copies**: how many of the unit there are. Above one the box is a
+  **farm**: a beat goes to whichever copy is free, and with **in order**
+  ticked the beats leave in the order they came. A box that is a design
+  takes copies the same way, which is how a chain becomes several lanes.
 - **answers**: a unit may emit several beats for one it takes — `mandelChunk`
-  drains a 128-pixel chunk as eight beats of sixteen. The placement carries
-  the beat's context alongside each of them and keeps the order across all
-  of them; nothing about it shows on the canvas but the count of beats out.
+  drains a 128-pixel chunk as eight beats of sixteen. Nothing about it shows
+  on the canvas but the count of beats out.
 
-The **input** and **output** boxes are the boundary: the fields of a beat in
-and out, with their formats (width, fraction bits, signedness), which the
-panel lets you add and remove. The input box also carries the design's own
-**control ports** — `volume`, `mute` on the gain example — which is how a
-control comes from outside: a number box in the simulator, a register on a
-board.
+The **input** and **output** boxes are the boundary: the design's streams in
+and out, each with a name (a new design starts with `in` and `out`) and its
+fields, which the panel lets you add and remove. The input box also carries
+the design's own **control ports** — `volume`, `mute` on the gain example —
+which is how a control comes from outside: a number box in the simulator, a
+register on a board.
 
 **Control boxes** — a number box, a toggle, a constant — sit on the canvas
 with a control outlet each. A number box pokes the running design live.
 
+Three boxes are what code does between stages rather than units. They have
+no fields of their own; each carries whatever is connected to it:
+
+| box | does | in code |
+|---|---|---|
+| **join** | several one-field streams into one beat; a beat leaves when every side has one | `streamJoin` |
+| **fields** | picks, renames and regroups a stream's fields (`sum = product, c`); every bit out went in unchanged | `streamMapTo` |
+| **fifo** | a buffer of `depth` beats | `streamFifo` |
+
+### Edges
+
+Select an edge and the panel sets what its **connection** registers:
+
+| connection | registers | costs |
+|---|---|---|
+| `Wire` | nothing | no cycle |
+| `Forward` | data and valid | one cycle; breaks a long forward path, such as a multiply into a multiply |
+| `Backward` | ready | no cycle while nothing stalls; breaks `ready` rippling back through stages |
+| `Both` | everything | one cycle |
+
+An edge **fits** when its two ports carry the same formats in the same
+order. Names are never refused: an edge whose fields go by different names
+at its two ends is drawn amber and says which. An edge that does not fit is
+red, stays where it is — a box's argument can change its fields under an
+edge that was fine — and the design does not build until it is fixed.
+
+### Where edges meet
+
+Several edges at one stream port are a meeting, and the port says what it
+does with them. The panel of any edge there sets it.
+
+| where | pattern | in code |
+|---|---|---|
+| several edges leave a port | **Broadcast** (the default): every edge gets every beat | `streamForkEager` |
+| | **Balance**: each beat goes to one edge that is free | `streamBalance` |
+| several edges arrive at a port | **Merge**, round-robin or priority, in the same cycle or registered | `streamMergeWith` |
+
+The edges' order is the lanes' order, and what priority serves first;
+**Raise** in the panel puts an edge first.
+
+### Sharing a unit
+
+A unit's box becomes a **service** when a socket is connected to it: draw an
+edge from a box's `multiply` socket to a multiplier's `service` port. One
+socket on a service is the unit in place; several share the one copy behind
+an arbiter, whose policy and timing are set on the edge's panel. A socket
+nobody connected is served in place, a copy of its own for each — which is
+why a plain `gain` box needs nothing drawn for its multiplies.
+
+`examples/three-band-eq-shared.json` is three bands each on a multiplier
+box of its own: three multipliers where the same chain in place has thirty.
+
 ### Designs inside designs
 
 A saved design can be placed in another as a box: **File → Import Design…**
-adds it to the palette's *designs* section, and the box's pins are that
-design's boundary, its control ports its control inlets. **Double-click** such a box to drill
-into it with the values live; the breadcrumb steps back out. The file
-carries the sub-designs, so it is complete on its own.
+adds it to the palette's *designs* section, and the box's ports are that
+design's boundary, its control ports its control inlets. **Double-click**
+such a box to drill into it with the values live; the breadcrumb steps back
+out. The file carries the sub-designs, so it is complete on its own.
 
 ### Writing a unit
 
@@ -106,42 +177,48 @@ such a file, naming the unit.
 **Open in sim** elaborates the current design and runs it on the mapping the
 file was opened with: a `.wav` for a stereo boundary, a `.pgm` image for a
 row boundary, a `.csv` table for a table boundary — or `frame:<w>x<h>`, a
-count in place of a file, for a design that draws: the input box's one
-field is the beat index and what comes out is assembled into a PGM. Then:
+count in place of a file, for a design that draws: the input stream's one
+field is the beat index and what comes out is assembled into a PGM. A source
+drives a design with one stream in and one out. Then:
 
 - **Play** runs the design at real time through the speaker; the speaker
   paces the simulator by back-pressure. **Run** is unpaced. **Step** is one
-  cycle. **Reset** reopens. **Save heard** writes what the output box heard
+  cycle. **Reset** reopens. **Save heard** writes what the output heard
   beside the source (`sine.heard.wav`).
-- Every signal wire carries a **level meter**; a selected box's panel shows
-  its outlets as a **waveform** over the last beats and every signal it
+- Every stream edge carries a **level meter**; a selected box's panel shows
+  its stream out as a **waveform** over the last beats and every signal it
   owns, live.
 - **break when** in the toolbar takes a condition over the design's nets in
-  the names the panel shows, comparing as bits — `in1_valid && in1_left >
+  the names the panel shows, comparing as bits — `in_valid && in_left >
   1000000` stops Run at the next such cycle.
-- **streams** in the design panel puts a beat on each stream; a wire draws
-  as one strand per stream, and every stream gets the recording.
 
 A structural edit while running stops the session; a number box does not.
+An unwired inlet's setting is part of the design, so changing one is a
+structural edit.
 
 ---
 
 ## 3. The design file
 
-A design saves as JSON — the graph as data: the boundary's pins with their
-formats, the boxes by unit name with their arguments and settings, the
-control boxes, the wires, the positions, the sub-designs and written units,
-and the name of its default mapping (below). It holds no types: the
-**palette is the type authority**, resolved by name on every load, so a unit
-whose pins have changed refuses an old file at the exact wire.
+A design saves as JSON — the graph as data: the boundary's streams with
+their fields, the boxes by unit name with their arguments and settings, the
+control boxes, the edges with what each registers, the meetings that are
+not the default, the positions, the sub-designs and written units, and the
+name of its default mapping (below). It holds no types: the **palette is the
+type authority**, resolved by name on every load. A unit whose ports have
+changed since the file was saved opens with the edge that no longer fits
+drawn red.
+
+The file says `"format": 2`. A design saved before boxes had stream ports
+has no `format` and is refused, saying so: it is redrawn, one edge a stream.
 
 `hdl/Warp11.Placement.Canvas/examples/` has one per feature, written by
 `Warp11.Placement -- examples`, with a README saying what to look at in each.
 
-**Build → Export to F#…** asks where to write the typed form: the units by their F#
-names, the beat as a tuple named after the pins, the stages in wire order —
-the source a person would have written, which elaborates to the same bytes.
-It is one-way: the typed form cannot be read back as a graph.
+**Build → Export to F#…** asks where to write the typed form: the units by
+their F# names and each call the elaboration makes, in its order — `stage`,
+`farm`, `connectAs`, `streamMergeWith`, `sharingWith` — which elaborates to
+the same bytes. It is one-way: the typed form cannot be read back as a graph.
 
 ---
 
@@ -309,8 +386,15 @@ code; the build follows from the code.
 
 ## What was measured
 
+The KV260 and iCEBreaker rows are from 2026-09-17, when a module box was
+elaborated with a context FIFO beside it. The canvas no longer builds that
+FIFO — in the simulator the same gain design now takes a cycle a frame — and
+those two rows have not been measured again on silicon.
+
 | | |
 |---|---|
 | a drawn gain design on the KV260 through DDR, 97 664 frames | 3.173 ms, byte-identical to the simulator |
 | the same design's iCEBreaker build | 7 ports pinned, Fmax 40 MHz against 24 |
 | the same design heard on the iCEBreaker | microphones to headphone through the shared-bus header |
+| `three-band-eq-shared` built for the Icepi from the drawing (2026-11-14) | 12 of 28 multiplier blocks, Fmax 67.5 MHz against 25; not loaded onto a board |
+| `twice-shared` built for the Icepi from the drawing (2026-11-14) | 24 of 28 multiplier blocks, Fmax 55.5 MHz against 25; not loaded onto a board |
