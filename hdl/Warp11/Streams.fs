@@ -399,6 +399,88 @@ let streamStageFor (layout: Layout<'p>) : Stream<'p> -> Stream<'p> =
           ready = outReady
           layout = layout }
 
+/// The backward register: `ready` from this stage's own slot, data and
+/// `valid` straight through. While the slot is empty every offered beat is
+/// taken, passed on in the same cycle if the next stage is ready and kept in
+/// the slot if it is not; while the slot is full nothing is taken and the
+/// kept beat is offered. So the stage's `ready` is a register, and a chain
+/// of stages whose readies pass straight through (`streamStageFor`, a fork, a
+/// client of a shared unit) stops at it. No cycle is added while nothing
+/// stalls. SpinalHDL's `s2mPipe`.
+let streamSkidFor (layout: Layout<'p>) : Stream<'p> -> Stream<'p> =
+    let stem =
+        layout.fields
+        |> List.map (fun (n, f) -> $"{n}%d{f.totalWidth}")
+        |> String.concat "_"
+
+    let stage =
+        defModule
+            $"StreamSkid_{stem}"
+            (fun p ->
+                let ins = [ for n, f in layout.fields -> p.inPort $"in_{n}" f.totalWidth ]
+                let outs = [ for n, f in layout.fields -> p.outPort $"out_{n}" f.totalWidth ]
+
+                ins, outs, p.inPort "in_valid" 1, p.outPort "in_ready" 1, p.outPort "out_valid" 1, p.inPort "out_ready" 1)
+            (fun (ins, outs, inValid, inReady, outValid, outReady) ->
+                let full = regBit "full"
+                bnot full ==> inReady
+                (inValid ||| full) ==> outValid
+
+                // A beat offered while the slot is empty and the next stage
+                // is not ready is the one the slot keeps.
+                let keep = wireBit "keep"
+                (bnot full &&& inValid &&& bnot outReady) ==> keep
+
+                for (n, f), i, o in List.zip3 layout.fields ins outs do
+                    let r = reg $"{n}R" f.totalWidth
+                    mux keep i r ==> r
+                    mux full r i ==> o
+
+                mux full (bnot outReady) keep ==> full)
+
+    fun (s: Stream<'p>) ->
+        let ins, outs, inValid, inReady, outValid, outReady = stage.New
+
+        for port, value in List.zip ins (layout.pack s.payload) do
+            value ==> port
+
+        s.valid ==> inValid
+        inReady ==> s.ready
+        registerStreamReady outReady
+
+        { payload = layout.unpack outs
+          valid = outValid
+          ready = outReady
+          layout = layout }
+
+/// What a connection between two stages registers. The parent's choice:
+/// a module does not register its own output, because whether a path is too
+/// long depends on what it is connected to. Qualified (`Connection.Both`),
+/// since `Wire` is also a declaration in the IR.
+[<RequireQualifiedAccess>]
+type Connection =
+    /// Nothing: valid, data and ready pass straight through. No cycle.
+    | Wire
+    /// Data and `valid` registered (`streamStageFor`); `ready` passes
+    /// through. One cycle. Breaks a long forward path, such as a multiply
+    /// feeding the next stage's multiply.
+    | Forward
+    /// `ready` registered (`streamSkidFor`); data and `valid` pass through.
+    /// No cycle while nothing stalls. Breaks a long backward path, such as
+    /// `ready` rippling back through a chain of stages that pass it on.
+    | Backward
+    /// Both directions: `Backward` then `Forward`. One cycle; every signal
+    /// crossing the connection comes from a register.
+    | Both
+
+/// A stream through a connection of the parent's choosing.
+let connectAs (connection: Connection) (s: Stream<'p>) : Stream<'p> =
+    match connection with
+    | Connection.Wire -> s
+    | Connection.Forward -> streamStageFor s.layout s
+    | Connection.Backward -> streamSkidFor s.layout s
+    | Connection.Both -> s |> streamSkidFor s.layout |> streamStageFor s.layout
+
 /// The depth at which a FIFO's storage stops being LUTs and becomes a block.
 /// Not a limit — the crossover. Below it the head is a combinational read;
 /// at or above it the head is a synchronous read behind a two-slot skid.

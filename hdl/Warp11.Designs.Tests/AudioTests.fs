@@ -520,5 +520,73 @@ let private gainChannelTests =
 
           testCase "stereo, one shared multiply, matches the formula" <| fun _ -> stereoAgrees audioGainShared.def ]
 
+/// The biquad as integers: `biquadDef`'s arithmetic, one sample at a time.
+/// Checked against `biquadSectionDef` before anything is checked against it.
+let private biquadTwin (coefficients: uint64 list) (samples: uint64 list) : uint64 list =
+    let mask = (1UL <<< sampleWidth) - 1UL
+    let ofBits width (v: uint64) = if v >= (1UL <<< (width - 1)) then int64 v - (1L <<< width) else int64 v
+    let c = coefficients |> List.map (ofBits biquadCoeffWidth)
+    let top = (1L <<< (sampleWidth - 1)) - 1L
+
+    samples
+    |> List.mapFold
+        (fun (x1, x2, y1, y2) raw ->
+            let x = ofBits sampleWidth raw
+            let acc = x * c[0] + x1 * c[1] + x2 * c[2] - (y1 * c[3] + y2 * c[4])
+            let y = max (-top - 1L) (min top (acc >>> biquadCoeffFrac))
+            uint64 y &&& mask, (x, x1, y, y1))
+        (0L, 0L, 0L, 0L)
+    |> fst
+
+let private eqBandTests =
+    let rate = 48_828.0
+    let designs =
+        [ "identity", [ biquadUnity; 0UL; 0UL; 0UL; 0UL ]
+          "low shelf +6 dB", toQ230 (rbjDesign LowShelf 200.0 0.707 6.0 rate)
+          "peaking -4 dB", toQ230 (rbjDesign Peaking 1000.0 0.707 -4.0 rate)
+          "high shelf +3 dB", toQ230 (rbjDesign HighShelf 5000.0 0.707 3.0 rate)
+          "low pass 100 Hz", toQ230 (rbjDesign LowPass 100.0 0.707 0.0 rate) ]
+
+    let random = System.Random 2026_11_15
+    let mask = (1UL <<< sampleWidth) - 1UL
+    let lefts = [ yield 0UL; yield mask; yield (1UL <<< (sampleWidth - 1)); for _ in 1..300 -> uint64 (random.NextInt64(0L, 1L <<< sampleWidth)) ]
+    let rights = [ for i in 0 .. lefts.Length - 1 -> uint64 (int64 (sin (float i / 7.0) * 4_000_000.0)) &&& mask ]
+
+    let bandAgrees (design: ModuleDef) =
+        for label, coefficients in designs do
+            for stallEvery in [ 0; 3 ] do
+                let sim = Sim design
+                coefficients |> List.iteri (fun i c -> sim.Poke($"c{i}", c))
+
+                let out =
+                    List.zip lefts rights
+                    |> Seq.map (fun (l, r) -> [ l; r ])
+                    |> streamThroughWith sim (streamPins "in" sampleLayout) (streamPins "out" sampleLayout) stallEvery 400
+                    |> List.ofSeq
+
+                let expected = List.zip (biquadTwin coefficients lefts) (biquadTwin coefficients rights) |> List.map (fun (l, r) -> [ l; r ])
+                Expect.sequenceEqual out expected $"{design.name} should match the biquad on both channels ({label}, stall every %d{stallEvery})"
+
+    testList
+        "EQ band"
+        [ testCase "the twin agrees with biquadSectionDef" <| fun _ ->
+              for label, coefficients in designs do
+                  let sim = Sim (biquadSectionDef "BiquadSection").def
+                  List.zip [ "b0"; "b1"; "b2"; "a1"; "a2" ] coefficients |> List.iter (fun (n, c) -> sim.Poke(n, c))
+
+                  let out =
+                      [ for x in lefts do
+                            sim.Poke("x", x)
+                            sim.Poke("advance", 1UL)
+                            let y = sim.Peek "y"
+                            sim.Tick()
+                            yield y ]
+
+                  Expect.sequenceEqual out (biquadTwin coefficients lefts) $"The twin should be biquadDef's arithmetic ({label})"
+
+          testCase "every product in place matches the biquad" <| fun _ -> bandAgrees audioEqBandInPlace.def
+
+          testCase "all ten products on one shared multiply match the biquad" <| fun _ -> bandAgrees audioEqBandShared.def ]
+
 let tests =
-    testList "Audio" [ dspTests; gainChannelTests; gainTableTests; gainExpTests; bandTableTests; integrationTests ]
+    testList "Audio" [ dspTests; gainChannelTests; eqBandTests; gainTableTests; gainExpTests; bandTableTests; integrationTests ]

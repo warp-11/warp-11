@@ -59,7 +59,9 @@ let effects: BoardTop.Design =
         (fun io ->
             io.input.stream
             |> audioGain "AudioGain" "gain" io.volume io.mute
+            |> connectAs Connection.Forward
             |> audioEqBand "AudioEqBand" "eq" io.eq
+            |> connectAs Connection.Forward
             |> audioCompressor "AudioCompressor" "compressor" io.compressor
             |> audioLimiter "AudioLimiter" "limiter" io.limitThreshold
             |> io.out)

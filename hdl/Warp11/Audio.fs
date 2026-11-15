@@ -878,10 +878,13 @@ let gainMultiplier =
 /// multiplies served by `multiply` — told which channel it is serving, and
 /// free to answer every channel with the same shared copy
 /// (`Fu.sharing gainMultiplier`) or each with its own (`Fu.inPlace`). Wires
-/// the volume and mute controls, splices the stream through, and registers
-/// what comes out — for the reason `audioEqBand` does: a multiply spliced
-/// straight into the next stage is one cone with it (gain into a biquad
-/// measured 11.9 ns on the KV260, WNS −2.1 ns at 100 MHz).
+/// the volume and mute controls and splices the stream through.
+///
+/// What comes out is not registered here: that is the connection's, and so
+/// the caller's (`connectAs`). In place, a multiply spliced straight into the
+/// next stage is one cone with it (gain into a biquad measured 11.9 ns on the
+/// KV260, WNS −2.1 ns at 100 MHz), so a caller chaining one into a multiply
+/// connects them `Forward`.
 let audioGainWith (multiply: string -> Stream<Expr * Expr> -> Stream<Expr>) (name: string) instName =
     let io = (audioGainDef name).NewNamed instName
 
@@ -892,12 +895,141 @@ let audioGainWith (multiply: string -> Stream<Expr * Expr> -> Stream<Expr>) (nam
         for channel, socket in List.zip (sampleLayout.fields |> List.map fst) io.multiply do
             serveSocket socket (multiply channel)
 
-        stereoSplice io.s s |> streamStageFor sampleLayout
+        stereoSplice io.s s
 
 /// `audioGainWith`, each channel with a multiply of its own in place: the
 /// stage as it has always been, two multipliers.
 let audioGain (name: string) instName =
     audioGainWith (fun _ -> Fu.inPlace gainMultiplier) name instName
+
+/// A biquad's five terms, in the order its coefficients are given:
+/// `b0, b1, b2` on the input and the two before it, `a1, a2` on the two
+/// outputs before this one.
+let biquadTerms = [ "b0"; "b1"; "b2"; "a1"; "a2" ]
+
+/// What a biquad term asks its multiply for: a sample and a Q2.30
+/// coefficient, both signed.
+let biquadOperands = pins2 ("a", signedInt sampleWidth) ("b", signedInt biquadCoeffWidth)
+
+/// What the multiply answers: the whole product.
+let biquadProduct = pins1 ("product", signedInt (sampleWidth + biquadCoeffWidth))
+
+/// The biquad channel's ports.
+type BiquadChannelPorts =
+    { input: StreamInputPorts<Expr>
+      output: StreamOutputPorts<Expr>
+      /// `b0, b1, b2, a1, a2`, each Q2.30: `biquadUnity` is +1.0.
+      coefficients: Input list
+      /// One multiply per term, `multiply_b0` … `multiply_a2`, in
+      /// `biquadTerms` order: what serves them is the parent's choice.
+      multiply: SocketPorts<Expr * Expr, Expr> list }
+
+/// One channel of a Direct Form I biquad, `biquadDef`'s arithmetic bit for
+/// bit:
+///
+///     y[n] = b0*x[n] + b1*x[n-1] + b2*x[n-2] − a1*y[n-1] − a2*y[n-2]
+///
+/// Its five products are five sockets. Served in place, the sample goes in
+/// and comes out in the same cycle, as `biquadDef`'s does; served by a
+/// shared multiply, the five take turns and the sample comes out when the
+/// last has landed. The channel cannot tell which.
+///
+/// One sample is in it at a time: the next waits until this one has left,
+/// because two of its products are of the outputs this one is still
+/// producing. The input sample rides to the end beside the products (a sixth
+/// branch of the fork) so the state can shift when the output leaves.
+let biquadChannelDef (name: string) : TypedModule<BiquadChannelPorts> =
+    let productWidth = sampleWidth + biquadCoeffWidth
+    let accWidth = productWidth + 3
+    let scaledWidth = accWidth - biquadCoeffFrac
+
+    defModule
+        name
+        (fun p ->
+            { input = streamInputPortsAs p "in" monoSample
+              output = streamOutputPortsAs p "out" monoSample
+              coefficients = [ for term in biquadTerms -> p.inPortAs term (SInt biquadCoeffWidth) ]
+              multiply = [ for term in biquadTerms -> socketPorts p $"multiply_{term}" biquadOperands biquadProduct ] })
+        (fun io ->
+            let xd1 = reg "x_d1" (SInt sampleWidth)
+            let xd2 = reg "x_d2" (SInt sampleWidth)
+            let yd1 = reg "y_d1" (SInt sampleWidth)
+            let yd2 = reg "y_d2" (SInt sampleWidth)
+            let busy = regBit "busy"
+
+            // A sample is taken only while none is inside.
+            let incoming = streamSource io.input
+            let taking = wireBit "taking_ready"
+            registerStreamReady taking
+            (taking &&& bnot busy) ==> incoming.ready
+            let admitted = { incoming with valid = incoming.valid &&& bnot busy; ready = taking }
+
+            let samplesFor x = [ x; xd1; xd2; yd1; yd2 ]
+            let branches = streamForkEager (biquadTerms.Length + 1) admitted
+
+            let products =
+                [ for i, (branch, socket) in List.indexed (List.zip (List.take biquadTerms.Length branches) io.multiply) ->
+                      branch
+                      |> streamMapTo biquadOperands (fun x -> (samplesFor x)[i], io.coefficients[i])
+                      |> socketOf socket ]
+
+            let carried = List.last branches
+
+            let joinedLayout =
+                layoutOfList (("x", signedInt sampleWidth) :: [ for term in biquadTerms -> $"p_{term}", signedInt productWidth ])
+
+            let result = streamJoin joinedLayout (carried :: products)
+
+            let filtered (values: Expr list) =
+                let widened =
+                    [ for term, product in List.zip biquadTerms (List.tail values) ->
+                          let w = wire $"p_{term}" (SInt productWidth)
+                          product ==> w
+                          signExtend accWidth w ]
+
+                let feedForward = List.take 3 widened |> reduceTree add
+                let feedBack = List.skip 3 widened |> reduceTree add
+                let acc = wire "acc" (SInt accWidth)
+                sub feedForward feedBack ==> acc
+                let scaled = wire "scaled" (SInt scaledWidth)
+                shr biquadCoeffFrac acc ==> scaled
+                let y = wire "y_value" (SInt sampleWidth)
+                saturate sampleWidth scaled ==> y
+                y
+
+            let x = wire "x_carried" (SInt sampleWidth)
+            List.head result.payload ==> x
+            let y = filtered result.payload
+            let leaving = result.valid &&& result.ready
+
+            ifElse [
+                (leaving, fun () -> lit 0UL 1 ==> busy)
+                (admitted.valid &&& admitted.ready, fun () -> lit 1UL 1 ==> busy) ]
+
+            If leaving (fun () ->
+                xd1 ==> xd2
+                x ==> xd1
+                yd1 ==> yd2
+                y ==> yd1)
+
+            result |> streamMapTo monoSample (fun _ -> y) |> streamSink io.output)
+
+/// One channel under `instName`, called as a stage: its five multiplies
+/// served by `multiply term`, which is the caller's to choose.
+let biquadChannel
+    (name: string)
+    instName
+    (multiply: string -> Stream<Expr * Expr> -> Stream<Expr>)
+    (coefficients: Expr list)
+    (s: Stream<Expr>)
+    : Stream<Expr> =
+    let io = (biquadChannelDef name).NewNamed instName
+    List.iter2 (fun port c -> c ==> port) io.coefficients coefficients
+
+    for term, socket in List.zip biquadTerms io.multiply do
+        serveSocket socket (multiply term)
+
+    streamThroughInstance io.input io.output s
 
 /// The single-band equalizer's ports.
 type AudioEqBandPorts =
@@ -905,56 +1037,82 @@ type AudioEqBandPorts =
       s: StereoPorts
       /// The five biquad coefficients in `b0, b1, b2, a1, a2` order, each
       /// Q2.30 — `biquadUnity` is +1.0. `biquadDesign` produces them.
-      coefficients: Input list }
+      coefficients: Input list
+      /// Each channel's five multiplies, `multiply_left_b0` …
+      /// `multiply_right_a2`, passed up for whoever instantiates the band to
+      /// serve: channel-major, terms in `biquadTerms` order.
+      multiply: SocketPorts<Expr * Expr, Expr> list }
 
-/// One EQ band: a biquad section per channel, both fed the same five
-/// host-written coefficients.
+/// One EQ band: a biquad channel per side, both fed the same five
+/// host-written coefficients, forked and joined (`eachChannel`).
 ///
-/// The sections are clock-enabled by the sample handshake rather than by the
-/// fabric clock, so the filter advances once per arriving sample whatever the
-/// clock rate — the same design behaves identically at 100 and 166.67 MHz, and
+/// A channel advances once per sample that leaves it rather than once per
+/// clock, so the band behaves identically at 100 and 166.67 MHz, and
 /// stalling the stream freezes the filter state rather than smearing it.
+///
+/// What multiplies for it is not the band's choice: each channel's five
+/// sockets are passed up to this module's boundary (`audioEqBandWith`).
 ///
 /// Identity coefficients (`b0 = biquadUnity`, the rest zero) make the band
 /// flat, which is what its registers reset to.
 let audioEqBandDef (name: string) : TypedModule<AudioEqBandPorts> =
+    let channels = sampleLayout.fields |> List.map fst
+
     defModule
         name
         (fun p ->
             { s = stereoPorts p
-              coefficients = List.init 5 (fun i -> p.inPort $"c{i}" biquadCoeffWidth) })
+              coefficients = List.init 5 (fun i -> p.inPort $"c{i}" biquadCoeffWidth)
+              multiply =
+                [ for channel in channels do
+                      for term in biquadTerms -> socketPorts p $"multiply_{channel}_{term}" biquadOperands biquadProduct ] })
         (fun io ->
-            spliceHandshake io.s
+            let socketFor channel term =
+                io.multiply[List.findIndex ((=) channel) channels * biquadTerms.Length + List.findIndex ((=) term) biquadTerms]
 
-            let advance = wireBit "advance"
-            (io.s.inValid &&& io.s.outReady) ==> advance
+            stereoIn io.s
+            |> eachChannel (fun channel ->
+                biquadChannel $"{name}Channel" channel (fun term -> socketOf (socketFor channel term)) io.coefficients)
+            |> stereoOut io.s)
 
-            let section = biquadSection $"{name}Section"
+/// The eq band's multiply, at the formats its terms ask for.
+let eqMultiplier =
+    match biquadOperands.fields with
+    | [ _, a; _, b ] -> Fu.multiplier a b
+    | _ -> failwith "biquadOperands: two operands"
 
-            let coefficients: BiquadCoeffs =
-                { b0 = io.coefficients[0]
-                  b1 = io.coefficients[1]
-                  b2 = io.coefficients[2]
-                  a1 = io.coefficients[3]
-                  a2 = io.coefficients[4] }
-
-            section "left" io.s.inLeft advance coefficients ==> io.s.outLeft
-            section "right" io.s.inRight advance coefficients ==> io.s.outRight)
-
-/// One instance under `instName`, called as a function: wire the five
-/// coefficients, splice the stream through, and register what comes out.
+/// One instance under `instName`, called as a function, its channels'
+/// multiplies served by `multiply channel term` — every one with the same
+/// shared copy (`Fu.sharing eqMultiplier`), each with its own (`Fu.inPlace`),
+/// or anything between. Wires the five coefficients and splices the stream
+/// through.
 ///
-/// The section is combinational from its input — five multiplies and their
-/// sum, ~7 ns on the KV260 — so chained bands with nothing between them are
-/// one cone: two three-band EQs measured 42.8 ns, WNS −33 ns at 100 MHz, while
-/// every Sim and byte comparison passed. The register makes each band its own
-/// cone however many are chained; it costs a cycle the `Stream` keeps.
-let audioEqBand (name: string) instName =
+/// What comes out is not registered here: that is the connection's, and so
+/// the caller's (`connectAs`). In place the band is combinational from its
+/// input — five multiplies and their sum, ~7 ns on the KV260 — so bands
+/// chained with plain wires are one cone: two three-band EQs measured
+/// 42.8 ns, WNS −33 ns at 100 MHz, while every Sim and byte comparison
+/// passed. Connected `Forward`, each band is its own cone. Served by a shared
+/// multiply, a band passes `ready` straight through, so a long chain wants
+/// `Backward` or `Both` between bands.
+let audioEqBandWith (multiply: string -> string -> Stream<Expr * Expr> -> Stream<Expr>) (name: string) instName =
     let io = (audioEqBandDef name).NewNamed instName
+    let channels = sampleLayout.fields |> List.map fst
 
     fun (coefficients: Expr list) (s: Stream<Expr * Expr>) ->
         List.iter2 (fun port c -> c ==> port) io.coefficients coefficients
-        stereoSplice io.s s |> streamStageFor sampleLayout
+
+        let served = [ for channel in channels do for term in biquadTerms -> channel, term ]
+
+        for (channel, term), socket in List.zip served io.multiply do
+            serveSocket socket (multiply channel term)
+
+        stereoSplice io.s s
+
+/// `audioEqBandWith`, every term with a multiply of its own in place: the
+/// band as it has always been, ten multipliers.
+let audioEqBand (name: string) instName =
+    audioEqBandWith (fun _ _ -> Fu.inPlace eqMultiplier) name instName
 
 /// The hard limiter's ports.
 type AudioLimiterPorts =

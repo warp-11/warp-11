@@ -2665,6 +2665,7 @@ let audioChain =
 
             streamSource inPorts
             |> gain
+            |> connectAs Connection.Forward
             |> compressor
             |> limiter
             |> streamSink outPorts)
@@ -2714,6 +2715,44 @@ let audioGainShared =
                 streamSource inPorts
                 |> audioGainWith (fun _ -> multiply) "AudioGain" "gain" volume mute)
             |> streamSink outPorts)
+
+/// One EQ band, every one of its ten products in place: the band as it has
+/// always been.
+let audioEqBandInPlace =
+    defModule
+        "AudioEqBandInPlace"
+        (fun p -> ([ for i in 0..4 -> p.inPort $"c{i}" biquadCoeffWidth ], streamInputPorts p "in" sampleLayout, streamOutputPorts p "out" sampleLayout))
+        (fun (coefficients, inPorts, outPorts) ->
+            streamSource inPorts
+            |> audioEqBand "AudioEqBand" "eq" coefficients
+            |> streamSink outPorts)
+
+/// The same band with all ten products, both channels' five, on one shared
+/// multiplier.
+let audioEqBandShared =
+    defModule
+        "AudioEqBandShared"
+        (fun p -> ([ for i in 0..4 -> p.inPort $"c{i}" biquadCoeffWidth ], streamInputPorts p "in" sampleLayout, streamOutputPorts p "out" sampleLayout))
+        (fun (coefficients, inPorts, outPorts) ->
+            Fu.sharing eqMultiplier "eq_multiply" (fun multiply ->
+                streamSource inPorts
+                |> audioEqBandWith (fun _ _ -> multiply) "AudioEqBand" "eq" coefficients)
+            |> streamSink outPorts)
+
+/// A stream through one connection of each kind: what each registers is
+/// checked by poking one side and reading the other within a cycle.
+let connectionThrough (connection: Connection) =
+    let layout = layout1 ("data", 16)
+
+    defModule
+        $"Connection{connection}"
+        (fun p -> streamInputPorts p "in" layout, streamOutputPorts p "out" layout)
+        (fun (inPorts, outPorts) -> streamSource inPorts |> connectAs connection |> streamSink outPorts)
+
+let connectionWire = connectionThrough Connection.Wire
+let connectionForward = connectionThrough Connection.Forward
+let connectionBackward = connectionThrough Connection.Backward
+let connectionBoth = connectionThrough Connection.Both
 
 /// Two channels that do not keep pace: the left through two register stages,
 /// the right straight through. `eachChannel` must hand every beat back

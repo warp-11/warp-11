@@ -117,8 +117,14 @@ let private diffDesignsAtDefault () =
       audioChain.def
       audioGainChannelInPlace.def
       eachChannelUneven.def
+      connectionWire.def
+      connectionForward.def
+      connectionBackward.def
+      connectionBoth.def
       audioGainInPlace.def
       audioGainShared.def
+      audioEqBandInPlace.def
+      audioEqBandShared.def
       audioTone.def
       i2sLoopback.def
       i2sLinkPassthru.def

@@ -118,7 +118,50 @@ let private verifyStallIndependence ordered label design inputFields outputField
 let tests =
     testList
         "Streams"
-        [ testCase "eachChannel pairs every beat with its own partner when the channels drift" <| fun _ ->
+        [ testCase "every connection delivers every beat once and in order under stalls" <| fun _ ->
+              let beats = [ for i in 1..300 -> [ uint64 (i * 37 % 65536) ] ]
+              for design in [ connectionWire; connectionForward; connectionBackward; connectionBoth ] do
+                  for seed in 1..6 do
+                      let out = runStreamStalled $"{design.def.name}, seed {seed}" design.def [ "in_data" ] [ "out_data" ] beats (Some seed)
+                      Expect.equal out beats $"{design.def.name} should pass every beat once, in order (seed {seed})"
+
+          testCase "a connection registers what its name says" <| fun _ ->
+              // (design, ready registered, cycles a beat takes)
+              for design, readyRegistered, latency in
+                  [ connectionWire, false, 0; connectionForward, false, 1; connectionBackward, true, 0; connectionBoth, true, 1 ] do
+                  let name = design.def.name
+                  let sim = Sim design.def
+                  sim.Poke("in_valid", 1UL)
+                  sim.Poke("in_data", 7UL)
+                  // Within one cycle: does the input's ready follow the output's?
+                  let readyWhen outReady =
+                      sim.Poke("out_ready", outReady)
+                      sim.Peek "in_ready"
+                  let changes = [ for _ in 1..20 do
+                                      let a = readyWhen 0UL
+                                      let b = readyWhen 1UL
+                                      sim.Tick()
+                                      yield a <> b ]
+                  Expect.equal (List.exists id changes) (not readyRegistered) $"{name}: whether ready crosses it within a cycle"
+                  // Latency, from empty: how many ticks before the first beat shows.
+                  let fresh = Sim design.def
+                  fresh.Poke("out_ready", 1UL)
+                  fresh.Poke("in_valid", 1UL)
+                  fresh.Poke("in_data", 9UL)
+                  let shown = Seq.initInfinite id |> Seq.find (fun i -> (if i > 0 then fresh.Tick()); fresh.Peek "out_valid" = 1UL || i > 5)
+                  Expect.equal shown latency $"{name}: cycles before the first beat shows"
+                  // Full rate: unstalled, a beat a cycle.
+                  let rate = Sim design.def
+                  rate.Poke("out_ready", 1UL)
+                  rate.Poke("in_valid", 1UL)
+                  let mutable taken = 0
+                  for i in 1..100 do
+                      rate.Poke("in_data", uint64 i)
+                      if rate.Peek "out_valid" = 1UL then taken <- taken + 1
+                      rate.Tick()
+                  Expect.isGreaterThanOrEqual taken (100 - latency) $"{name}: a beat a cycle when nothing stalls"
+
+          testCase "eachChannel pairs every beat with its own partner when the channels drift" <| fun _ ->
               let random = System.Random 2026_11_14
               let beats = [ for i in 1..300 -> [ uint64 i; uint64 (random.Next(0, 1 <<< 24)) ] ]
               let fields = [ "left"; "right" ]

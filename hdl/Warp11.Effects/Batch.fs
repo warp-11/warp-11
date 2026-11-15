@@ -64,6 +64,7 @@ let gainStage =
         (fun (volume, mute, inPorts, outPorts) ->
             streamSource inPorts
             |> audioGain "AudioGain" "g" volume mute
+            |> connectAs Connection.Forward
             |> streamSink outPorts)
 
 let eqStage =
@@ -76,6 +77,7 @@ let eqStage =
         (fun (coeffs, inPorts, outPorts) ->
             streamSource inPorts
             |> audioEqBand "AudioEqBand" "eq" coeffs
+            |> connectAs Connection.Forward
             |> streamSink outPorts)
 
 let compressorStage =
