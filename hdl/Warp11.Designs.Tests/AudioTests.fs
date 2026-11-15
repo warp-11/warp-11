@@ -455,5 +455,70 @@ let private bandTableTests =
               Expect.equal (sim.Peek "gained") 0UL "Silence in should be silence out"
               Expect.equal (sim.Peek "envelope") 0UL "The envelope should be at rest" ]
 
+/// The gain channel with its multiply served in place, against today's stereo
+/// gain and against the formula, under stalls: the socket must not change a
+/// bit, and must not lose or repeat a beat.
+/// The gain channel and the stereo gain built from two of them, with the
+/// multiplies served in place and with one shared multiplier, against the
+/// formula under stalls: serving a socket must not change a bit, and must not
+/// lose, repeat or mispair a beat.
+let private gainChannelTests =
+    let mask = (1UL <<< sampleWidth) - 1UL
+    let signed (v: uint64) = if v >= (1UL <<< (sampleWidth - 1)) then int64 v - (1L <<< sampleWidth) else int64 v
+    let maxSample = (1L <<< (sampleWidth - 1)) - 1L
+
+    let formula (sample: uint64) (volume: uint64) (mute: uint64) =
+        if mute = 1UL then 0UL
+        else
+            let scaled = (signed sample * int64 volume) >>> gainFracBits
+            uint64 (max (-maxSample - 1L) (min maxSample scaled)) &&& mask
+
+    let random = System.Random 2026_11_14
+
+    let samples =
+        [ 0UL; 1UL; mask; uint64 maxSample; uint64 maxSample + 1UL ]
+        @ [ for _ in 1..200 -> uint64 (random.NextInt64(0L, 1L <<< sampleWidth)) ]
+
+    let partners = samples |> List.map (fun x -> (x * 2654435761UL) &&& mask)
+
+    let settings =
+        [ for volume in [ 0UL; 1UL; 128UL; gainUnity; 300UL; 512UL; 65535UL ] do
+              for mute in [ 0UL; 1UL ] do
+                  for stallEvery in [ 0; 3 ] -> volume, mute, stallEvery ]
+
+    let stereoAgrees (design: ModuleDef) =
+        for volume, mute, stallEvery in settings do
+            let sim = Sim design
+            sim.Poke("volume", volume)
+            sim.Poke("mute", mute)
+
+            let out =
+                List.zip samples partners
+                |> Seq.map (fun (l, r) -> [ l; r ])
+                |> streamThroughWith sim (streamPins "in" sampleLayout) (streamPins "out" sampleLayout) stallEvery 200
+                |> List.ofSeq
+
+            let expected = [ for l, r in List.zip samples partners -> [ formula l volume mute; formula r volume mute ] ]
+            Expect.sequenceEqual out expected $"{design.name} should match the formula on both channels (volume %d{volume}, mute %d{mute}, stall every %d{stallEvery})"
+
+    testList
+        "Gain channel"
+        [ testCase "one channel, its multiply in place, matches the formula" <| fun _ ->
+              for volume, mute, stallEvery in settings do
+                  let sim = Sim audioGainChannelInPlace.def
+                  sim.Poke("volume", volume)
+                  sim.Poke("mute", mute)
+
+                  let out =
+                      samples |> Seq.map (fun x -> [ x ])
+                      |> streamThroughWith sim (streamPins "in" monoSample) (streamPins "out" monoSample) stallEvery 100
+                      |> Seq.map List.head |> List.ofSeq
+
+                  Expect.sequenceEqual out [ for x in samples -> formula x volume mute ] $"The channel should match the formula (volume %d{volume}, mute %d{mute}, stall every %d{stallEvery})"
+
+          testCase "stereo, each channel's multiply in place, matches the formula" <| fun _ -> stereoAgrees audioGainInPlace.def
+
+          testCase "stereo, one shared multiply, matches the formula" <| fun _ -> stereoAgrees audioGainShared.def ]
+
 let tests =
-    testList "Audio" [ dspTests; gainTableTests; gainExpTests; bandTableTests; integrationTests ]
+    testList "Audio" [ dspTests; gainChannelTests; gainTableTests; gainExpTests; bandTableTests; integrationTests ]

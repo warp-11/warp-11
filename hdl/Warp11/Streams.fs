@@ -243,6 +243,49 @@ let streamOfOutputPorts (sp: StreamOutputPorts<'p>) : Stream<'p> =
       ready = sp.ready
       layout = sp.layout }
 
+/// The ground type a field is declared at, so a port keeps its reading.
+let private groundTypeOf (f: NumberFormat) =
+    if f.signed then SInt f.totalWidth else UInt f.totalWidth
+
+/// `streamInputPorts` with each field declared at its format's reading, so a
+/// signed field arrives signed and an operation on it needs no `asSInt`.
+let streamInputPortsAs (p: Ports) name (layout: Layout<'p>) : StreamInputPorts<'p> =
+    { payload = layout.unpack [ for n, f in layout.fields -> p.inPortAs $"{name}_{n}" (groundTypeOf f) ]
+      valid = p.inPort $"{name}_valid" 1
+      ready = p.outPort $"{name}_ready" 1
+      layout = layout }
+
+/// `streamOutputPorts` with each field declared at its format's reading.
+let streamOutputPortsAs (p: Ports) name (layout: Layout<'p>) : StreamOutputPorts<'p> =
+    { targets = [ for n, f in layout.fields -> p.outPortAs $"{name}_{n}" (groundTypeOf f) ]
+      valid = p.outPort $"{name}_valid" 1
+      ready = p.inPort $"{name}_ready" 1
+      layout = layout }
+
+/// A socket: a stage a module needs and does not provide. Operands leave as
+/// `{name}_request`, results come back as `{name}_response`. What serves it —
+/// a unit in place, a private copy, one client of a shared copy — is the
+/// parent's choice, made where the module is instantiated; the module's body
+/// is the same whichever it gets.
+type SocketPorts<'a, 'r> =
+    { request: StreamOutputPorts<'a>
+      response: StreamInputPorts<'r> }
+
+/// Declare a socket on a module's boundary.
+let socketPorts (p: Ports) name (operands: Layout<'a>) (results: Layout<'r>) : SocketPorts<'a, 'r> =
+    { request = streamOutputPortsAs p $"{name}_request" operands
+      response = streamInputPortsAs p $"{name}_response" results }
+
+/// Inside the body: the socket as the stage it stands for.
+let socketOf (socket: SocketPorts<'a, 'r>) : Stream<'a> -> Stream<'r> =
+    fun operands ->
+        streamSink socket.request operands
+        streamSource socket.response
+
+/// At the instance: serve a child's socket with `stage`, the parent's choice.
+let serveSocket (socket: SocketPorts<'a, 'r>) (stage: Stream<'a> -> Stream<'r>) =
+    streamOfOutputPorts socket.request |> stage |> streamToInputPorts socket.response
+
 /// `streamInputPorts` minus the backward wire — a flow boundary in, for
 /// producers that cannot be told to wait.
 type FlowInputPorts<'p> =
@@ -661,6 +704,87 @@ let streamZip (joined: Layout<'z>) (combine: 'a -> 'b -> 'z) (a: Stream<'a>) (b:
       valid = a.valid &&& b.valid
       ready = outReady
       layout = joined }
+
+/// Every branch gets every beat, and the branches need not take it on the
+/// same cycle: one that takes it early is marked as having it and is not
+/// offered it again, and the source moves on once every branch has it.
+///
+/// `streamBroadcast` is the lazy fork, a branch offered the beat only while
+/// every other branch is ready. Joined back up (`streamJoin`), that is a
+/// combinational loop: each branch's valid waits on the other's ready, and
+/// the join's ready waits on the other's valid. Here no valid depends on a
+/// ready, so the branches can be joined, and between the fork and the join
+/// they may run at different speeds. The cost is a flip-flop a branch.
+let streamForkEager (n: int) (s: Stream<'p>) : Stream<'p> list =
+    if n < 1 then
+        failwith $"streamForkEager: a fork has at least one branch, not %d{n}"
+
+    if n = 1 then
+        [ s ]
+    else
+        let b = current ()
+        let readies = [ for _ in 1..n -> wireBit (b.FreshName "fork_ready") ]
+        let taken = [ for _ in 1..n -> regBit (b.FreshName "fork_taken") ]
+        List.map2 (|||) readies taken |> List.reduce (&&&) ==> s.ready
+        let fire = s.valid &&& s.ready
+
+        [ for i in 0 .. n - 1 ->
+              let valid = s.valid &&& bnot taken[i]
+
+              ifElse [
+                  (fire, fun () -> lit 0UL 1 ==> taken[i])
+                  (valid &&& readies[i], fun () -> lit 1UL 1 ==> taken[i]) ]
+
+              b.RegisterStreamReady readies[i]
+              { s with valid = valid; ready = readies[i] } ]
+
+/// Pair n streams beat for beat: `streamZip` for any number of sides, each
+/// side's payload one field of `joined`, in order. A beat leaves only when
+/// every side has one, and every side is consumed together.
+let streamJoin (joined: Layout<'z>) (sides: Stream<Expr> list) : Stream<'z> =
+    match sides with
+    | [] -> failwith "streamJoin: nothing to join"
+    | [ one ] -> streamMapTo joined (fun p -> joined.unpack [ p ]) one
+    | _ ->
+        let outReady = wireBit ((current ()).FreshName "join_ready")
+
+        sides
+        |> List.iteri (fun i side ->
+            let others = [ for j, other in List.indexed sides do if j <> i then yield other.valid ]
+            (outReady &&& List.reduce (&&&) others) ==> side.ready)
+
+        (current ()).RegisterStreamReady outReady
+
+        { payload = joined.unpack [ for side in sides -> side.payload ]
+          valid = sides |> List.map (fun side -> side.valid) |> List.reduce (&&&)
+          ready = outReady
+          layout = joined }
+
+/// One stage per field of a beat, rejoined: each field — a channel — split
+/// out, through `stage`, and paired back up with the others' results in the
+/// same order. `stage` is told the field's name, so its instances can be
+/// named after the channel without the channel knowing which it is.
+///
+/// The channels may run at different speeds: they are forked
+/// (`streamForkEager`) and joined (`streamJoin`), never assumed in step. At
+/// one field there is no fork and no join; the stage is the whole of it.
+/// Each channel must come back at the format it went in at.
+let eachChannel (stage: string -> Stream<Expr> -> Stream<Expr>) (s: Stream<'p>) : Stream<'p> =
+    let names = s.layout.fields |> List.map fst
+    let branches = streamForkEager names.Length s
+
+    let results =
+        [ for i, name, branch in List.zip3 [ 0 .. names.Length - 1 ] names branches ->
+              let value = (s.layout.pack s.payload)[i]
+              let channel = streamMapTo (pins1 (name, formatOf value)) (fun p -> (s.layout.pack p)[i]) branch
+              let result = stage name channel
+
+              if formatOf result.payload <> formatOf value then
+                  failwith $"eachChannel: channel '{name}' went in as %A{formatOf value} and came back as %A{formatOf result.payload}"
+
+              result ]
+
+    streamJoin s.layout results
 
 /// Run a stage over part of a beat and carry the rest of it through.
 ///

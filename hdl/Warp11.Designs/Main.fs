@@ -115,6 +115,10 @@ let private diffDesignsAtDefault () =
       snapshotDdr.def
       audioOps.def
       audioChain.def
+      audioGainChannelInPlace.def
+      eachChannelUneven.def
+      audioGainInPlace.def
+      audioGainShared.def
       audioTone.def
       i2sLoopback.def
       i2sLinkPassthru.def

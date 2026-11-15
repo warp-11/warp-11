@@ -118,7 +118,15 @@ let private verifyStallIndependence ordered label design inputFields outputField
 let tests =
     testList
         "Streams"
-        [ testCase "module boundaries deliver every beat once and in order" <| fun _ ->
+        [ testCase "eachChannel pairs every beat with its own partner when the channels drift" <| fun _ ->
+              let random = System.Random 2026_11_14
+              let beats = [ for i in 1..300 -> [ uint64 i; uint64 (random.Next(0, 1 <<< 24)) ] ]
+              let fields = [ "left"; "right" ]
+              for seed in 1..6 do
+                  let out = runStreamStalled $"uneven channels, seed {seed}" eachChannelUneven.def [ for f in fields -> $"in_{f}" ] [ for f in fields -> $"out_{f}" ] beats (Some seed)
+                  Expect.equal out beats $"Every beat should come back whole and in order (seed {seed})"
+
+          testCase "module boundaries deliver every beat once and in order" <| fun _ ->
               let sim = Sim boundaryWalk.def
               let random = System.Random 20260908
               let seen = ResizeArray<uint64>()

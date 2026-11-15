@@ -229,6 +229,23 @@ let private stereoSplice (sp: StereoPorts) (s: Stream<Expr * Expr>) : Stream<Exp
       ready = sp.outReady
       layout = sampleLayout }
 
+/// A module's own stereo input boundary, as a live stream.
+let private stereoIn (sp: StereoPorts) : Stream<Expr * Expr> =
+    registerStreamReady sp.inReady
+
+    { payload = (sp.inLeft, sp.inRight)
+      valid = sp.inValid
+      ready = sp.inReady
+      layout = sampleLayout }
+
+/// Land a stream on a module's own stereo output boundary.
+let private stereoOut (sp: StereoPorts) (s: Stream<Expr * Expr>) =
+    let left, right = s.payload
+    left ==> sp.outLeft
+    right ==> sp.outRight
+    s.valid ==> sp.outValid
+    sp.outReady ==> s.ready
+
 /// The zero-latency handshake: a combinational stage passes both directions
 /// straight through, so it adds no cycle to the pipeline and no state to stall.
 let private spliceHandshake (sp: StereoPorts) =
@@ -740,6 +757,73 @@ let gainApply (multiply: Expr -> Expr -> Expr) (name: string) (toWidth: int) (ga
     gainApplyFromProduct name gainLog product toWidth
 
 
+/// One channel's sample, signed.
+let monoSample = pins1 ("sample", signedInt sampleWidth)
+
+/// What the gain channel asks its multiply for: the sample, and the volume
+/// zero-padded to a signed 17 bits so it can never read as negative.
+let gainOperands = pins2 ("a", signedInt sampleWidth) ("b", signedInt 17)
+
+/// What the multiply answers: the whole product.
+let gainProduct = pins1 ("product", signedInt (sampleWidth + 17))
+
+/// The gain channel's ports.
+type AudioGainChannelPorts =
+    { input: StreamInputPorts<Expr>
+      output: StreamOutputPorts<Expr>
+      /// Gain in Q8.8, as `AudioGainPorts.volume`.
+      volume: Input
+      /// High forces the output to zero.
+      mute: Input
+      /// The multiply this channel needs and does not provide.
+      multiply: SocketPorts<Expr * Expr, Expr> }
+
+/// One channel of the volume / mute stage, as `audioGainDef` computes it:
+///
+///     out = saturate24((sample * volume) >> 8), or 0 when muted
+///
+/// It does not know whether it is one of two, and it does not know what
+/// multiplies for it: the multiply is a socket its parent serves. In place,
+/// the request goes out, through a combinational multiply in the parent,
+/// and straight back, so the channel adds no cycle and no state.
+let audioGainChannelDef (name: string) : TypedModule<AudioGainChannelPorts> =
+    let productWidth = sampleWidth + 17
+    let scaledWidth = productWidth - gainFracBits
+
+    defModule
+        name
+        (fun p ->
+            { input = streamInputPortsAs p "in" monoSample
+              output = streamOutputPortsAs p "out" monoSample
+              volume = p.inPort "volume" 16
+              mute = p.inPort "mute" 1
+              multiply = socketPorts p "multiply" gainOperands gainProduct })
+        (fun io ->
+            let volumeSigned = wire "volume_signed" (SInt 17)
+            widenUnsigned 17 io.volume ==> volumeSigned
+
+            let applied (product: Expr) =
+                let scaled = wire "scaled" (SInt scaledWidth)
+                shr gainFracBits product ==> scaled
+                let saturated = wire "saturated" (SInt sampleWidth)
+                saturate sampleWidth scaled ==> saturated
+                mux io.mute (lit 0UL sampleWidth) saturated
+
+            streamSource io.input
+            |> streamMapTo gainOperands (fun sample -> sample, volumeSigned)
+            |> socketOf io.multiply
+            |> streamMapTo monoSample applied
+            |> streamSink io.output)
+
+/// One channel under `instName`, called as a stage: its multiply served by
+/// `multiply`, which is the caller's to choose.
+let audioGainChannel (name: string) instName (multiply: Stream<Expr * Expr> -> Stream<Expr>) (volume: Expr) (mute: Expr) (s: Stream<Expr>) : Stream<Expr> =
+    let io = (audioGainChannelDef name).NewNamed instName
+    volume ==> io.volume
+    mute ==> io.mute
+    serveSocket io.multiply multiply
+    streamThroughInstance io.input io.output s
+
 /// The volume stage's ports.
 type AudioGainPorts =
     { /// The stereo stream through the stage.
@@ -748,58 +832,72 @@ type AudioGainPorts =
       /// 0 is silence.
       volume: Input
       /// High forces the output to zero, whatever `volume` says.
-      mute: Input }
+      mute: Input
+      /// Each channel's multiply, `multiply_left` and `multiply_right`,
+      /// passed up for whoever instantiates the stage to serve.
+      multiply: SocketPorts<Expr * Expr, Expr> list }
 
-/// Combinational stereo volume / mute stage.
+/// The stereo volume / mute stage: two gain channels, one per side.
 ///
 ///     out = saturate24((sample * volume) >> 8), or 0 when muted
 ///
-/// `volume` is unsigned and zero-padded to 17 bits for the signed multiply, so
-/// it can never present as negative. Saturation only bites above unity gain —
-/// at or below `gainUnity` the shift cannot overflow a sample.
+/// The channels are forked and joined (`eachChannel`), so neither is
+/// assumed to keep pace with the other: in place they do, sharing one
+/// multiply they take turns.
+///
+/// What multiplies for them is not this stage's choice: each channel's
+/// socket is passed up to this module's boundary, and the caller serves it
+/// (`audioGainWith`).
 ///
 /// Mute is a separate gate rather than "write volume 0" so a host can silence
 /// the output and restore the previous level without having stored it.
 let audioGainDef (name: string) : TypedModule<AudioGainPorts> =
-    let productWidth = sampleWidth + 17
-    let scaledWidth = productWidth - gainFracBits
+    let channels = sampleLayout.fields |> List.map fst
 
     defModule
         name
         (fun p ->
             { s = stereoPorts p
               volume = p.inPort "volume" 16
-              mute = p.inPort "mute" 1 })
+              mute = p.inPort "mute" 1
+              multiply = [ for channel in channels -> socketPorts p $"multiply_{channel}" gainOperands gainProduct ] })
         (fun io ->
-            spliceHandshake io.s
+            let socketFor channel = io.multiply[List.findIndex ((=) channel) channels]
 
-            let volumeSigned = wire "volume_signed" (SInt 17)
-            widenUnsigned 17 io.volume ==> volumeSigned
+            stereoIn io.s
+            |> eachChannel (fun channel -> audioGainChannel $"{name}Channel" channel (socketOf (socketFor channel)) io.volume io.mute)
+            |> stereoOut io.s)
 
-            let channel channelName x =
-                let product = wire $"{channelName}_product" (SInt productWidth)
-                mul x volumeSigned ==> product
-                let scaled = wire $"{channelName}_scaled" (SInt scaledWidth)
-                shr gainFracBits product ==> scaled
-                let saturated = wire $"{channelName}_saturated" (SInt sampleWidth)
-                saturate sampleWidth scaled ==> saturated
-                mux io.mute (lit 0UL sampleWidth) saturated
+/// The gain stage's multiply, at the formats its channels ask for.
+let gainMultiplier =
+    match gainOperands.fields with
+    | [ _, a; _, b ] -> Fu.multiplier a b
+    | _ -> failwith "gainOperands: two operands"
 
-            channel "left" io.s.inLeft ==> io.s.outLeft
-            channel "right" io.s.inRight ==> io.s.outRight)
-
-/// One instance under `instName`, called as a function: wire the volume and
-/// mute controls, splice the stream through, and register what comes out —
-/// for the reason `audioEqBand` does: a multiply spliced straight into the
-/// next stage is one cone with it (gain into a biquad measured 11.9 ns on the
-/// KV260, WNS −2.1 ns at 100 MHz).
-let audioGain (name: string) instName =
+/// One instance under `instName`, called as a function, its channels'
+/// multiplies served by `multiply` — told which channel it is serving, and
+/// free to answer every channel with the same shared copy
+/// (`Fu.sharing gainMultiplier`) or each with its own (`Fu.inPlace`). Wires
+/// the volume and mute controls, splices the stream through, and registers
+/// what comes out — for the reason `audioEqBand` does: a multiply spliced
+/// straight into the next stage is one cone with it (gain into a biquad
+/// measured 11.9 ns on the KV260, WNS −2.1 ns at 100 MHz).
+let audioGainWith (multiply: string -> Stream<Expr * Expr> -> Stream<Expr>) (name: string) instName =
     let io = (audioGainDef name).NewNamed instName
 
     fun (volume: Expr) (mute: Expr) (s: Stream<Expr * Expr>) ->
         volume ==> io.volume
         mute ==> io.mute
+
+        for channel, socket in List.zip (sampleLayout.fields |> List.map fst) io.multiply do
+            serveSocket socket (multiply channel)
+
         stereoSplice io.s s |> streamStageFor sampleLayout
+
+/// `audioGainWith`, each channel with a multiply of its own in place: the
+/// stage as it has always been, two multipliers.
+let audioGain (name: string) instName =
+    audioGainWith (fun _ -> Fu.inPlace gainMultiplier) name instName
 
 /// The single-band equalizer's ports.
 type AudioEqBandPorts =

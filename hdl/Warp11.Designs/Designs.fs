@@ -2669,6 +2669,65 @@ let audioChain =
             |> limiter
             |> streamSink outPorts)
 
+/// One gain channel whose multiply socket this design serves in place: the
+/// parent spends a multiplier on the channel and wires it to the socket. The
+/// channel does not know; the same channel served by a shared multiplier is
+/// the same module. Checked bit-exact against the left channel of
+/// `audioGain`.
+let audioGainChannelInPlace =
+    let multiply =
+        match gainOperands.fields with
+        | [ _, a; _, b ] -> Fu.inPlace (Fu.multiplier a b)
+        | _ -> failwith "gainOperands: two operands"
+
+    defModule
+        "AudioGainChannelInPlace"
+        (fun p ->
+            (p.inPort "volume" 16,
+             p.inPort "mute" 1,
+             streamInputPortsAs p "in" monoSample,
+             streamOutputPortsAs p "out" monoSample))
+        (fun (volume, mute, inPorts, outPorts) ->
+            streamSource inPorts
+            |> audioGainChannel "AudioGainChannel" "gain" multiply volume mute
+            |> streamSink outPorts)
+
+/// The stereo gain, each channel's multiply served by the caller in place:
+/// two multipliers, the stage as it has always been.
+let audioGainInPlace =
+    defModule
+        "AudioGainInPlace"
+        (fun p -> (p.inPort "volume" 16, p.inPort "mute" 1, streamInputPorts p "in" sampleLayout, streamOutputPorts p "out" sampleLayout))
+        (fun (volume, mute, inPorts, outPorts) ->
+            streamSource inPorts
+            |> audioGain "AudioGain" "gain" volume mute
+            |> streamSink outPorts)
+
+/// The same stereo gain with both channels' multiplies served by one shared
+/// multiplier: the channels take turns, and nothing inside the stage knows.
+let audioGainShared =
+    defModule
+        "AudioGainShared"
+        (fun p -> (p.inPort "volume" 16, p.inPort "mute" 1, streamInputPorts p "in" sampleLayout, streamOutputPorts p "out" sampleLayout))
+        (fun (volume, mute, inPorts, outPorts) ->
+            Fu.sharing gainMultiplier "gain_multiply" (fun multiply ->
+                streamSource inPorts
+                |> audioGainWith (fun _ -> multiply) "AudioGain" "gain" volume mute)
+            |> streamSink outPorts)
+
+/// Two channels that do not keep pace: the left through two register stages,
+/// the right straight through. `eachChannel` must hand every beat back
+/// paired with its own partner however far apart the channels run.
+let eachChannelUneven =
+    defModule
+        "EachChannelUneven"
+        (fun p -> streamInputPorts p "in" sampleLayout, streamOutputPorts p "out" sampleLayout)
+        (fun (inPorts, outPorts) ->
+            streamSource inPorts
+            |> eachChannel (fun channel s ->
+                if channel = "left" then s |> streamStageFor s.layout |> streamStageFor s.layout else s)
+            |> streamSink outPorts)
+
 /// The tone generator sourcing the tone-control FIR: a stream source feeding a
 /// pipelined-MAC stage. Together they cover the two shapes the earlier audio
 /// designs did not — a module that *originates* a stream (its phase advances

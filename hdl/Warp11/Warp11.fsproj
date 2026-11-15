@@ -67,6 +67,7 @@
         <Compile Include="Vcd.fs"/>
         <Compile Include="Diff.fs"/>
         <Compile Include="Stdlib.fs"/>
+        <Compile Include="Fu.fs"/>
         <Compile Include="Uart.fs"/>
         <Compile Include="SerialRegMap.fs"/>
         <Compile Include="SimUart.fs"/>
@@ -81,7 +82,6 @@
         <Compile Include="SimPdm.fs"/>
         <Compile Include="Pgm.fs"/>
         <Compile Include="Csv.fs"/>
-        <Compile Include="Fu.fs"/>
         <Compile Include="Units.fs"/>
         <Compile Include="Pedal.fs"/>
         <Compile Include="BoardTop.fs"/>

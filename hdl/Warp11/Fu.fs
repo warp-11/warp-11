@@ -44,6 +44,17 @@ let fu (name: string) (operands: Layout<'a>) (results: Layout<'r>) (law: 'a -> '
       copies = 1
       answers = 1 }
 
+/// A multiply as a combinational unit, at the operands' formats, the
+/// product's format derived from them: the whole product, nothing dropped.
+let multiplier (a: NumberFormat) (b: NumberFormat) : Fu<Expr * Expr, Expr> =
+    let sign (f: NumberFormat) = if f.signed then "s" else "u"
+
+    fu
+        $"multiply_{sign a}%d{a.totalWidth}x{sign b}%d{b.totalWidth}"
+        (pins2 ("a", a) ("b", b))
+        (pins1 ("product", Warp11.Number.productFormat a b))
+        (fun (x, y) -> mul x y)
+
 /// A sequential unit with no controls, one copy.
 let fuSequential (name: string) (operands: Layout<'a>) (results: Layout<'r>) (law: string -> Stream<'a> -> Stream<'r>) : Fu<'a, 'r> =
     { name = name
@@ -83,6 +94,30 @@ let answering (k: int) (unit: Fu<'a, 'r>) : Fu<'a, 'r> =
     | Combinational _ when k <> 1 -> failwith $"'{unit.name}': a combinational unit answers once for one beat, not %d{k} times"
     | _ when k < 1 -> failwith $"'{unit.name}': a unit answers at least once, not %d{k} times"
     | _ -> { unit with answers = k }
+
+/// A combinational unit as a stage: its law applied to each beat, `valid`
+/// and `ready` straight through, nothing declared but what the law builds.
+/// What a parent serves a socket with when it spends a copy on that socket
+/// alone.
+///
+/// The beat must arrive at the unit's operand formats, width and reading,
+/// because a signed multiply handed unsigned operands is a different multiply
+/// with the same bits.
+let inPlace (unit: Fu<'a, 'r>) : Stream<'a> -> Stream<'r> =
+    match unit.law with
+    | Sequential _ -> failwith $"'{unit.name}' is sequential: it is a stage of its own, not a law to apply in place"
+    | Combinational _ when not unit.controls.IsEmpty ->
+        let names = unit.controls |> List.map fst |> String.concat ", "
+        failwith $"'{unit.name}' has controls ({names}); in place takes a unit without them"
+    | Combinational law ->
+        fun s ->
+            let arriving = [ for e in s.layout.pack s.payload -> formatOf e ]
+            let expected = [ for _, f in unit.operands.fields -> { f with fracBits = 0 } ]
+
+            if arriving <> expected then
+                failwith $"'{unit.name}' in place: operands arrive as %A{arriving}, the unit takes %A{expected}"
+
+            streamMapTo unit.results (law []) s
 
 /// A unit over bare nets — what a graph holds. Made only by `erase`, from a
 /// typed unit through its pins, so a palette cannot disagree with the unit
@@ -219,8 +254,10 @@ let private pool (unit: Fu<'a, 'r>) (law: 'a -> 'r) (name: string) (clients: Cli
 
     let core (operands: Expr list) =
         let held =
+            // Held at the operands' readings, so a signed law multiplies
+            // signed: the bits arrive through the issue mux as plain bits.
             [ for (n, f), o in List.zip unit.operands.fields operands ->
-                  let r = reg $"{name}_{n}" f.totalWidth
+                  let r = reg $"{name}_{n}" (Warp11.Number.groundType f)
                   o ==> r
                   r ]
 
@@ -239,6 +276,54 @@ let private pool (unit: Fu<'a, 'r>) (law: 'a -> 'r) (name: string) (clients: Cli
         r.valid ==> c.landed
         // A client holds one beat, so a landed result always has a home.
         lit 1UL 1 ==> r.ready
+
+/// The beat's formats against the unit's operands: width and reading.
+let private checkOperands (unit: Fu<'a, 'r>) (what: string) (s: Stream<'a>) =
+    let arriving = [ for e in s.layout.pack s.payload -> formatOf e ]
+    let expected = [ for _, f in unit.operands.fields -> { f with fracBits = 0 } ]
+
+    if arriving <> expected then
+        failwith $"'{unit.name}' {what}: operands arrive as %A{arriving}, the unit takes %A{expected}"
+
+/// One copy of a combinational unit, shared by every stage `body` makes
+/// from it. `body` is handed a stage, `Stream<operands> -> Stream<results>`,
+/// of the same type `inPlace` returns; each place it is applied is one
+/// client of the copy, so a parent that served two sockets with it has two
+/// clients and one unit. When `body` returns, the copy is built behind an
+/// arbiter (`warpFu`) with every client it was given.
+///
+/// A client holds one beat while its operation is out, so a stream through
+/// one manages a beat every few cycles. The clients must be made in the
+/// module that shares the unit: a socket in a child reaches it by being
+/// passed up to this module's boundary, not by the child reaching out.
+let sharing (unit: Fu<'a, 'r>) (name: string) (body: (Stream<'a> -> Stream<'r>) -> 'x) : 'x =
+    let law =
+        match unit.law with
+        | Sequential _ -> failwith $"'{unit.name}' is sequential: sharing one is not built yet"
+        | Combinational _ when not unit.controls.IsEmpty ->
+            let names = unit.controls |> List.map fst |> String.concat ", "
+            failwith $"'{unit.name}' has controls ({names}); sharing takes a unit without them"
+        | Combinational law -> law []
+
+    let home = current ()
+    let clients = ResizeArray<Client>()
+
+    let client (s: Stream<'a>) : Stream<'r> =
+        if not (obj.ReferenceEquals(current (), home)) then
+            failwith $"'{name}': a client of a shared '{unit.name}' was made inside another module; pass that module's socket up to the one that shares the unit"
+
+        checkOperands unit "shared" s
+        let results, c = clientStage unit $"{name}_client%d{clients.Count}" unit.results id (fun r _ -> r) s
+        clients.Add c
+        results
+
+    let result = body client
+
+    if clients.Count = 0 then
+        failwith $"'{name}': a shared '{unit.name}' with no clients"
+
+    pool unit law name (List.ofSeq clients)
+    result
 
 /// The same layout under prefixed field names, so two layouts that both
 /// call a field `a` can be joined side by side.
