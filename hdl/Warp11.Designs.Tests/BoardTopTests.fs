@@ -881,7 +881,10 @@ let tests =
               let top = BoardTop.boardTop kv260 viaHostMemory wide
               let batch = top.batch.Value
               let sim = Sim top.top
-              let rows = 8
+              // One burst of rows: a row is four beats, and a burst is the
+              // board's to size. Source and destination a burst apart.
+              let burstBeats = kv260.hostMemory.Value.burstBeats
+              let rows = burstBeats / 4
               let src, dst = 0x1000, 0x4000
               let ddr = SimAxiDdr(sim, 0x8000, dataBytes = 16, awEvery = 3, bDelay = 6)
               let axi = SimAxi.clientWith sim ddr.Cycle

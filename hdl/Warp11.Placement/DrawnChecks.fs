@@ -121,8 +121,8 @@ let editsBuildTheDesigns () : bool =
     && emitDesign (elaborate registered).def <> emitDesign (elaborate g).def
     && narrowed.edges = g.edges
     && (match edgeFit narrowed intoGain with DoesNotFit _ -> true | _ -> false)
-    // The examples: nine, each built by edits, each a design.
-    && examples.Length = 9
+    // The examples: thirteen, each built by edits, each a design.
+    && examples.Length = 13
     && examples |> List.forall (fun (_, example) -> (emitDesign (elaborate example).def).Contains $"module {example.name}")
     // ...and the two that carry a connection are the checked pipelines.
     && emitDesign (elaborate (Examples.threeBandEq rate)).def = emitDesign (threeBandEqPipeline Connection.Forward).def
@@ -404,10 +404,14 @@ let designOnHostMemory () : bool =
     let ddr = SimAxiDdr(sim, 0x20000)
     let axi = SimAxi.clientWith sim ddr.Cycle
 
-    let frames = 64
+    // One burst of rows, and a burst is the board's to size: two stereo
+    // frames a beat. Source and destination on the burst's own boundary.
+    let burstBeats = kv260.hostMemory.Value.burstBeats
+    let burstBytes = burstBeats * kv260.hostMemory.Value.width / 8
+    let frames = 2 * burstBeats
     let source = toneWav (int (round stockSampleRate)) frames 1000.0 0.25
-    let src = 0x1000
-    let dst = 0x9000
+    let src = burstBytes
+    let dst = 4 * burstBytes
 
     for i in 0 .. frames - 1 do
         ddr.WriteWord(src + i * 8, uint32 (int source.samples[2 * i] <<< 8))

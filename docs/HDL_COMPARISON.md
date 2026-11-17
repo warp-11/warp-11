@@ -31,7 +31,7 @@ The cost is real and was measured before being accepted: two toolchains, and one
 | **Clash** | Haskell (GHC) | Verilog/VHDL/SV | Functional stdlib (Vec, signals); narrower than Chisel-class | Interactive REPL, simulation in GHC | Via standard tools | Decent (Hackage + tutorial) | QBayLogic, niche academic |
 | **Bluespec (BSV)** | BSV (own lang, SV-or-Haskell flavored) | Verilog | Guarded-atomic-actions stdlib (rules, methods, FIFOs, BRAMs, NoC fabric) | bluesim included | Recent partnership w/ Axiomise for RISC-V cores | Decent, BSC has 20+ yrs of materials | Flute, Piccolo, Shakti RISC-V; Achronix integrations |
 | **Veryl** | own lang (Rust-syntax-inspired) | SystemVerilog | Thin (it's a transpiler, leans on SV ecosystem) | Defer to SV simulators (Verilator, VCS) | Defer to SV tools | Good, modern site, LSP integration | Early adopters, growing |
-| **Warp 11** | F# (DSL) + Rust (runtime) | Verilog (multi-module, hierarchical) | Audio (biquad EQ + RBJ cookbook, FIR, broadband compressor, limiter, gain, tone, host-written dB gain tables, I2S, PDM microphones through a CIC decimator); AXI-Lite slave from a declarative register map with generated Rust layouts (registers, pulse/W1C bits, and windows in both directions — host-written with arbitrated readback, and design-written for the host to read), AXI4 master read+write (burst, multi-outstanding); typed streams with `wormhole` connect + operator chains, replication, unions, merge/dispatch trees, stall telemetry; snapshot buffer (CONFLATE/N=3); `reduceTree`/`countWhere`/`neighborhood`/`warpFu`/xoshiro; state machines over a union of states, decoded by name in the debugger; one numeric layer over the width-only IR — width, fraction bits and signedness in one format, so signed/unsigned integers and signed/unsigned fixed point are one type and the five sign-dependent primitives are chosen by the format rather than by the call site. no image-processing or crypto modules | Compiled cycle-based interpreter; Verilator differential across narrow + wide; **step-through debugger with signal breakpoints**; Rust driver runs against the F# sim over a bridge | None | This file + README + per-area design docs | One developer; three accelerators (Mandelbrot, GoL, GEP) running on a KV260, F#-elaborated and driven by the Rust runtime |
+| **Warp 11** | F# (DSL) + Rust (runtime) | Verilog (multi-module, hierarchical) | Audio (biquad EQ + RBJ cookbook, FIR, broadband compressor, limiter, gain, tone, host-written dB gain tables, I2S, PDM microphones through a CIC decimator); AXI-Lite slave from a declarative register map with generated Rust layouts (registers, pulse/W1C bits, and windows in both directions — host-written with arbitrated readback, and design-written for the host to read), AXI4 master read+write (burst, multi-outstanding); typed streams with `wormhole` connect + operator chains, replication, unions, merge/dispatch trees, arbitration and connections chosen by the parent, units shared through sockets, stall telemetry; a stream through the host's memory over one to five ports at the ports' rate; snapshot buffer (CONFLATE/N=3); `reduceTree`/`countWhere`/`neighborhood`/`warpFu`/xoshiro; state machines over a union of states, decoded by name in the debugger; one numeric layer over the width-only IR — width, fraction bits and signedness in one format, so signed/unsigned integers and signed/unsigned fixed point are one type and the five sign-dependent primitives are chosen by the format rather than by the call site. no image-processing or crypto modules | Compiled cycle-based interpreter; Verilator differential across narrow + wide; **step-through debugger with signal breakpoints**; Rust driver runs against the F# sim over a bridge | None | This file + README + per-area design docs | One developer; three accelerators (Mandelbrot, GoL, GEP) running on a KV260, F#-elaborated and driven by the Rust runtime |
 
 ## Per-HDL deep dive
 
@@ -598,11 +598,13 @@ payload uses, and five helpers reach it: `streamSource`/`streamSink` for a
 module's own boundary, `streamDrive` where the body builds the produced stream
 itself (its `ready` is the port, so there is nothing to hand back), and
 `streamToInputPorts`/`streamOfOutputPorts` for the same boundary seen from the
-caller, where every direction is flipped. Operators: `streamStageFor`/`streamMap`/`streamMapTo`/`streamFifo`/`streamBroadcast`/`streamBalance`/`streamMerge2`/`streamMergeTree`/`streamMergeWith`/`streamConflate3`/`streamProbe`; `wormhole` + `wormholeOut`/`wormholeIn` for fan shapes (flat or clustered ~√N registered tree); `rangeStream` (a scan's read schedule as a value: 0…n−1 per start pulse), `streamWindow` (the last k beats as one window — FIR taps, 1D receptive fields; framed or free-running), `streamStride` (every n-th beat, frame-aligned — a pooling layer's stride, a decimator's rate change), `lineWindow` over the window, and `bandedWorld` (a double-buffered, band-striped 2D world store that hands lockstep engines their slices with the vertical halo routed — the working set under a stencil sweep, from Life to pooling) (raster rows in, k-row stencil windows out, shaped by a `WindowSpec` — kernel height, edge columns, cell width, edge policy; halo rows come from the loader, the horizontal edge is applied by widening, and a checked frame counter re-arms it between frames) |
+caller, where every direction is flipped. Operators: `streamStageFor`/`streamMap`/`streamMapTo`/`streamFifo`/`streamBroadcast`/`streamForkEager`/`streamBalance`/`streamMerge2`/`streamMergeTree`/`streamMergeWith`/`streamJoin`/`streamJoinGroups`/`eachChannel`/`eachGroup`/`connectAs`/`streamConflate3`/`streamProbe`; `wormhole` + `wormholeOut`/`wormholeIn` for fan shapes (flat or clustered ~√N registered tree); `rangeStream` (a scan's read schedule as a value: 0…n−1 per start pulse), `streamWindow` (the last k beats as one window — FIR taps, 1D receptive fields; framed or free-running), `streamStride` (every n-th beat, frame-aligned — a pooling layer's stride, a decimator's rate change), `lineWindow` over the window, and `bandedWorld` (a double-buffered, band-striped 2D world store that hands lockstep engines their slices with the vertical halo routed — the working set under a stencil sweep, from Life to pooling) (raster rows in, k-row stencil windows out, shaped by a `WindowSpec` — kernel height, edge columns, cell width, edge policy; halo rows come from the loader, the horizontal edge is applied by widening, and a checked frame counter re-arms it between frames) |
 
-**This is a strength rather than a gap** — see [`docs/streams.md`](streams.md). Two things have no direct analogue in the field surveyed:
+**This is a strength rather than a gap** — see [`docs/streams.md`](streams.md). Several things have no direct analogue in the field surveyed:
 
 - **Arbitration is one record, chosen where the askers meet.** `streamMergeWith arbitration` merges N streams through a single pick, and `Fu.sharingWith arbitration` (over `warpFuWith`) puts N clients on one unit; both take `{ policy = RoundRobin | Priority; timing = SameCycle | Registered }` — Chisel's `RRArbiter` and `Arbiter`, SpinalHDL's `StreamArbiterFactory` choices, as a value the parent passes. Round-robin is fair at any count (five saturated inputs get a fifth each, where `streamMergeTree`'s tree of pairs gives the odd one a half); `Registered` moves the grant and the mux select into registers for a cycle. Living checks hold the share, the priority order and the timing; the stages on either side do not change.
+- **What a connection registers is the parent's choice, made on the connection.** `connectAs Connection.Wire | Forward | Backward | Both` between two stages: nothing, data and valid, `ready`, or both. A module does not register its own output, because whether a path is too long depends on what it is connected to — SpinalHDL's `m2sPipe`/`s2mPipe`/`halfPipe` on a `Stream`, and Chisel's `Queue(pipe, flow)`, are the same registers, reached as methods on the stream; here the choice is a value, so a drawn edge and a typed line carry the same one. Measured on the Icepi: two three-band EQs in series close at 45.8 MHz with `Backward` between bands and 61.3 with `Both`, the modules unchanged.
+- **A stage per group, side by side.** `eachChannel` puts a stage on each field of a beat and `eachGroup` on each group of fields — a wide beat's frames, a vector's lanes — forked and joined so the groups are never assumed in step. It is how one module becomes k without knowing: two stereo frames a beat through the unchanged stereo gain is `eachGroup stereo (audioGain …)`, the same bytes out as one frame a beat. Its limit is stated where it is defined: each group has a stage of its own, so it is for stages with no memory from one beat to the next, or for groups that are separate streams.
 - **The connect call carries the timing lesson.** The clustered fan builds the ~√N registered dispatch/merge tree that MandelPod needed to get from ~106 MHz to 166 MHz, so the next design gets it without a bitstream build and a timing report. Measured: at 104 lanes the generated tree's critical path has **zero logic levels** — pure route delay.
 - **Exactly-once consumption is checked at elaboration.** A stream has one consumer; `checkStreams` counts drives of each ready net and refuses to emit a design where a stream was dropped or double-consumed. Dangling a stream is expressible, but only by saying so.
 
@@ -666,6 +668,79 @@ answers with the caller's own context, in order, as each record lands. So a
 design that must not report a result before its payload landed (GEP advances
 a ring per landed record) says it with an ordinary stream, and never names a
 `B` channel.
+
+### A stream through memory, over several ports
+
+The other way a design meets memory: not a word by index, but a whole
+buffer in at one end and a whole buffer out at the other — a recording, an
+image, a table — as fast as the memory's ports will carry it.
+
+| HDL | A stream to and from memory | Several ports for one stream |
+|---|---|---|
+| Chisel | AXI4 and TileLink through diplomacy: crossbars, width adapters, fragmenters. A mover from a stream to a memory-mapped port is the designer's, or a generator's on top | The crossbars join several masters to several slaves; spreading one stream over several slave ports is the designer's |
+| SpinalHDL | `Axi4` with `Axi4CrossbarFactory` and read-only / write-only arbiters, beside `StreamArbiter` and the stream library; a mover is assembled from them | The arbiters bring several masters onto one slave; the other direction is the designer's |
+| Amaranth / LiteX | **LiteDRAM**: a memory controller with a crossbar of user ports — native, AXI or Wishbone — arbitration handled for the user, with a DMA reader and writer and a FIFO in the DRAM as frontends | Several user ports onto the one controller, each a stream of its own |
+| HardCaml / Clash / Bluespec / Veryl | AXI channel records and protocol libraries; the mover is the designer's | The designer's |
+| Vendor IP, for scale | An AXI DataMover or DMA core moves a stream to and from one memory-mapped port; an HLS tool gives each array its own port when the source says so | One port a core; the source decides what goes on which |
+| Warp 11 | A design declares `streamIn` and `streamOut` rows and a mapping puts them on the host's memory. The top it generates reads the buffer in bursts, unpacks rows, packs what comes back and writes it in bursts — a burst's address issued only when the whole burst is in hand, so nothing partial is ever on the bus | `streamPorts` in the mapping. The buffer in memory stays one contiguous run and the ports take its bursts in turn; each fills a ring of its own and a drain feeds the design in address order. The design and the host are the same at one port and at five |
+
+What the libraries above ship is, by their documentation, the joining
+direction: many users onto one memory, arbitrated. That is the common need,
+and LiteDRAM's crossbar is the most complete answer to it, with its DMA
+frontends the nearest thing to the mover here. Spreading **one** stream over
+several ports to add their bandwidth does not appear as a library feature in
+any of them, as far as their documentation shows; it is usually built for
+the design at hand.
+
+The shape here keeps two things apart that such a design tends to tie
+together. **Filling knows ports and bursts and nothing about rows; draining
+knows rows and nothing about ports.** How many ports is how fast the ring
+fills; how wide a row the design takes is how fast it empties; neither fixes
+the other, and throughput is the smaller. So the port count is a number in
+the mapping, any count works, and a design written for one port is the same
+source on five:
+
+```fsharp
+// the design: no port, no burst, no buffer
+let gainWide =
+    BoardTop.design
+        "GainWide"
+        (fun n -> {| rows = n.streamIn ("in", frames); out = n.streamOut ("out", frames) |})
+        (fun p -> p.rows.stream |> eachGroup stereo gain |> p.out)
+
+// the mapping: the memory's facts, and the only line that changes
+{ kv260 with hostMemory = kv260.hostMemory |> Option.map (fun m -> { m with streamPorts = 4 }) }
+```
+
+Measured on a KV260 at 100 MHz, two seconds of stereo audio through a gain,
+every run byte-identical to the simulator. A beat is 128 bits on one port in
+one cycle; a port's ceiling is one beat a cycle, 1.6 GB/s each way.
+
+| step | time | beats a cycle |
+|---|---|---|
+| a write a beat | 2.14 ms | 0.23 |
+| sixteen-beat write bursts | 1.01 ms | 0.49, the design the limit |
+| two frames a beat | 0.60 ms | 0.82 |
+| 256-beat bursts, one port | 0.50 ms | 0.98 |
+| two ports | 0.25 ms | 1.94 |
+| three ports | 0.17 ms | 2.89 |
+| four ports | 0.13 ms | 3.82 |
+| five ports | 0.12 ms | 4.03–4.12 |
+
+One port lands within 2% of its ceiling and four add almost in full; the
+fifth adds about a quarter of a port and the runs begin to vary, which is
+the processor's shared memory and not the fabric. Three things that
+measurement taught are in the generated top rather than in a note: a burst
+costs the port about three and a half cycles whatever its length, so the
+burst length is a fact of the board and the KV260's is a whole 4 KB page; an
+address is never issued ahead of its data; and a count that is not whole
+bursts never finishes, which the host's tools avoid by reading the burst
+from the design's seam.
+
+What it does not do: a row is a power of two beats; a counted input, a
+scattered output and a snapshot surface stay on one port; and one board has
+host memory at all. The simulator's memory is ideal and independent per
+port, so it predicts the design's side of these numbers and not the port's.
 
 ### The first design on a board
 
@@ -863,9 +938,11 @@ Two capabilities the field mostly leaves to the user, treated here as first-clas
 | SpinalHDL | Stream fan-out/fan-in with arbitration; explicit pipelining API | Hand-written counters |
 | Amaranth / HardCaml / Clash | Manual | Hand-written counters |
 | LiteX / LiteScope | — | **LiteScope**: an embedded logic analyzer with configurable triggers, capture into FPGA memory, upload to a host, VCD/sigrok/CSV export |
-| Warp 11 | Lane count is **one integer**: the fan builder instantiates N copies, dispatches into them and merges their results, choosing flat or a ~√N registered tree by size. `MANDEL_NUM_LANES = 104` is the whole knob for filling 100% of the chip's 1,248 DSPs | `streamProbe` puts two saturating counters on any link — `blocked` (`valid && !ready`) and `starved` (`ready && !valid`) — and `streamReport` walks a design for them. The same registers are peeked in the simulator and read over AXI-Lite on the board |
+| Warp 11 | Lane count is **one integer**: the fan builder instantiates N copies, dispatches into them and merges their results, choosing flat or a ~√N registered tree by size. `MANDEL_NUM_LANES = 104` is the whole knob for filling 100% of the chip's 1,248 DSPs. A unit as one stage is `Fu.stage`; `Fu.farm order controls unit name k` is k of it over one stream, in order or as each finishes, and at one copy is the stage and nothing else | `streamProbe` puts two saturating counters on any link — `blocked` (`valid && !ready`) and `starved` (`ready && !valid`) — and `streamReport` walks a design for them. The same registers are peeked in the simulator and read over AXI-Lite on the board. Every design on the host's memory also carries `readWaits` and `writeWaits` beside its cycle count: the cycles it had no row to work on and the cycles a row could not leave |
 
 The distinction from LiteScope is worth being precise about, because LiteScope is the better tool for its own job. It is a *logic analyzer*: you trigger, capture a window of samples into BRAM, and upload it to look at waveforms. Warp 11's counters are *aggregate occupancy* — no window, no trigger, no waveform, just "this link blocked 17,749 times". That is much less information, and it is available continuously, in simulation, at zero upload cost, which turns out to be the shape that answers "where is the bottleneck" in one `tick` and one `peek`.
+
+Two things about a farm are fixed by rule rather than left to the caller. **A unit never knows it is farmed**, so its `ready` may wait on its `valid` and the dispatch's `valid` waits on a lane's `ready` — a combinational loop through an innocent unit. `Fu.farm` therefore puts each copy between a `ready` register and a register stage; one alone halves an ordered farm (measured: 64 products on four sixteen-cycle multipliers in 276 cycles bare, 593 with the `ready` register alone, 283 with both). And **the two wait counters are what found a board's real limit**: a drawn gain measured 2.19 cycles a frame on a KV260 with the counters reading 53% of the cycles blocked on writes and none on reads, which named the write side — one AXI write a beat — where the simulator's ideal memory showed one cycle a frame.
 
 What that buys is a development loop: telemetry, not intuition, has re-ranked GEP's roadmap three times (the table in [§3 below](#3-telemetry-as-a-first-class-output-readable-in-simulation)), and the shape sweep that picks a bitstream's breeder × lane × filler counts runs entirely in simulation before Vivado starts.
 
@@ -979,6 +1056,28 @@ and wrong here, and the discriminator is which resource binds: LUTs on GEP,
 the eight multiplier blocks on a UP5K. What one-beat stages cost is
 *registers*: every stage holds its beat, and the first draft, holding each
 twice, did not place.
+
+**Since then, sharing is the parent's decision and the module does not
+change.** A module that needs a multiply declares a **socket** — the operands
+out, the product back — and whoever instantiates it serves the socket: with
+a multiplier of its own (`Fu.inPlace`), or as one client of a shared copy
+(`Fu.sharingWith arbitration unit name`), the arbitration the same record a
+merge takes. The stereo gain's two channels on one multiplier, and a
+three-band EQ's thirty products on three or on one, are the same modules
+with a different line in the parent, bit-exact against the in-place form:
+
+| three-band EQ | multiplies | on an Icepi Zero (28 multiplier blocks) |
+|---|---|---|
+| in place | 30 | does not fit (148 blocks) |
+| a multiplier a band | 3 | 12 blocks, 67.5 MHz |
+| one multiplier | 1 | — |
+
+This is the manual half of what high-level synthesis calls resource sharing
+— there the tool decides what shares, here the parent says — and it is
+closest in spirit to Bluespec, where a shared register file and rules give a
+folded schedule, with the difference that the design is written unfolded and
+folded afterwards. The folded compressor above predates sockets and still
+carries its own multiplier pool; moving it over is owed.
 
 ### A nonlinear curve: formula, generated ROM, or host-written table
 
@@ -1151,6 +1250,26 @@ A background thread running the simulation freely would give the same shape and 
 
 `streamThroughWith` adds injected backpressure, because a stage that behaves differently under stalls has a real defect — that is the shape the audio signal-shift bug lived in — and a check that only ever runs unstalled is checking the easy half.
 
+### A design as data, and drawing one
+
+| HDL | The design as something other than source |
+|---|---|
+| Chisel | FIRRTL and CIRCT's dialects are the design as data, for tools; viewers draw an elaborated circuit. The project ships no editor |
+| SpinalHDL / HardCaml / Amaranth / Clash / Bluespec / Veryl | The netlist or RTL the compiler emits; no drawn form in the project |
+| LiteX | An SoC is a Python description assembled from cores, with the interconnect generated |
+| Vendor block editors, for scale | Vivado's IP Integrator and Intel's Platform Designer: components with typed interfaces, a connection per interface pair, the interconnect and its arbitration generated from what meets where. Platform Designer is the stated model for the canvas here |
+| Graphical dataflow tools, for scale | Simulink with HDL Coder, LabVIEW FPGA: the diagram is the source |
+| Warp 11 | **Experimental.** A design is also a file — boxes with ports and edges between ports — that elaborates through exactly the calls typed code makes: a box is its unit applied once, an edge is `connectAs`, edges that meet are a broadcast, a balance or an arbitrated merge, a unit with sockets connected to it is shared. The checks hold each drawn shape against a pipeline written by hand, byte for byte, and the export prints the typed F# and is compiled and compared. A node editor over it runs the design in the simulator behind the drawing |
+
+The claim worth making is the narrow one: **the drawing is not a second
+language.** It has no semantics of its own to drift from the library's,
+because elaborating it is calling the library, and the bytes are compared.
+What a drawn edge registers, how edges that meet are arbitrated and whether
+a multiplier is shared are the same values typed code passes. The vendor
+block editors are far more capable tools at their own job — whole systems,
+catalogued IP, address maps; this is a view of one design's stream graph,
+and the editor is early ([`docs/design-canvas.md`](design-canvas.md)).
+
 ### Boards, toolchains and the build
 
 Where the board enters, how a design moves between boards, and what runs the vendor tool. This is the layer the release matrix — every example on every board — is built on, and the one the other entries mostly leave to the user or to a surrounding framework.
@@ -1166,6 +1285,8 @@ Where the board enters, how a design moves between boards, and what runs the ven
 | Warp 11 | A **board is data**: a record of facts — the part and what it holds (cells, multipliers, block RAM, a processing system), the clock, how the host reaches the design (an AXI-Lite aperture, a UART), how a bitstream is loaded, which pins carry which role, where a harness plugs in — kept as a JSON file or an F# value. A **design declares needs** (rows in and out, a value, a bit, a surface) and never names a pin. A **mapping** binds the two and is a file beside the design. A board on a toolchain the library knows is a file with no source change | `Build.write` derives the directory the board's toolchain builds from — the top, a PLL wrapper where the clock needs one, constraints, the flow, and on a Zynq the block design, overlay and packaging — and its `build.sh` ends with a **gate that reads the toolchain's own report**: resources used of the part's, the clock achieved against the target, and a refusal if a fact in the board file disagrees with what the tool says the part has |
 
 Amaranth's platforms are the nearest thing, and the comparison is worth being exact about. Both put the board in a value a program builds from and run the toolchain from the same place. Amaranth's design asks the platform for a resource by name, so the design knows it is on a board with an LED; Warp 11's design declares a bit it reports and the mapping says whether that is an LED, a register, or both — the same source elaborates with no board at all for the simulator, and a board is added without touching it. The cost is the mapping, a record beside the design. LiteX goes further than either on the host side, generating a whole SoC with its CSR map and bridge; Warp 11 generates the register seam and the carriers for rows, not a processor.
+
+**The memory's own facts are board facts too.** How long a burst is and how many ports a stream is spread over sit in the board's record beside its ports and their width, so they are in the mapping file and a design never states them; the host's tools read the resulting row and burst shape from the generated seam. Moving a design from one memory port to four is that one number ([above](#a-stream-through-memory-over-several-ports)).
 
 Two things the carriers do that the table cannot show. **The same design moves between host transports**: rows through a Zynq's DDR on one board and frames on a UART beside the register map on another, with the host tools reading the shape from the generated seam, and the test is the same file in and the same bytes out on every board as in the simulator. And **a design that scales reads its size from the part** — Mandelbrot's lanes from the multipliers, Life's world from the cells — unless the mapping names one, and a part that cannot hold the smallest is refused by number before any tool runs.
 
@@ -1185,7 +1306,7 @@ The piece with the least prior art is what the runtime's `RegisterWindow` trait 
 
 That is what makes a host-side bug cheap: the AXI rehearsal that replays every host action as a real transaction, reading frames back out of a fake DDR, is the same sequence the board driver runs, and it runs in a test.
 
-Two honest limits. Boards are four and toolchains two — a Linux-class PS driving a PL slave over AXI on the KV260, and a UART register link on three Lattice boards through the open flow — described as data (a board file, a mapping) with the toolchain's flow generated from them and gated on its own report; Quartus is not yet one of the flows, and place-and-route itself is not abstracted beyond that. And "the same driver against silicon and simulator" holds for the register map and the batch path; a design with its own DDR traffic (GEP's cluster) has its own driver and its own bridge.
+Two honest limits. Boards are five and toolchains three — a Linux-class PS driving a PL slave over AXI on the KV260 through Vivado, a UART register link on three Lattice boards through the open flow and on a DE10-Lite through Quartus — described as data (a board file, a mapping) with the toolchain's flow generated from them and gated on its own report; place-and-route itself is not abstracted beyond that. And "the same driver against silicon and simulator" holds for the register map and the batch path; a design with its own DDR traffic (GEP's cluster) has its own driver and its own bridge.
 
 ## The WarpCPU shape — an architectural pattern, not a language feature
 
@@ -1341,6 +1462,8 @@ are calibrated to that target, not established generally.
 - **Board and host integration as a first-class concern.** One declarative register map produces the slave *and* the driver's constants; the same driver code runs against `/dev/mem` and against the simulator, across the language seam. [Section above.](#board-and-host-integration) The caveat is the second toolchain, and it is smaller than it sounds: designing, simulating, debugging and emitting Verilog need .NET alone — Rust enters only when you deploy to a board. Every entry here needs a host-language toolchain plus the vendor flow, so the marginal cost is one more, paid at the point you have hardware in hand rather than at the front door. Against the HDLs surveyed that is the price of a capability they do not offer at all; against **LiteX**, which generates a CSR map and host-side access from Python end to end, it is a real comparative cost.
 - **Boards as data, and the build derived from them.** A design declares needs, a board is a file of facts, a mapping binds them, and the directory the toolchain builds from — with its gate reading the tool's own report — is written from the three. Five boards and three toolchains at 0.1.0, every example on every board that holds it, and a board on a known toolchain added with no source change. [Section above.](#boards-toolchains-and-the-build)
 - **The step-through debugger.** Watch lists, memory windows, breakpoints written as expressions over the design's own signals, and state machines that read as their state names — attachable to the session an application is already driving. [Section above.](#interactive-debugging)
+- **Memory as a stream, at the ports' rate.** A design declares rows in and rows out; the mapping says the host's memory, how long a burst is and how many ports; the generated top reaches 98% of one port's ceiling and adds four ports almost in full, with the design and the host unchanged — measured on a KV260, byte-identical to the simulator. [Section above.](#a-stream-through-memory-over-several-ports)
+- **Structure decided by the parent.** What a connection registers, how streams that meet are arbitrated, how many copies of a unit there are and whether a multiplier is shared are values the instantiating module passes; the module below does not change and does not know. The same values are what a drawn design's edges carry.
 - **The stream connect layer.** One connect call for every fan shape, with the measured timing fix (~√N registered tree) chosen by size, and exactly-once consumption checked at elaboration. See [`docs/streams.md`](streams.md).
 - **The WarpCPU accelerator shape** — barrel-threaded compute pods, rate-matched and independently scalable, with in-HDL telemetry that reads the same in simulation and on silicon. Not a language feature and not novel in its parts, but the surrounding machinery makes it cheap to author and re-size, which is what the other HDLs leave to you. [Section above.](#the-warpcpu-shape--an-architectural-pattern-not-a-language-feature)
 - **The differential oracle as a working discipline.** F# simulator ↔ emitted Verilog ↔ Verilator agree cycle-by-cycle across every design, every run. It has caught emitter bugs on first contact repeatedly, and it is what makes large internal changes (an 11× simulator rewrite) safe to make at all.
@@ -1389,3 +1512,7 @@ Sources:
 - [HGDB: Bringing Source-Level Debugging Frameworks to Hardware Generators (arxiv)](https://arxiv.org/pdf/2203.05742) and [libhgdb](https://pypi.org/project/libhgdb/) — the most ambitious hardware-debugger work, and more capable than Warp 11's on every axis except being packaged with the toolkit
 - [Treadle (Chisel's interactive simulator REPL)](https://github.com/chipsalliance/treadle) — prior art for step-through simulation from a host-language debugger
 - [Amaranth simulator docs](https://amaranth-lang.org/docs/amaranth/latest/simulator.html)
+- [LiteDRAM](https://github.com/enjoy-digital/litedram) — the crossbar of user ports and the DMA frontends: the nearest prior art for a stream to and from memory
+- [SpinalHDL AXI4 library](https://spinalhdl.github.io/SpinalDoc-RTD/dev/SpinalHDL/Libraries/Bus/amba4/axi4.html) and [its API](https://spinalhdl.github.io/SpinalHDL/dev/spinal/lib/bus/amba4/axi/index.html) — the crossbar factory and the read-only / write-only arbiters
+- [Zynq UltraScale+ Processing System product guide (PG201), Slave Interface](https://docs.amd.com/r/3.4-English/pg201-zynq-ultrascale-plus-processing-system/Slave-Interface) and [Traffic Shaping of HP Ports on Zynq UltraScale+](https://xilinx-wiki.atlassian.net/wiki/spaces/A/pages/688128001/Traffic+Shaping+of+HP+Ports+on+Zynq+UltraScale) — the ports the multi-port measurements are of
+- [Kria K26 SOM data sheet (DS987)](https://www.sundance.com/wp-content/uploads/docs/k26-som-Data-Sheet.pdf) — the memory behind them

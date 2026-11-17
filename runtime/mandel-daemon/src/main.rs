@@ -142,6 +142,8 @@ struct Seam {
     dy: usize,
     width: usize,
     chunk: usize,
+    /// Chunks a burst holds: what the count asked for is padded to.
+    rows_per_burst: usize,
     max_iterations: u32,
     fraction_bits: u32,
     fabric_hz: f64,
@@ -166,6 +168,11 @@ fn read_seam(layout: &Path) -> Seam {
         dy: offset("dy"),
         width: constant(layout, "FRAME_WIDTH") as usize,
         chunk: constant(layout, "CHUNK_PIXELS") as usize,
+        // A seam from before bursts had a length to state is sixteen beats.
+        rows_per_burst: match read_const(layout, "ROWS_PER_BURST") {
+            Ok(Some(rows)) => rows as usize,
+            _ => warp11_runtime::frame::BEATS_PER_BURST,
+        },
         max_iterations: constant(layout, "MAX_ITERATIONS"),
         fraction_bits: constant(layout, "FRACTION_BITS"),
         fabric_hz: f64::from(constant(layout, "FABRIC_HZ")),
@@ -233,7 +240,7 @@ struct Fabric {
 impl Fabric {
     fn open(args: &Args) -> Fabric {
         let seam = read_seam(&args.layout);
-        let shape = FrameShape::new(seam.width, args.height, seam.chunk);
+        let shape = FrameShape::with_burst(seam.width, args.height, seam.chunk, seam.rows_per_burst);
 
         let uio = find_uio(&args.board)
             .unwrap_or_else(|e| fail(e))

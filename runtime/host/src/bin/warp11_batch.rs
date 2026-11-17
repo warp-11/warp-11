@@ -108,6 +108,22 @@ impl CsvRun {
     }
 }
 
+/// Stereo frames a row of the design holds: one for a stereo stream, k where
+/// the design takes k frames side by side. The recording's bytes are the
+/// same either way — k consecutive frames are one row — so only the count
+/// the fabric is given changes. A seam that does not state its rows is a
+/// stereo design's.
+fn frames_per_row(constants: &Constants) -> Result<usize, String> {
+    let bytes = match constants.number("ROW_IN_BYTES") {
+        Ok(bytes) => bytes as usize,
+        Err(_) => return Ok(1),
+    };
+    if bytes == 0 || bytes % BYTES_PER_FRAME != 0 {
+        return Err(format!("a row of {bytes} bytes is not a whole number of stereo frames"));
+    }
+    Ok(bytes / BYTES_PER_FRAME)
+}
+
 /// How a row of `width` pixels sits in the host's memory — the fabric's
 /// `rowShape`, derived the same way: one 32-bit lane per field, so the
 /// row's one field takes `ceil(width / 4)` lanes; padded to a power of two
@@ -213,6 +229,27 @@ fn parse_args() -> Args {
     parsed
 }
 
+/// Where a batch's cycles went, when the top says: the cycles the design
+/// waited for a row from the host's memory, and the cycles it held one the
+/// write side would not take. A top built before these existed has neither.
+fn waits(registers: &[(String, usize)]) -> Option<(usize, usize)> {
+    match (seam::resolve("readWaits", registers), seam::resolve("writeWaits", registers)) {
+        (Ok(read), Ok(write)) => Some((read, write)),
+        _ => None,
+    }
+}
+
+fn describe_waits(cycles: u32, read: u32, write: u32) -> String {
+    let share = |n: u32| if cycles == 0 { 0.0 } else { 100.0 * n as f64 / cycles as f64 };
+    format!(
+        "waiting on reads {} ({:.0}%), on writes {} ({:.0}%)",
+        read,
+        share(read),
+        write,
+        share(write)
+    )
+}
+
 fn resolve(sets: &[(String, u32)], registers: &[(String, usize)]) -> Result<Vec<(usize, u32)>, String> {
     sets.iter()
         .map(|(name, value)| seam::resolve(name, registers).map(|offset| (offset, *value)))
@@ -221,8 +258,8 @@ fn resolve(sets: &[(String, u32)], registers: &[(String, usize)]) -> Result<Vec<
 
 /// The rows as the fabric reads them: two lanes a frame, the 16-bit sample
 /// left-justified into the lane, padded to whole bursts.
-fn stage(frames: &[(i16, i16)]) -> (Vec<u8>, usize) {
-    let padded = frames.len().div_ceil(FRAMES_PER_BURST) * FRAMES_PER_BURST;
+fn stage(frames: &[(i16, i16)], frames_per_burst: usize) -> (Vec<u8>, usize) {
+    let padded = frames.len().div_ceil(frames_per_burst) * frames_per_burst;
     let mut bytes = Vec::with_capacity(padded * BYTES_PER_FRAME);
     for i in 0..padded {
         let (l, r) = frames.get(i).copied().unwrap_or((0, 0));
@@ -286,8 +323,9 @@ fn image_of(args: &Args) -> Result<Image, String> {
 
 /// The image's rows as the fabric reads them: pixel `c` at byte `c` of a
 /// row padded to the row shape, rows padded to whole bursts.
-fn stage_image(image: &Image) -> (Vec<u8>, usize, usize) {
-    let (bytes_per_row, rows_per_burst) = pgm_row_shape(image.width);
+fn stage_image(image: &Image, rows_per_burst: Option<usize>) -> (Vec<u8>, usize, usize) {
+    let (bytes_per_row, derived) = pgm_row_shape(image.width);
+    let rows_per_burst = rows_per_burst.unwrap_or(derived);
     let padded = image.height.div_ceil(rows_per_burst) * rows_per_burst;
     let mut bytes = vec![0u8; padded * bytes_per_row];
     for r in 0..image.height {
@@ -298,26 +336,47 @@ fn stage_image(image: &Image) -> (Vec<u8>, usize, usize) {
 
 /// The staged input and its count: a recording's rows, or nothing and the
 /// beats of a frame.
-fn staged(args: &Args, frames: &[(i16, i16)], csv: Option<&CsvRun>) -> Result<(Vec<u8>, usize, usize), String> {
+/// What the seam says about a batch's shape, where it says anything.
+struct Shape {
+    /// Rows a burst holds; `None` from a seam that does not state it.
+    rows_per_burst: Option<usize>,
+    /// Stereo frames a row holds.
+    frames_per_row: usize,
+}
+
+impl Shape {
+    fn of(constants: &Constants) -> Result<Shape, String> {
+        Ok(Shape {
+            rows_per_burst: constants.number("ROWS_PER_BURST").ok().map(|rows| rows as usize),
+            frames_per_row: frames_per_row(constants)?,
+        })
+    }
+}
+
+fn staged(args: &Args, frames: &[(i16, i16)], csv: Option<&CsvRun>, shape: &Shape) -> Result<(Vec<u8>, usize, usize), String> {
     Ok(match &args.input {
         Source::Csv(_) => {
             let run = csv.ok_or("a table needs the seam's row shapes")?;
             let (bytes, padded) = stage_table(&run.table, &run.input, run.rows_per_burst)?;
             (bytes, padded, padded * run.output.bytes)
         }
+        // A recording's bytes are the same however many frames a row
+        // holds; the count the fabric is given is rows.
         Source::Wav(_) => {
-            let (bytes, padded) = stage(frames);
+            let frames_per_burst = shape.rows_per_burst.map(|rows| rows * shape.frames_per_row).unwrap_or(FRAMES_PER_BURST);
+            let (bytes, padded) = stage(frames, frames_per_burst);
             let out_len = bytes.len();
-            (bytes, padded, out_len)
+            (bytes, padded / shape.frames_per_row, out_len)
         }
         Source::Frame { width, height } => {
-            let shape = FrameShape::new(*width, *height, args.chunk);
-            (Vec::new(), shape.padded_chunks, shape.bytes_back())
+            let frame = FrameShape::with_burst(*width, *height, args.chunk, shape.rows_per_burst.unwrap_or(BEATS_PER_BURST));
+            (Vec::new(), frame.padded_chunks, frame.bytes_back())
         }
         // Padded to whole bursts as a recording is; the rows past the count
         // are drawn and dropped.
         Source::Count(n) => {
-            let padded = n.div_ceil(FRAMES_PER_BURST) * FRAMES_PER_BURST;
+            let burst = shape.rows_per_burst.unwrap_or(FRAMES_PER_BURST);
+            let padded = n.div_ceil(burst) * burst;
             (Vec::new(), padded, padded * BYTES_PER_FRAME)
         }
         Source::Pgm(_) => {
@@ -325,14 +384,14 @@ fn staged(args: &Args, frames: &[(i16, i16)], csv: Option<&CsvRun>) -> Result<(V
                 eprintln!("{e}");
                 std::process::exit(1);
             });
-            let (bytes, padded, _) = stage_image(&image);
+            let (bytes, padded, _) = stage_image(&image, shape.rows_per_burst);
             let out_len = bytes.len();
             (bytes, padded, out_len)
         }
     })
 }
 
-fn unstaged(args: &Args, frames: &[(i16, i16)], bytes: &[u8], csv: Option<&CsvRun>) -> Output {
+fn unstaged(args: &Args, frames: &[(i16, i16)], bytes: &[u8], csv: Option<&CsvRun>, shape: &Shape) -> Output {
     match &args.input {
         Source::Csv(_) => {
             let run = csv.expect("staged checked the table's run");
@@ -340,8 +399,8 @@ fn unstaged(args: &Args, frames: &[(i16, i16)], bytes: &[u8], csv: Option<&CsvRu
         }
         Source::Wav(_) => Output::Frames(unstage(bytes, frames.len())),
         Source::Frame { width, height } => {
-            let shape = FrameShape::new(*width, *height, args.chunk);
-            Output::Pixels(crop(bytes, &shape))
+            let frame = FrameShape::with_burst(*width, *height, args.chunk, shape.rows_per_burst.unwrap_or(BEATS_PER_BURST));
+            Output::Pixels(crop(bytes, &frame))
         }
         Source::Count(n) => Output::Frames(unstage(bytes, *n)),
         Source::Pgm(_) => {
@@ -386,7 +445,9 @@ fn run_sim(args: &Args, frames: &[(i16, i16)]) -> Result<Output, String> {
         _ => None,
     };
 
-    let (bytes, count, out_len) = staged(args, frames, csv.as_ref())?;
+    let pairs = device.window_mut().seam_constants().map_err(|e| format!("{e:?}"))?;
+    let shape = Shape::of(&Constants::from_pairs(&pairs))?;
+    let (bytes, count, out_len) = staged(args, frames, csv.as_ref(), &shape)?;
     let dst = SIM_SRC + bytes.len();
     if !bytes.is_empty() {
         device.window_mut().write_ddr(SIM_SRC, &bytes).map_err(|e| format!("{e:?}"))?;
@@ -396,9 +457,15 @@ fn run_sim(args: &Args, frames: &[(i16, i16)]) -> Result<Output, String> {
     device
         .wait_done(2_000_000, |w| w.free_cycles(2048))
         .map_err(describe)?;
-    eprintln!("{} rows in {} fabric cycles", count, device.cycles().map_err(|e| format!("{e:?}"))?);
+    let cycles = device.cycles().map_err(|e| format!("{e:?}"))?;
+    eprintln!("{} rows in {} fabric cycles", count, cycles);
+    if let Some((read, write)) = waits(&registers) {
+        let read = device.window_mut().read32(read).map_err(|e| format!("{e:?}"))?;
+        let write = device.window_mut().read32(write).map_err(|e| format!("{e:?}"))?;
+        eprintln!("{}", describe_waits(cycles, read, write));
+    }
     let out = device.window_mut().read_ddr(dst, out_len).map_err(|e| format!("{e:?}"))?;
-    Ok(unstaged(args, frames, &out, csv.as_ref()))
+    Ok(unstaged(args, frames, &out, csv.as_ref(), &shape))
 }
 
 fn run_board(args: &Args, frames: &[(i16, i16)]) -> Result<Output, String> {
@@ -419,7 +486,8 @@ fn run_board(args: &Args, frames: &[(i16, i16)]) -> Result<Output, String> {
         Source::Csv(_) => Some(CsvRun::new(args, &Constants::from_seam(layout)?)?),
         _ => None,
     };
-    let (bytes, count, out_len) = staged(args, frames, csv.as_ref())?;
+    let shape = Shape::of(&Constants::from_seam(layout)?)?;
+    let (bytes, count, out_len) = staged(args, frames, csv.as_ref(), &shape)?;
     let half = arena.size / 2;
     if bytes.len().max(out_len) > half {
         return Err(format!("{} rows need {} bytes; the arena's half is {}", count, bytes.len().max(out_len), half));
@@ -456,11 +524,21 @@ fn run_board(args: &Args, frames: &[(i16, i16)]) -> Result<Output, String> {
     device.wait_done(50_000_000, |_| Ok(())).map_err(describe)?;
     let elapsed = started.elapsed();
     let cycles = device.cycles().map_err(|e| format!("{e:?}"))?;
+    let waited = match waits(&registers) {
+        Some((read, write)) => Some((
+            device.window_mut().read32(read).map_err(|e| format!("{e:?}"))?,
+            device.window_mut().read32(write).map_err(|e| format!("{e:?}"))?,
+        )),
+        None => None,
+    };
     device.acknowledge().map_err(|e| format!("{e:?}"))?;
 
     arena.sync_for_cpu(half, out_len).map_err(|e| format!("sync_for_cpu: {e}"))?;
-    let out = unstaged(args, frames, &arena_map.bytes()[half..half + out_len], csv.as_ref());
+    let out = unstaged(args, frames, &arena_map.bytes()[half..half + out_len], csv.as_ref(), &shape);
     eprintln!("{} rows in {:.3} ms wall, {} fabric cycles", count, elapsed.as_secs_f64() * 1e3, cycles);
+    if let Some((read, write)) = waited {
+        eprintln!("{}", describe_waits(cycles, read, write));
+    }
     Ok(out)
 }
 

@@ -740,7 +740,24 @@ let private laneSpans (pins: (string * NumberFormat) list) : (int * int) list =
 /// Beats per burst. At 128 bits a burst is 256 bytes, so a 256-byte-aligned
 /// base can never cross AXI's 4 KB boundary — the rule `axiMasterReaderBurst`
 /// leaves to its caller, satisfied by making it unreachable.
-let beatsPerBurst = 16
+/// A port's burst, checked: a power of two beats, two at least, and no
+/// more bytes than the 4 KB a burst may not cross.
+let burstBeatsOf (memory: HostMemoryFacts) : int =
+    let beats = memory.burstBeats
+    let bytes = beats * memory.width / 8
+
+    if beats < 2 || beats > 256 || (beats &&& (beats - 1)) <> 0 then
+        failwith $"a burst is a power of two beats from 2 to 256, not %d{beats}"
+
+    if bytes > 4096 then
+        failwith $"a burst of %d{beats} beats of %d{memory.width} bits is %d{bytes} bytes, and a burst may not cross 4 KB"
+
+    beats
+
+/// Bursts a master keeps in flight on a host-memory port, reading or
+/// writing: enough that the next burst's address is with the port before
+/// the last one's data has finished.
+let burstsInFlight = 4
 
 /// How a row of the boundary sits in beats: one lane per field. A row no
 /// wider than a beat is padded to a power of two lanes so rows tile beats
@@ -757,7 +774,7 @@ type RowShape =
 
 /// The shape a boundary's rows take in beats of `beatWidth` bits, or why they
 /// cannot.
-let rowShape (beatWidth: int) (pins: (string * NumberFormat) list) : RowShape =
+let rowShape (beatWidth: int) (beatsPerBurst: int) (pins: (string * NumberFormat) list) : RowShape =
     let lanesPerBeat = beatWidth / laneWidth
     let lanes = pins |> List.sumBy (fun (_, f) -> lanesOf f)
 
@@ -873,6 +890,10 @@ type private BindingRegs =
       playerRegs: PlayRegs option
       counterRegs: CountRegs option
       snapshotRegs: SnapshotRegs option
+      /// Where a batch's cycles went, beside the batch contract: `readWaits`
+      /// and `writeWaits`. After the design's own words, so the contract's
+      /// offsets and the design's stay where every driver has them.
+      waitRegs: (RegEntry * RegEntry) option
       designEntries: (string * RegEntry) list
       regMap: RegMap }
 
@@ -983,7 +1004,7 @@ let private registersFor
             | Records _, Some(InHostMemory | InHostMemoryOn _) -> true
             | _ -> false)
 
-    let (regions, batch, recorder, player, counter, snapshot, controls), map =
+    let (regions, batch, recorder, player, counter, snapshot, waits, controls), map =
         buildRegMapAtLeast apertureAddrWidth (fun r ->
             let regions =
                 if not inHostMemory then
@@ -1099,6 +1120,17 @@ let private registersFor
                 | Some(need, other) -> failwith $"{d.name}: '{need}' is a surface, and nothing carries one as {other}"
                 | None -> None
 
+            // A batch says where its cycles went: how many the design spent
+            // waiting for a row from the host's memory, and how many it spent
+            // holding one the write side would not take. Cleared at `start`,
+            // counting while `busy`, as `cycles` is; what is left of `cycles`
+            // is the work itself.
+            let waits =
+                if wantsContract then
+                    Some(r.RoField("readWaits", 32), r.RoField("writeWaits", 32))
+                else
+                    None
+
             // Tables last: each is aligned to its own size, so it lands at
             // the same offset whatever the scalars before it came to, and the
             // scalars after it would otherwise start past it and double the
@@ -1115,7 +1147,7 @@ let private registersFor
                         | words -> Some(name, r.RwArray(name, entries, storage, words))
                     | _ -> None)
 
-            regions, batch, recorder, player, counter, snapshot, scalars @ tables)
+            regions, batch, recorder, player, counter, snapshot, waits, scalars @ tables)
 
     { regionRegs = regions
       batchRegs = batch
@@ -1123,6 +1155,7 @@ let private registersFor
       playerRegs = player
       counterRegs = counter
       snapshotRegs = snapshot
+      waitRegs = waits
       designEntries = controls
       regMap = map }
 
@@ -1141,6 +1174,59 @@ let private timesConstant (k: int) (e: Expr) =
 /// One beat becomes its rows, a row a cycle. The beat is not copied: `ready`
 /// is asserted as the last row leaves, and the read master holds its payload
 /// until then, so the handshake does the storing.
+/// Beats gathered `per` at a time into one word, the first beat at the low
+/// end — as a row wider than a beat sits in memory. Every beat but the last
+/// of a word is held as it arrives; the word is offered with its last beat.
+/// At one beat a word it is the stream itself.
+let private gatherBeats (name: string) (per: int) (beats: Stream<Expr>) : Stream<Expr> =
+    if per = 1 then
+        beats
+    else
+        let beatWidth = width beats.payload
+        let outReady = wireBit $"{name}_gather_ready"
+        registerStreamReady outReady
+        let phaseWidth = ceilLog2 per
+        let phase = reg $"{name}_gather_phase" phaseWidth
+        let last = eq phase (lit (uint64 (per - 1)) phaseWidth)
+        let held = [ for k in 0 .. per - 2 -> reg $"{name}_gather_held%d{k}" beatWidth ]
+        let take = beats.valid &&& (bnot last ||| outReady)
+        (bnot last ||| outReady) ==> beats.ready
+
+        If take (fun () ->
+            mux last (lit 0UL phaseWidth) (phase + lit 1UL phaseWidth) ==> phase
+            held |> List.iteri (fun k h -> If (eq phase (lit (uint64 k) phaseWidth)) (fun () -> beats.payload ==> h)))
+
+        let word = wire $"{name}_gather_word" (per * beatWidth)
+        ((held @ [ beats.payload ]) |> List.rev |> List.reduce cat) ==> word
+
+        { payload = word
+          valid = beats.valid &&& last
+          ready = outReady
+          layout = layout1 ("data", per * beatWidth) }
+
+/// A word of `per` beats handed on a beat at a time, the low end first. The
+/// word is held by its producer until its last beat has gone. At one beat
+/// a word it is the stream itself.
+let private spreadWords (name: string) (per: int) (beatWidth: int) (words: Stream<Expr>) : Stream<Expr> =
+    if per = 1 then
+        words
+    else
+        let outReady = wireBit $"{name}_spread_ready"
+        registerStreamReady outReady
+        let phaseWidth = ceilLog2 per
+        let phase = reg $"{name}_spread_phase" phaseWidth
+        let last = eq phase (lit (uint64 (per - 1)) phaseWidth)
+        let fire = words.valid &&& outReady
+        If fire (fun () -> mux last (lit 0UL phaseWidth) (phase + lit 1UL phaseWidth) ==> phase)
+        (fire &&& last) ==> words.ready
+        let word = wire $"{name}_spread_word" (per * beatWidth)
+        words.payload ==> word
+
+        { payload = selectIndexed phase [ for k in 0 .. per - 1 -> slice ((k + 1) * beatWidth - 1) (k * beatWidth) word ]
+          valid = words.valid
+          ready = outReady
+          layout = layout1 ("data", beatWidth) }
+
 let private beatsToRows (shape: RowShape) (pins: (string * NumberFormat) list) (beats: Stream<Expr * Expr>) : Stream<Expr list> =
     let data, _last = beats.payload
     let beatWidth = width data
@@ -1338,7 +1424,7 @@ let private recordInto
     (rows: Stream<Expr list>)
     (dropped: Expr)
     =
-    let shape = rowShape memory.width pins
+    let shape = rowShape memory.width (burstBeatsOf memory) pins
     let beatBytes = memory.width / 8
     let beatAddrShift = ceilLog2 beatBytes
     let armed = regs.value armReg
@@ -2465,9 +2551,9 @@ let private hostMemoryTop (board: Board) (path: DataPath) (d: Design) : BoardTop
         match batchOption with
         | Some b -> b
         | None -> failwith $"{d.name}: the host-memory path needs the batch contract, and no binding contributed one"
-    let inShape = rowShape memory.width (inputsOf d)
+    let inShape = rowShape memory.width (burstBeatsOf memory) (inputsOf d)
     // Rows out have a shape; a surface has its own, below.
-    let outShape = if payloadPins.IsEmpty then None else Some(rowShape memory.width payloadPins)
+    let outShape = if payloadPins.IsEmpty then None else Some(rowShape memory.width (burstBeatsOf memory) payloadPins)
 
     // A scattered beat carries one address, so it has to BE one beat: there is
     // nowhere to put a second address if two rows shared a word, and no reason
@@ -2483,7 +2569,7 @@ let private hostMemoryTop (board: Board) (path: DataPath) (d: Design) : BoardTop
     let surfaceShape =
         surface
         |> Option.map (fun (name, fields, rows) ->
-            let shape = rowShape memory.width fields
+            let shape = rowShape memory.width (burstBeatsOf memory) fields
 
             if shape.beatsPerRow > 1 then
                 failwith $"{d.name}: a surface's row is at most a beat, and '{name}' is %d{shape.lanesPerRow} lanes"
@@ -2496,7 +2582,25 @@ let private hostMemoryTop (board: Board) (path: DataPath) (d: Design) : BoardTop
         failwith $"{d.name}: the scatter path's destination '{n}' is a beat index and the bus addresses 32 bits, not %d{f.totalWidth}"
     | _ -> ()
     let beatBytes = memory.width / 8
+    let beatsPerBurst = burstBeatsOf memory
     let burstBytes = beatsPerBurst * beatBytes
+
+    // How many ports the rows are spread over, and which.
+    let streamPorts = memory.streamPorts
+
+    if streamPorts < 1 || streamPorts > memory.ports.Length then
+        failwith $"{d.name}: a stream is spread over 1 to %d{memory.ports.Length} of the board's memory ports, not %d{streamPorts}"
+
+    if streamPorts > 1 && (counted || scattered || surface.IsSome) then
+        failwith $"{d.name}: a stream over several ports is rows read in order and written in order; a counted input, a scattered output and a surface are on one port for now"
+
+    let streamOn = memory.ports |> List.truncate streamPorts
+
+    // With several ports the rows are fed from a ring, a word a cycle: a
+    // word is a whole row where a row is wider than a beat, and a beat
+    // otherwise. The same shapes as below, over a word in place of a beat.
+    let wordBeats (shape: RowShape) = if shape.beatsPerRow > 1 then shape.beatsPerRow else 1
+    let wideShape (shape: RowShape) (pins: (string * NumberFormat) list) = rowShape (wordBeats shape * memory.width) (beatsPerBurst / wordBeats shape) pins
     let beatAddrShift = ceilLog2 beatBytes
     let name = $"{d.name}Batch"
 
@@ -2506,14 +2610,27 @@ let private hostMemoryTop (board: Board) (path: DataPath) (d: Design) : BoardTop
             name
             (fun p ->
                 axiLiteSlavePorts p map.apertureAddrWidth,
-                (if counted then None else Some(axiReadBusPorts p "m_axi" 32 memory.width)),
-                axiWriteBusPorts p "m_axi" 32 memory.width,
+                // One master a port. A stream on one port is `m_axi`, as it
+                // always was; over several, each master is named for its port.
+                (if counted then
+                     []
+                 elif streamPorts = 1 then
+                     [ axiReadBusPorts p "m_axi" 32 memory.width ]
+                 else
+                     [ for port in streamOn -> axiReadBusPorts p (masterPrefixOf port) 32 memory.width ]),
+                (if streamPorts = 1 then
+                     [ axiWriteBusPorts p "m_axi" 32 memory.width ]
+                 else
+                     [ for port in streamOn -> axiWriteBusPorts p (masterPrefixOf port) 32 memory.width ]),
                 // A surface grants snapshots the host waits for, so it has an
                 // interrupt; a batch is polled on `busy`, as it always was.
                 (if surface.IsSome then Some(p.outPort "irq" 1) else None))
-            (fun (slavePorts, readBusPorts, writeBusPorts, irqPort) ->
+            (fun (slavePorts, readBuses, writeBuses, irqPort) ->
                 let regs = regMapSlave slavePorts map
                 let byName = Map.ofList entries
+                // The one-port paths below know one master each way.
+                let readBusPorts = if streamPorts = 1 then List.tryHead readBuses else None
+                let writeBusPorts = List.head writeBuses
 
                 // The counters both sides share are built by whichever side the
                 // body asks for first — its rows in, as it happens — so they
@@ -2565,12 +2682,105 @@ let private hostMemoryTop (board: Board) (path: DataPath) (d: Design) : BoardTop
 
                 let writerIdle = ref None
 
+                // Whether the design is waiting on the read side this cycle,
+                // and whether the write side is holding it up: set where each
+                // side is built, counted below.
+                let readWaiting: Expr option ref = ref None
+                let writeWaiting: Expr option ref = ref None
+
                 let rowsIn (_: string) : Stream<Expr list> =
                     let { frameCount = frameCount; bursts = bursts; running = running; arIssued = arIssued; burstAddrShift = burstAddrShift; beatsWritten = beatsWritten } =
                         counters.Force()
 
                     let rows =
                         match readBusPorts with
+                        | _ when streamPorts > 1 ->
+                            // --- several ports: a ring of bursts, drained in
+                            // address order ----------------------------------
+                            // Port p reads bursts p, p + P, p + 2P … of the one
+                            // contiguous buffer into a ring of its own, two
+                            // bursts deep, and asks for a burst only when the
+                            // ring has room for all of it — so no port is ever
+                            // stopped part way. The drain takes a burst's
+                            // worth from each ring in turn, which is the
+                            // buffer's order, a word a cycle.
+                            let per = wordBeats inShape
+                            let wordsPerBurst = beatsPerBurst / per
+                            let wordShift = ceilLog2 wordsPerBurst
+                            let turnWidth = max 1 (ceilLog2 streamPorts)
+                            let start = regs.pulse batch.start
+                            let turn = reg "rd_turn" turnWidth
+                            let taken = reg "rd_taken" (max 1 wordShift)
+                            let lastWord = if wordShift = 0 then lit 1UL 1 else eq taken (lit (uint64 (wordsPerBurst - 1)) wordShift)
+                            let outReady = wireBit "rd_ring_ready"
+
+                            let rings =
+                                [ for p, bus in List.indexed readBuses ->
+                                      let mine = wireBit $"rd%d{p}_turn"
+                                      eq turn (lit (uint64 p) turnWidth) ==> mine
+                                      // The next burst of the buffer this port
+                                      // reads, and how many of its ring's two
+                                      // slots are spoken for.
+                                      let burst = reg $"rd%d{p}_burst" 32
+                                      let used = reg $"rd%d{p}_used" 2
+                                      let more = wireBit $"rd%d{p}_more"
+                                      (running &&& lt burst bursts &&& lt used (lit 2UL 2)) ==> more
+                                      let addr = wire $"rd%d{p}_addr" 32
+                                      (regs.value batch.srcAddr + asUInt (shl burstAddrShift (slice (31 - burstAddrShift) 0 burst))) ==> addr
+                                      let reqReady = wireBit $"rd%d{p}_req_ready"
+
+                                      let requests: Stream<Expr * Expr> =
+                                          { payload = (addr, lit (uint64 (beatsPerBurst - 1)) 8)
+                                            valid = more
+                                            ready = reqReady
+                                            layout = layout2 ("addr", 32) ("len", 8) }
+
+                                      let ring =
+                                          axiMasterReaderBurstOn (axiReadBusOf bus) 2 beatsPerBurst requests
+                                          |> streamMapTo (layout1 ("data", memory.width)) fst
+                                          |> gatherBeats $"rd%d{p}" per
+                                          |> streamFifo $"rd%d{p}_ring" (2 * wordsPerBurst)
+
+                                      (outReady &&& mine) ==> ring.ready
+                                      let issued = wireBit $"rd%d{p}_issued"
+                                      (more &&& reqReady) ==> issued
+                                      let drained = wireBit $"rd%d{p}_drained"
+                                      (ring.valid &&& outReady &&& mine &&& lastWord) ==> drained
+
+                                      ifElse
+                                          [ (start,
+                                             fun () ->
+                                                 lit (uint64 p) 32 ==> burst
+                                                 lit 0UL 2 ==> used)
+                                            (otherwise,
+                                             fun () ->
+                                                 If issued (fun () -> burst + lit (uint64 streamPorts) 32 ==> burst)
+                                                 used + pad 2 issued - pad 2 drained ==> used) ]
+
+                                      mine, ring ]
+
+                            let valid = wireBit "rd_ring_valid"
+                            mux1H [ for mine, _ in rings -> mine ] [ for _, ring in rings -> ring.valid ] ==> valid
+                            let word = wire "rd_ring_word" (per * memory.width)
+                            mux1H [ for mine, _ in rings -> mine ] [ for _, ring in rings -> ring.payload ] ==> word
+
+                            ifElse
+                                [ (start,
+                                   fun () ->
+                                       lit 0UL turnWidth ==> turn
+                                       lit 0UL (max 1 wordShift) ==> taken)
+                                  (valid &&& outReady &&& lastWord,
+                                   fun () ->
+                                       lit 0UL (max 1 wordShift) ==> taken
+                                       mux (eq turn (lit (uint64 (streamPorts - 1)) turnWidth)) (lit 0UL turnWidth) (turn + lit 1UL turnWidth) ==> turn)
+                                  (valid &&& outReady, fun () -> taken + lit 1UL (max 1 wordShift) ==> taken) ]
+
+                            ({ payload = (word, lit 0UL 1)
+                               valid = valid
+                               ready = outReady
+                               layout = layout2 ("data", per * memory.width) ("last", 1) }
+                             : Stream<Expr * Expr>)
+                            |> beatsToRows (wideShape inShape (inputsOf d)) (inputsOf d)
                         | Some readBusPorts ->
                             // --- the read side: one descriptor per burst -------
                             let reqReady = wireBit "req_ready"
@@ -2588,7 +2798,7 @@ let private hostMemoryTop (board: Board) (path: DataPath) (d: Design) : BoardTop
 
                             If (arMore &&& reqReady) (fun () -> arIssued + lit 1UL 32 ==> arIssued)
 
-                            axiMasterReaderBurstOn (axiReadBusOf readBusPorts) 4 beatsPerBurst requests
+                            axiMasterReaderBurstOn (axiReadBusOf readBusPorts) burstsInFlight beatsPerBurst requests
                             |> beatsToRows inShape (inputsOf d)
                         | None ->
                             // --- the count: `frameCount` beats, the index each -
@@ -2612,6 +2822,21 @@ let private hostMemoryTop (board: Board) (path: DataPath) (d: Design) : BoardTop
                     if surface.IsSome then
                         If (rows.valid &&& rows.ready) (fun () -> beatsWritten + lit 1UL 32 ==> beatsWritten)
 
+                    // The read side has no row to offer while rows are still
+                    // due. Counted off `valid` alone, with the rows taken so
+                    // far against the count asked for: a design whose `ready`
+                    // waits on `valid` — the gain's does, its channels fork
+                    // and join — is never "ready with nothing there", and a
+                    // count of that reads zero however starved it is.
+                    if not readBuses.IsEmpty then
+                        let taken = reg "rows_taken" 32
+
+                        ifElse
+                            [ (regs.pulse batch.start, fun () -> lit 0UL 32 ==> taken)
+                              (rows.valid &&& rows.ready, fun () -> taken + lit 1UL 32 ==> taken) ]
+
+                        readWaiting.Value <- Some(bnot rows.valid &&& lt taken frameCount)
+
                     rows
 
                 let rowsOut (_: string) (produced: Stream<Expr list>) =
@@ -2633,42 +2858,227 @@ let private hostMemoryTop (board: Board) (path: DataPath) (d: Design) : BoardTop
                         | Some shape -> shape
                         | None -> failwith $"{d.name}: the design handed rows out and declares none"
 
-                    let outBeats = payloadRows |> rowsToBeats shape payloadPins memory.width
+                    // The rows as beats of one port — made by the one-port
+                    // paths, which are the only ones that use them.
+                    let beatsOfRows = lazy (payloadRows |> rowsToBeats shape payloadPins memory.width)
 
-                    // --- the write side -----------------------------------------
-                    let wrAddr = wire "wr_addr" 32
-                    let beatAddrShift = ceilLog2 beatBytes
+                    if scattered then
+                        // Each beat goes where the design said, so each is a
+                        // write of its own: an address, the beat, a response.
+                        let outBeats = beatsOfRows.Value
+                        let wrAddr = wire "wr_addr" 32
+                        let beatAddrShift = ceilLog2 beatBytes
 
-                    // Where the beat goes: the count of beats written so far, or —
-                    // on the scatter path — where the design said. That single
-                    // choice is the whole of the difference, and it is what lets
-                    // the farm above be unordered: position is stated, not implied
-                    // by arrival.
-                    let destBeat =
-                        match destIndex with
-                        | Some index -> pad 32 index
-                        | None -> beatsWritten
+                        // Where the beat goes: the count of beats written so far, or —
+                        // on the scatter path — where the design said. That single
+                        // choice is the whole of the difference, and it is what lets
+                        // the farm above be unordered: position is stated, not implied
+                        // by arrival.
+                        let destBeat =
+                            match destIndex with
+                            | Some index -> pad 32 index
+                            | None -> beatsWritten
 
-                    (regs.value batch.dstAddr + asUInt (shl beatAddrShift (slice (31 - beatAddrShift) 0 destBeat))) ==> wrAddr
+                        (regs.value batch.dstAddr + asUInt (shl beatAddrShift (slice (31 - beatAddrShift) 0 destBeat))) ==> wrAddr
 
-                    let wrReady = wireBit "wr_ready"
+                        let wrReady = wireBit "wr_ready"
 
-                    let writeBeats: Stream<Expr * Expr * Expr> =
-                        { payload = (wrAddr, outBeats.payload, lit ((1UL <<< beatBytes) - 1UL) beatBytes)
-                          valid = outBeats.valid
-                          ready = wrReady
-                          layout = axiWriteBeatLayout 32 memory.width }
+                        let writeBeats: Stream<Expr * Expr * Expr> =
+                            { payload = (wrAddr, outBeats.payload, lit ((1UL <<< beatBytes) - 1UL) beatBytes)
+                              valid = outBeats.valid
+                              ready = wrReady
+                              layout = axiWriteBeatLayout 32 memory.width }
 
-                    wrReady ==> outBeats.ready
+                        wrReady ==> outBeats.ready
 
-                    // How many writes stay in flight is the board's port's
-                    // business, not this top's: the cost of a write here is a full
-                    // AW+W+B round trip, and overlapping them is what hides it.
-                    let idle =
-                        axiMasterWriterWithIdleOn (axiWriteBusOf writeBusPorts) memory.writeOutstanding writeBeats
+                        // How many writes stay in flight is the board's port's
+                        // business, not this top's: the cost of a write here is a full
+                        // AW+W+B round trip, and overlapping them is what hides it.
+                        let idle =
+                            axiMasterWriterWithIdleOn (axiWriteBusOf writeBusPorts) memory.writeOutstanding writeBeats
 
-                    If (outBeats.valid &&& wrReady) (fun () -> beatsWritten + lit 1UL 32 ==> beatsWritten)
-                    writerIdle.Value <- Some idle
+                        If (outBeats.valid &&& wrReady) (fun () -> beatsWritten + lit 1UL 32 ==> beatsWritten)
+                        writerIdle.Value <- Some idle
+                        // A beat is ready to go and the writer will not take it.
+                        writeWaiting.Value <- Some(outBeats.valid &&& bnot wrReady)
+                    elif streamPorts > 1 then
+                        // --- several ports: the rows fill bursts in order,
+                        // each burst to the next port ----------------------
+                        // The mirror of the read side. A word goes into the
+                        // ring of the port whose turn it is; after a burst's
+                        // worth the turn passes on. Each port writes its own
+                        // bursts where they belong in the one contiguous
+                        // buffer — burst p, p + P, p + 2P … — and, as on one
+                        // port, issues a burst's address only when all of
+                        // it is in its ring.
+                        let { running = running; beatsTotal = beatsTotal; burstAddrShift = burstAddrShift } = counters.Force()
+                        let per = wordBeats shape
+                        let wordsPerBurst = beatsPerBurst / per
+                        let wordShift = ceilLog2 wordsPerBurst
+                        let turnWidth = max 1 (ceilLog2 streamPorts)
+                        let start = regs.pulse batch.start
+                        let outWords = payloadRows |> rowsToBeats (wideShape shape payloadPins) payloadPins (per * memory.width)
+                        let turn = reg "wr_turn" turnWidth
+                        let taken = reg "wr_taken" (max 1 wordShift)
+                        let lastWord = if wordShift = 0 then lit 1UL 1 else eq taken (lit (uint64 (wordsPerBurst - 1)) wordShift)
+
+                        let lanes =
+                            [ for p, bus in List.indexed writeBuses ->
+                                  let mine = wireBit $"wr%d{p}_turn"
+                                  eq turn (lit (uint64 p) turnWidth) ==> mine
+                                  let inReady = wireBit $"wr%d{p}_in_ready"
+
+                                  let offered: Stream<Expr> =
+                                      { payload = outWords.payload
+                                        valid = outWords.valid &&& mine
+                                        ready = inReady
+                                        layout = outWords.layout }
+
+                                  let buffered =
+                                      offered |> streamFifo $"wr%d{p}_ring" (2 * wordsPerBurst) |> spreadWords $"wr%d{p}" per memory.width
+
+                                  // Words into this port's ring, bursts whose
+                                  // address it has issued, and which burst of
+                                  // the buffer its next one is.
+                                  let pushed = reg $"wr%d{p}_pushed" 32
+                                  let awIssued = reg $"wr%d{p}_aw_issued" 32
+                                  let burst = reg $"wr%d{p}_burst" 32
+                                  let burstReady = wireBit $"wr%d{p}_burst_ready"
+                                  (running &&& lt awIssued (pad 32 (slice 31 wordShift pushed))) ==> burstReady
+                                  let addr = wire $"wr%d{p}_addr" 32
+                                  (regs.value batch.dstAddr + asUInt (shl burstAddrShift (slice (31 - burstAddrShift) 0 burst))) ==> addr
+                                  let descriptorReady = wireBit $"wr%d{p}_descriptor_ready"
+
+                                  let descriptors: Stream<Expr * Expr> =
+                                      { payload = (addr, lit (uint64 (beatsPerBurst - 1)) 8)
+                                        valid = burstReady
+                                        ready = descriptorReady
+                                        layout = layout2 ("addr", 32) ("len", 8) }
+
+                                  let beatReady = wireBit $"wr%d{p}_beat_ready"
+                                  beatReady ==> buffered.ready
+
+                                  let burstBeats: Stream<Expr * Expr> =
+                                      { payload = (buffered.payload, lit ((1UL <<< beatBytes) - 1UL) beatBytes)
+                                        valid = buffered.valid
+                                        ready = beatReady
+                                        layout = layout2 ("data", memory.width) ("strb", beatBytes) }
+
+                                  let writer = axiMasterWriterBurstOn (axiWriteBusOf bus) burstsInFlight descriptors burstBeats
+
+                                  ifElse
+                                      [ (start,
+                                         fun () ->
+                                             lit 0UL 32 ==> pushed
+                                             lit 0UL 32 ==> awIssued
+                                             lit (uint64 p) 32 ==> burst)
+                                        (otherwise,
+                                         fun () ->
+                                             If (offered.valid &&& inReady) (fun () -> pushed + lit 1UL 32 ==> pushed)
+
+                                             If (burstReady &&& descriptorReady) (fun () ->
+                                                 awIssued + lit 1UL 32 ==> awIssued
+                                                 burst + lit (uint64 streamPorts) 32 ==> burst)) ]
+
+                                  let wrote = wireBit $"wr%d{p}_wrote"
+                                  (buffered.valid &&& beatReady) ==> wrote
+                                  mine, inReady, wrote, writer.idle ]
+
+                        let taking = wireBit "wr_ring_ready"
+                        mux1H [ for mine, _, _, _ in lanes -> mine ] [ for _, inReady, _, _ in lanes -> inReady ] ==> taking
+                        taking ==> outWords.ready
+
+                        ifElse
+                            [ (start,
+                               fun () ->
+                                   lit 0UL turnWidth ==> turn
+                                   lit 0UL (max 1 wordShift) ==> taken)
+                              (outWords.valid &&& taking &&& lastWord,
+                               fun () ->
+                                   lit 0UL (max 1 wordShift) ==> taken
+                                   mux (eq turn (lit (uint64 (streamPorts - 1)) turnWidth)) (lit 0UL turnWidth) (turn + lit 1UL turnWidth) ==> turn)
+                              (outWords.valid &&& taking, fun () -> taken + lit 1UL (max 1 wordShift) ==> taken) ]
+
+                        // Beats written this cycle, on however many ports.
+                        If ([ for _, _, wrote, _ in lanes -> wrote ] |> List.reduce (|||)) (fun () ->
+                            beatsWritten + ([ for _, _, wrote, _ in lanes -> pad 32 wrote ] |> List.reduce (+)) ==> beatsWritten)
+                        writerIdle.Value <- Some([ for _, _, _, idle in lanes -> idle ] |> List.reduce (&&&))
+                        // The design has a row and the ring whose turn it is
+                        // is full.
+                        writeWaiting.Value <- Some(outWords.valid &&& bnot taking)
+
+                        assertThat
+                            (bnot running ||| eq (slice (ceilLog2 beatsPerBurst - 1) 0 beatsTotal) (lit 0UL (ceilLog2 beatsPerBurst)))
+                            $"the rows out must fill whole bursts of %d{beatsPerBurst} beats"
+                    else
+                        // --- the write side: one descriptor per burst -------
+                        // In order, so the beats are bursts as the rows in
+                        // are: sixteen beats an address. A write of its own
+                        // for every beat costs the port a round trip each,
+                        // and on the KV260 that was 4.4 cycles a beat, with
+                        // the design waiting on it for half the batch.
+                        //
+                        // A burst's address is issued only when all its beats
+                        // are in hand. An address the port has taken with no
+                        // data behind it is a write in flight for as long as
+                        // the design stalls, and a bitstream unloaded then
+                        // leaves the port's address and data channels out of
+                        // step until the board reboots. So the beats wait in
+                        // a buffer two bursts deep, and nothing partial is
+                        // ever on the bus.
+                        let { running = running; beatsTotal = beatsTotal; burstAddrShift = burstAddrShift } = counters.Force()
+                        let burstShift = ceilLog2 beatsPerBurst
+                        let outBeats = beatsOfRows.Value
+                        let buffered = outBeats |> streamFifo "wr_burst_buffer" (2 * beatsPerBurst)
+
+                        // Beats that have gone into the buffer, and bursts
+                        // whose address has been issued: a burst is in hand
+                        // when sixteen more beats have gone in than that.
+                        let pushed = reg "wr_pushed" 32
+                        let awIssued = reg "aw_issued" 32
+                        let burstReady = wireBit "wr_burst_ready"
+                        (running &&& lt awIssued (pad 32 (slice 31 burstShift pushed))) ==> burstReady
+
+                        let wrBurstAddr = wire "wr_burst_addr" 32
+                        (regs.value batch.dstAddr + asUInt (shl burstAddrShift (slice (31 - burstAddrShift) 0 awIssued))) ==> wrBurstAddr
+
+                        let descriptorReady = wireBit "wr_descriptor_ready"
+
+                        let descriptors: Stream<Expr * Expr> =
+                            { payload = (wrBurstAddr, lit (uint64 (beatsPerBurst - 1)) 8)
+                              valid = burstReady
+                              ready = descriptorReady
+                              layout = layout2 ("addr", 32) ("len", 8) }
+
+                        let beatReady = wireBit "wr_beat_ready"
+                        beatReady ==> buffered.ready
+
+                        let burstBeats: Stream<Expr * Expr> =
+                            { payload = (buffered.payload, lit ((1UL <<< beatBytes) - 1UL) beatBytes)
+                              valid = buffered.valid
+                              ready = beatReady
+                              layout = layout2 ("data", memory.width) ("strb", beatBytes) }
+
+                        let writer = axiMasterWriterBurstOn (axiWriteBusOf writeBusPorts) burstsInFlight descriptors burstBeats
+
+                        ifElse
+                            [ (regs.pulse batch.start,
+                               fun () ->
+                                   lit 0UL 32 ==> pushed
+                                   lit 0UL 32 ==> awIssued)
+                              (otherwise,
+                               fun () ->
+                                   If (outBeats.valid &&& outBeats.ready) (fun () -> pushed + lit 1UL 32 ==> pushed)
+                                   If (burstReady &&& descriptorReady) (fun () -> awIssued + lit 1UL 32 ==> awIssued)) ]
+
+                        If (buffered.valid &&& beatReady) (fun () -> beatsWritten + lit 1UL 32 ==> beatsWritten)
+                        writerIdle.Value <- Some writer.idle
+                        // The design has a beat and the buffer is full.
+                        writeWaiting.Value <- Some(outBeats.valid &&& bnot outBeats.ready)
+
+                        assertThat
+                            (bnot running ||| eq (slice (burstShift - 1) 0 beatsTotal) (lit 0UL burstShift))
+                            $"the rows out must fill whole bursts of %d{beatsPerBurst} beats"
 
                 // --- the surface: the keep-latest triple buffer -----------
                 // The surface is latched whole in one cycle, streamed as beats,
@@ -2783,17 +3193,41 @@ let private hostMemoryTop (board: Board) (path: DataPath) (d: Design) : BoardTop
                 let finished = wireBit "finished"
                 (running &&& eq beatsWritten beatsTotal &&& writerIdle) ==> finished
 
+                // Where the cycles went. A register each, counting off the
+                // handshake the stream already has: nothing in the data path
+                // reads them.
+                let waitCounters =
+                    match contributed.waitRegs with
+                    | Some(readWaits, writeWaits) ->
+                        [ for name, entry, waiting in [ "read_waits", readWaits, readWaiting.Value; "write_waits", writeWaits, writeWaiting.Value ] ->
+                              let count = reg name 32
+                              regs.drive entry count
+                              count, waiting |> Option.defaultValue (lit 0UL 1) ]
+                        // A cycle the write side is holding the design up is
+                        // the write side's, whatever the read side has.
+                        |> fun counted ->
+                            match counted, writeWaiting.Value with
+                            | [ reads, readWait; writes ], Some blocked -> [ reads, readWait &&& bnot blocked; writes ]
+                            | _ -> counted
+                    | None -> []
+
                 ifElse
                     [ (regs.pulse batch.start,
                        fun () ->
                            lit 1UL 1 ==> running
                            lit 0UL 32 ==> arIssued
                            lit 0UL 32 ==> beatsWritten
-                           lit 0UL 32 ==> cycleCount)
+                           lit 0UL 32 ==> cycleCount
+
+                           for count, _ in waitCounters do
+                               lit 0UL 32 ==> count)
                       (otherwise,
                        fun () ->
                            If finished (fun () -> lit 0UL 1 ==> running)
-                           If running (fun () -> cycleCount + lit 1UL 32 ==> cycleCount)) ]
+                           If running (fun () -> cycleCount + lit 1UL 32 ==> cycleCount)
+
+                           for count, waiting in waitCounters do
+                               If (running &&& waiting) (fun () -> count + lit 1UL 32 ==> count)) ]
 
                 regs.drive batch.busy running
                 regs.drive batch.cycles cycleCount
@@ -2858,11 +3292,13 @@ let private hostMemoryTop (board: Board) (path: DataPath) (d: Design) : BoardTop
             | Some shape -> max inShape.rowsPerBurst shape.rowsPerBurst
             | None -> inShape.rowsPerBurst
 
-        if scattered then
+        // What the count a host asks for must be a multiple of: on every
+        // path, since the fabric holds every path to it.
+        [ $"pub const ROWS_PER_BURST: usize = %d{rowsPerBurst};" ]
+        @ if scattered then
             []
-        else
-            [ $"pub const ROWS_PER_BURST: usize = %d{rowsPerBurst};" ]
-            @ describe "IN" inShape (inputsOf d)
+          else
+            describe "IN" inShape (inputsOf d)
             @ (match outShape with
                | Some shape -> describe "OUT" shape payloadPins
                | None -> [])
@@ -2881,6 +3317,9 @@ let private hostMemoryTop (board: Board) (path: DataPath) (d: Design) : BoardTop
           "cycles", batch.cycles ]
         @ entries
         @ snapshotEntries
+        @ (match contributed.waitRegs with
+           | Some(readWaits, writeWaits) -> [ "readWaits", readWaits; "writeWaits", writeWaits ]
+           | None -> [])
       batch = Some batch
       map = map
       target = targetOf board.part

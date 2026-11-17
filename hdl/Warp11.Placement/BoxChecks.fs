@@ -183,9 +183,7 @@ let fieldsAreRegrouped () : bool =
     // a field that is not there; a name picked twice; nothing picked
     && refuses "picks 'centre'" { crossed with boxes = [ box "cross" fieldsBox [ "pick", "left = centre, right" ] ] }
     && refuses "'left' is picked twice" { crossed with boxes = [ box "cross" fieldsBox [ "pick", "left, left = right" ] ] }
-    // a side of a join with two fields; two sides with one name
-    && refuses "a side of a join carries one field"
-        { splitAndJoined with boxes = [ box "leftOnly" fieldsBox [ "pick", "left, right" ]; box "rightOnly" fieldsBox [ "pick", "right" ]; box "both" joinBox [] ] }
+    // two sides with one name
     && refuses "two of its sides carry a field called 'left'"
         { splitAndJoined with boxes = [ box "leftOnly" fieldsBox [ "pick", "left" ]; box "rightOnly" fieldsBox [ "pick", "left" ]; box "both" joinBox [] ] }
 
@@ -227,6 +225,45 @@ let bufferIsABox () : bool =
     && held 4 = 4
     && held 16 = 16
     && refuses "depth is a count" { buffered 4 with boxes = [ box "buffer" fifoBox [ "depth", "none" ] ] }
+
+// ---------------------------------------------------------------------------
+// BD5 — the wide beat: two stereo frames side by side, the stereo gain on
+// each. Drawn with a `fields` box a frame and a `join` of two-field sides,
+// it is `eachGroup` over the stereo layout; and since the gain remembers
+// nothing between frames, a recording through it is the recording through
+// the stereo gain, sample for sample.
+
+// THE DRAWING is `Examples.gainWide`.
+
+// THE PIPELINE
+let gainWidePipeline =
+    let sample = signedInt sampleWidth
+    let wide = pins4 ("left0", sample) ("right0", sample) ("left1", sample) ("right1", sample)
+
+    defModule
+        "GainWide"
+        (fun p -> streamInputPorts p "in" wide, streamOutputPorts p "out" wide, p.inPort "volume" 16, p.inPort "mute" 1)
+        (fun (inPorts, outPorts, volume, mute) ->
+            streamSource inPorts
+            |> eachGroup stereoPins (fun i -> audioGain "AudioGain" $"gain%d{i}" volume mute)
+            |> streamSink outPorts)
+
+// CHECK
+let wideBeatIsGroups () : bool =
+    let drawn = Examples.gainWide rate 2
+    // An odd count of frames, so the last beat is half silence.
+    let tone = toneWav (int (round rate)) 201 440.0 0.25
+    let controls = [ "volume", 3UL * gainUnity / 2UL; "mute", 0UL ]
+    let play (g: Graph) = (Warp11.Devices.runInSim 10_000 g { source = tone; controls = controls; outputPath = None }).samples
+    let wide = play drawn
+    let stereo = play { gainGraph with sampleRate = rate }
+
+    same drawn gainWidePipeline
+    && wide.Length = tone.samples.Length
+    && wide = stereo
+    && Warp11.Devices.framesABeat (fst (Warp11.Devices.boundaryOf drawn)).fields = Some 2
+    // Three samples are not frames.
+    && Warp11.Devices.framesABeat [ for n in [ "a"; "b"; "c" ] -> n, signedInt sampleWidth ] = None
 
 // ---------------------------------------------------------------------------
 // BD4 — the boxes are placed, set and saved as any box is.

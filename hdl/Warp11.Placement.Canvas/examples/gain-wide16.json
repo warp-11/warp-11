@@ -1,0 +1,1378 @@
+{
+  "format": 2,
+  "name": "GainWide16",
+  "sampleRate": 48828,
+  "inputs": [
+    {
+      "name": "in",
+      "fields": [
+        {
+          "name": "left0",
+          "width": 24,
+          "fraction": 0,
+          "signed": true
+        },
+        {
+          "name": "right0",
+          "width": 24,
+          "fraction": 0,
+          "signed": true
+        },
+        {
+          "name": "left1",
+          "width": 24,
+          "fraction": 0,
+          "signed": true
+        },
+        {
+          "name": "right1",
+          "width": 24,
+          "fraction": 0,
+          "signed": true
+        },
+        {
+          "name": "left2",
+          "width": 24,
+          "fraction": 0,
+          "signed": true
+        },
+        {
+          "name": "right2",
+          "width": 24,
+          "fraction": 0,
+          "signed": true
+        },
+        {
+          "name": "left3",
+          "width": 24,
+          "fraction": 0,
+          "signed": true
+        },
+        {
+          "name": "right3",
+          "width": 24,
+          "fraction": 0,
+          "signed": true
+        },
+        {
+          "name": "left4",
+          "width": 24,
+          "fraction": 0,
+          "signed": true
+        },
+        {
+          "name": "right4",
+          "width": 24,
+          "fraction": 0,
+          "signed": true
+        },
+        {
+          "name": "left5",
+          "width": 24,
+          "fraction": 0,
+          "signed": true
+        },
+        {
+          "name": "right5",
+          "width": 24,
+          "fraction": 0,
+          "signed": true
+        },
+        {
+          "name": "left6",
+          "width": 24,
+          "fraction": 0,
+          "signed": true
+        },
+        {
+          "name": "right6",
+          "width": 24,
+          "fraction": 0,
+          "signed": true
+        },
+        {
+          "name": "left7",
+          "width": 24,
+          "fraction": 0,
+          "signed": true
+        },
+        {
+          "name": "right7",
+          "width": 24,
+          "fraction": 0,
+          "signed": true
+        },
+        {
+          "name": "left8",
+          "width": 24,
+          "fraction": 0,
+          "signed": true
+        },
+        {
+          "name": "right8",
+          "width": 24,
+          "fraction": 0,
+          "signed": true
+        },
+        {
+          "name": "left9",
+          "width": 24,
+          "fraction": 0,
+          "signed": true
+        },
+        {
+          "name": "right9",
+          "width": 24,
+          "fraction": 0,
+          "signed": true
+        },
+        {
+          "name": "left10",
+          "width": 24,
+          "fraction": 0,
+          "signed": true
+        },
+        {
+          "name": "right10",
+          "width": 24,
+          "fraction": 0,
+          "signed": true
+        },
+        {
+          "name": "left11",
+          "width": 24,
+          "fraction": 0,
+          "signed": true
+        },
+        {
+          "name": "right11",
+          "width": 24,
+          "fraction": 0,
+          "signed": true
+        },
+        {
+          "name": "left12",
+          "width": 24,
+          "fraction": 0,
+          "signed": true
+        },
+        {
+          "name": "right12",
+          "width": 24,
+          "fraction": 0,
+          "signed": true
+        },
+        {
+          "name": "left13",
+          "width": 24,
+          "fraction": 0,
+          "signed": true
+        },
+        {
+          "name": "right13",
+          "width": 24,
+          "fraction": 0,
+          "signed": true
+        },
+        {
+          "name": "left14",
+          "width": 24,
+          "fraction": 0,
+          "signed": true
+        },
+        {
+          "name": "right14",
+          "width": 24,
+          "fraction": 0,
+          "signed": true
+        },
+        {
+          "name": "left15",
+          "width": 24,
+          "fraction": 0,
+          "signed": true
+        },
+        {
+          "name": "right15",
+          "width": 24,
+          "fraction": 0,
+          "signed": true
+        }
+      ]
+    }
+  ],
+  "controls": [
+    {
+      "name": "volume",
+      "width": 16,
+      "fraction": 0,
+      "signed": false
+    },
+    {
+      "name": "mute",
+      "width": 1,
+      "fraction": 0,
+      "signed": false
+    }
+  ],
+  "outputs": [
+    {
+      "name": "out",
+      "fields": [
+        {
+          "name": "left0",
+          "width": 24,
+          "fraction": 0,
+          "signed": true
+        },
+        {
+          "name": "right0",
+          "width": 24,
+          "fraction": 0,
+          "signed": true
+        },
+        {
+          "name": "left1",
+          "width": 24,
+          "fraction": 0,
+          "signed": true
+        },
+        {
+          "name": "right1",
+          "width": 24,
+          "fraction": 0,
+          "signed": true
+        },
+        {
+          "name": "left2",
+          "width": 24,
+          "fraction": 0,
+          "signed": true
+        },
+        {
+          "name": "right2",
+          "width": 24,
+          "fraction": 0,
+          "signed": true
+        },
+        {
+          "name": "left3",
+          "width": 24,
+          "fraction": 0,
+          "signed": true
+        },
+        {
+          "name": "right3",
+          "width": 24,
+          "fraction": 0,
+          "signed": true
+        },
+        {
+          "name": "left4",
+          "width": 24,
+          "fraction": 0,
+          "signed": true
+        },
+        {
+          "name": "right4",
+          "width": 24,
+          "fraction": 0,
+          "signed": true
+        },
+        {
+          "name": "left5",
+          "width": 24,
+          "fraction": 0,
+          "signed": true
+        },
+        {
+          "name": "right5",
+          "width": 24,
+          "fraction": 0,
+          "signed": true
+        },
+        {
+          "name": "left6",
+          "width": 24,
+          "fraction": 0,
+          "signed": true
+        },
+        {
+          "name": "right6",
+          "width": 24,
+          "fraction": 0,
+          "signed": true
+        },
+        {
+          "name": "left7",
+          "width": 24,
+          "fraction": 0,
+          "signed": true
+        },
+        {
+          "name": "right7",
+          "width": 24,
+          "fraction": 0,
+          "signed": true
+        },
+        {
+          "name": "left8",
+          "width": 24,
+          "fraction": 0,
+          "signed": true
+        },
+        {
+          "name": "right8",
+          "width": 24,
+          "fraction": 0,
+          "signed": true
+        },
+        {
+          "name": "left9",
+          "width": 24,
+          "fraction": 0,
+          "signed": true
+        },
+        {
+          "name": "right9",
+          "width": 24,
+          "fraction": 0,
+          "signed": true
+        },
+        {
+          "name": "left10",
+          "width": 24,
+          "fraction": 0,
+          "signed": true
+        },
+        {
+          "name": "right10",
+          "width": 24,
+          "fraction": 0,
+          "signed": true
+        },
+        {
+          "name": "left11",
+          "width": 24,
+          "fraction": 0,
+          "signed": true
+        },
+        {
+          "name": "right11",
+          "width": 24,
+          "fraction": 0,
+          "signed": true
+        },
+        {
+          "name": "left12",
+          "width": 24,
+          "fraction": 0,
+          "signed": true
+        },
+        {
+          "name": "right12",
+          "width": 24,
+          "fraction": 0,
+          "signed": true
+        },
+        {
+          "name": "left13",
+          "width": 24,
+          "fraction": 0,
+          "signed": true
+        },
+        {
+          "name": "right13",
+          "width": 24,
+          "fraction": 0,
+          "signed": true
+        },
+        {
+          "name": "left14",
+          "width": 24,
+          "fraction": 0,
+          "signed": true
+        },
+        {
+          "name": "right14",
+          "width": 24,
+          "fraction": 0,
+          "signed": true
+        },
+        {
+          "name": "left15",
+          "width": 24,
+          "fraction": 0,
+          "signed": true
+        },
+        {
+          "name": "right15",
+          "width": 24,
+          "fraction": 0,
+          "signed": true
+        }
+      ]
+    }
+  ],
+  "boxes": [
+    {
+      "name": "frame0",
+      "unit": "fields",
+      "arguments": {
+        "pick": "left0, right0"
+      },
+      "settings": {}
+    },
+    {
+      "name": "gain0",
+      "unit": "gain",
+      "arguments": {},
+      "settings": {}
+    },
+    {
+      "name": "gained0",
+      "unit": "fields",
+      "arguments": {
+        "pick": "left0 = left, right0 = right"
+      },
+      "settings": {}
+    },
+    {
+      "name": "frame1",
+      "unit": "fields",
+      "arguments": {
+        "pick": "left1, right1"
+      },
+      "settings": {}
+    },
+    {
+      "name": "gain1",
+      "unit": "gain",
+      "arguments": {},
+      "settings": {}
+    },
+    {
+      "name": "gained1",
+      "unit": "fields",
+      "arguments": {
+        "pick": "left1 = left, right1 = right"
+      },
+      "settings": {}
+    },
+    {
+      "name": "frame2",
+      "unit": "fields",
+      "arguments": {
+        "pick": "left2, right2"
+      },
+      "settings": {}
+    },
+    {
+      "name": "gain2",
+      "unit": "gain",
+      "arguments": {},
+      "settings": {}
+    },
+    {
+      "name": "gained2",
+      "unit": "fields",
+      "arguments": {
+        "pick": "left2 = left, right2 = right"
+      },
+      "settings": {}
+    },
+    {
+      "name": "frame3",
+      "unit": "fields",
+      "arguments": {
+        "pick": "left3, right3"
+      },
+      "settings": {}
+    },
+    {
+      "name": "gain3",
+      "unit": "gain",
+      "arguments": {},
+      "settings": {}
+    },
+    {
+      "name": "gained3",
+      "unit": "fields",
+      "arguments": {
+        "pick": "left3 = left, right3 = right"
+      },
+      "settings": {}
+    },
+    {
+      "name": "frame4",
+      "unit": "fields",
+      "arguments": {
+        "pick": "left4, right4"
+      },
+      "settings": {}
+    },
+    {
+      "name": "gain4",
+      "unit": "gain",
+      "arguments": {},
+      "settings": {}
+    },
+    {
+      "name": "gained4",
+      "unit": "fields",
+      "arguments": {
+        "pick": "left4 = left, right4 = right"
+      },
+      "settings": {}
+    },
+    {
+      "name": "frame5",
+      "unit": "fields",
+      "arguments": {
+        "pick": "left5, right5"
+      },
+      "settings": {}
+    },
+    {
+      "name": "gain5",
+      "unit": "gain",
+      "arguments": {},
+      "settings": {}
+    },
+    {
+      "name": "gained5",
+      "unit": "fields",
+      "arguments": {
+        "pick": "left5 = left, right5 = right"
+      },
+      "settings": {}
+    },
+    {
+      "name": "frame6",
+      "unit": "fields",
+      "arguments": {
+        "pick": "left6, right6"
+      },
+      "settings": {}
+    },
+    {
+      "name": "gain6",
+      "unit": "gain",
+      "arguments": {},
+      "settings": {}
+    },
+    {
+      "name": "gained6",
+      "unit": "fields",
+      "arguments": {
+        "pick": "left6 = left, right6 = right"
+      },
+      "settings": {}
+    },
+    {
+      "name": "frame7",
+      "unit": "fields",
+      "arguments": {
+        "pick": "left7, right7"
+      },
+      "settings": {}
+    },
+    {
+      "name": "gain7",
+      "unit": "gain",
+      "arguments": {},
+      "settings": {}
+    },
+    {
+      "name": "gained7",
+      "unit": "fields",
+      "arguments": {
+        "pick": "left7 = left, right7 = right"
+      },
+      "settings": {}
+    },
+    {
+      "name": "frame8",
+      "unit": "fields",
+      "arguments": {
+        "pick": "left8, right8"
+      },
+      "settings": {}
+    },
+    {
+      "name": "gain8",
+      "unit": "gain",
+      "arguments": {},
+      "settings": {}
+    },
+    {
+      "name": "gained8",
+      "unit": "fields",
+      "arguments": {
+        "pick": "left8 = left, right8 = right"
+      },
+      "settings": {}
+    },
+    {
+      "name": "frame9",
+      "unit": "fields",
+      "arguments": {
+        "pick": "left9, right9"
+      },
+      "settings": {}
+    },
+    {
+      "name": "gain9",
+      "unit": "gain",
+      "arguments": {},
+      "settings": {}
+    },
+    {
+      "name": "gained9",
+      "unit": "fields",
+      "arguments": {
+        "pick": "left9 = left, right9 = right"
+      },
+      "settings": {}
+    },
+    {
+      "name": "frame10",
+      "unit": "fields",
+      "arguments": {
+        "pick": "left10, right10"
+      },
+      "settings": {}
+    },
+    {
+      "name": "gain10",
+      "unit": "gain",
+      "arguments": {},
+      "settings": {}
+    },
+    {
+      "name": "gained10",
+      "unit": "fields",
+      "arguments": {
+        "pick": "left10 = left, right10 = right"
+      },
+      "settings": {}
+    },
+    {
+      "name": "frame11",
+      "unit": "fields",
+      "arguments": {
+        "pick": "left11, right11"
+      },
+      "settings": {}
+    },
+    {
+      "name": "gain11",
+      "unit": "gain",
+      "arguments": {},
+      "settings": {}
+    },
+    {
+      "name": "gained11",
+      "unit": "fields",
+      "arguments": {
+        "pick": "left11 = left, right11 = right"
+      },
+      "settings": {}
+    },
+    {
+      "name": "frame12",
+      "unit": "fields",
+      "arguments": {
+        "pick": "left12, right12"
+      },
+      "settings": {}
+    },
+    {
+      "name": "gain12",
+      "unit": "gain",
+      "arguments": {},
+      "settings": {}
+    },
+    {
+      "name": "gained12",
+      "unit": "fields",
+      "arguments": {
+        "pick": "left12 = left, right12 = right"
+      },
+      "settings": {}
+    },
+    {
+      "name": "frame13",
+      "unit": "fields",
+      "arguments": {
+        "pick": "left13, right13"
+      },
+      "settings": {}
+    },
+    {
+      "name": "gain13",
+      "unit": "gain",
+      "arguments": {},
+      "settings": {}
+    },
+    {
+      "name": "gained13",
+      "unit": "fields",
+      "arguments": {
+        "pick": "left13 = left, right13 = right"
+      },
+      "settings": {}
+    },
+    {
+      "name": "frame14",
+      "unit": "fields",
+      "arguments": {
+        "pick": "left14, right14"
+      },
+      "settings": {}
+    },
+    {
+      "name": "gain14",
+      "unit": "gain",
+      "arguments": {},
+      "settings": {}
+    },
+    {
+      "name": "gained14",
+      "unit": "fields",
+      "arguments": {
+        "pick": "left14 = left, right14 = right"
+      },
+      "settings": {}
+    },
+    {
+      "name": "frame15",
+      "unit": "fields",
+      "arguments": {
+        "pick": "left15, right15"
+      },
+      "settings": {}
+    },
+    {
+      "name": "gain15",
+      "unit": "gain",
+      "arguments": {},
+      "settings": {}
+    },
+    {
+      "name": "gained15",
+      "unit": "fields",
+      "arguments": {
+        "pick": "left15 = left, right15 = right"
+      },
+      "settings": {}
+    },
+    {
+      "name": "frames",
+      "unit": "join",
+      "arguments": {
+        "inputs": "16"
+      },
+      "settings": {}
+    }
+  ],
+  "controlBoxes": [],
+  "edges": [
+    {
+      "from": "input.in",
+      "to": "frame0.in"
+    },
+    {
+      "from": "frame0.out",
+      "to": "gain0.in"
+    },
+    {
+      "from": "input.volume",
+      "to": "gain0.volume"
+    },
+    {
+      "from": "input.mute",
+      "to": "gain0.mute"
+    },
+    {
+      "from": "gain0.out",
+      "to": "gained0.in"
+    },
+    {
+      "from": "input.in",
+      "to": "frame1.in"
+    },
+    {
+      "from": "frame1.out",
+      "to": "gain1.in"
+    },
+    {
+      "from": "input.volume",
+      "to": "gain1.volume"
+    },
+    {
+      "from": "input.mute",
+      "to": "gain1.mute"
+    },
+    {
+      "from": "gain1.out",
+      "to": "gained1.in"
+    },
+    {
+      "from": "input.in",
+      "to": "frame2.in"
+    },
+    {
+      "from": "frame2.out",
+      "to": "gain2.in"
+    },
+    {
+      "from": "input.volume",
+      "to": "gain2.volume"
+    },
+    {
+      "from": "input.mute",
+      "to": "gain2.mute"
+    },
+    {
+      "from": "gain2.out",
+      "to": "gained2.in"
+    },
+    {
+      "from": "input.in",
+      "to": "frame3.in"
+    },
+    {
+      "from": "frame3.out",
+      "to": "gain3.in"
+    },
+    {
+      "from": "input.volume",
+      "to": "gain3.volume"
+    },
+    {
+      "from": "input.mute",
+      "to": "gain3.mute"
+    },
+    {
+      "from": "gain3.out",
+      "to": "gained3.in"
+    },
+    {
+      "from": "input.in",
+      "to": "frame4.in"
+    },
+    {
+      "from": "frame4.out",
+      "to": "gain4.in"
+    },
+    {
+      "from": "input.volume",
+      "to": "gain4.volume"
+    },
+    {
+      "from": "input.mute",
+      "to": "gain4.mute"
+    },
+    {
+      "from": "gain4.out",
+      "to": "gained4.in"
+    },
+    {
+      "from": "input.in",
+      "to": "frame5.in"
+    },
+    {
+      "from": "frame5.out",
+      "to": "gain5.in"
+    },
+    {
+      "from": "input.volume",
+      "to": "gain5.volume"
+    },
+    {
+      "from": "input.mute",
+      "to": "gain5.mute"
+    },
+    {
+      "from": "gain5.out",
+      "to": "gained5.in"
+    },
+    {
+      "from": "input.in",
+      "to": "frame6.in"
+    },
+    {
+      "from": "frame6.out",
+      "to": "gain6.in"
+    },
+    {
+      "from": "input.volume",
+      "to": "gain6.volume"
+    },
+    {
+      "from": "input.mute",
+      "to": "gain6.mute"
+    },
+    {
+      "from": "gain6.out",
+      "to": "gained6.in"
+    },
+    {
+      "from": "input.in",
+      "to": "frame7.in"
+    },
+    {
+      "from": "frame7.out",
+      "to": "gain7.in"
+    },
+    {
+      "from": "input.volume",
+      "to": "gain7.volume"
+    },
+    {
+      "from": "input.mute",
+      "to": "gain7.mute"
+    },
+    {
+      "from": "gain7.out",
+      "to": "gained7.in"
+    },
+    {
+      "from": "input.in",
+      "to": "frame8.in"
+    },
+    {
+      "from": "frame8.out",
+      "to": "gain8.in"
+    },
+    {
+      "from": "input.volume",
+      "to": "gain8.volume"
+    },
+    {
+      "from": "input.mute",
+      "to": "gain8.mute"
+    },
+    {
+      "from": "gain8.out",
+      "to": "gained8.in"
+    },
+    {
+      "from": "input.in",
+      "to": "frame9.in"
+    },
+    {
+      "from": "frame9.out",
+      "to": "gain9.in"
+    },
+    {
+      "from": "input.volume",
+      "to": "gain9.volume"
+    },
+    {
+      "from": "input.mute",
+      "to": "gain9.mute"
+    },
+    {
+      "from": "gain9.out",
+      "to": "gained9.in"
+    },
+    {
+      "from": "input.in",
+      "to": "frame10.in"
+    },
+    {
+      "from": "frame10.out",
+      "to": "gain10.in"
+    },
+    {
+      "from": "input.volume",
+      "to": "gain10.volume"
+    },
+    {
+      "from": "input.mute",
+      "to": "gain10.mute"
+    },
+    {
+      "from": "gain10.out",
+      "to": "gained10.in"
+    },
+    {
+      "from": "input.in",
+      "to": "frame11.in"
+    },
+    {
+      "from": "frame11.out",
+      "to": "gain11.in"
+    },
+    {
+      "from": "input.volume",
+      "to": "gain11.volume"
+    },
+    {
+      "from": "input.mute",
+      "to": "gain11.mute"
+    },
+    {
+      "from": "gain11.out",
+      "to": "gained11.in"
+    },
+    {
+      "from": "input.in",
+      "to": "frame12.in"
+    },
+    {
+      "from": "frame12.out",
+      "to": "gain12.in"
+    },
+    {
+      "from": "input.volume",
+      "to": "gain12.volume"
+    },
+    {
+      "from": "input.mute",
+      "to": "gain12.mute"
+    },
+    {
+      "from": "gain12.out",
+      "to": "gained12.in"
+    },
+    {
+      "from": "input.in",
+      "to": "frame13.in"
+    },
+    {
+      "from": "frame13.out",
+      "to": "gain13.in"
+    },
+    {
+      "from": "input.volume",
+      "to": "gain13.volume"
+    },
+    {
+      "from": "input.mute",
+      "to": "gain13.mute"
+    },
+    {
+      "from": "gain13.out",
+      "to": "gained13.in"
+    },
+    {
+      "from": "input.in",
+      "to": "frame14.in"
+    },
+    {
+      "from": "frame14.out",
+      "to": "gain14.in"
+    },
+    {
+      "from": "input.volume",
+      "to": "gain14.volume"
+    },
+    {
+      "from": "input.mute",
+      "to": "gain14.mute"
+    },
+    {
+      "from": "gain14.out",
+      "to": "gained14.in"
+    },
+    {
+      "from": "input.in",
+      "to": "frame15.in"
+    },
+    {
+      "from": "frame15.out",
+      "to": "gain15.in"
+    },
+    {
+      "from": "input.volume",
+      "to": "gain15.volume"
+    },
+    {
+      "from": "input.mute",
+      "to": "gain15.mute"
+    },
+    {
+      "from": "gain15.out",
+      "to": "gained15.in"
+    },
+    {
+      "from": "gained0.out",
+      "to": "frames.in0"
+    },
+    {
+      "from": "gained1.out",
+      "to": "frames.in1"
+    },
+    {
+      "from": "gained2.out",
+      "to": "frames.in2"
+    },
+    {
+      "from": "gained3.out",
+      "to": "frames.in3"
+    },
+    {
+      "from": "gained4.out",
+      "to": "frames.in4"
+    },
+    {
+      "from": "gained5.out",
+      "to": "frames.in5"
+    },
+    {
+      "from": "gained6.out",
+      "to": "frames.in6"
+    },
+    {
+      "from": "gained7.out",
+      "to": "frames.in7"
+    },
+    {
+      "from": "gained8.out",
+      "to": "frames.in8"
+    },
+    {
+      "from": "gained9.out",
+      "to": "frames.in9"
+    },
+    {
+      "from": "gained10.out",
+      "to": "frames.in10"
+    },
+    {
+      "from": "gained11.out",
+      "to": "frames.in11"
+    },
+    {
+      "from": "gained12.out",
+      "to": "frames.in12"
+    },
+    {
+      "from": "gained13.out",
+      "to": "frames.in13"
+    },
+    {
+      "from": "gained14.out",
+      "to": "frames.in14"
+    },
+    {
+      "from": "gained15.out",
+      "to": "frames.in15"
+    },
+    {
+      "from": "frames.out",
+      "to": "output.out"
+    }
+  ],
+  "positions": {
+    "frame0": [
+      300,
+      80
+    ],
+    "frame1": [
+      300,
+      300
+    ],
+    "frame10": [
+      300,
+      2280
+    ],
+    "frame11": [
+      300,
+      2500
+    ],
+    "frame12": [
+      300,
+      2720
+    ],
+    "frame13": [
+      300,
+      2940
+    ],
+    "frame14": [
+      300,
+      3160
+    ],
+    "frame15": [
+      300,
+      3380
+    ],
+    "frame2": [
+      300,
+      520
+    ],
+    "frame3": [
+      300,
+      740
+    ],
+    "frame4": [
+      300,
+      960
+    ],
+    "frame5": [
+      300,
+      1180
+    ],
+    "frame6": [
+      300,
+      1400
+    ],
+    "frame7": [
+      300,
+      1620
+    ],
+    "frame8": [
+      300,
+      1840
+    ],
+    "frame9": [
+      300,
+      2060
+    ],
+    "frames": [
+      1020,
+      1730
+    ],
+    "gain0": [
+      540,
+      80
+    ],
+    "gain1": [
+      540,
+      300
+    ],
+    "gain10": [
+      540,
+      2280
+    ],
+    "gain11": [
+      540,
+      2500
+    ],
+    "gain12": [
+      540,
+      2720
+    ],
+    "gain13": [
+      540,
+      2940
+    ],
+    "gain14": [
+      540,
+      3160
+    ],
+    "gain15": [
+      540,
+      3380
+    ],
+    "gain2": [
+      540,
+      520
+    ],
+    "gain3": [
+      540,
+      740
+    ],
+    "gain4": [
+      540,
+      960
+    ],
+    "gain5": [
+      540,
+      1180
+    ],
+    "gain6": [
+      540,
+      1400
+    ],
+    "gain7": [
+      540,
+      1620
+    ],
+    "gain8": [
+      540,
+      1840
+    ],
+    "gain9": [
+      540,
+      2060
+    ],
+    "gained0": [
+      780,
+      80
+    ],
+    "gained1": [
+      780,
+      300
+    ],
+    "gained10": [
+      780,
+      2280
+    ],
+    "gained11": [
+      780,
+      2500
+    ],
+    "gained12": [
+      780,
+      2720
+    ],
+    "gained13": [
+      780,
+      2940
+    ],
+    "gained14": [
+      780,
+      3160
+    ],
+    "gained15": [
+      780,
+      3380
+    ],
+    "gained2": [
+      780,
+      520
+    ],
+    "gained3": [
+      780,
+      740
+    ],
+    "gained4": [
+      780,
+      960
+    ],
+    "gained5": [
+      780,
+      1180
+    ],
+    "gained6": [
+      780,
+      1400
+    ],
+    "gained7": [
+      780,
+      1620
+    ],
+    "gained8": [
+      780,
+      1840
+    ],
+    "gained9": [
+      780,
+      2060
+    ],
+    "input": [
+      60,
+      1730
+    ],
+    "output": [
+      1260,
+      1730
+    ]
+  },
+  "designs": {},
+  "units": {}
+}

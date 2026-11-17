@@ -30,7 +30,8 @@
       ],
       "width": 128,
       "arenaBytes": 8388608,
-      "writeOutstanding": 16
+      "writeOutstanding": 16,
+      "burstBeats": 256
     },
     "host": {
       "driver": "AxiLite",

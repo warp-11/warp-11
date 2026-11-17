@@ -108,7 +108,12 @@ let private runBatchPaced (flat: bool) (frames: int) (seed: int) (jitter: int op
 
     axi.write32 batch.srcAddr.offset (uint64 src)
     axi.write32 batch.dstAddr.offset (uint64 dst)
-    axi.write32 batch.frameCount.offset (uint64 frames)
+    // The count is whole bursts, as the host pads a recording: the frames
+    // staged, then silence. Two stereo frames a beat, and a burst is the
+    // board's to size.
+    let framesPerBurst = 2 * kv260.hostMemory.Value.burstBeats
+    let padded = (frames + framesPerBurst - 1) / framesPerBurst * framesPerBurst
+    axi.write32 batch.frameCount.offset (uint64 padded)
     // "Flat" is a configuration rather than a route around the DSP:
     // threshold at full scale with ratio 0 is no gain reduction whatever the
     // signal, which this chain reassembles bit-exactly.

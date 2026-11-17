@@ -39,12 +39,20 @@ type App(o: FuncCanvas.Opening) =
 ///   the canvas over a running design;
 /// - `edit design.json [file.wav|.pgm|.csv]` — a design file (a new design
 ///   if there is no file yet), and with a source, `Open in sim` runs it;
+///   without one, File › Attach Source… puts one on the boundary;
 /// - nothing — the gain design, to look at.
 let private opening (argv: string[]) : FuncCanvas.Opening =
     let none: FuncCanvas.Opening =
         { graph = gainGraph
           live = None
           opener = None
+          attach =
+            Some(fun path ->
+                try
+                    let source, heard = Session.sourceOf path (AudioSink.available ())
+                    Ok(fun g knobs -> Session.openWith g source knobs (Some heard))
+                with e ->
+                    Error e.Message)
           file = None }
 
     match argv with
@@ -70,7 +78,7 @@ let private opening (argv: string[]) : FuncCanvas.Opening =
             | Error why -> failwith why
 
         let opener = source |> Option.map (fun (source, heard) -> fun g knobs -> Session.openWith g source knobs (Some heard))
-        { graph = g; live = None; opener = opener; file = Some designPath }
+        { none with graph = g; opener = opener; file = Some designPath }
     | _ -> none
 
 [<EntryPoint>]

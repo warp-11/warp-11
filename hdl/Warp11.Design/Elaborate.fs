@@ -33,11 +33,7 @@ let checkEdges (g: Graph) =
                         failwith $"{b.name}: '{name}' picks '{field}', and what reaches it carries {has}"
             | _ -> ()
         elif b.unit = joinBox then
-            let sides, joined = streamsOf g b.name
-
-            for side in sides do
-                if side.fields.Length > 1 then
-                    failwith $"{b.name}.{side.name}: a side of a join carries one field, and this carries %d{side.fields.Length}; pick one with a fields box"
+            let _, joined = streamsOf g b.name
 
             match joined.Head.fields |> List.map fst |> List.countBy id |> List.tryFind (fun (_, n) -> n > 1) with
             | Some(name, _) -> failwith $"{b.name}: two of its sides carry a field called '{name}'; rename one with a fields box"
@@ -349,16 +345,18 @@ let rec elaborateFull (probes: bool) (onRead: string -> bool list -> unit) (g: G
                             | Some(name, _) -> failwith $"{b.name}: two of its sides carry a field called '{name}'; rename one with a fields box"
                             | None -> ()
 
-                            let sides =
-                                [ for side in joinInputs b ->
-                                      let s = arriving branches (port b.name side)
+                            let sides = [ for side in joinInputs b -> arriving branches (port b.name side) ]
 
-                                      match s.layout.fields with
-                                      | [ field ] -> s |> streamMapTo (pins1 field) List.head
-                                      | fields ->
-                                          failwith $"{b.name}.{side}: a side of a join carries one field, and this carries %d{fields.Length}; pick one with a fields box" ]
+                            // Sides of one field each are `streamJoin`; a
+                            // side that carries several makes it the join
+                            // of groups.
+                            let out =
+                                if sides |> List.forall (fun s -> s.layout.fields.Length = 1) then
+                                    streamJoin (layoutOfList joined) [ for s in sides -> s |> streamMapTo (pins1 s.layout.fields.Head) List.head ]
+                                else
+                                    streamJoinGroups (layoutOfList joined) sides
 
-                            streamJoin (layoutOfList joined) sides |> leaving branches (port b.name streamOutlet)
+                            leaving branches (port b.name streamOutlet) out
                         | [ input ], [ output ] ->
                             let order = if b.ordered then Farm.InOrder else Farm.AsDone
 

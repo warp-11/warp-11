@@ -1,0 +1,230 @@
+{
+  "format": 2,
+  "name": "GainWide",
+  "sampleRate": 48828,
+  "inputs": [
+    {
+      "name": "in",
+      "fields": [
+        {
+          "name": "left0",
+          "width": 24,
+          "fraction": 0,
+          "signed": true
+        },
+        {
+          "name": "right0",
+          "width": 24,
+          "fraction": 0,
+          "signed": true
+        },
+        {
+          "name": "left1",
+          "width": 24,
+          "fraction": 0,
+          "signed": true
+        },
+        {
+          "name": "right1",
+          "width": 24,
+          "fraction": 0,
+          "signed": true
+        }
+      ]
+    }
+  ],
+  "controls": [
+    {
+      "name": "volume",
+      "width": 16,
+      "fraction": 0,
+      "signed": false
+    },
+    {
+      "name": "mute",
+      "width": 1,
+      "fraction": 0,
+      "signed": false
+    }
+  ],
+  "outputs": [
+    {
+      "name": "out",
+      "fields": [
+        {
+          "name": "left0",
+          "width": 24,
+          "fraction": 0,
+          "signed": true
+        },
+        {
+          "name": "right0",
+          "width": 24,
+          "fraction": 0,
+          "signed": true
+        },
+        {
+          "name": "left1",
+          "width": 24,
+          "fraction": 0,
+          "signed": true
+        },
+        {
+          "name": "right1",
+          "width": 24,
+          "fraction": 0,
+          "signed": true
+        }
+      ]
+    }
+  ],
+  "boxes": [
+    {
+      "name": "frame0",
+      "unit": "fields",
+      "arguments": {
+        "pick": "left0, right0"
+      },
+      "settings": {}
+    },
+    {
+      "name": "gain0",
+      "unit": "gain",
+      "arguments": {},
+      "settings": {}
+    },
+    {
+      "name": "gained0",
+      "unit": "fields",
+      "arguments": {
+        "pick": "left0 = left, right0 = right"
+      },
+      "settings": {}
+    },
+    {
+      "name": "frame1",
+      "unit": "fields",
+      "arguments": {
+        "pick": "left1, right1"
+      },
+      "settings": {}
+    },
+    {
+      "name": "gain1",
+      "unit": "gain",
+      "arguments": {},
+      "settings": {}
+    },
+    {
+      "name": "gained1",
+      "unit": "fields",
+      "arguments": {
+        "pick": "left1 = left, right1 = right"
+      },
+      "settings": {}
+    },
+    {
+      "name": "frames",
+      "unit": "join",
+      "arguments": {
+        "inputs": "2"
+      },
+      "settings": {}
+    }
+  ],
+  "controlBoxes": [],
+  "edges": [
+    {
+      "from": "input.in",
+      "to": "frame0.in"
+    },
+    {
+      "from": "frame0.out",
+      "to": "gain0.in"
+    },
+    {
+      "from": "input.volume",
+      "to": "gain0.volume"
+    },
+    {
+      "from": "input.mute",
+      "to": "gain0.mute"
+    },
+    {
+      "from": "gain0.out",
+      "to": "gained0.in"
+    },
+    {
+      "from": "input.in",
+      "to": "frame1.in"
+    },
+    {
+      "from": "frame1.out",
+      "to": "gain1.in"
+    },
+    {
+      "from": "input.volume",
+      "to": "gain1.volume"
+    },
+    {
+      "from": "input.mute",
+      "to": "gain1.mute"
+    },
+    {
+      "from": "gain1.out",
+      "to": "gained1.in"
+    },
+    {
+      "from": "gained0.out",
+      "to": "frames.in0"
+    },
+    {
+      "from": "gained1.out",
+      "to": "frames.in1"
+    },
+    {
+      "from": "frames.out",
+      "to": "output.out"
+    }
+  ],
+  "positions": {
+    "frame0": [
+      300,
+      80
+    ],
+    "frame1": [
+      300,
+      300
+    ],
+    "frames": [
+      1020,
+      190
+    ],
+    "gain0": [
+      540,
+      80
+    ],
+    "gain1": [
+      540,
+      300
+    ],
+    "gained0": [
+      780,
+      80
+    ],
+    "gained1": [
+      780,
+      300
+    ],
+    "input": [
+      60,
+      190
+    ],
+    "output": [
+      1260,
+      190
+    ]
+  },
+  "designs": {},
+  "units": {}
+}

@@ -6,7 +6,9 @@
 
 /// Pixels a 128-bit beat carries, a byte each.
 pub const PIXELS_PER_BEAT: usize = 16;
-/// Beats a burst holds: what the count asked for must be a multiple of.
+/// Beats a burst holds where a design's seam does not say (`ROWS_PER_BURST`):
+/// what the count asked for must be a multiple of. A seam that states it is
+/// the authority — the burst is the board's to size.
 pub const BEATS_PER_BURST: usize = 16;
 
 /// A frame's shape: the width rounded up to whole chunks; the chunks the
@@ -27,9 +29,15 @@ pub struct FrameShape {
 
 impl FrameShape {
     pub fn new(width: usize, height: usize, chunk: usize) -> FrameShape {
+        FrameShape::with_burst(width, height, chunk, BEATS_PER_BURST)
+    }
+
+    /// The shape where the fabric's bursts hold `rows_per_burst` chunks: the
+    /// count is padded to a multiple of that.
+    pub fn with_burst(width: usize, height: usize, chunk: usize, rows_per_burst: usize) -> FrameShape {
         let padded_width = width.div_ceil(chunk) * chunk;
         let chunks = height * padded_width / chunk;
-        let padded_chunks = chunks.div_ceil(BEATS_PER_BURST) * BEATS_PER_BURST;
+        let padded_chunks = chunks.div_ceil(rows_per_burst) * rows_per_burst;
         FrameShape { width, height, padded_width, chunks, padded_chunks, beats_per_chunk: chunk / PIXELS_PER_BEAT }
     }
 

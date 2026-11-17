@@ -96,6 +96,17 @@ let boundaryOf (g: Graph) : BoundaryStream * BoundaryStream =
 /// each way.
 let private stereo = [ "left", signedInt sampleWidth; "right", signedInt sampleWidth ]
 
+/// How many stereo frames a beat of `fields` carries: one for a stereo
+/// stream, k for k frames side by side — pairs of signed samples, whatever
+/// they are called. `None` when the fields are not that.
+let framesABeat (fields: Fields) : int option =
+    let sample = signedInt sampleWidth
+
+    if not fields.IsEmpty && fields.Length % 2 = 0 && fields |> List.forall (fun (_, f) -> f = sample) then
+        Some(fields.Length / 2)
+    else
+        None
+
 /// Does the mapping fit what the graph declares? Said before anything runs,
 /// naming the side that does not.
 let private check (g: Graph) (m: SimMapping) =
@@ -107,8 +118,11 @@ let private check (g: Graph) (m: SimMapping) =
     let input, output = boundaryOf g
 
     for stream in [ input; output ] do
-        if stream.fields <> stereo then
-            failwith $"{g.name}: a WAV device needs '{stream.name}' to be [{describePins stereo}], and it is [{describePins stream.fields}]"
+        if (framesABeat stream.fields).IsNone then
+            failwith $"{g.name}: a WAV device needs '{stream.name}' to be [{describePins stereo}], or a whole number of such frames side by side, and it is [{describePins stream.fields}]"
+
+    if framesABeat input.fields <> framesABeat output.fields then
+        failwith $"{g.name}: a WAV device needs as many frames a beat out of '{output.name}' as into '{input.name}'"
 
     let ports = controlPorts g
 
@@ -139,23 +153,47 @@ let runInSim (idleLimit: int) (g: Graph) (m: SimMapping) : WavData =
         sim.Poke(name, value)
 
     let input, output = streamPinsOf g
-    let device = WavStreamDevice(sim, input, output, m.source)
-    let driven = device :> ISimDevice
-    let mutable idle = 0
-    let mutable lastHeard = 0
+    let frames = framesABeat (fst (boundaryOf g)).fields |> Option.get
 
-    while device.FramesHeard < m.source.FrameCount && idle < idleLimit do
-        driven.Drive()
-        sim.Tick()
-        driven.Sample()
+    let heard =
+        if frames = 1 then
+            let device = WavStreamDevice(sim, input, output, m.source)
+            let driven = device :> ISimDevice
+            let mutable idle = 0
+            let mutable lastHeard = 0
 
-        if device.FramesHeard = lastHeard then
-            idle <- idle + 1
+            while device.FramesHeard < m.source.FrameCount && idle < idleLimit do
+                driven.Drive()
+                sim.Tick()
+                driven.Sample()
+
+                if device.FramesHeard = lastHeard then
+                    idle <- idle + 1
+                else
+                    idle <- 0
+                    lastHeard <- device.FramesHeard
+
+            device.Output
         else
-            idle <- 0
-            lastHeard <- device.FramesHeard
+            // Several frames a beat: the recording's frames taken `frames`
+            // at a time, the last beat filled out with silence, and what
+            // comes back cut to the recording's length.
+            let sampleAt (i: int) = if i < m.source.samples.Length then m.source.samples[i] else 0s
+            let beatCount = (m.source.FrameCount + frames - 1) / frames
 
-    let heard = device.Output
+            let beats =
+                [ for b in 0 .. beatCount - 1 ->
+                      [ for lane in 0 .. 2 * frames - 1 -> BigInteger(toSampleBits (sampleAt (b * 2 * frames + lane))) ] ]
+
+            let device = BeatStreamDevice(sim, input, output, beats, beatCount)
+            drive sim [ device ] idleLimit
+
+            let samples =
+                [| for beat in device.Heard do
+                       for lane in beat -> fromSampleBits (uint64 lane) |]
+
+            { m.source with samples = Array.truncate m.source.samples.Length samples }
+
     m.outputPath |> Option.iter (fun path -> writeWavFile path heard)
     heard
 

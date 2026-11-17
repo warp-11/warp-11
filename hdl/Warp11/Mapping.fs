@@ -107,6 +107,10 @@ let private boardNode (b: Board) : JsonObject =
         hm["width"] <- num m.width
         hm["arenaBytes"] <- num m.arenaBytes
         hm["writeOutstanding"] <- num m.writeOutstanding
+        hm["burstBeats"] <- num m.burstBeats
+
+        if m.streamPorts <> 1 then
+            hm["streamPorts"] <- num m.streamPorts
         o["hostMemory"] <- hm)
 
     b.boardMemory
@@ -359,7 +363,20 @@ let private readBoard (o: JsonNode) : Result<Board, string> =
                                                                              | Some n -> n
                                                                              | None -> 16
 
-                                                                         Some { ports = ports; width = width; arenaBytes = arena; writeOutstanding = outstanding }))
+                                                                         // Optional the same way: a board file from
+                                                                         // before bursts had a length is sixteen beats.
+                                                                         let burstBeats =
+                                                                             match optional hm "burstBeats" |> Option.bind (fun v -> asInt "burstBeats" v |> Result.toOption) with
+                                                                             | Some n -> n
+                                                                             | None -> 16
+
+                                                                         // Absent is one port: a stream on the first.
+                                                                         let streamPorts =
+                                                                             match optional hm "streamPorts" |> Option.bind (fun v -> asInt "streamPorts" v |> Result.toOption) with
+                                                                             | Some n -> n
+                                                                             | None -> 1
+
+                                                                         Some { ports = ports; width = width; arenaBytes = arena; writeOutstanding = outstanding; burstBeats = burstBeats; streamPorts = streamPorts }))
                                                         >>= fun hostMemory ->
                                                             field o "host"
                                                             >>= fun host ->
@@ -774,7 +791,7 @@ let showBoard (b: Board) : string =
         b.hostMemory
         |> showOption (fun m ->
             let ports = m.ports |> List.map quote |> String.concat "; "
-            $"{{ ports = [ {ports} ]; width = %d{m.width}; arenaBytes = %d{m.arenaBytes}; writeOutstanding = %d{m.writeOutstanding} }}")
+            $"{{ ports = [ {ports} ]; width = %d{m.width}; arenaBytes = %d{m.arenaBytes}; writeOutstanding = %d{m.writeOutstanding}; burstBeats = %d{m.burstBeats}; streamPorts = %d{m.streamPorts} }}")
 
     String.concat
         "\n"

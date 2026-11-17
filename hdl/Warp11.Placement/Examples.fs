@@ -141,6 +141,73 @@ let twiceShared (rate: float) : Graph =
         .present
     |> inARow [ "input"; "ThreeBandEqShared"; "ThreeBandEqShared2"; "output" ]
 
+/// Several stereo frames a row, the stereo gain on each: the wide row. The
+/// boundary carries `frames` pairs of samples; a `fields` box picks each
+/// frame out, a `gain` box of its own takes it, and a `join` puts them back
+/// side by side. The gain remembers nothing from one frame to the next, so
+/// `frames` of it on every `frames`-th frame are the same as one on every
+/// frame — which is not true of a filter, whose wide form is a module of
+/// its own.
+let gainWide (rate: float) (frames: int) : Graph =
+    let sample = signedInt sampleWidth
+    let wide = [ for i in 0 .. frames - 1 do yield $"left%d{i}", sample; yield $"right%d{i}", sample ]
+
+    let frame (i: int) (h: History) =
+        h
+        |> place fieldsBox $"frame%d{i}"
+        |> step (setArgument $"frame%d{i}" "pick" $"left%d{i}, right%d{i}")
+        |> place "gain" $"gain%d{i}"
+        |> place fieldsBox $"gained%d{i}"
+        |> step (setArgument $"gained%d{i}" "pick" $"left%d{i} = left, right%d{i} = right")
+        |> step (connect (port "input" "in") (port $"frame%d{i}" streamInlet))
+        |> step (connect (port $"frame%d{i}" streamOutlet) (port $"gain%d{i}" streamInlet))
+        |> step (connect (port "input" "volume") (port $"gain%d{i}" "volume"))
+        |> step (connect (port "input" "mute") (port $"gain%d{i}" "mute"))
+        |> step (connect (port $"gain%d{i}" streamOutlet) (port $"gained%d{i}" streamInlet))
+
+    let name = if frames = 2 then "GainWide" else $"GainWide%d{frames}"
+
+    let framed =
+        (history (emptyGraph name rate wide)
+         |> step (addControl ("volume", unsignedInt 16))
+         |> step (addControl ("mute", unsignedInt 1)),
+         [ 0 .. frames - 1 ])
+        ||> List.fold (fun h i -> frame i h)
+        |> place joinBox "frames"
+        |> step (setArgument "frames" "inputs" (string frames))
+
+    let joined =
+        (framed, [ 0 .. frames - 1 ])
+        ||> List.fold (fun h i -> h |> step (connect (port $"gained%d{i}" streamOutlet) (port "frames" $"in%d{i}")))
+        |> step (connect (port "frames" streamOutlet) (port "output" "out"))
+
+    let middle = 80.0 + 110.0 * float (frames - 1)
+
+    (joined.present,
+     [ yield "input", 60.0, middle
+       for i in 0 .. frames - 1 do
+           yield $"frame%d{i}", 300.0, 80.0 + 220.0 * float i
+           yield $"gain%d{i}", 540.0, 80.0 + 220.0 * float i
+           yield $"gained%d{i}", 780.0, 80.0 + 220.0 * float i
+       yield "frames", 1020.0, middle
+       yield "output", 1260.0, middle ])
+    ||> List.fold (fun g (name, x, y) -> moveBox name (x, y) g)
+
+/// How wide `copy`'s row is, in beats of a 128-bit port: more than any
+/// number of ports can deliver a cycle, so the ports are always the limit.
+let copyBeats = 8
+
+/// A copy: the stream in is the stream out, a row `copyBeats` beats wide.
+/// Nothing is done to the data. It is what measures the memory ports
+/// themselves: it takes rows faster than they can be supplied, so how long
+/// a batch takes is how fast the ports are, at however many the mapping
+/// spreads the stream over.
+let copy: Graph =
+    (history (emptyGraph "Copy" defaultSampleRate [ "row", unsignedInt (copyBeats * 128) ])
+     |> step (connect (port "input" "in") (port "output" "out")))
+        .present
+    |> inARow [ "input"; "output" ]
+
 /// M6's image design: rows of `columns` pixels through a 3×3 blur. Opened
 /// with a PGM of that width, the mapping supplies the halo rows.
 let imageBlur (columns: int) (rows: int) : Graph =
@@ -218,7 +285,11 @@ let all (rate: float) : (string * Graph) list =
       "twice-shared.json", twiceShared rate
       "blur.json", imageBlur gradient.width gradient.height
       "adder.json", adder
-      "mac.json", mac ]
+      "mac.json", mac
+      "gain-wide.json", gainWide rate 2
+      "gain-wide4.json", gainWide rate 4
+      "gain-wide16.json", gainWide rate 16
+      "copy.json", copy ]
 
 /// Every example's mapping files, one per board that holds it: rows
 /// through the KV260's memory, and over the link on the three boards with
@@ -247,6 +318,25 @@ let mappings: (string * Warp11.Mapping.Mapping) list =
     @ holds "twice" [ "kv260"; "icepi"; "de10lite" ]
     @ holds "three-band-eq-shared" [ "kv260"; "icepi" ]
     @ holds "twice-shared" [ "kv260"; "icepi" ]
+    @ holds "gain-wide" [ "kv260" ]
+    // Four frames a row is two beats: the KV260 with its rows over two of
+    // its memory ports, a ring of bursts between them and the design.
+    // The copy on the KV260 with its rows over one to five memory ports:
+    // the same design, the port count the only difference.
+    @ [ for ports in 1..5 ->
+            $"copy.kv260-%d{ports}.json",
+            { gainMapping with
+                board = { kv260 with hostMemory = kv260.hostMemory |> Option.map (fun m -> { m with streamPorts = ports }) } } ]
+    // Sixteen frames a row is eight beats, more than the KV260's five
+    // memory ports deliver a cycle: every port flat out, the design waiting
+    // on them. A row is a power of two beats, and four would leave a port
+    // idle.
+    @ [ "gain-wide16.kv260.json",
+        { gainMapping with
+            board = { kv260 with hostMemory = kv260.hostMemory |> Option.map (fun m -> { m with streamPorts = 5 }) } } ]
+    @ [ "gain-wide4.kv260.json",
+        { gainMapping with
+            board = { kv260 with hostMemory = kv260.hostMemory |> Option.map (fun m -> { m with streamPorts = 2 }) } } ]
     @ holds "blur" [ "kv260"; "icepi"; "de10lite" ]
     @ holds "adder" [ "kv260"; "icebreaker"; "icepi"; "goboard"; "de10lite" ]
 

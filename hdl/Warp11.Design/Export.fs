@@ -165,8 +165,29 @@ let rec private printDesign (g: Graph) : Result<string, string> =
                               $"|> streamMapTo ({outPins}) (fun {tuple pattern} -> {tupleValue (List.map ident picked)})" ]
                     )
                 else
-                    let sides = joinInputs b |> List.map (fun side -> wrapped (arriving (port b.name side))) |> String.concat "; "
-                    Ok(leaving (port b.name streamOutlet) [ $"streamJoin ({outPins}) [ {sides} ]" ])
+                    let sideFields = (fst (streamsOf g b.name)) |> List.map (fun side -> side.fields)
+
+                    if sideFields |> List.forall (fun fields -> fields.Length = 1) then
+                        let sides = joinInputs b |> List.map (fun side -> wrapped (arriving (port b.name side))) |> String.concat "; "
+                        Ok(leaving (port b.name streamOutlet) [ $"streamJoin ({outPins}) [ {sides} ]" ])
+                    else
+                        // A side that carries several fields: each side as
+                        // its fields in a list, joined as groups.
+                        let side (name: string) (fields: Fields) =
+                            let names = fields |> List.map (fst >> ident)
+                            let formats = fields |> List.map (fun (n, f) -> $"\"{n}\", {showFormat f}") |> String.concat "; "
+                            let listed = String.concat "; " names
+                            $"({arriving (port b.name name)} |> streamMapTo (layoutOfList [ {formats} ]) (fun {tuple names} -> [ {listed} ]))"
+
+                        let sides = List.map2 side (joinInputs b) sideFields
+
+                        Ok(
+                            leaving
+                                (port b.name streamOutlet)
+                                ([ $"streamJoinGroups ({outPins})" ]
+                                 @ [ for i, text in List.indexed sides ->
+                                         (if i = 0 then "    [ " else "      ") + text + (if i = sides.Length - 1 then " ]" else "") ])
+                        )
 
         let stageOf (b: Box) : Result<string list, string> =
             if isStructural b then structuralOf b else

@@ -52,7 +52,7 @@ it registers.
 | **palette** (left) | every unit the library offers, the boxes that sit between stages (`join`, `fields`, `fifo`), the designs imported into this one, and the control boxes. Click one to add it, or double-click the canvas and type its name |
 | **canvas** (middle) | boxes and edges. Drag a box to move it; drag from a port to a port to connect them; click to select; pan on empty space; wheel to zoom, Shift+wheel to scroll down the design, Ctrl+wheel across it. Scrollbars appear when a box is out of view and span the design |
 | **panel** (right) | the selection's properties: a box's name, copies and arguments; an edge's connection and, where several edges meet, the port's pattern; a boundary box's streams, fields and controls; the design itself when nothing is selected — name, sample rate, and the **target** section |
-| **menus** (top) | **File**: New, Open…, Import Design…, Save, Save As… — the platform's own pickers. **Edit**: Undo, Redo, Delete. **Build**: Build…, Export to F#… |
+| **menus** (top) | **File**: New, Open…, Import Design…, Attach Source…, Save, Save As… — the platform's own pickers. **Edit**: Undo, Redo, Delete. **Build**: Build…, Export to F#… |
 | **toolbar** | **Open in sim**, then Play / Run / Step / Reset / Stop; a number box per control; the breakpoint entry; where the view is, and the file it is over |
 | **status line** | what just happened, or why something was refused |
 
@@ -179,7 +179,13 @@ file was opened with: a `.wav` for a stereo boundary, a `.pgm` image for a
 row boundary, a `.csv` table for a table boundary — or `frame:<w>x<h>`, a
 count in place of a file, for a design that draws: the input stream's one
 field is the beat index and what comes out is assembled into a PGM. A source
-drives a design with one stream in and one out. Then:
+drives a design with one stream in and one out.
+
+A canvas opened without a source shows **Attach source…** where Open in sim
+would be: pick a `.wav`, a `.pgm` or a `.csv` and Open in sim appears.
+**File → Attach Source…** does the same at any time, and replaces the source
+a design is running on (which stops it). `frame:<w>x<h>` is not a file, so
+it is given on the command line. Then:
 
 - **Play** runs the design at real time through the speaker; the speaker
   paces the simulator by back-pressure. **Run** is unpaced. **Step** is one
@@ -378,23 +384,26 @@ code; the build follows from the code.
   refused naming both. Make the design at the board's rate.
 - **`iceprog -S` does not work on the iCEBreaker** we have; use the flash
   (`PROG=1`).
-- **The host-memory path pads to whole bursts** — 32 frames for a stereo
-  boundary — and needs 256-byte-aligned buffers; the driver does both.
+- **The host-memory path pads to whole bursts** — on the KV260 a burst is
+  4 KB, 512 frames of a stereo boundary — and needs buffers aligned to a
+  burst; the driver does both. A count that is not whole bursts never
+  finishes.
 - **The differential** (`hdl/run_differential.sh`) verifies the toolchain,
   not a design. Run it before a release or a bitstream build when the
   library has moved.
 
 ## What was measured
 
-The KV260 and iCEBreaker rows are from 2026-09-17, when a module box was
-elaborated with a context FIFO beside it. The canvas no longer builds that
-FIFO — in the simulator the same gain design now takes a cycle a frame — and
-those two rows have not been measured again on silicon.
+The iCEBreaker rows are from 2026-09-17, when a module box was elaborated
+with a context FIFO beside it; they have not been measured again.
 
 | | |
 |---|---|
-| a drawn gain design on the KV260 through DDR, 97 664 frames | 3.173 ms, byte-identical to the simulator |
+| a drawn gain design on the KV260 through DDR, 97 664 frames (2026-11-15) | 1.009 ms, 1.03 cycles a frame at 100 MHz, byte-identical to the simulator. With a write per beat instead of bursts it was 2.14 ms, waiting on the write side for 53% of the cycles |
 | the same design's iCEBreaker build | 7 ports pinned, Fmax 40 MHz against 24 |
 | the same design heard on the iCEBreaker | microphones to headphone through the shared-bus header |
+| `gain-wide`, two frames a beat, on the KV260, the same recording (2026-11-15) | 0.50 ms: 0.98 beats a cycle through one memory port each way, 1.57 GB/s at 100 MHz, byte-identical to the simulator. With sixteen-beat bursts in place of 256 it was 0.60 ms, waiting on the write side for 11% of the cycles |
+| `gain-wide4`, four frames a row, the KV260's rows over two memory ports, the same recording (2026-11-15) | 0.25 ms: 1.94 beats a cycle, 3.1 GB/s each way at 100 MHz, byte-identical to the simulator. The design is the same on one port; only the mapping says two |
+| `gain-wide16`, sixteen frames a row, the KV260's rows over all five memory ports, the same recording (2026-11-15) | 0.12 ms: about 4.1 beats a cycle, 6.5 GB/s each way at 100 MHz, byte-identical to the simulator; the design waiting on the read side for 46% of the cycles, where five ideal ports would be 37.5% |
 | `three-band-eq-shared` built for the Icepi from the drawing (2026-11-14) | 12 of 28 multiplier blocks, Fmax 67.5 MHz against 25; not loaded onto a board |
 | `twice-shared` built for the Icepi from the drawing (2026-11-14) | 24 of 28 multiplier blocks, Fmax 55.5 MHz against 25; not loaded onto a board |

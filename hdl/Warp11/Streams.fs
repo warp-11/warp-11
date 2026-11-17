@@ -908,6 +908,87 @@ let eachChannel (stage: string -> Stream<Expr> -> Stream<Expr>) (s: Stream<'p>) 
 
     streamJoin s.layout results
 
+/// `streamJoin` for sides that carry several fields each: n streams paired
+/// beat for beat, their fields one after another as the fields of `joined`.
+/// A beat leaves only when every side has one, and every side is consumed
+/// together.
+let streamJoinGroups (joined: Layout<'z>) (sides: Stream<Expr list> list) : Stream<'z> =
+    let fields = sides |> List.sumBy (fun side -> side.payload.Length)
+
+    if fields <> joined.fields.Length then
+        failwith $"streamJoinGroups: the sides carry %d{fields} field(s) between them, and the beat they make has %d{joined.fields.Length}"
+
+    match sides with
+    | [] -> failwith "streamJoinGroups: nothing to join"
+    | [ one ] -> streamMapTo joined joined.unpack one
+    | _ ->
+        let outReady = wireBit ((current ()).FreshName "join_ready")
+
+        sides
+        |> List.iteri (fun i side ->
+            let others = [ for j, other in List.indexed sides do if j <> i then yield other.valid ]
+            (outReady &&& List.reduce (&&&) others) ==> side.ready)
+
+        (current ()).RegisterStreamReady outReady
+
+        { payload = joined.unpack (sides |> List.collect (fun side -> side.payload))
+          valid = sides |> List.map (fun side -> side.valid) |> List.reduce (&&&)
+          ready = outReady
+          layout = joined }
+
+/// One stage per group of fields of a beat, rejoined: the beat's fields
+/// taken `group` at a time — a wide beat's frames, a vector's lanes — each
+/// group split out, through `stage`, and put back beside the others' results
+/// in the same order. `stage` is told which group it is, so its instances
+/// can be named apart without the stage knowing how many there are.
+///
+/// ```fsharp
+/// // Two stereo frames a beat, the stereo gain on each.
+/// wide |> eachGroup sampleLayout (fun i -> audioGain "AudioGain" $"gain%d{i}" volume mute)
+/// ```
+///
+/// The groups are forked (`streamForkEager`) and joined
+/// (`streamJoinGroups`), never assumed in step. At one group there is no
+/// fork and no join; the stage is the whole of it. Each group must come
+/// back at the formats it went in at.
+///
+/// **Each group has a stage of its own.** That is right for a stage with no
+/// memory from one beat to the next, and for groups that are separate
+/// streams. It is wrong for consecutive frames of one stream through a
+/// stage that remembers: each copy would see every k-th frame. Several
+/// frames a beat through such a stage is a different module (a block form),
+/// not this.
+let eachGroup (group: Layout<'g>) (stage: int -> Stream<'g> -> Stream<'g>) (s: Stream<'p>) : Stream<'p> =
+    let size = group.fields.Length
+    let total = s.layout.fields.Length
+
+    if size = 0 || total % size <> 0 then
+        failwith $"eachGroup: a beat of %d{total} field(s) is not a whole number of groups of %d{size}"
+
+    let count = total / size
+    let slice (i: int) (p: 'p) = group.unpack ((s.layout.pack p)[i * size .. (i + 1) * size - 1])
+    let formats = [ for _, f in group.fields -> f.totalWidth, f.signed ]
+
+    for i in 0 .. count - 1 do
+        let arriving = [ for _, f in s.layout.fields[i * size .. (i + 1) * size - 1] -> f.totalWidth, f.signed ]
+
+        if arriving <> formats then
+            failwith $"eachGroup: group %d{i} of the beat is %A{arriving}, and a group is %A{formats}"
+
+    let branches = streamForkEager count s
+
+    let results =
+        [ for i, branch in List.indexed branches ->
+              let result = branch |> streamMapTo group (slice i) |> stage i
+              let came = [ for e in group.pack result.payload -> width e ]
+
+              if came <> List.map fst formats then
+                  failwith $"eachGroup: group %d{i} went in as %A{List.map fst formats} bits and came back as %A{came}"
+
+              result |> streamMapTo (layoutOfList group.fields) group.pack ]
+
+    streamJoinGroups s.layout results
+
 /// Run a stage over part of a beat and carry the rest of it through.
 ///
 /// ```fsharp

@@ -209,8 +209,9 @@ let edgesInto (g: Graph) (p: PortRef) : Edge list = g.edges |> List.filter (fun 
 // join, a regrouping of fields, a buffer. They have no layout of their own —
 // each takes the fields of whatever is connected to it.
 
-/// Several streams into one beat (`streamJoin`): a beat leaves when every
-/// side has one. `inputs` sides, `in0` … , each carrying one field.
+/// Several streams into one beat (`streamJoin`, or `streamJoinGroups` where
+/// a side carries several fields): a beat leaves when every side has one.
+/// `inputs` sides, `in0` … , their fields one after another.
 let joinBox = "join"
 
 /// Pick, rename and regroup a stream's fields. `pick` lists the fields

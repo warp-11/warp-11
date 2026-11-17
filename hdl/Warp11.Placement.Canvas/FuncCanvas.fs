@@ -400,6 +400,11 @@ type Opening =
     { graph: Graph
       live: Live option
       opener: (Graph -> (string * uint64) list -> Live) option
+      /// How this head puts a file on the design's boundary: a recording, an
+      /// image or a table at a path, as the opener that runs the design on
+      /// it — or why the file is not a source. `None` where the head has no
+      /// files to read.
+      attach: (string -> Result<Graph -> (string * uint64) list -> Live, string>) option
       file: string option }
 
 let private valueOf (snapshot: Warp11.Debug.Snapshot) (name: string) : System.Numerics.BigInteger option =
@@ -539,6 +544,9 @@ let private splitter (column: int) =
 let private wheelStep = 48.0
 
 let private designFileType = FilePickerFileType("Warp 11 design", Patterns = ResizeArray [ "*.json" ])
+let private sourceFileType =
+    FilePickerFileType("A recording, an image or a table", Patterns = ResizeArray [ "*.wav"; "*.pgm"; "*.csv" ])
+
 let private fsharpFileType = FilePickerFileType("F# source", Patterns = ResizeArray [ "*.fs" ])
 
 /// The canvas over a design. The graph the user edits is the component's
@@ -592,6 +600,9 @@ let view (opening: Opening) : Control =
         // The running design is state, because `Reset` replaces it and an
         // edit to the design drops it.
         let liveState = ctx.useState opening.live
+        // What runs the design: the source the canvas was opened with, or
+        // the one attached since.
+        let opener = ctx.useState opening.opener
         let snapshot = ctx.useState (opening.live |> Option.map (fun l -> l.session.Latest) |> Option.defaultValue blankSnapshot)
         let controlText = ctx.useState Map.empty<string, string>
         /// The recent trace: the last `scopeSamples` cycles of the watched
@@ -645,9 +656,10 @@ let view (opening: Opening) : Control =
         ctx.useEffect (
             handler =
                 (fun () ->
-                    match opening.live, opening.opener with
-                    | None, None -> ()
-                    | _ ->
+                    // Always running: a source may be attached after the
+                    // canvas opens, and with nothing live a tick does nothing.
+                    match () with
+                    | () ->
                         Avalonia.Threading.DispatcherTimer.Run(
                             (fun () ->
                                 match liveState.Current with
@@ -1268,7 +1280,7 @@ let view (opening: Opening) : Control =
         // ---- the run: `Open in sim` on the view row, and with a design running,
         // the run controls with a number box per control on the row below.
         let openInSim () =
-            match opening.opener with
+            match opener.Current with
             | None -> ()
             | Some opener ->
                 let knobs =
@@ -1317,13 +1329,13 @@ let view (opening: Opening) : Control =
                 | Some path -> onPath path
                 | None -> message.Set "refused: no local path for that file — this head reads and writes files by path"
 
-        let pickOpen (title: string) (onPath: string -> unit) =
+        let pickOpenOf (fileType: FilePickerFileType) (title: string) (onPath: string -> unit) =
             topLevel ()
             |> Option.iter (fun top ->
                 task {
                     try
                         let! start = startIn top.StorageProvider
-                        let options = FilePickerOpenOptions(Title = title, AllowMultiple = false, FileTypeFilter = ResizeArray [ designFileType ])
+                        let options = FilePickerOpenOptions(Title = title, AllowMultiple = false, FileTypeFilter = ResizeArray [ fileType ])
                         start |> Option.iter (fun s -> options.SuggestedStartLocation <- s)
                         let! files = top.StorageProvider.OpenFilePickerAsync options
                         picked (files |> Seq.tryHead |> Option.map (fun f -> f :> IStorageItem)) onPath
@@ -1331,6 +1343,8 @@ let view (opening: Opening) : Control =
                         message.Set $"refused: {e.Message}"
                 }
                 |> ignore)
+
+        let pickOpen (title: string) (onPath: string -> unit) = pickOpenOf designFileType title onPath
 
         let pickSave (title: string) (suggested: string) (fileType: FilePickerFileType) (onPath: string -> unit) =
             topLevel ()
@@ -1424,6 +1438,24 @@ let view (opening: Opening) : Control =
         let saveAs () = pickSave "Save the design as" $"{root.name}.json" designFileType saveTo
 
         /// A design file as a unit of this one: it joins the palette's designs.
+        /// A file on the design's boundary: what Open in sim runs the design
+        /// on from now. A design that is running is stopped, since it was
+        /// running on the last one.
+        let attachFrom (file: string) =
+            match opening.attach with
+            | None -> message.Set "refused: this head has no files to put on a design's boundary"
+            | Some attach ->
+                match (try attach file with e -> Error e.Message) with
+                | Ok source ->
+                    if liveState.Current.IsSome then
+                        stopLive ()
+
+                    opener.Set(Some source)
+                    message.Set $"{System.IO.Path.GetFileName file} is on the boundary — Open in sim runs the design on it"
+                | Error why -> message.Set $"refused: {why}"
+
+        let attachSource () = pickOpenOf sourceFileType "Put a recording, an image or a table on the boundary" attachFrom
+
         let importFrom (file: string) =
             match Warp11.DesignFile.load file with
             | Ok sub -> if change (importDesign sub) then message.Set $"imported {sub.name}: place it from the palette"
@@ -1464,6 +1496,7 @@ let view (opening: Opening) : Control =
                                   [ menuItem "_New" (Some "Ctrl+N") newDesign
                                     menuItem "_Open…" (Some "Ctrl+O") (fun () -> pickOpen "Open a design" openFrom)
                                     menuItem "_Import Design…" None (fun () -> pickOpen "Import a design as a unit" importFrom)
+                                    menuItem "Attach _Source…" None attachSource
                                     menuSeparator ()
                                     menuItem "_Save" (Some "Ctrl+S") save
                                     menuItem "Save _As…" (Some "Ctrl+Shift+S") saveAs ] ]
@@ -1501,8 +1534,10 @@ let view (opening: Opening) : Control =
                   StackPanel.orientation Layout.Orientation.Horizontal
                   StackPanel.margin (Thickness(10.0, 6.0, 10.0, 0.0))
                   StackPanel.children
-                      [ (match live, opening.opener with
-                         | None, Some _ -> button "Open in sim" openInSim
+                      [ (match live, opener.Current, opening.attach with
+                         | None, Some _, _ -> button "Open in sim" openInSim
+                         // Nothing to run it on yet: say how to give it something.
+                         | None, None, Some _ -> button "Attach source…" attachSource
                          | _ -> TextBlock.create [] :> Types.IView)
                         // Where the view is: the design, then each box drilled into,
                         // each a step back out.

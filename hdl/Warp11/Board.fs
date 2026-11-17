@@ -215,7 +215,28 @@ type HostMemoryFacts =
       /// got wrong there: the batch top passed `4`, matching the *reader*'s
       /// `4` on the line above — where 4 counts bursts of 16 beats, not
       /// beats — and every hand-built design in the tree passed 8 or 16.
-      writeOutstanding: int }
+      writeOutstanding: int
+      /// How many beats a burst on this port carries, reading and writing.
+      ///
+      /// A burst costs the port a few cycles whatever its length — measured
+      /// on the KV260 at about three and a half — so a longer one spends
+      /// less of the port's time on anything but data: sixteen beats wrote
+      /// 0.82 of a beat a cycle. A burst may not cross 4 KB, which at a
+      /// 128-bit beat is 256 beats, the most AXI allows in any case.
+      ///
+      /// What it costs: buffers and addresses are aligned to a burst's bytes,
+      /// a batch is padded to whole bursts, and the write side holds a burst
+      /// until all of it is in hand.
+      burstBeats: int
+      /// How many of `ports` a stream of rows through the host's memory is
+      /// spread over. The buffer in memory is one contiguous run either
+      /// way: the ports take its bursts in turn — the first burst on the
+      /// first port, the second on the second — into a ring the design is
+      /// fed from in address order, and out the same way. So this is how
+      /// fast the ring fills and empties, a burst's beats a cycle each; how
+      /// wide a row the design takes from it is the design's own, and
+      /// neither fixes the other. One is a stream on the first port alone.
+      streamPorts: int }
 
 /// The prefix a master on a PS port takes — `m_axi_hp0` for
 /// `S_AXI_HP0_FPD` — so a top with several ports names each, and the block
@@ -641,7 +662,10 @@ let kv260At (fabricHz: int) =
               arenaBytes = 8 <<< 20
               // The top of `Stdlib.fs`'s stated 8..16 sweet spot for an HP
               // port, and what the frame design and Game of Life both use.
-              writeOutstanding = 16 }
+              writeOutstanding = 16
+              // A whole 4 KB page a burst: the longest there is.
+              burstBeats = 256
+              streamPorts = 1 }
       boardMemory = None
       host = AxiLiteAt 0xB0000000UL
       loading = OsApp "/lib/firmware/xilinx"

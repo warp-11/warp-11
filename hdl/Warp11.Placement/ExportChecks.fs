@@ -114,8 +114,12 @@ let exportIsTheDesign () : bool =
           crossed
           splitAndJoined
           buffered 4 ]
+        // (`GainWide4` and `GainWide16` are left out: their streams are more
+        // than six fields, where the typed form's `pinsN` stop, which the
+        // export says. `Copy` is a boundary wired to itself, which the
+        // typed form has nothing to say about.)
         @ [ for _, example in Examples.all Examples.recordingRate do
-                if not (List.contains example.name [ "GainPatch"; "ThreeBandEq"; "Twice"; "Controls"; "Mac" ]) then
+                if not (List.contains example.name [ "GainPatch"; "ThreeBandEq"; "Twice"; "Controls"; "Mac"; "GainWide4"; "GainWide16"; "Copy" ]) then
                     yield example ]
 
     // The gain design carries a mapping, so the export's board, path and

@@ -37,9 +37,17 @@ fn the_driver_runs_a_drawn_design_through_ddr() {
     // Q8.8: 512 is twice unity.
     device.set(volume, 512).expect("set volume");
 
-    // 64 frames — two bursts — of a ramp, two 32-bit lanes each, the sample
-    // in the low 24 bits.
-    let frames: Vec<(i32, i32)> = (0..64).map(|i| (i * 1000, -i * 1000)).collect();
+    // One burst of frames — the seam says how many rows that is, since the
+    // burst is the board's to size — of a ramp, two 32-bit lanes each, the
+    // sample in the low 24 bits.
+    let seam = device.window_mut().seam_constants().expect("the seam's constants");
+    let rows_per_burst: i32 = seam
+        .split_whitespace()
+        .find_map(|pair| pair.strip_prefix("ROWS_PER_BURST="))
+        .expect("the seam states the rows a burst holds")
+        .parse()
+        .expect("a number");
+    let frames: Vec<(i32, i32)> = (0..rows_per_burst).map(|i| (i * 1000, -i * 1000)).collect();
     let mut bytes = Vec::new();
     for (l, r) in &frames {
         bytes.extend_from_slice(&l.to_le_bytes());

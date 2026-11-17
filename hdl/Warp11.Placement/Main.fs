@@ -93,6 +93,7 @@ let main argv =
     run "BD2 fields are regrouped" fieldsAreRegrouped
     run "BD3 a buffer is a box" bufferIsABox
     run "BD4 the boxes are edits" boxesAreEdits
+    run "BD5 the wide beat is groups" wideBeatIsGroups
     run "UD3 palette is the units" paletteIsTheUnits
     run "UD5 wav plays through the graph" wavPlaysThroughTheGraph
     run "UD6 edits build the designs" editsBuildTheDesigns

@@ -1,0 +1,52 @@
+{
+  "format": 2,
+  "name": "Copy",
+  "sampleRate": 48000,
+  "inputs": [
+    {
+      "name": "in",
+      "fields": [
+        {
+          "name": "row",
+          "width": 1024,
+          "fraction": 0,
+          "signed": false
+        }
+      ]
+    }
+  ],
+  "controls": [],
+  "outputs": [
+    {
+      "name": "out",
+      "fields": [
+        {
+          "name": "row",
+          "width": 1024,
+          "fraction": 0,
+          "signed": false
+        }
+      ]
+    }
+  ],
+  "boxes": [],
+  "controlBoxes": [],
+  "edges": [
+    {
+      "from": "input.in",
+      "to": "output.out"
+    }
+  ],
+  "positions": {
+    "input": [
+      60,
+      120
+    ],
+    "output": [
+      320,
+      120
+    ]
+  },
+  "designs": {},
+  "units": {}
+}
