@@ -583,6 +583,20 @@ A tag is needed only to route results *back* to independent clients, which is
 | one in-order unit | `withContext` — a FIFO alongside | no |
 | replicated (`farmWith`) | per-lane FIFO; the merge knows the lane | no |
 | shared by independent clients | routed back by tag (`warpFu`) | yes |
+| a pool of a slow unit, shared (`Fu.sharingAmong`) | the client's index rides through the unit (`withContext`) and lands it | yes, and no count |
+
+**Sharing a unit that takes cycles, in pools.** `Fu.sharingAmong arbitration
+copies unit name body` puts the sockets `body` makes on `copies` copies of a
+unit, dealt in turn; one copy is `Fu.sharingWith`. A combinational unit — a
+multiply — sits between registers behind `warpFu`; a unit that is itself a
+stream stage and takes cycles — a divider holding `ready` low while it
+works — is merged into from its clients, their index riding through it
+beside the beat, and nothing anywhere says how long it takes. How many
+copies is the application's to state, beside the design, as lanes are
+(`Fu.Serving = InPlace | Shared of copies`). The `Pooled divide` toy: four
+clients on two eight-bit stream dividers, every client's answers its own and
+in its order under random stalls on every port, and two copies doing the
+same 160 divides in 802 cycles against one copy's 1 602.
 
 ### Streaming / ready-valid
 

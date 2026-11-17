@@ -109,6 +109,7 @@ let exportIsTheDesign () : bool =
           sharedGain priority
           sharedEq 3
           sharedEq 1
+          pooledEq 3
           reads
           macDrawn
           crossed

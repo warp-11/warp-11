@@ -203,7 +203,7 @@ table:
 |---|---|---|---|---|
 | iCEBreaker | `iceBreakerAt 24_000_000` | 2 | `PROG=1 ./build.sh` — the flash; SRAM does not configure it | `--serial /dev/ttyUSB1 --baud 115200` |
 | Go Board | `goBoard` | 4 | `PROG=1 ./build.sh` — the flash | `--serial /dev/ttyUSB1 --baud 115200` |
-| Icepi Zero | `icepi` | 5 | `PROG=sram ./build.sh` (volatile) or `PROG=1` (flash), through `openFPGALoader -b icepi-zero` | `--serial <the device the board enumerates> --baud 1000000` |
+| Icepi Zero | `icepi` | 5 | `PROG=sram ./build.sh` (volatile) or `PROG=1` (flash), through `openFPGALoader -b icepi-zero` | `--serial /dev/ttyUSB0 --baud 1000000` (an FT231X) |
 | DE10-Lite | `de10Lite` | 10 | `PROG=1 ./build.sh` — `quartus_pgm` over the USB-Blaster, volatile | `--serial /dev/ttyUSB0 --baud 115200`, a 3.3 V USB-serial cable on the GPIO header |
 | KV260 | `kv260` | none: a 1-bit register, read back | `./build.sh` writes the app; then the three lines it prints | `--uio hello_axi`, on the board |
 
@@ -230,7 +230,7 @@ runs at a million baud. `let board = icepi`; then:
 ```sh
 dotnet run --project Warp11.Designs -- hello out/hello-icepi
 cd out/hello-icepi && PROG=sram ./build.sh
-warp11_regs --serial /dev/ttyACM0 --baud 1000000 --layout hello_uart_layout.rs --set pattern=21 --get pattern
+warp11_regs --serial /dev/ttyUSB0 --baud 1000000 --layout hello_uart_layout.rs --set pattern=21 --get pattern
 ```
 
 `ls /dev/tty*` before and after plugging the board in tells you the device.

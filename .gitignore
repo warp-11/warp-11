@@ -51,6 +51,9 @@ hardware/vivado/*/*.xpr
 hardware/build/
 # xmutil packaging output (bootgen .bit.bin, dtc .dtbo), per app.
 hardware/xmutil/build/
+# Build directories the docs' verbs write (`-- hello out/…`, `-- build … out/…`),
+# each with its toolchain's products under build/. Regenerated from the source.
+hdl/out/
 
 # ---- editors, tooling, local state ----
 .idea

@@ -72,8 +72,7 @@ type MemReadPort internal (data: Expr, depth: int, through: string -> Expr -> Ex
 /// **`through` delays by the port's depth, whatever the port's depth is.** That
 /// is the whole of it: a hand-written `reg` states the latency, so it is wrong
 /// the first time the read changes, and nothing anywhere would say so. Depth
-/// lives in one place and every carried signal follows it — the same rule that
-/// makes `reduceTreePipelined` return its depth rather than take one.
+/// lives in one place and every carried signal follows it.
 ///
 /// This is `withContext`'s bargain at a scale that does not want a FIFO: no
 /// handshake, no backpressure, one register per carried signal, and the caller

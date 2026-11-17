@@ -58,8 +58,8 @@ let checkEdges (g: Graph) =
                 if not ((edgesInto g (port b.name s.name) @ edgesFrom g (port b.name s.name)).IsEmpty) then
                     failwith $"{b.name}: sockets are connected to it and so is a stream, and a box is a service or a stage, not both"
 
-            if b.copies <> 1 then
-                failwith $"{b.name}: %d{b.copies} copies behind one arbiter is not built yet; a service is one copy"
+            if b.copies > clientsOf g b then
+                failwith $"{b.name}: %d{b.copies} copies for %d{clientsOf g b} socket(s) — a copy would have nothing to do"
 
         for s in socketsOf g b.name do
             match edgesFrom g (port b.name s.name) with
@@ -299,7 +299,7 @@ let rec elaborateFull (probes: bool) (onRead: string -> bool list -> unit) (g: G
                         let serve (socket: string) =
                             edgesFrom g (port b.name socket)
                             |> List.tryHead
-                            |> Option.map (fun e -> fun (_: int) -> servers[e.``to``.box])
+                            |> Option.map (fun e -> servers[e.``to``.box])
 
                         // What a structural box carries out, and what
                         // reaches each of its sides.
@@ -403,8 +403,8 @@ let rec elaborateFull (probes: bool) (onRead: string -> bool list -> unit) (g: G
                 [ for s, ports in List.zip g.outputs io.outs -> ports, arriving branches (port "output" s.name) ]
 
             // The services, outermost first: one client is the unit in
-            // place, several share one copy behind the port's arbitration,
-            // built when every client has been made.
+            // place, several share the box's copies behind the port's
+            // arbitration, built when every client has been made.
             let rec serving (services: Box list) (servers: Map<string, Server>) =
                 match services with
                 | [] -> stages servers
@@ -414,7 +414,7 @@ let rec elaborateFull (probes: bool) (onRead: string -> bool list -> unit) (g: G
                     if clientsOf g service = 1 then
                         serving rest (servers |> Map.add service.name (inPlace unit))
                     else
-                        sharingWith (mergeAt g (port service.name servicePort)) unit service.name (fun stage ->
+                        sharingAmong (mergeAt g (port service.name servicePort)) service.copies unit service.name (fun stage ->
                             serving rest (servers |> Map.add service.name stage))
 
             for ports, s in serving (g.boxes |> List.filter (isService g)) Map.empty do
@@ -435,7 +435,7 @@ and graphUnit (probes: bool) (sub: Graph) : ErasedFu =
 
 /// The unit a box is: a palette unit made by its factory with its sockets
 /// served as `serve` says, or the design the box is.
-and unitServedWith (probes: bool) (g: Graph) (b: Box) (serve: string -> (int -> Server) option) : ErasedFu =
+and unitServedWith (probes: bool) (g: Graph) (b: Box) (serve: string -> Server option) : ErasedFu =
     match designOf g b with
     | Some sub -> graphUnit probes sub
     | None -> paletteUnitServed g b serve

@@ -733,10 +733,11 @@ let streamIterate (outputLayout: Layout<'q>) (it: Iteration<'p, 's, 'q>) (input:
 
     out
 
-/// `reduceTree` with every level registered, gated by `enable` so the whole
-/// tree freezes together on backpressure. Returns the reduced value and its
-/// latency in cycles (= the number of levels); the caller must delay its own
-/// `valid` by that much, through registers gated by the same `enable`.
+/// `reduceTree` with every level a register stage, as a stream: a beat of
+/// `items` in, their reduction out, every level `Forward` so nothing is
+/// counted and a stall holds the whole tree. Each pair is combined into an
+/// `accWidth` value; an unpaired element rides its level's register with the
+/// sums, so it stays beside them.
 ///
 /// **This is not the combinational tree with registers bolted on — the
 /// registers are the point.** A combinational tree feeding DSPs gets
@@ -747,42 +748,66 @@ let streamIterate (outputLayout: Layout<'q>) (it: Iteration<'p, 's, 'q>) (input:
 /// depth-log2 combinational `reduceTree` is not a substitute (CLAUDE.md, "when
 /// a design is sim-clean but corrupts on hardware").
 ///
-/// An odd level carries its unpaired element forward through a register too,
-/// so it stays aligned with the paired sums rather than arriving a cycle early.
-let reduceTreePipelined
-    (name: string)
-    (accWidth: int)
-    (enable: Expr)
-    (combine: Expr -> Expr -> Expr)
-    (items: Expr list)
-    : Expr * int =
-    let hold holdName value =
-        let r = reg holdName accWidth
-        If enable (fun () -> value ==> r)
-        r
+/// Nothing says how deep the tree is, and nothing needs to: the answer leaves
+/// with `valid`, so a caller keeps whatever else it needs beside the beat
+/// with a join, not with a count.
+let reduceTreePipelined (name: string) (accWidth: int) (combine: Expr -> Expr -> Expr) (s: Stream<Expr list>) : Stream<Expr> =
+    let rec level stage (s: Stream<Expr list>) =
+        match s.payload with
+        | [] -> failwith $"'{name}': a tree of nothing"
+        | [ x ] -> streamMapTo (pins1 (name, formatOf x)) List.head s
+        | items ->
+            let combined =
+                items
+                |> List.chunkBySize 2
+                |> List.mapi (fun i chunk ->
+                    match chunk with
+                    | [ a; b ] ->
+                        let w = wire $"{name}_s%d{stage}_%d{i}" accWidth
+                        combine a b ==> w
+                        w
+                    | [ x ] -> x
+                    | _ -> failwith "chunkBySize 2 gave a bigger chunk")
 
+            s
+            |> streamMapTo (layoutOfList [ for i, e in List.indexed combined -> $"{name}_l%d{stage}_%d{i}", formatOf e ]) (fun _ -> combined)
+            |> connectAs Connection.Forward
+            |> level (stage + 1)
+
+    level 0 s
+
+/// The sum, as a stream: `reduceTreePipelined` with `add` — the common,
+/// timing-critical case.
+let adderTreePipelined (name: string) (accWidth: int) (s: Stream<Expr list>) : Stream<Expr> =
+    reduceTreePipelined name accWidth add s
+
+/// `reduceTree` with every level registered, for a value nothing is aligned
+/// to — a meter, a status a host polls. Its answer trails its inputs by the
+/// tree's depth and nothing reads that depth; a value that must stay beside
+/// a beat takes `reduceTreePipelined`, whose `valid` says when.
+let reduceTreeRegistered (name: string) (accWidth: int) (combine: Expr -> Expr -> Expr) (items: Expr list) : Expr =
     let rec level stage items =
         match items with
-        | [] -> failwith "reduceTreePipelined of nothing"
-        | [ x ] -> x, stage
+        | [] -> failwith $"'{name}': a tree of nothing"
+        | [ x ] -> x
         | _ ->
             items
             |> List.chunkBySize 2
             |> List.mapi (fun i chunk ->
+                let r = reg $"{name}_r%d{stage}_%d{i}" accWidth
+
                 match chunk with
                 | [ a; b ] ->
                     let s = wire $"{name}_s%d{stage}_%d{i}" accWidth
                     combine a b ==> s
-                    hold $"{name}_r%d{stage}_%d{i}" s
-                | [ x ] -> hold $"{name}_c%d{stage}" x
-                | _ -> failwith "chunkBySize 2 gave a bigger chunk")
+                    s ==> r
+                | [ x ] -> x ==> r
+                | _ -> failwith "chunkBySize 2 gave a bigger chunk"
+
+                r)
             |> level (stage + 1)
 
     level 0 items
-
-/// Sum alias — the common, timing-critical case.
-let adderTreePipelined (name: string) (accWidth: int) (enable: Expr) (items: Expr list) =
-    reduceTreePipelined name accWidth enable add items
 
 /// An integer divider, as a stream stage.
 ///

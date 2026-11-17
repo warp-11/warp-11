@@ -1,6 +1,7 @@
 //! A greyscale image as a file — PGM, binary `P5`, one byte a pixel — the
 //! shape a drawn frame comes back in. The F# side reads and writes the same.
 
+use crate::rows::{bytes_of, RowShape};
 use std::path::Path;
 
 pub fn write_pgm(path: &Path, width: usize, height: usize, pixels: &[u8]) -> Result<(), String> {
@@ -46,4 +47,28 @@ pub fn read_pgm(path: &Path) -> Result<(usize, usize, Vec<u8>), String> {
     at += 1;
     let pixels = bytes.get(at..at + width * height).ok_or_else(|| format!("{}: short of pixels", path.display()))?;
     Ok((width, height, pixels.to_vec()))
+}
+
+/// An image as the design's input rows: pixel `c` of a row at byte `c` of
+/// the row's words, low word first — whatever fields the row is cut into.
+pub fn image_to_rows(width: usize, height: usize, pixels: &[u8], shape: &RowShape) -> Result<Vec<u32>, String> {
+    if width > 4 * shape.words {
+        return Err(format!("a row of {width} pixels does not fit the design's row of {} words", shape.words));
+    }
+    let mut bytes = vec![0u8; 4 * shape.words];
+    let mut words = Vec::with_capacity(height * shape.words);
+    for r in 0..height {
+        bytes[..width].copy_from_slice(&pixels[r * width..(r + 1) * width]);
+        words.extend(bytes.chunks(4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]])));
+    }
+    Ok(words)
+}
+
+/// Output rows back as an image of `width` × `height`, the row's first
+/// `width` bytes its pixels.
+pub fn rows_to_image(words: &[u32], shape: &RowShape, width: usize, height: usize) -> Result<Vec<u8>, String> {
+    if width > 4 * shape.words {
+        return Err(format!("a row of {width} pixels does not fit the design's output row of {} words", shape.words));
+    }
+    Ok((0..height).flat_map(|r| bytes_of(&words[r * shape.words..(r + 1) * shape.words])[..width].to_vec()).collect())
 }

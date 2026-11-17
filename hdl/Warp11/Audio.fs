@@ -874,10 +874,9 @@ let gainMultiplier =
     | [ _, a; _, b ] -> Fu.multiplier a b
     | _ -> failwith "gainOperands: two operands"
 
-/// One instance under `instName`, called as a function, its channels'
-/// multiplies served by `multiply` — told which channel it is serving, and
-/// free to answer every channel with the same shared copy
-/// (`Fu.sharing gainMultiplier`) or each with its own (`Fu.inPlace`). Wires
+/// One instance under `instName`, called as a function, both channels'
+/// multiplies served by `multiply` — one copy each in place
+/// (`Fu.inPlace gainMultiplier`), or turns on a pool (`Fu.serving`). Wires
 /// the volume and mute controls and splices the stream through.
 ///
 /// What comes out is not registered here: that is the connection's, and so
@@ -885,22 +884,22 @@ let gainMultiplier =
 /// next stage is one cone with it (gain into a biquad measured 11.9 ns on the
 /// KV260, WNS −2.1 ns at 100 MHz), so a caller chaining one into a multiply
 /// connects them `Forward`.
-let audioGainWith (multiply: string -> Stream<Expr * Expr> -> Stream<Expr>) (name: string) instName =
+let audioGainWith (multiply: Stream<Expr * Expr> -> Stream<Expr>) (name: string) instName =
     let io = (audioGainDef name).NewNamed instName
 
     fun (volume: Expr) (mute: Expr) (s: Stream<Expr * Expr>) ->
         volume ==> io.volume
         mute ==> io.mute
 
-        for channel, socket in List.zip (sampleLayout.fields |> List.map fst) io.multiply do
-            serveSocket socket (multiply channel)
+        for socket in io.multiply do
+            serveSocket socket multiply
 
         stereoSplice io.s s
 
 /// `audioGainWith`, each channel with a multiply of its own in place: the
 /// stage as it has always been, two multipliers.
 let audioGain (name: string) instName =
-    audioGainWith (fun _ -> Fu.inPlace gainMultiplier) name instName
+    audioGainWith (Fu.inPlace gainMultiplier) name instName
 
 /// A biquad's five terms, in the order its coefficients are given:
 /// `b0, b1, b2` on the input and the two before it, `a1, a2` on the two
@@ -1014,22 +1013,25 @@ let biquadChannelDef (name: string) : TypedModule<BiquadChannelPorts> =
 
             result |> streamMapTo monoSample (fun _ -> y) |> streamSink io.output)
 
-/// One channel under `instName`, called as a stage: its five multiplies
-/// served by `multiply term`, which is the caller's to choose.
-let biquadChannel
+/// One channel under `instName`, its five multiplies served one by one, in
+/// `biquadTerms` order — what a module passing each up to a socket of its
+/// own needs.
+let private biquadChannelEach
     (name: string)
     instName
-    (multiply: string -> Stream<Expr * Expr> -> Stream<Expr>)
+    (multiplies: (Stream<Expr * Expr> -> Stream<Expr>) list)
     (coefficients: Expr list)
     (s: Stream<Expr>)
     : Stream<Expr> =
     let io = (biquadChannelDef name).NewNamed instName
     List.iter2 (fun port c -> c ==> port) io.coefficients coefficients
-
-    for term, socket in List.zip biquadTerms io.multiply do
-        serveSocket socket (multiply term)
-
+    List.iter2 serveSocket io.multiply multiplies
     streamThroughInstance io.input io.output s
+
+/// One channel under `instName`, called as a stage: its five multiplies
+/// served by `multiply`, which is the caller's to choose.
+let biquadChannel (name: string) instName (multiply: Stream<Expr * Expr> -> Stream<Expr>) (coefficients: Expr list) (s: Stream<Expr>) : Stream<Expr> =
+    biquadChannelEach name instName (List.replicate biquadTerms.Length multiply) coefficients s
 
 /// The single-band equalizer's ports.
 type AudioEqBandPorts =
@@ -1072,7 +1074,7 @@ let audioEqBandDef (name: string) : TypedModule<AudioEqBandPorts> =
 
             stereoIn io.s
             |> eachChannel (fun channel ->
-                biquadChannel $"{name}Channel" channel (fun term -> socketOf (socketFor channel term)) io.coefficients)
+                biquadChannelEach $"{name}Channel" channel [ for term in biquadTerms -> socketOf (socketFor channel term) ] io.coefficients)
             |> stereoOut io.s)
 
 /// The eq band's multiply, at the formats its terms ask for.
@@ -1081,11 +1083,10 @@ let eqMultiplier =
     | [ _, a; _, b ] -> Fu.multiplier a b
     | _ -> failwith "biquadOperands: two operands"
 
-/// One instance under `instName`, called as a function, its channels'
-/// multiplies served by `multiply channel term` — every one with the same
-/// shared copy (`Fu.sharing eqMultiplier`), each with its own (`Fu.inPlace`),
-/// or anything between. Wires the five coefficients and splices the stream
-/// through.
+/// One instance under `instName`, called as a function, all ten of its
+/// multiplies served by `multiply` — each its own in place
+/// (`Fu.inPlace eqMultiplier`), or turns on a pool (`Fu.serving`). Wires the
+/// five coefficients and splices the stream through.
 ///
 /// What comes out is not registered here: that is the connection's, and so
 /// the caller's (`connectAs`). In place the band is combinational from its
@@ -1095,24 +1096,21 @@ let eqMultiplier =
 /// passed. Connected `Forward`, each band is its own cone. Served by a shared
 /// multiply, a band passes `ready` straight through, so a long chain wants
 /// `Backward` or `Both` between bands.
-let audioEqBandWith (multiply: string -> string -> Stream<Expr * Expr> -> Stream<Expr>) (name: string) instName =
+let audioEqBandWith (multiply: Stream<Expr * Expr> -> Stream<Expr>) (name: string) instName =
     let io = (audioEqBandDef name).NewNamed instName
-    let channels = sampleLayout.fields |> List.map fst
 
     fun (coefficients: Expr list) (s: Stream<Expr * Expr>) ->
         List.iter2 (fun port c -> c ==> port) io.coefficients coefficients
 
-        let served = [ for channel in channels do for term in biquadTerms -> channel, term ]
-
-        for (channel, term), socket in List.zip served io.multiply do
-            serveSocket socket (multiply channel term)
+        for socket in io.multiply do
+            serveSocket socket multiply
 
         stereoSplice io.s s
 
 /// `audioEqBandWith`, every term with a multiply of its own in place: the
 /// band as it has always been, ten multipliers.
 let audioEqBand (name: string) instName =
-    audioEqBandWith (fun _ _ -> Fu.inPlace eqMultiplier) name instName
+    audioEqBandWith (Fu.inPlace eqMultiplier) name instName
 
 /// The hard limiter's ports.
 type AudioLimiterPorts =
@@ -1349,7 +1347,10 @@ let private envelopeFollower (peak: Expr) (attack: Expr) (releaseRate: Expr) (ad
     env, envWide
 
 /// How far the envelope is over the threshold, clipped at zero — the gain
-/// computer's multiply operand, and the first half of `gainComputer`.
+/// computer's multiply operand. The gain computer is
+/// `gain = 1 - min((env - threshold) * ratio, 1)` in Q0.24: `ratio` is a slope
+/// of gain against excess rather than an N:1 knob, which is what keeps it one
+/// multiply and a clip — no division, no log. The multiply is the caller's.
 let private gainExcess (envWide: Expr) (threshold: Expr) : Expr =
     let thresholdWide = wire "threshold_wide" (SInt wideWidth)
     widenUnsigned wideWidth threshold ==> thresholdWide
@@ -1366,9 +1367,9 @@ let private gainExcess (envWide: Expr) (threshold: Expr) : Expr =
 
     excess
 
-/// The gain from the reduction product, clipped and sign-extended for the apply
-/// multiply — the second half of `gainComputer`. `reductionRaw` must be a
-/// declared `gainRedWidth` signal.
+/// The gain from the reduction product (`excess * ratio`), clipped and
+/// sign-extended for the apply multiply. `reductionRaw` must be a declared
+/// `gainRedWidth` signal.
 let private gainFromReduction (reductionRaw: Expr) : Expr =
     let reduction = wire "reduction" gainWidth
 
@@ -1384,24 +1385,80 @@ let private gainFromReduction (reductionRaw: Expr) : Expr =
     widenUnsigned (gainWidth + 1) gain ==> gainSigned
     gainSigned
 
-/// Gain computer: `gain = 1 - min((env - threshold) * ratio, 1)` in Q0.24,
-/// returned sign-extended and ready for the apply multiply. `ratio` is a slope
-/// of gain against excess rather than an N:1 knob, which is what keeps the
-/// whole computer one multiply and a clip — no division, no log. The halves
-/// are `gainExcess` and `gainFromReduction`.
-let private gainComputer (multiply: Expr -> Expr -> Expr) (envWide: Expr) (threshold: Expr) (ratio: Expr) : Expr =
-    let excess = gainExcess envWide threshold
+/// The bits a boosted sample keeps: the makeup product less makeup's fraction.
+let private boostWidth = sampleWidth + 17 - gainFracBits
 
-    let reductionRaw = wire "reduction_raw" gainRedWidth
-    multiply excess ratio ==> reductionRaw
+/// What the compressor asks its multiplies for, and what each answers — the
+/// whole product every time. The boost is a sample times the Q8.8 makeup,
+/// the same multiply the gain stage asks for, so one pool can serve both.
+let compressorBoostOperands = gainOperands
+let compressorBoostProduct = gainProduct
 
-    gainFromReduction reductionRaw
+/// The envelope step: how far the peak is from the envelope, times the
+/// Q1.15 attack or release coefficient.
+let compressorStepOperands = pins2 ("a", signedInt wideWidth) ("b", signedInt 17)
+let compressorStepProduct = pins1 ("product", signedInt stepWidth)
 
-/// Pipeline latency of [audioCompressor]'s gain-apply datapath. The envelope
-/// feedback is a recurrence and stays combinational; only the two output
-/// multiplies are registered. A parallel or bypass path must delay by this
-/// much to stay aligned.
-let compressorLatency = 2
+/// The gain computer: the excess over the threshold, times the ratio.
+let compressorRatioOperands = pins2 ("a", unsignedInt sampleWidth) ("b", unsignedInt 8)
+let compressorRatioProduct = pins1 ("product", unsignedInt gainRedWidth)
+
+/// The apply: a boosted sample times the Q0.24 gain.
+let compressorApplyOperands = pins2 ("a", signedInt boostWidth) ("b", signedInt (gainWidth + 1))
+let compressorApplyProduct = pins1 ("product", signedInt (boostWidth + gainWidth + 1))
+
+/// What serves a compressor's multiplies, by role — the stereo compressor's
+/// and the band compressor's alike, each at its own formats. A stage serves
+/// every socket of its role: both channels' boosts, both applies.
+type CompressorMultiplies =
+    { /// A sample times the Q8.8 makeup: `compressorBoostOperands` (s24 × s17)
+      /// in the stereo compressor, `bandBoostOperands` (s25 × s17) in a band.
+      boost: Stream<Expr * Expr> -> Stream<Expr>
+      /// The envelope step, how far the peak is from the envelope times the
+      /// attack or release coefficient: `compressorStepOperands` (s25 × s17).
+      step: Stream<Expr * Expr> -> Stream<Expr>
+      /// The gain computer, the excess over the threshold times the ratio:
+      /// `compressorRatioOperands` (u24 × u8).
+      ratio: Stream<Expr * Expr> -> Stream<Expr>
+      /// A boosted sample times the Q0.24 gain: `compressorApplyOperands`
+      /// (s33 × s26) in the stereo compressor, `bandApplyOperands` (s34 × s26)
+      /// in a band.
+      apply: Stream<Expr * Expr> -> Stream<Expr> }
+
+/// The compressor's sockets by name, each with what it asks and answers.
+let private compressorSockets =
+    [ "boost_left", compressorBoostOperands, compressorBoostProduct
+      "boost_right", compressorBoostOperands, compressorBoostProduct
+      "step", compressorStepOperands, compressorStepProduct
+      "ratio", compressorRatioOperands, compressorRatioProduct
+      "apply_left", compressorApplyOperands, compressorApplyProduct
+      "apply_right", compressorApplyOperands, compressorApplyProduct ]
+
+/// The multiply that serves a socket of these operands, at their formats.
+let multiplierFor (operands: Layout<Expr * Expr>) =
+    match operands.fields with
+    | [ _, a; _, b ] -> Fu.multiplier a b
+    | _ -> failwith "a multiply takes two operands"
+
+/// The stereo compressor with every multiply its own, in place.
+let compressorInPlace: CompressorMultiplies =
+    { boost = Fu.inPlace (multiplierFor compressorBoostOperands)
+      step = Fu.inPlace (multiplierFor compressorStepOperands)
+      ratio = Fu.inPlace (multiplierFor compressorRatioOperands)
+      apply = Fu.inPlace (multiplierFor compressorApplyOperands) }
+
+/// The stage a role's socket is served by.
+let private roleOf (m: CompressorMultiplies) (socket: string) =
+    match socket with
+    | "boost"
+    | "boost_left"
+    | "boost_right" -> m.boost
+    | "step" -> m.step
+    | "ratio" -> m.ratio
+    | "apply"
+    | "apply_left"
+    | "apply_right" -> m.apply
+    | other -> failwith $"a compressor has no multiply '{other}'"
 
 /// The stereo compressor's ports. Every parameter is a signal, so a host can
 /// retune the dynamics without a rebuild.
@@ -1419,7 +1476,10 @@ type AudioCompressorPorts =
       releaseRate: Input
       /// Gain applied after compression, in the same Q8.8 as `audioGain` —
       /// which is what makes the boost-then-compress order preservable.
-      makeup: Input }
+      makeup: Input
+      /// Its six multiplies, passed up for whoever instantiates the
+      /// compressor to serve (`CompressorMultiplies`).
+      multiply: SocketPorts<Expr * Expr, Expr> list }
 
 /// Single-band stereo-coupled dynamic-range compressor.
 ///
@@ -1440,14 +1500,30 @@ type AudioCompressorPorts =
 /// `ratio` is a slope of gain against excess rather than a traditional N:1
 /// knob — that is what makes the whole computer one multiply and a clip.
 ///
-/// Sample path per channel: apply gain, then `makeup` (Q8.8, as the master
-/// volume is). The three multiplies in series — excess*ratio, sample*gain,
-/// gained*makeup — are split one per stage, which is why this stage costs
-/// cycles where the gain and limiter stages do not.
+/// Sample path per channel: boost by `makeup` first, then apply the gain.
+/// Boosting first and detecting on the boosted signal means the compressor
+/// regulates the level it actually emits; applying makeup after detection
+/// let a heavily boosted input slip past a quiet-looking envelope and clip
+/// downstream — measured as a buzz on hot input in the multiband build this
+/// topology came from.
+///
+/// **Two stages, and every multiply a socket.** The first holds one sample at
+/// a time: its four multiplies — the two boosts, the envelope step, the
+/// ratio — go out together, and when the answers are in the sample leaves
+/// with its boosted values and gain, and the envelope and the held boosted
+/// samples move on. The detector reads the boosted samples held from the
+/// sample before, which keeps the boost multiply out of the envelope's
+/// recurrence. A register stage (`Forward`) follows, then the second stage
+/// applies the gain, two multiplies and no state. Served in place, a sample
+/// goes in every cycle, as the hand-pipelined compressor this replaced did,
+/// and the answers are bit for bit the same; served by a shared multiply,
+/// the first stage takes the next sample when the last has left it.
+///
+/// What comes out is not registered here: that is the connection's, and so
+/// the caller's (`connectAs`).
 let audioCompressorDef (name: string) : TypedModule<AudioCompressorPorts> =
-    let gainWidth = sampleWidth + 1
-    let boostProductWidth = sampleWidth + 17
-    let boostWidth = boostProductWidth - gainFracBits
+    let boostProductWidth = boostWidth + gainFracBits
+    let applyProductWidth = boostWidth + gainWidth + 1
 
     defModule
         name
@@ -1458,51 +1534,21 @@ let audioCompressorDef (name: string) : TypedModule<AudioCompressorPorts> =
               attack = p.inPort "attack" 16
               // `release` is a Verilog reserved word.
               releaseRate = p.inPort "releaseRate" 16
-              makeup = p.inPort "makeup" 16 })
+              makeup = p.inPort "makeup" 16
+              multiply = [ for socket, operands, product in compressorSockets -> socketPorts p $"multiply_{socket}" operands product ] })
         (fun io ->
-            // Advance when downstream can accept; freeze whole on backpressure.
-            let enable = wireBit "enable"
-            io.s.outReady ==> enable
-            io.s.outReady ==> io.s.inReady
+            let socket name = io.multiply[compressorSockets |> List.findIndex (fun (n, _, _) -> n = name)]
 
-            let advance = wireBit "advance"
-            (io.s.inValid &&& enable) ==> advance
-
-            // The apply path is `compressorLatency` deep, so valid rides
-            // alongside. The envelope loop is a recurrence and cannot join it.
-            let validPipe = List.init compressorLatency (fun i -> regBit $"cvalid{i}")
-
-            If enable (fun () ->
-                validPipe
-                |> List.iteri (fun i r -> (if i = 0 then io.s.inValid else validPipe[i - 1]) ==> r))
-
-            List.last validPipe ==> io.s.outValid
+            let env = reg "env" sampleWidth
+            let leftHeld = reg "left_boosted_held" (SInt boostWidth)
+            let rightHeld = reg "right_boosted_held" (SInt boostWidth)
+            let busy = regBit "busy"
 
             let makeupSigned = wire "makeup_signed" (SInt 17)
             widenUnsigned 17 io.makeup ==> makeupSigned
 
-            // Boost FIRST, then detect on the boosted signal. Applying makeup
-            // after detection lets a heavily-boosted input slip past a
-            // quiet-looking envelope and clip downstream — measured as a buzz
-            // on hot input in the multiband build this topology came from.
-            // Detecting post-boost means the compressor regulates the level it
-            // actually emits, which is also what makes one global threshold
-            // meaningful across bands whose makeup gains differ by ~10x.
-            let boost channelName x =
-                let product = wire $"{channelName}_boost_product" (SInt boostProductWidth)
-                mul x makeupSigned ==> product
-                let boosted = wire $"{channelName}_boosted" (SInt boostWidth)
-                shr gainFracBits product ==> boosted
-                boosted
-
-            let boostedLeft = boost "left" io.s.inLeft
-            let boostedRight = boost "right" io.s.inRight
-
-            // The detector reads a registered copy, which keeps the makeup
-            // multiply out of the envelope recurrence's combinational path.
-            let magnitude channelName boosted =
-                let held = reg $"{channelName}_boosted_held" (SInt boostWidth)
-                If advance (fun () -> boosted ==> held)
+            // The detector, from the samples held from the one before.
+            let magnitude channelName (held: Expr) =
                 let negated = wire $"{channelName}_negated" (SInt boostWidth)
                 sub (lit 0UL boostWidth) held ==> negated
                 let absolute = wire $"{channelName}_absolute" boostWidth
@@ -1513,41 +1559,107 @@ let audioCompressorDef (name: string) : TypedModule<AudioCompressorPorts> =
                 saturate sampleWidth absolute ==> level
                 level
 
-            let absLeft = magnitude "left" boostedLeft
-            let absRight = magnitude "right" boostedRight
-
+            let absLeft = magnitude "left" leftHeld
+            let absRight = magnitude "right" rightHeld
             let peak = wire "peak" sampleWidth
             mux (greaterThan absLeft absRight) absLeft absRight ==> peak
 
-            let _, envWide = envelopeFollower peak io.attack io.releaseRate advance
-            let gainSigned = gainComputer mul envWide io.threshold io.ratio
+            let difference, alphaSigned, envWide = envelopeOperands env peak io.attack io.releaseRate
+            let excess = gainExcess envWide io.threshold
 
-            // Stage 1 — latch the gain beside the boosted samples it was
-            // derived from, so they stay aligned down the apply pipeline.
-            let gainHeld = reg "gain_held" (SInt(gainWidth + 1))
-            let leftHeld = reg "left_held" (SInt boostWidth)
-            let rightHeld = reg "right_held" (SInt boostWidth)
+            // ---- the first stage: a sample is taken only while none is inside.
+            let incoming = stereoIn io.s
+            let taking = wireBit "taking_ready"
+            registerStreamReady taking
+            (taking &&& bnot busy) ==> incoming.ready
+            let admitted = { incoming with valid = incoming.valid &&& bnot busy; ready = taking }
 
-            If enable (fun () ->
-                gainSigned ==> gainHeld
+            let branches = streamForkEager 4 admitted
+
+            let products =
+                [ branches[0] |> streamMapTo compressorBoostOperands (fun (left, _) -> left, makeupSigned) |> socketOf (socket "boost_left")
+                  branches[1] |> streamMapTo compressorBoostOperands (fun (_, right) -> right, makeupSigned) |> socketOf (socket "boost_right")
+                  branches[2] |> streamMapTo compressorStepOperands (fun _ -> difference, alphaSigned) |> socketOf (socket "step")
+                  branches[3] |> streamMapTo compressorRatioOperands (fun _ -> excess, io.ratio) |> socketOf (socket "ratio") ]
+
+            let answered =
+                streamJoin
+                    (layoutOfList
+                        [ "boost_left", signedInt boostProductWidth
+                          "boost_right", signedInt boostProductWidth
+                          "step", signedInt stepWidth
+                          "ratio", unsignedInt gainRedWidth ])
+                    products
+
+            let boostLeftProduct, boostRightProduct, stepProduct, ratioProduct =
+                match answered.payload with
+                | [ a; b; c; d ] -> a, b, c, d
+                | _ -> failwith "four answers"
+
+            let boosted channelName (product: Expr) =
+                let w = wire $"{channelName}_boosted" (SInt boostWidth)
+                shr gainFracBits product ==> w
+                w
+
+            let boostedLeft = boosted "left" boostLeftProduct
+            let boostedRight = boosted "right" boostRightProduct
+
+            let step = wire "step" (SInt stepWidth)
+            stepProduct ==> step
+            let envValue = envelopeFromStep step envWide
+
+            let reductionRaw = wire "reduction_raw" gainRedWidth
+            ratioProduct ==> reductionRaw
+            let gainSigned = gainFromReduction reductionRaw
+
+            let leaving = answered.valid &&& answered.ready
+
+            ifElse [
+                (leaving, fun () -> lit 0UL 1 ==> busy)
+                (admitted.valid &&& admitted.ready, fun () -> lit 1UL 1 ==> busy) ]
+
+            If leaving (fun () ->
+                envValue ==> env
                 boostedLeft ==> leftHeld
                 boostedRight ==> rightHeld)
 
-            // Stage 2 — one multiply, because makeup is already folded in.
-            let applyGain channelName held =
-                let productWidth = boostWidth + gainWidth + 1
-                let product = wire $"{channelName}_gain_product" (SInt productWidth)
-                mul held gainHeld ==> product
-                let scaled = wire $"{channelName}_gain_scaled" (SInt(productWidth - sampleWidth))
-                shr sampleWidth product ==> scaled
-                let saturated = wire $"{channelName}_gain_saturated" (SInt sampleWidth)
-                saturate sampleWidth scaled ==> saturated
-                let output = reg $"{channelName}_gained" (SInt sampleWidth)
-                If enable (fun () -> saturated ==> output)
-                output
+            let gainedLayout =
+                layoutOfList [ "left", signedInt boostWidth; "right", signedInt boostWidth; "gain", signedInt (gainWidth + 1) ]
 
-            applyGain "left" leftHeld ==> io.s.outLeft
-            applyGain "right" rightHeld ==> io.s.outRight)
+            // ---- the second stage: the gain applied to each side.
+            let held =
+                answered
+                |> streamMapTo gainedLayout (fun _ -> [ boostedLeft; boostedRight; gainSigned ])
+                |> connectAs Connection.Forward
+
+            let heldLeft, heldRight, heldGain =
+                match held.payload with
+                | [ a; b; c ] -> a, b, c
+                | _ -> failwith "three fields"
+
+            let sides = streamForkEager 2 held
+
+            let applied =
+                streamJoin
+                    (layoutOfList [ "left", signedInt applyProductWidth; "right", signedInt applyProductWidth ])
+                    [ sides[0] |> streamMapTo compressorApplyOperands (fun _ -> heldLeft, heldGain) |> socketOf (socket "apply_left")
+                      sides[1] |> streamMapTo compressorApplyOperands (fun _ -> heldRight, heldGain) |> socketOf (socket "apply_right") ]
+
+            let saturated channelName (product: Expr) =
+                let p = wire $"{channelName}_gain_product" (SInt applyProductWidth)
+                product ==> p
+                let scaled = wire $"{channelName}_gain_scaled" (SInt(applyProductWidth - sampleWidth))
+                shr sampleWidth p ==> scaled
+                let out = wire $"{channelName}_gained" (SInt sampleWidth)
+                saturate sampleWidth scaled ==> out
+                out
+
+            applied
+            |> streamMapTo sampleLayout (fun values ->
+                match values with
+                | [ left; right ] -> saturated "left" left, saturated "right" right
+                | _ -> failwith "two sides")
+            |> stereoOut io.s)
 
 /// What a compressor is set to. Five values, four of them unsigned and two of
 /// them the same width, handed over positionally: swapping attack and release
@@ -1576,9 +1688,10 @@ let compressorSettingsPorts (p: Ports) : CompressorSettings =
       releaseRate = p.inPort "releaseRate" 16
       makeup = p.inPort "makeup" 16 }
 
-/// One instance under `instName`, called as a function: wire the dynamics
-/// controls, splice the stream through.
-let audioCompressor (name: string) instName =
+/// One instance under `instName`, called as a function, its multiplies
+/// served as `multiplies` says, role by role. Wires the dynamics controls and
+/// splices the stream through.
+let audioCompressorWith (multiplies: CompressorMultiplies) (name: string) instName =
     let io = (audioCompressorDef name).NewNamed instName
 
     fun (settings: CompressorSettings) (s: Stream<Expr * Expr>) ->
@@ -1587,7 +1700,16 @@ let audioCompressor (name: string) instName =
         settings.attack ==> io.attack
         settings.releaseRate ==> io.releaseRate
         settings.makeup ==> io.makeup
+
+        for (socketName, _, _), socket in List.zip compressorSockets io.multiply do
+            serveSocket socket (roleOf multiplies socketName)
+
         stereoSplice io.s s
+
+/// `audioCompressorWith`, every multiply with one of its own in place: six
+/// multipliers, a sample a cycle.
+let audioCompressor (name: string) instName =
+    audioCompressorWith compressorInPlace name instName
 
 // ---------------------------------------------------------------------------
 // Sources and the tone-control filter.
@@ -1762,10 +1884,12 @@ type AudioFirPorts =
 /// mux rather than reloading coefficients — and every bank shares the group
 /// delay, so a switch does not shift the signal in time.
 ///
-/// The MAC trees are `adderTreePipelined`, not the combinational reduction:
-/// products feeding DSPs get re-flattened into a linear DSP cascade unless
-/// registers stand in the way. Latency is `ceilLog2 taps` cycles and the valid
-/// bit is shifted alongside.
+/// The MAC trees are `adderTreePipelined`, not the combinational
+/// reduction: products feeding DSPs get re-flattened into a linear DSP cascade
+/// unless registers stand in the way. The beat is forked to the six trees
+/// (three banks, two channels) and their sums meet in a join, so nothing
+/// counts the trees' depth; the delay line moves when every tree has taken
+/// the sample.
 ///
 /// **Transition-width caveat:** 16 taps gives a transition of roughly
 /// 3.3*Fs/N — about 10 kHz at 48 kHz — so these are coarse tone shapers, not
@@ -1801,7 +1925,6 @@ let audioFirDef (name: string) (taps: int) (bands: FirBands) : TypedModule<Audio
     let productWidth = sampleWidth + firCoeffWidth
     let accWidth = productWidth + ceilLog2 taps
     let scaledWidth = accWidth - firCoeffFrac
-    let macLatency = ceilLog2 taps
 
     let banks =
         [ "bypass", designBypass taps
@@ -1814,21 +1937,6 @@ let audioFirDef (name: string) (taps: int) (bands: FirBands) : TypedModule<Audio
             { s = stereoPorts p
               preset = p.inPort "preset" 2 })
         (fun io ->
-            let enable = wireBit "enable"
-            io.s.outReady ==> enable
-            io.s.outReady ==> io.s.inReady
-
-            let advance = wireBit "advance"
-            (io.s.inValid &&& enable) ==> advance
-
-            let validPipe = List.init macLatency (fun i -> regBit $"v{i}")
-
-            If enable (fun () ->
-                validPipe
-                |> List.iteri (fun i r -> (if i = 0 then io.s.inValid else validPipe[i - 1]) ==> r))
-
-            List.last validPipe ==> io.s.outValid
-
             // The coefficient banks are named wires shared by both channels:
             // a signed multiply needs a declared signal on each side, and naming
             // a bank once means it is emitted once rather than per channel.
@@ -1842,27 +1950,38 @@ let audioFirDef (name: string) (taps: int) (bands: FirBands) : TypedModule<Audio
                         lit (uint64 c &&& 0xFFFFUL) firCoeffWidth ==> w
                         w))
 
-            let channel channelName current =
-                let line =
-                    List.scan
-                        (fun previous i ->
-                            let d = reg $"{channelName}_d{i}" (SInt sampleWidth)
-                            If advance (fun () -> previous ==> d)
-                            d)
-                        current
-                        [ 1 .. taps - 1 ]
+            let incoming = stereoIn io.s
+            let taken = incoming.valid &&& incoming.ready
 
-                let bank (label: string, coeffs: Expr list) =
-                    List.zip coeffs line
-                    |> List.mapi (fun i (c, tap) ->
-                        let p = wire $"{channelName}_{label}_p{i}" (SInt productWidth)
-                        mul c tap ==> p
-                        signExtend accWidth p)
-                    |> adderTreePipelined $"{channelName}_{label}" accWidth enable
-                    |> fst
+            // Each channel's delay line, moving when the sample is taken.
+            let line channelName current =
+                List.scan
+                    (fun previous i ->
+                        let d = reg $"{channelName}_d{i}" (SInt sampleWidth)
+                        If taken (fun () -> previous ==> d)
+                        d)
+                    current
+                    [ 1 .. taps - 1 ]
 
-                let accumulators = List.map bank coeffBanks
+            let left, right = incoming.payload
+            let lines = [ "left", line "left" left; "right", line "right" right ]
+            let trees = [ for channelName, delayed in lines do for label, coeffs in coeffBanks -> channelName, delayed, label, coeffs ]
+            let branches = streamForkEager trees.Length incoming
 
+            let sums =
+                [ for (channelName, delayed, label, coeffs), branch in List.zip trees branches ->
+                      let products =
+                          List.zip coeffs delayed
+                          |> List.mapi (fun i (c, tap) ->
+                              let p = wire $"{channelName}_{label}_p{i}" (SInt productWidth)
+                              mul c tap ==> p
+                              signExtend accWidth p)
+
+                      branch
+                      |> streamMapTo (layoutOfList [ for i, p in List.indexed products -> $"{channelName}_{label}_t{i}", formatOf p ]) (fun _ -> products)
+                      |> adderTreePipelined $"{channelName}_{label}" accWidth ]
+
+            let channel channelName (accumulators: Expr list) =
                 let selected = wire $"{channelName}_selected" (SInt accWidth)
 
                 mux
@@ -1875,8 +1994,10 @@ let audioFirDef (name: string) (taps: int) (bands: FirBands) : TypedModule<Audio
                 shr firCoeffFrac selected ==> scaled
                 saturate sampleWidth scaled
 
-            channel "left" io.s.inLeft ==> io.s.outLeft
-            channel "right" io.s.inRight ==> io.s.outRight)
+            streamJoin (layoutOfList [ for channelName, _, label, _ in trees -> $"{channelName}_{label}", unsignedInt accWidth ]) sums
+            |> streamMapTo sampleLayout (fun accumulators ->
+                channel "left" (List.take 3 accumulators), channel "right" (List.skip 3 accumulators))
+            |> stereoOut io.s)
 
 /// One instance under `instName`, called as a function: wire the preset
 /// select, splice the stream through.
@@ -2817,14 +2938,32 @@ let bandGainTable
 
 /// One band's compressor ports. The multiband stage instantiates one of these
 /// per band and sums what comes back.
+/// What the band compressor asks its multiplies for: the band, wider than a
+/// sample, times the Q8.8 makeup; the boosted band times the Q0.24 gain. The
+/// envelope step and the ratio are the stereo compressor's.
+let bandBoostOperands = pins2 ("a", signedInt bandWidth) ("b", signedInt 17)
+let bandBoostProduct = pins1 ("product", signedInt (bandWidth + 17))
+let bandApplyOperands = pins2 ("a", signedInt gainedWidth) ("b", signedInt (gainWidth + 1))
+let bandApplyProduct = pins1 ("product", signedInt (gainedWidth + gainWidth + 1))
+
+/// The band compressor's sockets by name, each with what it asks and answers.
+let private bandCompressorSockets =
+    [ "boost", bandBoostOperands, bandBoostProduct
+      "step", compressorStepOperands, compressorStepProduct
+      "ratio", compressorRatioOperands, compressorRatioProduct
+      "apply", bandApplyOperands, bandApplyProduct ]
+
+/// One band in: this band's sample, signed and wider than a full-range
+/// sample — a crossover output can exceed the input it came from.
+let bandSampleLayout = pins1 ("band", signedInt bandWidth)
+
+/// One band out: compressed and boosted, wide and unsaturated, for the
+/// caller to sum.
+let bandGainedLayout = pins1 ("gained", signedInt gainedWidth)
+
 type MonoBandCompressorPorts =
-    { /// This band's sample, signed and wider than a full-range sample —
-      /// a crossover output can exceed the input it came from.
-      band: Input
-      /// High for one cycle per sample.
-      advance: Input
-      /// Low passes the band through with makeup gain and no compression.
-      enable: Input
+    { input: StreamInputPorts<Expr>
+      output: StreamOutputPorts<Expr>
       /// The level above which gain reduction begins, at sample scale.
       threshold: Input
       /// Compression ratio above the threshold.
@@ -2837,52 +2976,50 @@ type MonoBandCompressorPorts =
       /// arrives in — the fabric knows nothing about where the number came
       /// from.
       makeup: Input
-      /// The band after compression and makeup.
-      gained: Output
       /// The detector's current level, for a host measuring what the band is
       /// actually doing.
-      envelope: Output }
+      envelope: Output
+      /// Its four multiplies, passed up for whoever instantiates the band to
+      /// serve (`CompressorMultiplies`).
+      multiply: SocketPorts<Expr * Expr, Expr> list }
 
 /// Mono single-band compressor — the per-band unit. The same envelope detector
 /// and gain computer as `audioCompressor`, in the same Q formats and with the
-/// same boost-first topology, but mono and emitting a wide unsaturated value
-/// for the caller to sum.
+/// same boost-first topology and the same two stages, but mono and emitting a
+/// wide unsaturated value for the caller to sum.
 ///
 /// With `ratio = 0` and unity makeup it is an exact pass-through, which is what
 /// lets the filterbank still reconstruct its input through eight of these.
 /// `envelope` is exposed for host diagnostics.
 let monoBandCompressorDef (name: string) : TypedModule<MonoBandCompressorPorts> =
     let boostProductWidth = bandWidth + 17
-    let gainWidth = sampleWidth + 1
     let applyProductWidth = gainedWidth + gainWidth + 1
 
     defModule
         name
         (fun p ->
-            { band = p.inPortAs "band" (SInt bandWidth)
-              advance = p.inPort "advance" 1
-              enable = p.inPort "enable" 1
+            { input = streamInputPortsAs p "in" bandSampleLayout
+              output = streamOutputPortsAs p "out" bandGainedLayout
               threshold = p.inPort "threshold" sampleWidth
               ratio = p.inPort "ratio" 8
               attack = p.inPort "attack" 16
               releaseRate = p.inPort "releaseRate" 16
               makeup = p.inPort "makeup" 16
-              gained = p.outPortAs "gained" (SInt gainedWidth)
-              envelope = p.outPort "envelope" sampleWidth })
+              envelope = p.outPort "envelope" sampleWidth
+              multiply = [ for socket, operands, product in bandCompressorSockets -> socketPorts p $"multiply_{socket}" operands product ] })
         (fun io ->
+            let socket name = io.multiply[bandCompressorSockets |> List.findIndex (fun (n, _, _) -> n = name)]
+
+            let env = reg "env" sampleWidth
+            env ==> io.envelope
+            let detected = reg "detected" (SInt gainedWidth)
+            let busy = regBit "busy"
+
             let makeupSigned = wire "makeup_signed" (SInt 17)
             widenUnsigned 17 io.makeup ==> makeupSigned
 
-            let boostProduct = wire "boost_product" (SInt boostProductWidth)
-            mul io.band makeupSigned ==> boostProduct
-            let boosted = wire "boosted" (SInt gainedWidth)
-            shr gainFracBits boostProduct ==> boosted
-
-            // Registered ahead of the envelope loop: the makeup multiply stays
-            // out of the recurrence's combinational path.
-            let detected = reg "detected" (SInt gainedWidth)
-            If io.advance (fun () -> boosted ==> detected)
-
+            // The detector, from the boosted band held from the sample before:
+            // the makeup multiply stays out of the recurrence.
             let negated = wire "negated" (SInt gainedWidth)
             sub (lit 0UL gainedWidth) detected ==> negated
             let absolute = wire "absolute" gainedWidth
@@ -2890,44 +3027,109 @@ let monoBandCompressorDef (name: string) : TypedModule<MonoBandCompressorPorts> 
             let peak = wire "peak" sampleWidth
             saturate sampleWidth absolute ==> peak
 
-            // --- envelope follower + gain computer, shared with audioCompressor ---
-            let env, envWide = envelopeFollower peak io.attack io.releaseRate io.advance
-            env ==> io.envelope
-            let gainSigned = gainComputer mul envWide io.threshold io.ratio
+            let difference, alphaSigned, envWide = envelopeOperands env peak io.attack io.releaseRate
+            let excess = gainExcess envWide io.threshold
 
-            // --- apply, pipelined ---
-            let boostedHeld = reg "boosted_held" (SInt gainedWidth)
-            let gainHeld = reg "gain_held" (SInt(gainWidth + 1))
+            // ---- the first stage: a band sample is taken only while none is inside.
+            let incoming = streamSource io.input
+            let taking = wireBit "taking_ready"
+            registerStreamReady taking
+            (taking &&& bnot busy) ==> incoming.ready
+            let admitted = { incoming with valid = incoming.valid &&& bnot busy; ready = taking }
 
-            If io.enable (fun () ->
-                boosted ==> boostedHeld
-                gainSigned ==> gainHeld)
+            let branches = streamForkEager 3 admitted
 
-            let applyProduct = wire "apply_product" (SInt applyProductWidth)
-            mul boostedHeld gainHeld ==> applyProduct
-            let applyScaled = wire "apply_scaled" (SInt(applyProductWidth - sampleWidth))
-            shr sampleWidth applyProduct ==> applyScaled
-            let applySaturated = wire "apply_saturated" (SInt gainedWidth)
-            saturate gainedWidth applyScaled ==> applySaturated
-            let gained = reg "gained_reg" (SInt gainedWidth)
-            If io.enable (fun () -> applySaturated ==> gained)
-            gained ==> io.gained)
+            let answered =
+                streamJoin
+                    (layoutOfList [ "boost", signedInt boostProductWidth; "step", signedInt stepWidth; "ratio", unsignedInt gainRedWidth ])
+                    [ branches[0] |> streamMapTo bandBoostOperands (fun band -> band, makeupSigned) |> socketOf (socket "boost")
+                      branches[1] |> streamMapTo compressorStepOperands (fun _ -> difference, alphaSigned) |> socketOf (socket "step")
+                      branches[2] |> streamMapTo compressorRatioOperands (fun _ -> excess, io.ratio) |> socketOf (socket "ratio") ]
 
-/// One band unit under `instName`, called as a function: wire the band and its
-/// controls, read the gained value and the envelope back.
-let monoBandCompressor (name: string) instName =
+            let boostProduct, stepProduct, ratioProduct =
+                match answered.payload with
+                | [ a; b; c ] -> a, b, c
+                | _ -> failwith "three answers"
+
+            let boosted = wire "boosted" (SInt gainedWidth)
+            shr gainFracBits boostProduct ==> boosted
+
+            let step = wire "step" (SInt stepWidth)
+            stepProduct ==> step
+            let envValue = envelopeFromStep step envWide
+
+            let reductionRaw = wire "reduction_raw" gainRedWidth
+            ratioProduct ==> reductionRaw
+            let gainSigned = gainFromReduction reductionRaw
+
+            let leaving = answered.valid &&& answered.ready
+
+            ifElse [
+                (leaving, fun () -> lit 0UL 1 ==> busy)
+                (admitted.valid &&& admitted.ready, fun () -> lit 1UL 1 ==> busy) ]
+
+            If leaving (fun () ->
+                envValue ==> env
+                boosted ==> detected)
+
+            // ---- the second stage: the gain applied.
+            let held =
+                answered
+                |> streamMapTo (layoutOfList [ "boosted", signedInt gainedWidth; "gain", signedInt (gainWidth + 1) ]) (fun _ -> [ boosted; gainSigned ])
+                |> connectAs Connection.Forward
+
+            held
+            |> streamMapTo bandApplyOperands (fun values ->
+                match values with
+                | [ b; g ] -> b, g
+                | _ -> failwith "two fields")
+            |> socketOf (socket "apply")
+            |> streamMapTo bandGainedLayout (fun product ->
+                let p = wire "apply_product" (SInt applyProductWidth)
+                product ==> p
+                let scaled = wire "apply_scaled" (SInt(applyProductWidth - sampleWidth))
+                shr sampleWidth p ==> scaled
+                let out = wire "apply_saturated" (SInt gainedWidth)
+                saturate gainedWidth scaled ==> out
+                out)
+            |> streamSink io.output)
+
+/// A band compressor with every multiply its own, in place.
+let bandCompressorInPlace: CompressorMultiplies =
+    { boost = Fu.inPlace (multiplierFor bandBoostOperands)
+      step = Fu.inPlace (multiplierFor compressorStepOperands)
+      ratio = Fu.inPlace (multiplierFor compressorRatioOperands)
+      apply = Fu.inPlace (multiplierFor bandApplyOperands) }
+
+/// One band unit under `instName`, called as a stage: its multiplies served
+/// as `multiplies` says, role by role. The band in, the gained band out, and
+/// the envelope beside it for a meter.
+let monoBandCompressorWith
+    (multiplies: CompressorMultiplies)
+    (name: string)
+    instName
+    (threshold: Expr)
+    (ratio: Expr)
+    (attack: Expr)
+    (releaseRate: Expr)
+    (makeup: Expr)
+    (s: Stream<Expr>)
+    : Stream<Expr> * Expr =
     let io = (monoBandCompressorDef name).NewNamed instName
+    threshold ==> io.threshold
+    ratio ==> io.ratio
+    attack ==> io.attack
+    releaseRate ==> io.releaseRate
+    makeup ==> io.makeup
 
-    fun (band: Expr) (advance: Expr) (enable: Expr) (threshold: Expr) (ratio: Expr) (attack: Expr) (releaseRate: Expr) (makeup: Expr) ->
-        band ==> io.band
-        advance ==> io.advance
-        enable ==> io.enable
-        threshold ==> io.threshold
-        ratio ==> io.ratio
-        attack ==> io.attack
-        releaseRate ==> io.releaseRate
-        makeup ==> io.makeup
-        io.gained, io.envelope
+    for (socketName, _, _), socket in List.zip bandCompressorSockets io.multiply do
+        serveSocket socket (roleOf multiplies socketName)
+
+    streamThroughInstance io.input io.output s, io.envelope
+
+/// `monoBandCompressorWith`, every multiply with one of its own in place.
+let monoBandCompressor (name: string) instName =
+    monoBandCompressorWith bandCompressorInPlace name instName
 
 /// One section of the crossover: a biquad that reads one node of the graph and
 /// writes another. Node 0 is the ear's sample; every other node is an earlier
@@ -3073,9 +3275,10 @@ type MultibandCompressorPorts =
 /// 8-band stereo multiband compressor.
 ///
 /// Each ear goes through the crossover tree — seven Linkwitz-Riley splits and
-/// their all-pass compensation, one section per pipeline level, so every band
-/// arrives at the same position — then each band gets its own compressor,
-/// and the eight are summed and saturated once. The bands sum to an all-pass:
+/// their all-pass compensation, each section a stream stage with a register
+/// after it — then each band gets its own compressor, and the eight meet in a
+/// join and are summed and saturated once. Nothing is counted: a band's beat
+/// waits in the join for the others, whatever the path cost. The bands sum to an all-pass:
 /// unity makeup and zero ratio return the signal at its level, phase-shifted,
 /// not bit for bit.
 ///
@@ -3102,9 +3305,15 @@ let multibandCompressor8PrefilteredDef
         failwith $"multibandCompressor8 needs {multibandBands - 1} crossovers, got {List.length crossovers}"
 
     let tree = crossoverTreeWith prefilter crossovers sampleRate
-    let section = biquadSection $"{name}_biquad"
     let compressor = monoBandCompressor $"{name}_band"
     let sumWidth = gainedWidth + 3
+
+    // How many stages read each node: the sections that take it, and the
+    // band compressor if it is a band.
+    let readers =
+        Array.init tree.nodes (fun node ->
+            (tree.sections |> List.filter (fun sec -> sec.input = node) |> List.length)
+            + (if List.contains node tree.bands then 1 else 0))
 
     defModule
         name
@@ -3118,150 +3327,69 @@ let multibandCompressor8PrefilteredDef
               rightGains = List.init multibandBands (fun i -> p.inPort $"rightGain{i}" 16)
               envelope = p.outPort "envelope" sampleWidth })
         (fun io ->
-            let enable = wireBit "enable"
-            io.s.outReady ==> enable
-            io.s.outReady ==> io.s.inReady
+            let envelopes = ResizeArray<Expr>()
+
+            let ear (earName: string) (sample: Stream<Expr>) : Stream<Expr> =
+                let gains = if earName = "left" then io.leftGains else io.rightGains
+
+                // A node is produced once and forked to each stage that reads
+                // it; a stage takes the next unread branch.
+                let branches = Array.create tree.nodes ([]: Stream<Expr> list)
+                let produce node (s: Stream<Expr>) = branches[node] <- streamForkEager readers[node] s
+
+                let take node =
+                    match branches[node] with
+                    | next :: rest ->
+                        branches[node] <- rest
+                        next
+                    | [] -> failwith $"'{name}': node %d{node} read more often than counted"
+
+                produce 0 sample
+
+                for i, sec in List.indexed tree.sections do
+                    take sec.input
+                    |> biquadChannel $"{name}_biquad" $"{earName}_s{i}" (Fu.inPlace eqMultiplier) [ for c in sec.coefficients -> lit c biquadCoeffWidth ]
+                    |> connectAs Connection.Forward
+                    |> produce sec.output
+
+                let gained =
+                    [ for k in 0 .. multibandBands - 1 ->
+                          let band, envelope =
+                              take tree.bands[k]
+                              |> streamMapTo bandSampleLayout (signExtend bandWidth)
+                              |> compressor $"{earName}_band{k}_comp" io.threshold io.ratio io.attack io.releaseRate gains[k]
+
+                          let held = wire $"{earName}_env{k}" sampleWidth
+                          envelope ==> held
+                          envelopes.Add held
+
+                          band
+                          |> connectAs Connection.Forward
+                          |> streamMapTo (pins1 ($"g{k}", signedInt sumWidth)) (signExtend sumWidth) ]
+
+                streamJoin (layoutOfList [ for k in 0 .. multibandBands - 1 -> $"g{k}", signedInt sumWidth ]) gained
+                |> adderTreePipelined $"{earName}_sum" sumWidth
+                |> streamMapTo monoSample (fun total ->
+                    let sum = wire $"{earName}_sum_value" (SInt sumWidth)
+                    total ==> sum
+                    let saturated = wire $"{earName}_out" (SInt sampleWidth)
+                    saturate sampleWidth sum ==> saturated
+                    // Back at the reading the channel came in at: the stereo
+                    // row is width-only.
+                    if (formatOf sample.payload).signed then saturated else asUInt saturated)
 
             // An input register, because the path from an upstream buffer read
             // into the filterbank is long enough to be the critical one.
-            let inLeft = reg "in_left_reg" (SInt sampleWidth)
-            let inRight = reg "in_right_reg" (SInt sampleWidth)
-            let inValid = regBit "in_valid_reg"
-
-            If enable (fun () ->
-                io.s.inLeft ==> inLeft
-                io.s.inRight ==> inRight
-                io.s.inValid ==> inValid)
-
-            // ONE valid chain, starting at the input register, and every gate in
-            // this stage derived from it. `inValid` is the valid of the beat at
-            // position 0; each later position is that bit having moved once.
-            //
-            // Both gates below used to be derived independently of the chain
-            // that carries `valid` to the output, which is how the two came
-            // apart: there were two notions of "where is this beat" and nothing
-            // held them together. Now there is one.
-
-            // Positions 0..depth: the beat in the input register is at 0, and
-            // each level of the crossover tree moves it one on. A section at
-            // level l may touch its history only when the beat at l is real;
-            // the compressors sit at `depth`, where every band arrives at once.
-            let validAt =
-                (inValid, [ 1 .. tree.depth ])
-                ||> List.scan (fun previous l ->
-                    let r = regBit $"valid_%d{l}"
-                    If enable (fun () -> previous ==> r)
-                    r)
-
-            let advanceAt =
-                validAt
-                |> List.mapi (fun l v ->
-                    let a = wireBit $"advance_%d{l}"
-                    (v &&& enable) ==> a
-                    a)
-
-            let envelopes = ResizeArray<Expr>()
-
-            let ear earName x (gains: Expr list) =
-                // The tree, one register after every section: node 0 is the
-                // input register, and a section at level l reads a node that
-                // was registered at level l − 1.
-                let nodes = Array.create tree.nodes x
-                let levelOf = Array.create tree.nodes 0
-
-                for i, sec in List.indexed tree.sections do
-                    let cs = sec.coefficients
-
-                    // Annotated because BiquadDesign shares these field
-                    // names — one carries reals for the host, the other
-                    // nets for the fabric.
-                    let coeffs: BiquadCoeffs =
-                        { b0 = lit cs[0] biquadCoeffWidth
-                          b1 = lit cs[1] biquadCoeffWidth
-                          b2 = lit cs[2] biquadCoeffWidth
-                          a1 = lit cs[3] biquadCoeffWidth
-                          a2 = lit cs[4] biquadCoeffWidth }
-
-                    let level = levelOf[sec.input]
-                    let y = section $"{earName}_s{i}" nodes[sec.input] advanceAt[level] coeffs
-                    let held = reg $"{earName}_node{sec.output}" sampleWidth
-                    If enable (fun () -> y ==> held)
-                    nodes[sec.output] <- held
-                    levelOf[sec.output] <- level + 1
-
-                let band k =
-                    let b = wire $"{earName}_band{k}" bandWidth
-                    signExtend bandWidth nodes[tree.bands[k]] ==> b
-                    b
-
-                let gained =
-                    List.init multibandBands (fun k ->
-                        let value, envelope =
-                            compressor
-                                $"{earName}_band{k}_comp"
-                                (band k)
-                                advanceAt[tree.depth]
-                                enable
-                                io.threshold
-                                io.ratio
-                                io.attack
-                                io.releaseRate
-                                gains[k]
-
-                        let held = wire $"{earName}_env{k}" sampleWidth
-                        envelope ==> held
-                        envelopes.Add held
-                        let wide = wire $"{earName}_gained{k}" gainedWidth
-                        value ==> wide
-                        signExtend sumWidth wide)
-
-                let total, treeLatency = adderTreePipelined $"{earName}_sum" sumWidth enable gained
-                let sum = wire $"{earName}_sum_value" (SInt sumWidth)
-                total ==> sum
-                let saturated = wire $"{earName}_out" (SInt sampleWidth)
-                saturate sampleWidth sum ==> saturated
-                saturated, tree.depth + compressorLatency + treeLatency
-
-            let outLeft, earLatency = ear "left" inLeft io.leftGains
-            let outRight, _ = ear "right" inRight io.rightGains
+            stereoIn io.s
+            |> connectAs Connection.Forward
+            |> eachChannel ear
+            |> stereoOut io.s
 
             // Loudest band detector across both ears — a registered max tree,
             // because a flat reduce over sixteen wide values is a deep enough
             // cone to matter and this is only a meter.
-            fst (
-                reduceTreePipelined "env_max" sampleWidth enable (fun a b -> mux (greaterThan a b) a b) (List.ofSeq envelopes)
-            )
-            ==> io.envelope
-
-            // `valid` rides a delay line matched to the DSP path, so it arrives
-            // with the result it describes rather than ahead of it.
-            //
-            // There is no bypass copy alongside it. A raw passthrough would be
-            // a second data path, `latency` deep and two samples wide per ear,
-            // kept so that flipping bypass would not move the signal in time.
-            // Unity settings pass the signal at its level — as an all-pass
-            // since the crossover became a tree, bit-exact before — which is
-            // what a bypass is for. See `audio: unity settings pass audio
-            // through`.
-            // Positions depth+1..earLatency, continuing from the tree's last
-            // level. The output's valid is the last link — the very same bit
-            // that gated the filterbank, arriving with the result it describes.
-            let validAtDepth = List.last validAt
-            let validRest = List.init (earLatency - tree.depth) (fun i -> regBit $"v{i}")
-
-            // These shift on `enable`, with the data pipeline they describe:
-            // the tree's node registers and the adder tree all move on the
-            // same bit, so a bubble travels through as `valid` low and the
-            // tail drains. Only the *recurrences* — the filterbank history and
-            // the compressor envelopes — gate on `advance`, because state may
-            // move only on a real beat.
-            If enable (fun () ->
-                validRest
-                |> List.iteri (fun i r -> (if i = 0 then validAtDepth else validRest[i - 1]) ==> r))
-
-            (if List.isEmpty validRest then validAtDepth else List.last validRest) ==> io.s.outValid
-            outLeft ==> io.s.outLeft
-            outRight ==> io.s.outRight)
+            reduceTreeRegistered "env_max" sampleWidth (fun a b -> mux (greaterThan a b) a b) (List.ofSeq envelopes)
+            ==> io.envelope)
 
 /// One bank under `instName`, called as a function: wire the shared dynamics
 /// and the per-band gains, splice the stream through, and hand the metering

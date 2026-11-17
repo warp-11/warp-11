@@ -62,10 +62,10 @@ let shiftAddMultiplier (name: string) (w: int) : Stream<Expr * Expr> -> Stream<E
           layout = layout1 ("product", 2 * w) }
 
 /// `audioGainWith` as a box: a stereo stream through it, `volume` and `mute`
-/// held beside it, each channel's multiply served by `multiply`, which is
-/// told the channel. The library's instance-as-a-function is the law
-/// verbatim; this line is the whole cost of making a module a box.
-let gainModuleWith (multiply: string -> Stream<Expr * Expr> -> Stream<Expr>) : Fu<Expr * Expr, Expr * Expr> =
+/// held beside it, both channels' multiplies served by `multiply`. The
+/// library's instance-as-a-function is the law verbatim; this line is the
+/// whole cost of making a module a box.
+let gainModuleWith (multiply: Stream<Expr * Expr> -> Stream<Expr>) : Fu<Expr * Expr, Expr * Expr> =
     let stereo = pins2 ("left", signedInt sampleWidth) ("right", signedInt sampleWidth)
 
     moduleUnit "gain" stereo stereo [ "volume", unsignedInt 16; "mute", unsignedInt 1 ] (fun instance controls s ->
@@ -74,7 +74,7 @@ let gainModuleWith (multiply: string -> Stream<Expr * Expr> -> Stream<Expr>) : F
         | _ -> failwith "gain: volume and mute")
 
 /// The gain with a multiply of its own for each channel, in place.
-let gainModule: Fu<Expr * Expr, Expr * Expr> = gainModuleWith (fun _ -> inPlace gainMultiplier)
+let gainModule: Fu<Expr * Expr, Expr * Expr> = gainModuleWith (inPlace gainMultiplier)
 
 // ---------------------------------------------------------------------------
 // Three small units the first designs were placed with, and the palette

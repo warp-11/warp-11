@@ -138,10 +138,11 @@ fn run(args: &Args) -> Result<(), String> {
         if seed_rows.len() != rows {
             return Err(format!("{}: {} rows for a surface of {rows}", seed.display(), seed_rows.len()));
         }
-        // The input need is whichever has a player on the link.
+        // The input need is whichever has a player on the link; the seam
+        // spells it `SEED_LINK_FILL`, and `resolve` reads either spelling.
         let player = registers
             .iter()
-            .find_map(|(name, _)| name.strip_suffix("LinkFill").map(str::to_string))
+            .find_map(|(name, _)| name.strip_suffix("_LINK_FILL").or_else(|| name.strip_suffix("LinkFill")).map(str::to_string))
             .ok_or("the seam has no played need to seed")?;
         let arm = resolve(&format!("{player}LinkArm"), &registers)?;
         let dropped = resolve(&format!("{player}LinkDropped"), &registers)?;

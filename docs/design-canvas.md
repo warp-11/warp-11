@@ -151,8 +151,12 @@ an arbiter, whose policy and timing are set on the edge's panel. A socket
 nobody connected is served in place, a copy of its own for each — which is
 why a plain `gain` box needs nothing drawn for its multiplies.
 
-`examples/three-band-eq-shared.json` is three bands each on a multiplier
-box of its own: three multipliers where the same chain in place has thirty.
+`examples/three-band-eq.json` is three bands each on a multiplier box of
+its own: three multipliers where the same chain in place has thirty. Which
+of the two a design wants is the design's choice, not the board's: audio,
+whose samples arrive every few hundred cycles, shares; a design that needs a
+product every cycle keeps its own, and a part too small for that says so in
+the build's gate.
 
 ### Designs inside designs
 
@@ -405,5 +409,5 @@ with a context FIFO beside it; they have not been measured again.
 | `gain-wide`, two frames a beat, on the KV260, the same recording (2026-11-15) | 0.50 ms: 0.98 beats a cycle through one memory port each way, 1.57 GB/s at 100 MHz, byte-identical to the simulator. With sixteen-beat bursts in place of 256 it was 0.60 ms, waiting on the write side for 11% of the cycles |
 | `gain-wide4`, four frames a row, the KV260's rows over two memory ports, the same recording (2026-11-15) | 0.25 ms: 1.94 beats a cycle, 3.1 GB/s each way at 100 MHz, byte-identical to the simulator. The design is the same on one port; only the mapping says two |
 | `gain-wide16`, sixteen frames a row, the KV260's rows over all five memory ports, the same recording (2026-11-15) | 0.12 ms: about 4.1 beats a cycle, 6.5 GB/s each way at 100 MHz, byte-identical to the simulator; the design waiting on the read side for 46% of the cycles, where five ideal ports would be 37.5% |
-| `three-band-eq-shared` built for the Icepi from the drawing (2026-11-14) | 12 of 28 multiplier blocks, Fmax 67.5 MHz against 25; not loaded onto a board |
-| `twice-shared` built for the Icepi from the drawing (2026-11-14) | 24 of 28 multiplier blocks, Fmax 55.5 MHz against 25; not loaded onto a board |
+| `three-band-eq` (a multiplier a band) built for the Icepi from the drawing (2026-11-14) | 12 of 28 multiplier blocks, Fmax 67.5 MHz against 25; on the board 2026-11-16, byte-identical to the simulator |
+| `twice` (the same EQ twice) built for the Icepi from the drawing (2026-11-14) | 24 of 28 multiplier blocks, Fmax 55.5 MHz against 25; on the board 2026-11-16, byte-identical to the simulator |

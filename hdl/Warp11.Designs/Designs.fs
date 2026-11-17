@@ -382,6 +382,32 @@ let farmedDivide =
             out.valid ==> outValid
             outReady ==> out.ready)
 
+/// The divider as a unit a pool can share: a stream stage that takes eight
+/// cycles a divide and holds `ready` low while it works.
+let divideUnit =
+    Fu.fuSequential
+        "divide8"
+        (pins2 ("dividend", unsignedInt 8) ("divisor", unsignedInt 8))
+        (pins2 ("quotient", unsignedInt 8) ("remainder", unsignedInt 8))
+        (fun instance s -> divider instance 8 s)
+
+/// Four clients, each with a stream of its own, sharing `copies` dividers:
+/// a pool of a unit that takes cycles. Each client's requests are its own
+/// stream in and its answers its own stream out, and nothing in the design
+/// says how long a divide takes — the client's index rides through the
+/// divider beside the beat, and the answer lands where the index says.
+let pooledDivideWith (copies: int) =
+    defModule
+        $"PooledDivide%d{copies}"
+        (fun p -> [ for i in 0..3 -> streamInputPorts p $"in%d{i}" divideOperands, streamOutputPorts p $"out%d{i}" divideResults ])
+        (fun clients ->
+            Fu.sharingAmong Arbitration.roundRobin copies divideUnit "divpool" (fun divide ->
+                for inPorts, outPorts in clients do
+                    streamSource inPorts |> divide |> streamSink outPorts))
+
+/// The pool at two copies: two clients a divider.
+let pooledDivide = pooledDivideWith 2
+
 let byteLayout = layout1 ("data", 8)
 let coordLayout = layout2 ("x", 8) ("lum", 8)
 
@@ -2728,7 +2754,7 @@ let audioGainSharedWith (arbitration: Arbitration) =
         (fun (volume, mute, inPorts, outPorts) ->
             Fu.sharingWith arbitration gainMultiplier "gain_multiply" (fun multiply ->
                 streamSource inPorts
-                |> audioGainWith (fun _ -> multiply) "AudioGain" "gain" volume mute)
+                |> audioGainWith multiply "AudioGain" "gain" volume mute)
             |> streamSink outPorts)
 
 /// The same stereo gain with both channels' multiplies served by one shared
@@ -2757,7 +2783,7 @@ let audioEqBandSharedWith (arbitration: Arbitration) =
         (fun (coefficients, inPorts, outPorts) ->
             Fu.sharingWith arbitration eqMultiplier "eq_multiply" (fun multiply ->
                 streamSource inPorts
-                |> audioEqBandWith (fun _ _ -> multiply) "AudioEqBand" "eq" coefficients)
+                |> audioEqBandWith multiply "AudioEqBand" "eq" coefficients)
             |> streamSink outPorts)
 
 /// The same band with all ten products, both channels' five, on one shared
@@ -2833,8 +2859,8 @@ let eachChannelUneven =
 /// The tone generator sourcing the tone-control FIR: a stream source feeding a
 /// pipelined-MAC stage. Together they cover the two shapes the earlier audio
 /// designs did not — a module that *originates* a stream (its phase advances
-/// on the handshake, not the clock) and one whose latency comes from an
-/// `adderTreePipelined` rather than a hand-placed register.
+/// on the handshake, not the clock) and one whose cycles are its MAC trees'
+/// (`adderTreePipelined`), which nothing counts.
 let audioTone =
     defModule
         "AudioTone"

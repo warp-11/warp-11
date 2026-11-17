@@ -80,7 +80,7 @@ let private opening (argv: string[]) : FuncCanvas.Opening =
         let opener = source |> Option.map (fun (source, heard) -> fun g knobs -> Session.openWith g source knobs (Some heard))
         { none with graph = g; opener = opener; file = Some designPath }
     | _ -> none
-
+    
 [<EntryPoint>]
 let main argv =
     // This head has a compiler: a design carrying a written unit opens here.

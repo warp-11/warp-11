@@ -49,10 +49,17 @@ let gain (rate: float) : Graph =
 let gainMapping: Warp11.Mapping.Mapping = { board = kv260; path = viaHostMemory; plugged = [] }
 
 /// M2's design: three `eq` sections with creation arguments — a low shelf,
-/// a peaking cut, a high shelf — designed for the rate, with a register
-/// stage on each edge between them: a band's last multiply does not feed
-/// the next band's first in one cycle.
+/// a peaking cut, a high shelf — designed for the rate, each band's ten
+/// products taking turns on a multiplier box of its own, drawn as an edge
+/// from the band's socket port to the multiplier. Thirty multiplies are
+/// three multipliers: this is audio, and a sample arrives every few hundred
+/// cycles. Leave a band's socket unconnected and its multiplies are its own,
+/// in place. `ready` is registered between the bands, since a band served by
+/// a shared multiply passes it straight through.
 let threeBandEq (rate: float) : Graph =
+    let bands = [ "low"; "mid"; "high" ]
+    let multiplier = Warp11.Audio.eqMultiplier.name
+
     let band (name: string) (shape: string) (fc: string) (gain: string) (h: History) =
         h
         |> place "eq" name
@@ -60,18 +67,28 @@ let threeBandEq (rate: float) : Graph =
         |> step (setArgument name "fc" fc)
         |> step (setArgument name "gain" gain)
 
-    (stereoDesign "ThreeBandEq" rate
-     |> band "low" "lowshelf" "200" "6"
-     |> band "mid" "peaking" "1000" "-4"
-     |> band "high" "highshelf" "5000" "3"
-     |> step (connect (port "input" "in") (port "low" streamInlet))
-     |> step (connect (port "low" streamOutlet) (port "mid" streamInlet))
-     |> step (through Connection.Forward (port "low" streamOutlet) (port "mid" streamInlet))
-     |> step (connect (port "mid" streamOutlet) (port "high" streamInlet))
-     |> step (through Connection.Forward (port "mid" streamOutlet) (port "high" streamInlet))
-     |> step (connect (port "high" streamOutlet) (port "output" "out")))
-        .present
+    let served (band: string) (h: History) =
+        h
+        |> place multiplier $"multiplier_{band}"
+        |> step (connect (port band "multiply") (port $"multiplier_{band}" servicePort))
+
+    let chain =
+        stereoDesign "ThreeBandEq" rate
+        |> band "low" "lowshelf" "200" "6"
+        |> band "mid" "peaking" "1000" "-4"
+        |> band "high" "highshelf" "5000" "3"
+        |> step (connect (port "input" "in") (port "low" streamInlet))
+        |> step (connect (port "low" streamOutlet) (port "mid" streamInlet))
+        |> step (through Connection.Backward (port "low" streamOutlet) (port "mid" streamInlet))
+        |> step (connect (port "mid" streamOutlet) (port "high" streamInlet))
+        |> step (through Connection.Backward (port "mid" streamOutlet) (port "high" streamInlet))
+        |> step (connect (port "high" streamOutlet) (port "output" "out"))
+
+    ((chain, bands) ||> List.fold (fun h band -> served band h)).present
     |> inARow [ "input"; "low"; "mid"; "high"; "output" ]
+    |> fun g ->
+        (g, List.indexed bands)
+        ||> List.fold (fun g (i, band) -> moveBox $"multiplier_{band}" (320.0 + float i * 260.0, 320.0) g)
 
 /// The second half of M2: a gain whose volume is a number box the host can
 /// change and whose mute is a toggle.
@@ -89,7 +106,8 @@ let controls (rate: float) : Graph =
 
 /// M4's design: the three-band EQ imported and placed twice in series — a
 /// design as a box, to double-click into — with `ready` registered between
-/// the two, so it does not ripple back through six bands.
+/// the two, so it does not ripple back through six bands. Six multipliers,
+/// each band's own.
 let twice (rate: float) : Graph =
     (stereoDesign "Twice" rate
      |> step (importDesign (threeBandEq rate))
@@ -101,45 +119,6 @@ let twice (rate: float) : Graph =
      |> step (connect (port "ThreeBandEq2" "out") (port "output" "out")))
         .present
     |> inARow [ "input"; "ThreeBandEq"; "ThreeBandEq2"; "output" ]
-
-/// The three-band EQ with one multiplier a band: each band's ten products
-/// take turns on a multiplier box of its own, drawn as an edge from the
-/// band's socket port to the multiplier. `ready` is registered between the
-/// bands, since a band served by a shared multiply passes it straight
-/// through. Thirty multiplies become three.
-let threeBandEqShared (rate: float) : Graph =
-    let bands = [ "low"; "mid"; "high" ]
-    let multiplier = Warp11.Audio.eqMultiplier.name
-
-    let served (band: string) (h: History) =
-        h
-        |> place multiplier $"multiply_{band}"
-        |> step (connect (port band "multiply") (port $"multiply_{band}" servicePort))
-
-    let chain =
-        (history (threeBandEq rate)
-         |> step (rename "ThreeBandEqShared")
-         |> step (through Connection.Backward (port "low" streamOutlet) (port "mid" streamInlet))
-         |> step (through Connection.Backward (port "mid" streamOutlet) (port "high" streamInlet)))
-
-    ((chain, bands) ||> List.fold (fun h band -> served band h)).present
-    |> fun g ->
-        (g, List.indexed bands)
-        ||> List.fold (fun g (i, band) -> moveBox $"multiply_{band}" (320.0 + float i * 260.0, 320.0) g)
-
-/// The shared three-band EQ placed twice in series, `ready` registered
-/// between the two: six multipliers where the drawing in place has sixty.
-let twiceShared (rate: float) : Graph =
-    (stereoDesign "TwiceShared" rate
-     |> step (importDesign (threeBandEqShared rate))
-     |> step (addBox "ThreeBandEqShared" (0.0, 0.0) >> Result.map fst)
-     |> step (addBox "ThreeBandEqShared" (0.0, 0.0) >> Result.map fst)
-     |> step (connect (port "input" "in") (port "ThreeBandEqShared" "in"))
-     |> step (connect (port "ThreeBandEqShared" "out") (port "ThreeBandEqShared2" "in"))
-     |> step (through Connection.Backward (port "ThreeBandEqShared" "out") (port "ThreeBandEqShared2" "in"))
-     |> step (connect (port "ThreeBandEqShared2" "out") (port "output" "out")))
-        .present
-    |> inARow [ "input"; "ThreeBandEqShared"; "ThreeBandEqShared2"; "output" ]
 
 /// Several stereo frames a row, the stereo gain on each: the wide row. The
 /// boundary carries `frames` pairs of samples; a `fields` box picks each
@@ -281,8 +260,6 @@ let all (rate: float) : (string * Graph) list =
       "three-band-eq.json", threeBandEq rate
       "controls.json", controls rate
       "twice.json", twice rate
-      "three-band-eq-shared.json", threeBandEqShared rate
-      "twice-shared.json", twiceShared rate
       "blur.json", imageBlur gradient.width gradient.height
       "adder.json", adder
       "mac.json", mac
@@ -316,8 +293,6 @@ let mappings: (string * Warp11.Mapping.Mapping) list =
     @ holds "three-band-eq" [ "kv260"; "icepi"; "de10lite" ]
     @ holds "controls" [ "kv260"; "icebreaker"; "icepi"; "de10lite" ]
     @ holds "twice" [ "kv260"; "icepi"; "de10lite" ]
-    @ holds "three-band-eq-shared" [ "kv260"; "icepi" ]
-    @ holds "twice-shared" [ "kv260"; "icepi" ]
     @ holds "gain-wide" [ "kv260" ]
     // Four frames a row is two beats: the KV260 with its rows over two of
     // its memory ports, a ring of bursts between them and the design.

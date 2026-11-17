@@ -84,6 +84,7 @@ let catalog =
           entry "Buffered stream (block RAM)" (nameof deepBufferedStream) (fun () -> deepBufferedStream.def)
           entry "Tagged divide" (nameof taggedDivide) (fun () -> taggedDivide.def)
           entry "Farmed divide" (nameof farmedDivide) (fun () -> farmedDivide.def)
+          entry "Pooled divide" (nameof pooledDivide) (fun () -> pooledDivide.def)
           entry "Priority mux" (nameof onPriority) (fun () -> onPriority.def)
           entry "Priority ladder (ifElse)" (nameof ifElseLadder) (fun () -> ifElseLadder.def)
           entry "State ladder (Switch)" (nameof switchRing) (fun () -> switchRing.def)

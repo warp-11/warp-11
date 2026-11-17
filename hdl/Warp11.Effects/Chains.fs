@@ -33,10 +33,11 @@ type EffectsIo =
       compressor: CompressorSettings
       limitThreshold: Expr }
 
-/// The full chain, every stage host-controlled and every default a no-op.
-let effects: BoardTop.Design =
+/// The chain as a design under `name`: the controls every form of it has,
+/// and `chain` between the rows in and the rows out.
+let private effectsDesign (name: string) (chain: EffectsIo -> Stream<Expr * Expr> -> Stream<Expr * Expr>) : BoardTop.Design =
     BoardTop.design
-        "Effects"
+        name
         (fun n ->
             { input = n.streamIn ("in", stereo)
               out = n.streamOut ("out", stereo)
@@ -56,15 +57,55 @@ let effects: BoardTop.Design =
                   makeup = n.valueIn ("compMakeup", unsignedInt 16, gainUnity) }
               // Full-scale limit: never clamps until a host tightens it.
               limitThreshold = n.valueIn ("limitThreshold", unsignedInt sampleWidth, sampleMaxSigned) })
-        (fun io ->
-            io.input.stream
-            |> audioGain "AudioGain" "gain" io.volume io.mute
-            |> connectAs Connection.Forward
-            |> audioEqBand "AudioEqBand" "eq" io.eq
-            |> connectAs Connection.Forward
-            |> audioCompressor "AudioCompressor" "compressor" io.compressor
-            |> audioLimiter "AudioLimiter" "limiter" io.limitThreshold
-            |> io.out)
+        (fun io -> io.input.stream |> chain io |> io.out)
+
+/// The chain's multiplier pools, by format: the application's choice, as
+/// Mandelbrot's lanes are. Each is a socket a multiplier of its own
+/// (`InPlace`) or a pool of copies the sockets take turns on (`Shared n`).
+type EffectsMultiplies =
+    { /// A sample times a Q8.8 gain, s24 × s17: the gain's two and the
+      /// compressor's two boosts. Two of a part's 18×18 blocks a copy.
+      sample: Fu.Serving
+      /// A sample times a Q2.30 coefficient, s24 × s32: the band's ten. Four
+      /// blocks a copy.
+      coefficient: Fu.Serving
+      /// A boosted sample times the compressor's gain, s33 × s26: its two
+      /// applies. Four blocks a copy.
+      apply: Fu.Serving }
+
+/// Every multiply its own, a sample a cycle: 60 of the KV260's 1 248 DSPs.
+/// The Icepi's 28 blocks hold `{ sample = Shared 2; coefficient = Shared 3;
+/// apply = InPlace }` — 4 + 12 + 8, and 4 for the envelope step and the
+/// ratio, which are the only multiplies of their formats and keep their own.
+let multiplies =
+    { sample = Fu.InPlace
+      coefficient = Fu.InPlace
+      apply = Fu.InPlace }
+
+/// The full chain, every stage host-controlled and every default a no-op,
+/// its multiplies served as `multiplies` says.
+///
+/// The stages are connected `Both`: a stage served by a shared multiply
+/// passes `ready` straight through, so every signal between two of them
+/// comes from a register.
+let effects: BoardTop.Design =
+    effectsDesign "Effects" (fun io s ->
+        Fu.serving multiplies.sample gainMultiplier "multiply_sample" (fun sampleMultiply ->
+            Fu.serving multiplies.coefficient eqMultiplier "multiply_coefficient" (fun coefficientMultiply ->
+                Fu.serving multiplies.apply (multiplierFor compressorApplyOperands) "multiply_apply" (fun applyMultiply ->
+                    let compressor =
+                        { compressorInPlace with
+                            boost = sampleMultiply
+                            apply = applyMultiply }
+
+                    s
+                    |> audioGainWith sampleMultiply "AudioGain" "gain" io.volume io.mute
+                    |> connectAs Connection.Both
+                    |> audioEqBandWith coefficientMultiply "AudioEqBand" "eq" io.eq
+                    |> connectAs Connection.Both
+                    |> audioCompressorWith compressor "AudioCompressor" "compressor" io.compressor
+                    |> connectAs Connection.Both
+                    |> audioLimiter "AudioLimiter" "limiter" io.limitThreshold))))
 
 /// What the multiband compressor asks of the world.
 type MultibandIo =

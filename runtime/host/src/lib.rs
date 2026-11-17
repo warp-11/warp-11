@@ -9,5 +9,6 @@ pub mod mandel_frame_twin;
 pub mod mmap;
 pub mod seam;
 pub mod serial_window;
+pub mod rows;
 pub mod table;
 pub mod warp11_dma;

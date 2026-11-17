@@ -1,20 +1,21 @@
 # Adder tree
 
 Eight values summed two ways — a combinational balanced tree, and the same tree
-with every level registered. They give the same answer. Which one you want is
+with every level registered, as a stream. They give the same answer. Which one you want is
 decided by the clock, and getting it wrong is the single most expensive mistake
 in this whole tutorial.
 
 ## What to look at
 
-Poke `x0..x7` to 1 through 8 and `enable = 1`.
+Poke `in_x0..in_x7` to 1 through 8, `in_valid = 1` and `out_ready = 1`.
 
 - `flat` reads **36** immediately. No stepping.
-- `pipelined` reads 0, then 0, then after **three** steps, 36.
-- `depth` reads 3, which the design did not have to be told — the tree reports
-  how deep it turned out.
+- `out_valid` is low, then low, then after **three** steps it rises, with
+  `out_sum` reading 36.
 
-Same sum. One arrives now, one arrives in three cycles.
+Same sum. One arrives now, one arrives in three cycles — and nothing in the
+design says "three". The answer leaves with `valid`, so whoever reads it waits
+for that, not for a number.
 
 ## Why a tree and not a chain
 
@@ -54,13 +55,20 @@ fix, when it is needed, is this page's second half.
 ## `adderTreePipelined` — registers as the point
 
 ```fsharp
-let deep, levels = adderTreePipelined "acc" 11 enable widened
+incoming
+|> streamMapTo widened (List.map widen)
+|> adderTreePipelined "acc" 11
 ```
 
-Every level of the tree gets a register, `enable` freezes the whole thing
-together for backpressure, and it returns the sum **and its latency**, because
-the depth is a fact about the tree rather than something the caller should be
-asserting. (Same principle as [**Stream pipe**](streamPipe.md)'s rejection of `pipe(latency)`.)
+Every level of the tree gets a register, and the tree is a stream stage: a beat
+of eight values in, their sum out, `ready` holding the whole tree still when
+the reader is not taking. It does **not** tell you its depth. A depth handed to
+a caller is a number the caller then has to carry — delay its own `valid` by
+it, line its other signals up with it — and that number is wrong the first
+time the tree changes. A stream has nowhere to put one: what comes out is
+marked when it comes out. (The same reason [**Stream pipe**](streamPipe.md)
+rejects `pipe(latency)`.) Anything that has to stay beside the sum is joined
+to it, not counted alongside it.
 
 **This is not the combinational tree with registers bolted on.** The library's
 note on it is emphatic, and the reason is specific to FPGAs: a combinational
@@ -71,8 +79,8 @@ across.
 
 So anything that maps to DSPs — FIR filters, convolution, dot products — wants
 the pipelined form, and the log-depth combinational tree is not a substitute.
-The `fir` entry in the stdlib uses `reduceTree` for precisely this reason, and
-its own comment points at the same gotcha.
+The FIR in the audio library uses `adderTreePipelined` for precisely this
+reason, and its own comment points at the same gotcha.
 
 ## Where this is used
 
@@ -86,8 +94,8 @@ which is the kind of thing you learn by hitting it.
 
 - Set all eight inputs to 255 and check `flat` — 11 bits is enough for 8 × 255,
   which is why the inputs are widened before summing.
-- Poke `enable = 0` and step. The pipelined tree freezes mid-flight; the flat
-  one does not care, having nothing to freeze.
+- Poke `out_ready = 0` and step. The pipelined tree freezes mid-flight; the
+  flat one does not care, having nothing to freeze.
 - Change the inputs while the pipeline is in flight and watch a mixed answer
   emerge — the stages hold different generations.
 - In the source, replace `reduceTree (+)` with `List.reduce (+)` and diff the

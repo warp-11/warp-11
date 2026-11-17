@@ -272,7 +272,7 @@ let designOf (g: Graph) (b: Box) : Graph option = g.designs |> Map.tryFind b.uni
 /// factory's defaults. A box whose arguments the factory refuses cannot be
 /// elaborated, and says which one. A box that is a design is
 /// `Elaborate.unitOf`'s to make.
-let paletteUnitServed (g: Graph) (b: Box) (serve: string -> (int -> Server) option) : ErasedFu =
+let paletteUnitServed (g: Graph) (b: Box) (serve: string -> Server option) : ErasedFu =
     match (units ()).TryFind b.unit with
     | None -> failwith $"{b.name}: no unit called '{b.unit}' in the palette or among the design's own designs"
     | Some factory ->

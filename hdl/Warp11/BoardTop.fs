@@ -2203,6 +2203,27 @@ let private linkEnds (d: Design) =
 
     inName, outName, surface
 
+/// A row of the boundary as the seam states it, the same on every carrier:
+/// the fields in order, and for each its first lane, its lanes and the
+/// format a lane holds — what a host needs to turn a file into rows without
+/// the design file. A top has one row in and one out, so `side` is `IN` or
+/// `OUT`. `bytes` is the row's footprint where a carrier pads it (host
+/// memory tiles beats); the link sends the lanes as they are and has none.
+let private rowSeam (side: string) (pins: (string * NumberFormat) list) (bytes: int option) =
+    let names = pins |> List.map fst |> String.concat ","
+
+    [ yield $"pub const ROW_{side}_FIELDS: &str = \"%s{names}\";"
+      match bytes with
+      | Some b -> yield $"pub const ROW_{side}_BYTES: usize = %d{b};"
+      | None -> ()
+      for (field, f), (lane, lanes) in List.zip pins (laneSpans pins) do
+          let s = $"ROW_{side}_{upperSnake field}"
+          yield $"pub const {s}_LANE: usize = %d{lane};"
+          yield $"pub const {s}_LANES: usize = %d{lanes};"
+          yield $"pub const {s}_WIDTH: u32 = %d{f.totalWidth};"
+          yield $"pub const {s}_FRACTION: u32 = %d{f.fracBits};"
+          yield $"pub const {s}_SIGNED: u32 = %d{if f.signed then 1 else 0};" ]
+
 /// The seam's word of what each link-carried need takes on the wire: words
 /// a row, and for a surface its rows — so a host reads a snapshot without
 /// a number of its own.
@@ -2219,7 +2240,17 @@ let private linkSeamExtras (part: Part) (d: Design) (inName: string option) (out
       | Some(fields, rows) ->
           yield $"pub const {upperSnake outName}_WORDS: usize = %d{linkWordsOf fields};"
           yield $"pub const {upperSnake outName}_ROWS: usize = %d{rows};"
-      | None -> yield $"pub const {upperSnake outName}_WORDS: usize = %d{linkWordsOf (fieldsOf d outName)};" ]
+      | None -> yield $"pub const {upperSnake outName}_WORDS: usize = %d{linkWordsOf (fieldsOf d outName)};"
+
+      // The rows themselves, as host memory states them, unpadded: the
+      // link sends a row's lanes as they are.
+      match inName with
+      | Some name -> yield! rowSeam "IN" (fieldsOf d name) None
+      | None -> ()
+
+      match surface with
+      | Some _ -> ()
+      | None -> yield! rowSeam "OUT" (fieldsOf d outName) None ]
 
 /// The output half of a link top: the design's rows out as frames, or its
 /// surface as snapshots, either way threaded back through a wire pair to
@@ -3269,23 +3300,11 @@ let private hostMemoryTop (board: Board) (path: DataPath) (d: Design) : BoardTop
               $"pub const {upperSnake sname}_MEM_SLOT_BYTES: usize = %d{1 <<< (ceilLog2 beats + beatAddrShift)};" ]
         | None -> []
 
-    // The rows' own shape, so a host that stages a table can place each
-    // field without the design file: the fields in order, and for each its
-    // first lane, its lanes, and the format a lane holds. A batch top has one
-    // row in and one out, so they are `ROW_IN` and `ROW_OUT`.
+    // The rows' own shape (`rowSeam`), and what only host memory has: the
+    // bytes a row takes there, padded to tile the beats.
     let rowExtras =
         let describe (side: string) (shape: RowShape) (pins: (string * NumberFormat) list) =
-            let names = pins |> List.map fst |> String.concat ","
-
-            [ yield $"pub const ROW_{side}_FIELDS: &str = \"%s{names}\";"
-              yield $"pub const ROW_{side}_BYTES: usize = %d{shape.bytesPerRow};"
-              for (field, f), (lane, lanes) in List.zip pins (laneSpans pins) do
-                  let s = $"ROW_{side}_{upperSnake field}"
-                  yield $"pub const {s}_LANE: usize = %d{lane};"
-                  yield $"pub const {s}_LANES: usize = %d{lanes};"
-                  yield $"pub const {s}_WIDTH: u32 = %d{f.totalWidth};"
-                  yield $"pub const {s}_FRACTION: u32 = %d{f.fracBits};"
-                  yield $"pub const {s}_SIGNED: u32 = %d{if f.signed then 1 else 0};" ]
+            rowSeam side pins (Some shape.bytesPerRow)
 
         let rowsPerBurst =
             match outShape with

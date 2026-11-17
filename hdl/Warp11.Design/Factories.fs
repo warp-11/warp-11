@@ -57,9 +57,9 @@ type Sockets =
 type Served =
     { sockets: Sockets list
       /// The unit with each socket port served by what `serve` answers for
-      /// its name — told which of the port's sockets it is serving — or in
-      /// place where it answers nothing.
-      make: float -> Arguments -> (string -> (int -> Server) option) -> Result<ErasedFu, string>
+      /// its name — every socket of the port by the same stage — or in place
+      /// where it answers nothing.
+      make: float -> Arguments -> (string -> Server option) -> Result<ErasedFu, string>
       /// The same call as F# source, each served port given the name of the
       /// stage that serves it.
       print: float -> Arguments -> (string -> string option) -> Result<string, string> }
@@ -205,8 +205,8 @@ let private eqSockets: Sockets =
       needs = erase eqMultiplier
       needsSymbol = "eqMultiplier" }
 
-/// `eqSection` with every product served by `multiply channel term`.
-let eqSectionWith (multiply: string -> string -> Stream<Expr * Expr> -> Stream<Expr>) (shape: EqType) (fc: float) (q: float) (gainDb: float) (rate: float) : Fu<Expr * Expr, Expr * Expr> =
+/// `eqSection` with every product served by `multiply`.
+let eqSectionWith (multiply: Stream<Expr * Expr> -> Stream<Expr>) (shape: EqType) (fc: float) (q: float) (gainDb: float) (rate: float) : Fu<Expr * Expr, Expr * Expr> =
     let coefficients = toQ230 (rbjDesign shape fc q gainDb rate)
     moduleUnit "eq" stereo stereo [] (fun instance _ s -> audioEqBandWith multiply "AudioEqBand" instance (literals biquadCoeffWidth coefficients) s)
 
@@ -340,11 +340,7 @@ let eq: Factory =
                             | Some server ->
                                 parse rate args
                                 |> Result.map (fun (shape, fc, q, gain) ->
-                                    let multiply (channel: string) (term: string) =
-                                        let at = List.findIndex ((=) channel) channelNames * biquadTerms.Length + List.findIndex ((=) term) biquadTerms
-                                        typedServer biquadOperands biquadProduct (server at)
-
-                                    eqSectionWith multiply (eqShape shape) fc q gain rate |> erase)
+                                    eqSectionWith (typedServer biquadOperands biquadProduct server) (eqShape shape) fc q gain rate |> erase)
                       print =
                         fun rate args serve ->
                             match serve eqSockets.name with
@@ -352,7 +348,7 @@ let eq: Factory =
                             | Some stage ->
                                 parse rate args
                                 |> Result.map (fun (shape, fc, q, gain) ->
-                                    $"eqSectionWith (fun _ _ -> {stage}) {eqShapeSymbol shape} {showFloat fc} {showFloat q} {showFloat gain} sampleRate") } }
+                                    $"eqSectionWith {stage} {eqShapeSymbol shape} {showFloat fc} {showFloat q} {showFloat gain} sampleRate") } }
 
 let limiter: Factory = plain "limiterUnit" limiterUnit
 
@@ -472,14 +468,14 @@ let builtIn: Map<string, Factory> =
                           match serve gainSockets.name with
                           | None -> Ok(erase gainModule)
                           | Some server ->
-                              gainModuleWith (fun channel -> typedServer gainOperands gainProduct (server (List.findIndex ((=) channel) channelNames)))
+                              gainModuleWith (typedServer gainOperands gainProduct server)
                               |> erase
                               |> Ok
                     print =
                       fun _ _ serve ->
                           match serve gainSockets.name with
                           | None -> Ok "gainModule"
-                          | Some stage -> Ok $"gainModuleWith (fun _ -> {stage})" } }
+                          | Some stage -> Ok $"gainModuleWith {stage}" } }
       plain "gainMultiplier" gainMultiplier
       plain "eqMultiplier" eqMultiplier
       eq

@@ -277,6 +277,62 @@ let private pool (arbitration: Arbitration) (unit: Fu<'a, 'r>) (law: 'a -> 'r) (
         // A client holds one beat, so a landed result always has a home.
         lit 1UL 1 ==> r.ready
 
+/// One copy of a sequential unit — a stream stage that takes cycles, as many
+/// as it takes — for every client at once. The clients' requests, each
+/// tagged with the client's index, are merged behind `arbitration`; the tag
+/// rides through the unit beside the beat (`withContext`), and the answer
+/// lands at the client it names. Nothing counts the unit's cycles: it may
+/// stall, hold `ready` low while it works, or take a different time for each
+/// beat.
+///
+/// A client holds one beat in flight, so a landed answer always has a home
+/// and the unit's output is never held up by a client that is not ready —
+/// two clients of one unit joined downstream cannot wait on each other. It
+/// also sizes the tag FIFO: at most one beat a client is inside.
+let private streamPool
+    (arbitration: Arbitration)
+    (unit: Fu<'a, 'r>)
+    (law: string -> Stream<'a> -> Stream<'r>)
+    (name: string)
+    (clients: Client list)
+    =
+    let tagWidth = max 1 (ceilLog2 clients.Length)
+    let tagLayout = pins1 ("client", unsignedInt tagWidth)
+    let issueLayout = layoutJoin unit.operands tagLayout
+
+    let issues: Stream<'a * Expr> list =
+        [ for i, c in List.indexed clients ->
+              { payload = unit.operands.unpack c.operands, lit (uint64 i) tagWidth
+                valid = c.issue
+                ready = c.grant
+                layout = issueLayout } ]
+
+    let answered =
+        streamMergeWith arbitration issues
+        |> withContext $"{name}_tags" clients.Length unit.operands unit.results tagLayout (law name)
+
+    let results, tag = answered.payload
+    lit 1UL 1 ==> answered.ready
+
+    for i, c in List.indexed clients do
+        List.iter2 (fun w v -> bare v ==> w) c.results (unit.results.pack results)
+        (answered.valid &&& eq tag (lit (uint64 i) tagWidth)) ==> c.landed
+
+/// The law a shared unit runs, or why it cannot be shared.
+let private sharedLaw (unit: Fu<'a, 'r>) =
+    if not unit.controls.IsEmpty then
+        let names = unit.controls |> List.map fst |> String.concat ", "
+        failwith $"'{unit.name}' has controls ({names}); sharing takes a unit without them"
+
+    unit.law
+
+/// One copy of `unit` serving `clients`: a combinational unit between
+/// registers behind `warpFu`, a sequential one as the stream it is.
+let private copyFor (arbitration: Arbitration) (unit: Fu<'a, 'r>) (name: string) (clients: Client list) =
+    match sharedLaw unit with
+    | Combinational law -> pool arbitration unit (law []) name clients
+    | Sequential law -> streamPool arbitration unit (fun instance s -> law instance [] s) name clients
+
 /// The beat's formats against the unit's operands: width and reading.
 let private checkOperands (unit: Fu<'a, 'r>) (what: string) (s: Stream<'a>) =
     let arriving = [ for e in s.layout.pack s.payload -> formatOf e ]
@@ -308,12 +364,14 @@ let stage (controls: Expr list) (unit: Fu<'a, 'r>) (instance: string) : Stream<'
             checkOperands unit $"as the stage '{instance}'" s
             streamMapTo unit.results (law controls) s
 
-/// One copy of a combinational unit, shared by every stage `body` makes
-/// from it. `body` is handed a stage, `Stream<operands> -> Stream<results>`,
-/// of the same type `inPlace` returns; each place it is applied is one
-/// client of the copy, so a parent that served two sockets with it has two
-/// clients and one unit. When `body` returns, the copy is built behind an
-/// arbiter (`warpFu`) with every client it was given.
+/// One copy of a unit, shared by every stage `body` makes from it. `body` is
+/// handed a stage, `Stream<operands> -> Stream<results>`, of the same type
+/// `inPlace` returns; each place it is applied is one client of the copy, so
+/// a parent that served two sockets with it has two clients and one unit.
+/// When `body` returns, the copy is built with every client it was given: a
+/// combinational unit between registers behind an arbiter (`warpFu`), a
+/// sequential one — a stream stage that takes cycles — as its own stream,
+/// the client's index riding through it beside the beat (`streamPool`).
 ///
 /// A client holds one beat while its operation is out, so a stream through
 /// one manages a beat every few cycles. The clients must be made in the
@@ -329,14 +387,7 @@ let sharingWith
     (name: string)
     (body: (Stream<'a> -> Stream<'r>) -> 'x)
     : 'x =
-    let law =
-        match unit.law with
-        | Sequential _ -> failwith $"'{unit.name}' is sequential: sharing one is not built yet"
-        | Combinational _ when not unit.controls.IsEmpty ->
-            let names = unit.controls |> List.map fst |> String.concat ", "
-            failwith $"'{unit.name}' has controls ({names}); sharing takes a unit without them"
-        | Combinational law -> law []
-
+    sharedLaw unit |> ignore
     let home = current ()
     let clients = ResizeArray<Client>()
 
@@ -354,12 +405,77 @@ let sharingWith
     if clients.Count = 0 then
         failwith $"'{name}': a shared '{unit.name}' with no clients"
 
-    pool arbitration unit law name (List.ofSeq clients)
+    copyFor arbitration unit name (List.ofSeq clients)
     result
 
 /// `sharingWith`, round-robin in the same cycle.
 let sharing (unit: Fu<'a, 'r>) (name: string) (body: (Stream<'a> -> Stream<'r>) -> 'x) : 'x =
     sharingWith Arbitration.roundRobin unit name body
+
+/// `copies` copies of `unit`, sharing the sockets `body` makes: a pool. The
+/// sockets are dealt to the copies in turn as `body` makes them — the nth to
+/// copy `n mod copies` — and each copy arbitrates its own share behind
+/// `arbitration`, so a stream's beats stay in order with no tag. One copy is
+/// `sharingWith`, to the byte. A pool with more copies than sockets is
+/// refused: a copy with nothing to do is a mistake about the design, not a
+/// spare.
+let sharingAmong
+    (arbitration: Arbitration)
+    (copies: int)
+    (unit: Fu<'a, 'r>)
+    (name: string)
+    (body: (Stream<'a> -> Stream<'r>) -> 'x)
+    : 'x =
+    if copies < 1 then
+        failwith $"'{name}': a pool has at least one copy, not %d{copies}"
+
+    if copies = 1 then
+        sharingWith arbitration unit name body
+    else
+        sharedLaw unit |> ignore
+        let home = current ()
+        let shares = Array.init copies (fun _ -> ResizeArray<Client>())
+        let mutable made = 0
+
+        let client (s: Stream<'a>) : Stream<'r> =
+            if not (obj.ReferenceEquals(current (), home)) then
+                failwith $"'{name}': a client of a shared '{unit.name}' was made inside another module; pass that module's socket up to the one that shares the unit"
+
+            checkOperands unit "shared" s
+            let copy = made % copies
+            made <- made + 1
+            let share = shares[copy]
+            let results, c = clientStage unit $"{name}%d{copy}_client%d{share.Count}" unit.results id (fun r _ -> r) s
+            share.Add c
+            results
+
+        let result = body client
+
+        if made < copies then
+            failwith $"'{name}': a pool of %d{copies} copies of '{unit.name}' with %d{made} client(s) — a copy would have nothing to do"
+
+        for copy, share in Array.indexed shares do
+            copyFor arbitration unit $"{name}%d{copy}" (List.ofSeq share)
+
+        result
+
+/// How a design serves the sockets that ask for one kind of unit — the
+/// application's choice, stated beside the design the way Mandelbrot states
+/// its lanes. `InPlace` gives every socket a copy of its own: the plain
+/// operation, full speed, as much hardware as there are sockets. `Shared n`
+/// is a pool of `n` copies the sockets take turns on (`sharingAmong`). A part
+/// too small for what is asked is refused by the build's gate with the
+/// number, and the answer is a smaller pool.
+type Serving =
+    | InPlace
+    | Shared of copies: int
+
+/// `body` given what serves its sockets of `unit`: the unit in place for
+/// each, or a pool of copies under `name`, round-robin.
+let serving (how: Serving) (unit: Fu<'a, 'r>) (name: string) (body: (Stream<'a> -> Stream<'r>) -> 'x) : 'x =
+    match how with
+    | InPlace -> body (inPlace unit)
+    | Shared copies -> sharingAmong Arbitration.roundRobin copies unit name body
 
 /// The same layout under prefixed field names, so two layouts that both
 /// call a field `a` can be joined side by side.

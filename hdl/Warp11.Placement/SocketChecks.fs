@@ -88,7 +88,7 @@ let sharedGainTyped (arbitration: Arbitration) =
         (fun p -> streamInputPorts p "in" stereoPins, streamOutputPorts p "out" stereoPins, p.inPort "volume" 16, p.inPort "mute" 1)
         (fun (inPorts, outPorts, volume, mute) ->
             sharingWith arbitration gainMultiplier "multiplier" (fun multiply ->
-                streamSource inPorts |> audioGainWith (fun _ -> multiply) "AudioGain" "gain" volume mute)
+                streamSource inPorts |> audioGainWith multiply "AudioGain" "gain" volume mute)
             |> streamSink outPorts)
 
 // CHECK — the same bits as the gain with a multiplier a channel.
@@ -123,11 +123,11 @@ let sharedEq (multipliers: int) : Graph =
         edges = chain.edges @ [ for i, band in List.indexed bands -> wire (port band "multiply") (port (serviceFor i) servicePort) ] }
 
 // THE TYPED FORM
-let sharedEqTyped (multipliers: int) =
+let sharedEqTypedAs (name: string) (multipliers: int) =
     let band (multiply: Stream<Expr * Expr> -> Stream<Expr>) (shape: EqType) (fc: float) (gainDb: float) (instance: string) =
-        stage [] (eqSectionWith (fun _ _ -> multiply) shape fc 0.707 gainDb rate) instance
+        stage [] (eqSectionWith multiply shape fc 0.707 gainDb rate) instance
 
-    defModule $"SharedEq%d{multipliers}" stereoIo (fun (inPorts, outPorts) ->
+    defModule name stereoIo (fun (inPorts, outPorts) ->
         let chain (low: Stream<Expr * Expr> -> Stream<Expr>) mid high =
             streamSource inPorts
             |> band low LowShelf 200.0 6.0 "low"
@@ -146,6 +146,33 @@ let sharedEqTyped (multipliers: int) =
 
         streamSink outPorts out)
 
+let sharedEqTyped (multipliers: int) = sharedEqTypedAs $"SharedEq%d{multipliers}" multipliers
+
+// A pool: one multiplier box of `copies` copies serving all three bands,
+// the thirty sockets dealt to the copies in turn.
+let pooledEq (copies: int) : Graph =
+    let g = sharedEq 1
+
+    { g with
+        name = $"PooledEq%d{copies}"
+        boxes = g.boxes |> List.map (fun b -> if b.name = "multiplier" then { b with copies = copies } else b) }
+
+let pooledEqTyped (copies: int) =
+    let band (multiply: Stream<Expr * Expr> -> Stream<Expr>) (shape: EqType) (fc: float) (gainDb: float) (instance: string) =
+        stage [] (eqSectionWith multiply shape fc 0.707 gainDb rate) instance
+
+    defModule $"PooledEq%d{copies}" stereoIo (fun (inPorts, outPorts) ->
+        let out =
+            sharingAmong Arbitration.roundRobin copies eqMultiplier "multiplier" (fun multiply ->
+                streamSource inPorts
+                |> band multiply LowShelf 200.0 6.0 "low"
+                |> connectAs Connection.Backward
+                |> band multiply Peaking 1000.0 -4.0 "mid"
+                |> connectAs Connection.Backward
+                |> band multiply HighShelf 5000.0 3.0 "high")
+
+        streamSink outPorts out)
+
 // CHECK
 let bandsShareMultipliers () : bool =
     let spatial = through (elaborate (threeBandEq Connection.Backward)).def [] 3 beats
@@ -154,8 +181,23 @@ let bandsShareMultipliers () : bool =
     let multiplies (g: Graph) = (verilog (elaborate g)).Split(" * ").Length - 1
     printfn $"      multiplies: %d{multiplies (threeBandEq Connection.Backward)} in place, %d{multiplies (sharedEq 3)} a band, %d{multiplies (sharedEq 1)} shared by all"
 
+    let pooled copies = through (elaborate (pooledEq copies)).def [] 3 beats
+    printfn $"      a pool of 2: %d{multiplies (pooledEq 2)} multiplies, of 3: %d{multiplies (pooledEq 3)}"
+
     same (sharedEq 3) (sharedEqTyped 3)
     && same (sharedEq 1) (sharedEqTyped 1)
+    && same (pooledEq 2) (pooledEqTyped 2)
+    && same (pooledEq 3) (pooledEqTyped 3)
+    && pooled 2 = spatial
+    && pooled 3 = spatial
+    && multiplies (pooledEq 2) = 2
+    && multiplies (pooledEq 3) = 3
+    // a copy with nothing to do
+    && (try
+            elaborate { pooledEq 2 with boxes = (pooledEq 2).boxes |> List.map (fun b -> if b.name = "multiplier" then { b with copies = 31 } else b) } |> ignore
+            false
+        with e ->
+            e.Message.Contains "31 copies" && e.Message.Contains "nothing to do")
     && spatial.Length = beats.Length
     && perBand = spatial
     && one = spatial
@@ -198,7 +240,8 @@ let socketsFitTheirService () : bool =
             inputs = g.inputs @ [ { name = "side"; fields = gainMultiplier.operands.fields } ]
             outputs = g.outputs @ [ { name = "product"; fields = gainMultiplier.results.fields } ]
             edges = g.edges @ [ wire (port "input" "side") (port "multiplier" streamInlet); wire (port "multiplier" streamOutlet) (port "output" "product") ] }
-    && refuses "a service is one copy" { g with boxes = gainGraph.boxes @ [ { box "multiplier" gainMultiplierName [] with copies = 2 } ] }
+    // a copy with nothing to do: three for the gain's two sockets
+    && refuses "nothing to do" { g with boxes = gainGraph.boxes @ [ { box "multiplier" gainMultiplierName [] with copies = 3 } ] }
 
 // ---------------------------------------------------------------------------
 // SD4 — sharing is drawn by the same edits, and saved in the same file.

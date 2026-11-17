@@ -45,7 +45,7 @@ let mappingFor (board: Board) : Mapping.Mapping =
       plugged = [] }
 
 /// The board hello is built for. Moving hello to another board is this line.
-let board = icepi
+let board = iceBreakerAt 24_000_000
 
 /// Hello's mapping: the board above, through `mappingFor`.
 let mapping = mappingFor board

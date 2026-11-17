@@ -302,7 +302,13 @@ let rec private printDesign (g: Graph) : Result<string, string> =
                         else
                             let arbitration = showArbitration (mergeAt g (port service.name servicePort))
 
-                            [ $"{indent}sharingWith {arbitration} ({unit}) \"{service.name}\" (fun {ident service.name} ->" ]
+                            let opening =
+                                if service.copies = 1 then
+                                    $"{indent}sharingWith {arbitration} ({unit}) \"{service.name}\" (fun {ident service.name} ->"
+                                else
+                                    $"{indent}sharingAmong {arbitration} %d{service.copies} ({unit}) \"{service.name}\" (fun {ident service.name} ->"
+
+                            [ opening ]
                             @ serving rest (indent + "    ")
                             |> fun lines -> (lines |> List.take (lines.Length - 1)) @ [ List.last lines + ")" ]
 

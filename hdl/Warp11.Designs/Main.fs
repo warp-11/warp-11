@@ -22,6 +22,7 @@ let private diffDesignsAtDefault () =
       deepBufferedStream.def
       taggedDivide.def
       farmedDivide.def
+      pooledDivide.def
       add3
       dot2
       dot2Auto
@@ -2073,6 +2074,56 @@ let private streamAgreesUnderStalls (ordered: bool) (label: string) d setup inFi
     printfn $"      stall-independent: %-16s{label} %b{ok}{note}"
     ok
 
+/// A pool of a unit that takes cycles: four clients on two dividers. The
+/// property is the pool's whole claim — every client gets the answer to each
+/// of its own requests, in its own order, whatever the others do and however
+/// each input and output stalls — and that the copies work at once: saturated,
+/// the same divides on two copies take about half the cycles they take on one.
+let private poolServesEveryClient () =
+    let run (design: TypedModule<'io>) (stalls: bool) (perClient: int) =
+        let sim = Sim design.def
+        let rng = System.Random 5
+        let requests = Array.init 4 (fun _ -> [| for _ in 1..perClient -> uint64 (rng.Next 256), uint64 (rng.Next(1, 256)) |])
+        let sent = Array.zeroCreate 4
+        let heard = Array.init 4 (fun _ -> ResizeArray<uint64 * uint64>())
+        let mutable cycles = 0
+
+        while (heard |> Array.exists (fun h -> h.Count < perClient)) && cycles < 200_000 do
+            for i in 0..3 do
+                let offer = sent[i] < perClient && (not stalls || rng.Next 3 > 0)
+                sim.Poke($"in{i}_valid", (if offer then 1UL else 0UL))
+
+                if offer then
+                    let a, b = requests[i][sent[i]]
+                    sim.Poke($"in{i}_dividend", a)
+                    sim.Poke($"in{i}_divisor", b)
+
+                sim.Poke($"out{i}_ready", (if not stalls || rng.Next 3 > 0 then 1UL else 0UL))
+
+            let taken = [| for i in 0..3 -> sim.Peek $"in{i}_valid" = 1UL && sim.Peek $"in{i}_ready" = 1UL |]
+
+            for i in 0..3 do
+                if sim.Peek $"out{i}_valid" = 1UL && sim.Peek $"out{i}_ready" = 1UL then
+                    heard[i].Add(sim.Peek $"out{i}_quotient", sim.Peek $"out{i}_remainder")
+
+            sim.Tick()
+            cycles <- cycles + 1
+
+            for i in 0..3 do
+                if taken[i] then sent[i] <- sent[i] + 1
+
+        let right =
+            [ for i in 0..3 -> List.ofSeq heard[i] = [ for a, b in requests[i] -> a / b, a % b ] ]
+            |> List.forall id
+
+        right, cycles
+
+    let stalledRight, _ = run pooledDivide true 40
+    let twoRight, two = run (pooledDivideWith 2) false 40
+    let oneRight, one = run (pooledDivideWith 1) false 40
+    printfn $"      pooled divide: 160 divides in %d{one} cycles on one copy, %d{two} on two"
+    stalledRight && twoRight && oneRight && float two < 0.6 * float one
+
 /// The divider family: the unit itself, the same unit carrying a caller's tag
 /// through `withContext`, and a farm of four. All three are the shape the audio
 /// defect lived in — a multi-cycle unit behind a two-wire interface.
@@ -3028,6 +3079,7 @@ let private mainDemo () =
     printfn $"context rides along:          %b{contextRidesAlong ()}"
     printfn $"pdm decimator recovers tone:  %b{pdmDecimatorRecoversTheTone ()}"
     printfn $"farm carries context:         %b{farmCarriesContext ()}"
+    printfn $"pool serves every client:     %b{poolServesEveryClient ()}"
     printfn $"ram style rule holds:         %b{ramStyleRule ()}"
     printfn $"a literal borrows the sign:   %b{literalBorrowsTheSign ()}"
     printfn $"saturate keeps the reading:   %b{saturateKeepsTheReading ()}"

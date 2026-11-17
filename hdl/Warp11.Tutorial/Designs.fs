@@ -691,30 +691,24 @@ let arbiter =
             mux1H grants values ==> served)
 
 /// Eight values summed two ways: a combinational balanced tree, and the same
-/// tree with every level registered. They agree — after the pipelined one has
-/// been given its cycles.
+/// tree with every level registered, as a stream. They agree — and the
+/// pipelined one says when with `valid`, not with a number.
 let adderTree =
+    let values = layoutOfList [ for i in 0..7 -> $"x{i}", unsignedInt 8 ]
+
     defModule
         "AdderTree"
-        (fun p ->
-            (p.inPort "enable" 1,
-             [ for i in 0..7 -> p.inPort $"x{i}" 8 ],
-             p.outPort "flat" 11,
-             p.outPort "pipelined" 11,
-             p.outPort "depth" 4))
-        (fun (enable, inputs, flat, pipelined, depth) ->
+        (fun p -> (streamInputPorts p "in" values, p.outPort "flat" 11, streamOutputPorts p "out" (pins1 ("sum", unsignedInt 11))))
+        (fun (inPorts, flat, outPorts) ->
             let widen x = cat (lit 0UL 3) x
-            let widened = List.map widen inputs
+            let incoming = streamSource inPorts
 
-            reduceTree (+) widened ==> flat
+            reduceTree (+) (List.map widen incoming.payload) ==> flat
 
-            let deep, levels = adderTreePipelined "acc" 11 enable widened
-
-            deep ==> pipelined
-
-            // The latency is reported, not assumed — it is however deep the tree
-            // turned out to be.
-            lit (uint64 levels) 4 ==> depth)
+            incoming
+            |> streamMapTo (layoutOfList [ for i in 0..7 -> $"w{i}", unsignedInt 11 ]) (List.map widen)
+            |> adderTreePipelined "acc" 11
+            |> streamSink outPorts)
 
 /// Two wrap counters and a cascade. `columns` wraps every 5 counts and its
 /// wrap is what advances `rows` — which is how a raster scan is built, and why

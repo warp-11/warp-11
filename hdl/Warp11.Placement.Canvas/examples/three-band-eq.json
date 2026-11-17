@@ -74,6 +74,24 @@
         "shape": "highshelf"
       },
       "settings": {}
+    },
+    {
+      "name": "multiplier_low",
+      "unit": "multiply_s24xs32",
+      "arguments": {},
+      "settings": {}
+    },
+    {
+      "name": "multiplier_mid",
+      "unit": "multiply_s24xs32",
+      "arguments": {},
+      "settings": {}
+    },
+    {
+      "name": "multiplier_high",
+      "unit": "multiply_s24xs32",
+      "arguments": {},
+      "settings": {}
     }
   ],
   "controlBoxes": [],
@@ -85,16 +103,28 @@
     {
       "from": "low.out",
       "to": "mid.in",
-      "connection": "Forward"
+      "connection": "Backward"
     },
     {
       "from": "mid.out",
       "to": "high.in",
-      "connection": "Forward"
+      "connection": "Backward"
     },
     {
       "from": "high.out",
       "to": "output.out"
+    },
+    {
+      "from": "low.multiply",
+      "to": "multiplier_low.service"
+    },
+    {
+      "from": "mid.multiply",
+      "to": "multiplier_mid.service"
+    },
+    {
+      "from": "high.multiply",
+      "to": "multiplier_high.service"
     }
   ],
   "positions": {
@@ -113,6 +143,18 @@
     "mid": [
       580,
       120
+    ],
+    "multiplier_high": [
+      840,
+      320
+    ],
+    "multiplier_low": [
+      320,
+      320
+    ],
+    "multiplier_mid": [
+      580,
+      320
     ],
     "output": [
       1100,

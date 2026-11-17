@@ -394,17 +394,22 @@ let private pagesTellTheTruth () =
         // 2^8 - 1 states, every one of them, and never zero.
         steps = 255 && seen.Count = 255 && not (seen.Contains 0UL)
 
-    // Both trees compute the same sum; the pipelined one takes its depth in
-    // cycles to say so, and reports that depth rather than being told it.
+    // Both trees compute the same sum; the pipelined one says when its
+    // answer is there with `valid`, and nothing says how many cycles that is.
     let treesAgree =
         let sim = Sim adderTree.def
-        sim.Poke("enable", 1UL)
-        for i in 0..7 do sim.Poke($"x{i}", uint64 (i + 1))
+        sim.Poke("in_valid", 1UL)
+        sim.Poke("out_ready", 1UL)
+        for i in 0..7 do sim.Poke($"in_x{i}", uint64 (i + 1))
 
         let combinational = sim.Peek "flat" = 36UL
-        let depth = sim.Peek "depth"
-        for _ in 1..3 do sim.Tick()
-        combinational && depth = 3UL && sim.Peek "pipelined" = 36UL
+        let mutable steps = 0
+
+        while sim.Peek "out_valid" = 0UL && steps < 16 do
+            sim.Tick()
+            steps <- steps + 1
+
+        combinational && sim.Peek "out_sum" = 36UL
 
     // A wrap is a signal, so it can drive the next counter up.
     let countersCascade =

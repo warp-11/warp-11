@@ -121,11 +121,11 @@ let editsBuildTheDesigns () : bool =
     && emitDesign (elaborate registered).def <> emitDesign (elaborate g).def
     && narrowed.edges = g.edges
     && (match edgeFit narrowed intoGain with DoesNotFit _ -> true | _ -> false)
-    // The examples: thirteen, each built by edits, each a design.
-    && examples.Length = 13
+    // The examples: eleven, each built by edits, each a design.
+    && examples.Length = 11
     && examples |> List.forall (fun (_, example) -> (emitDesign (elaborate example).def).Contains $"module {example.name}")
-    // ...and the two that carry a connection are the checked pipelines.
-    && emitDesign (elaborate (Examples.threeBandEq rate)).def = emitDesign (threeBandEqPipeline Connection.Forward).def
+    // ...and the EQ is the checked pipeline: a multiplier a band.
+    && emitDesign (elaborate (Examples.threeBandEq rate)).def = emitDesign (SocketChecks.sharedEqTypedAs "ThreeBandEq" 3).def
     // both ends inputs
     && refuses (addEdge (port "gain" "in", In) (port "output" "out", In)) [ "inputs" ]
     // a box feeding itself
@@ -201,7 +201,7 @@ let savedDesignOpensAsItWas () : bool =
     && Examples.all Examples.recordingRate |> List.forall (snd >> roundTrips)
     // a wire says nothing about its connection; a register stage does
     && not (text.Contains "\"connection\"")
-    && threeBands.Contains "\"connection\": \"Forward\""
+    && threeBands.Contains "\"connection\": \"Backward\""
     // a design drawn field to field
     && (match DesignFile.parse fieldModel with
         | Error why -> why.Contains "field to field" && why.Contains "Redraw"
@@ -210,7 +210,7 @@ let savedDesignOpensAsItWas () : bool =
     // a unit the palette does not have
     && refuses (fun t -> t.Replace("\"unit\": \"gain\"", "\"unit\": \"biquad\"")) [ "gain"; "biquad"; "palette" ]
     // a connection that is not one
-    && (match DesignFile.parse (threeBands.Replace("\"Forward\"", "\"Sideways\"")) with
+    && (match DesignFile.parse (threeBands.Replace("\"Backward\"", "\"Sideways\"")) with
         | Error why -> why.Contains "Sideways"
         | Ok _ -> false)
     // an edge onto a port the unit does not have
