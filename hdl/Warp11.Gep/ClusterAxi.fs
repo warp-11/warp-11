@@ -227,21 +227,13 @@ let clusterSiliconShape =
 /// different children the moment a draw lands on a function symbol — measured
 /// as 53/64 fitnesses and 37/64 genomes on the first silicon run, deterministic
 /// and therefore not a fabric fault at all.
-let clusterSiliconConfig =
-    Chromosome.gepConfig
-        (Chromosome.geneLayout clusterSiliconShape.headLen 2)
-        clusterSiliconShape.varCount
-        1
-        clusterSiliconShape.constCount
-        clusterSiliconShape.functionSet
-        Opcodes.ADD
+let clusterConfigOf (shape: GepClusterShape) =
+    Chromosome.gepConfig (Chromosome.geneLayout shape.headLen 2) shape.varCount 1 shape.constCount shape.functionSet Opcodes.ADD
+
+let clusterSiliconConfig = clusterConfigOf clusterSiliconShape
 
 /// Lazy, so only the seam emit pays for elaborating 4 breeders and 8 lanes.
 let clusterAxiSilicon = lazy (clusterTopOf "GepCluster" clusterSiliconShape)
-
-/// The committed seam's text, from the same top the build directory is
-/// written from.
-let clusterLayoutRs () = BoardTop.seamLines clusterAxiSilicon.Value
 
 /// The smallest GEP there is: one breeder, one lane, the streaming loop's
 /// op-list emitter — what `notes/DEVICES.md` §13 rung 4 measured as fitting
@@ -257,8 +249,18 @@ let clusterIcepiShape =
         ringRecords = 64
         auto = Some { popCapacity = 64; opList = true } }
 
+/// Its software config, for the vectors it is judged against — derived for
+/// the reason `clusterSiliconConfig` is.
+let clusterIcepiConfig = clusterConfigOf clusterIcepiShape
+
 /// It on the Icepi, its host and its regions on the one UART.
 let clusterOnIcepi =
     lazy
         (let t = BoardTop.boardTop icepi viaLink (clusterDesign "GepCluster" clusterIcepiShape)
          { t with seamExtras = t.seamExtras @ [ "" ] @ clusterSeamExtras clusterIcepiShape })
+
+/// The committed half of the seam: the names the cluster states on every
+/// board it is built for, as the type the Rust driver is compiled against.
+/// The numbers stay with each build directory.
+let clusterSeamNamesRs () =
+    BoardTop.seamNamesLines "GepSeam" "the GEP cluster" [ clusterAxiSilicon.Value; clusterOnIcepi.Value ]

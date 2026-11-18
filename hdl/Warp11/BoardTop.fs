@@ -3698,6 +3698,11 @@ let boardTop (board: Board) (path: DataPath) (d: Design) : BoardTop =
 let boardTopFor (m: Mapping.Mapping) (d: Design) : BoardTop = boardTop (Mapping.boardOf m) m.path d
 
 /// The register map as the Rust seam prints it, headed for the top it serves.
+let private kebabOf (name: string) =
+    name
+    |> Seq.mapi (fun i c -> if System.Char.IsUpper c && i > 0 then $"-{System.Char.ToLower c}" else string (System.Char.ToLower c))
+    |> String.concat ""
+
 let seamLines (t: BoardTop) : string list =
     [ $"//! Register map for the `{t.name}` slave on the {t.board.name}."
       "//! Generated from the design's own register map. Do not edit by hand."
@@ -3709,7 +3714,77 @@ let seamLines (t: BoardTop) : string list =
     // disagree with the fabric about how fast the fabric is (it did, by five
     // hertz, for the hand GoL top).
     @ [ ""; $"pub const FABRIC_HZ: u64 = %d{t.board.fabricHz};" ]
+    // How a host reaches the top, from the board: the baud its map is
+    // spoken at, or the app whose name its uio node and its buffer carry.
+    // A host told these separately is a host that can be told them wrong.
+    @ (match t.board.host with
+       | UartAt baud -> [ $"pub const HOST_BAUD: u32 = %d{baud};" ]
+       | _ -> [])
+    @ (match t.board.loading with
+       | OsApp _ -> [ $"pub const HOST_APP: &str = \"%s{kebabOf t.name}\";" ]
+       | _ -> [])
     @ (if List.isEmpty t.seamExtras then [] else "" :: t.seamExtras)
+
+/// The names every one of `tops`' seams states, as a Rust type: a field a
+/// constant, and a reader that fills them from a seam by name. A driver
+/// compiled against the type is checked for its names by the compiler and
+/// takes its numbers from the build it is pointed at — so one driver runs
+/// every build of a design, on every board, and a build of something else
+/// is refused by the name it lacks. What only some tops state (a carrier's
+/// own registers, a counter per instance past the first) is left out: a
+/// driver reaches those through the seam itself.
+let seamNamesLines (typeName: string) (what: string) (tops: BoardTop list) : string list =
+    let constantsOf (t: BoardTop) =
+        seamLines t
+        |> List.fold
+            (fun (docs, found) (line: string) ->
+                let l = line.Trim()
+
+                if l.StartsWith "///" then
+                    docs @ [ l ], found
+                elif l.StartsWith "pub const " then
+                    match l.Substring(10).Split(':', 2) with
+                    | [| name; rest |] ->
+                        match rest.Split('=', 2) with
+                        | [| rustType; _ |] -> [], found @ [ name.Trim(), rustType.Trim(), docs ]
+                        | _ -> [], found
+                    | _ -> [], found
+                else
+                    [], found)
+            ([], [])
+        |> snd
+
+    let reading =
+        dict [ "usize", " as usize"; "u32", " as u32"; "u64", ""; "bool", " != 0" ]
+
+    let shared =
+        match tops |> List.map constantsOf with
+        | [] -> []
+        | first :: rest ->
+            first
+            |> List.filter (fun (name, rustType, _) ->
+                reading.ContainsKey rustType
+                && rest |> List.forall (List.exists (fun (n, t, _) -> n = name && t = rustType)))
+
+    [ $"//! The names {what}'s seam states on every board it is built for, as a"
+      "//! type: the compiler checks a driver's names, and the numbers come from"
+      "//! the seam of the build it is pointed at."
+      "//! Generated from the design's own register map. Do not edit by hand."
+      ""
+      "#[derive(Clone, Debug)]"
+      $"pub struct {typeName} {{" ]
+    @ [ for name, rustType, docs in shared do
+            yield! docs |> List.map (fun d -> "    " + d)
+            yield $"    pub {name.ToLowerInvariant()}: {rustType}," ]
+    @ [ "}"
+        ""
+        $"impl {typeName} {{"
+        "    /// Every name from a seam's values; the name a seam lacks comes back."
+        "    pub fn read(mut value: impl FnMut(&str) -> Option<u64>) -> Result<Self, &'static str> {"
+        $"        Ok({typeName} {{" ]
+    @ [ for name, rustType, _ in shared ->
+            $"            {name.ToLowerInvariant()}: value(\"{name}\").ok_or(\"{name}\")?{reading[rustType]}," ]
+    @ [ "        })"; "    }"; "}" ]
 
 /// The top's Verilog and its seam, written into `dir`: `{Name}.v` and
 /// `{name}_layout.rs`. The paths written come back.

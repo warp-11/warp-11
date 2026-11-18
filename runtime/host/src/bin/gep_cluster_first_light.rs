@@ -1,9 +1,10 @@
-//! First light for the F#-elaborated WarpCPU genetic-programming cluster on the
-//! KV260: 4 breeders x 8 DIV-resident 16-thread lanes, two fillers, inline
-//! parents. Run on the board after `xmutil loadapp gep-cluster-axi`:
+//! First light for the F#-elaborated WarpCPU genetic-programming cluster:
+//! breeders, DIV-resident lanes, fillers, inline parents — on whichever
+//! board the build was for:
 //!
-//!     ./gep_cluster_first_light <vector-dir>              # uio node, no root
-//!     ./gep_cluster_first_light <vector-dir> /dev/mem     # root mode (sudo)
+//!     ./gep_cluster_first_light <vector-dir> --board <build-dir>                       # the KV260
+//!     ./gep_cluster_first_light <vector-dir> --board <build-dir> --port /dev/ttyUSB0   # over a link
+//!     ./gep_cluster_first_light <vector-dir> --sim
 //!
 //! Silicon is judged by the same oracle the Sim is. The vector directory is
 //! written by hdl's `dotnet run --project Warp11.Gep -- boardvector
@@ -16,65 +17,12 @@
 //! the PL clock, against the Kotlin scoreboard's 0.96 ms/gen resident and
 //! 332 us/gen streaming.
 
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::Read;
-use std::os::unix::fs::OpenOptionsExt;
 use std::process::exit;
-use std::time::Instant;
-use warp11_host::mmap::{MmapWindow, O_SYNC};
-use warp11_runtime::RegisterWindow;
-use warp11_runtime::gep::{GepClusterDevice, GepResult, RECORD_WORDS, RESULT_WORDS, WORK_ITEM_WORDS};
-use warp11_runtime::gep_layout as layout;
-
-const AXI_BASE: i64 = 0xB000_0000;
-/// Set by the generated block design and pinned by the app's dtbo. The operator
-/// engine's single-cycle Irwin-Hall multiply is what caps the design here.
-const PL_CLOCK_MHZ: f64 = 99.999_001;
-
-/// Where the build placed the regions, and how far into the arena the last
-/// one this run touches ends. The batch has to fit the regions as built: a
-/// queue item and a ring record an entry, a population slot for every
-/// parent and every destination.
-fn region_offsets(entries: usize, pop_slots: usize) -> (usize, usize, usize) {
-    assert!(entries <= layout::QUEUE_RECORDS, "{entries} entries, and the queue holds {}", layout::QUEUE_RECORDS);
-    assert!(entries <= layout::RING_RECORDS, "{entries} entries, and the ring holds {}", layout::RING_RECORDS);
-    assert!(
-        pop_slots + entries <= layout::POPULATION_RECORDS,
-        "{} population slots, and the population holds {}",
-        pop_slots + entries,
-        layout::POPULATION_RECORDS
-    );
-    (layout::QUEUE_REGION_OFFSET, layout::POPULATION_REGION_OFFSET, layout::RING_REGION_OFFSET)
-}
-
-fn udmabuf_phys_addr(node: &str) -> Option<u64> {
-    let text = std::fs::read_to_string(format!("/sys/class/u-dma-buf/{node}/phys_addr")).ok()?;
-    u64::from_str_radix(text.trim().trim_start_matches("0x"), 16).ok()
-}
-
-/// The app's own buffer, found by the device name its dtbo declares — so a
-/// leftover buffer from another app is not silently used instead.
-fn find_udmabuf(device_name: &str) -> Option<String> {
-    for entry in std::fs::read_dir("/sys/class/u-dma-buf").ok()?.flatten() {
-        let node = entry.file_name().to_string_lossy().into_owned();
-        let dn = std::fs::read_to_string(entry.path().join("device_name")).unwrap_or_default();
-        if dn.trim() == device_name || node == device_name {
-            return Some(node);
-        }
-    }
-    None
-}
-
-fn find_uio(name: &str) -> Option<String> {
-    for entry in std::fs::read_dir("/sys/class/uio").ok()?.flatten() {
-        if let Ok(n) = std::fs::read_to_string(entry.path().join("name")) {
-            if n.trim() == name {
-                return Some(format!("/dev/{}", entry.file_name().to_string_lossy()));
-            }
-        }
-    }
-    None
-}
+use std::time::{Duration, Instant};
+use warp11_host::gep_evolve::{connect, device as cluster, CONNECT_USAGE, POPULATION, QUEUE, RING};
+use warp11_runtime::gep::GepResult;
 
 fn read_words(dir: &str, name: &str) -> Vec<u32> {
     let mut bytes = Vec::new();
@@ -103,25 +51,24 @@ fn manifest_value(dir: &str, key: &str) -> usize {
 }
 
 fn main() {
-    let mut args = std::env::args().skip(1);
-    let dir = args.next().unwrap_or_else(|| {
-        eprintln!("usage: gep_cluster_first_light <vector-dir> [/dev/mem]");
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let Some(dir) = args.first().filter(|a| !a.starts_with("--")).cloned() else {
+        eprintln!("usage: gep_cluster_first_light <vector-dir> {CONNECT_USAGE}");
         exit(2);
-    });
-    let reg_arg = args.next().unwrap_or_else(|| "auto".into());
+    };
+    let fail = |e: String| -> ! {
+        eprintln!("{e}");
+        exit(1)
+    };
 
     let entries = manifest_value(&dir, "entries");
-    let pop_slots = manifest_value(&dir, "pop_slots");
     let n_cases = manifest_value(&dir, "n_cases");
     let var_count = manifest_value(&dir, "var_count");
     let dest_base = manifest_value(&dir, "dest_base");
     let record_words = manifest_value(&dir, "record_words");
-    let work_item_words = manifest_value(&dir, "work_item_words");
-    assert_eq!(record_words, RECORD_WORDS, "vector/layout disagree on a record");
-    assert_eq!(work_item_words, WORK_ITEM_WORDS, "vector/layout disagree on a work item");
-
-    let (queue_off, pop_off, ring_off) = region_offsets(entries, pop_slots);
-    let needed = ring_off + entries * layout::RING_STRIDE_BYTES;
+    // The vector's items are on the stride the host's memory wants; a
+    // region takes the item alone, and its carrier pads it where it must.
+    let item_stride_words = manifest_value(&dir, "work_item_words");
 
     let work_items = read_words(&dir, "workitems.bin");
     let population = read_words(&dir, "population.bin");
@@ -129,100 +76,60 @@ fn main() {
     let expected_genomes = read_words(&dir, "expected_genomes.bin");
     let expected_fitness = read_words(&dir, "expected_fitness.bin");
 
-    // ---- the DDR buffer ----
-    let node = find_udmabuf("udmabuf-gep-cluster-axi").unwrap_or_else(|| {
-        eprintln!("no udmabuf for 'udmabuf-gep-cluster-axi' — is the app loaded and u-dma-buf up?");
-        exit(1);
-    });
-    let phys = udmabuf_phys_addr(&node).unwrap_or_else(|| {
-        eprintln!("no phys_addr for {node}");
-        exit(1);
-    });
-    // O_SYNC, and it is not optional: u-dma-buf hands out a CACHED mapping
-    // otherwise, and the fabric's masters drive AxCACHE=0 — so they do not
-    // snoop the APU caches even through the coherent HPC port. Staging writes
-    // would sit in cache while the fabric read stale DDR underneath. Measured:
-    // without this the fitnesses come back wrong and most ring records carry
-    // entry id 0.
-    let buf_file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .custom_flags(O_SYNC)
-        .open(format!("/dev/{node}"))
-        .expect("open udmabuf");
-    let mut ddr = MmapWindow::open(&buf_file, 0, 4 << 20).expect("mmap udmabuf");
-    assert!(needed <= 4 << 20, "batch needs {needed} bytes, buffer is 4 MiB");
+    let mut connection = connect(&args[1..]).unwrap_or_else(|e| fail(e));
+    let mut device = cluster(&connection).unwrap_or_else(|e| fail(e));
+    let seam = device.seam().clone();
+    let fabric_mhz = seam.fabric_hz as f64 / 1e6;
+    assert_eq!(record_words, seam.record_words(), "vector/build disagree on a record");
+    assert!(item_stride_words >= seam.work_item_words(), "vector/build disagree on a work item");
+    let regions = connection.regions.as_mut();
 
-    let put = |ddr: &mut MmapWindow, off: usize, words: &[u32]| {
-        for (i, w) in words.iter().enumerate() {
-            ddr.write32(off + i * 4, *w).expect("ddr write");
-        }
-    };
-    let get = |ddr: &mut MmapWindow, off: usize, n: usize| -> Vec<u32> {
-        (0..n).map(|i| ddr.read32(off + i * 4).expect("ddr read")).collect()
-    };
-
-    put(&mut ddr, queue_off, &work_items);
-    put(&mut ddr, pop_off, &population);
+    let items: Vec<u32> = work_items.chunks(item_stride_words).flat_map(|item| item[..seam.work_item_words()].to_vec()).collect();
+    regions.write(QUEUE, 0, &items).unwrap_or_else(|e| fail(e));
+    regions.write(POPULATION, 0, &population).unwrap_or_else(|e| fail(e));
     // Sentinel the destination slots so a missing writeback is visible rather
     // than passing on whatever was already there.
-    let sentinel: Vec<u32> = (0..record_words).map(|i| 0x5EAD_0000 | i as u32).collect();
-    for e in 0..entries {
-        put(&mut ddr, pop_off + (dest_base + e) * record_words * 4, &sentinel);
-    }
+    let sentinel: Vec<u32> = (0..entries * record_words).map(|i| 0x5EAD_0000 | (i % record_words) as u32).collect();
+    regions.write(POPULATION, dest_base, &sentinel).unwrap_or_else(|e| fail(e));
 
-    // ---- the register window ----
-    let reg_path = if reg_arg == "auto" {
-        find_uio("gep_cluster_axi").unwrap_or_else(|| {
-            eprintln!("no uio node named 'gep_cluster_axi' — pass /dev/mem to use root mode");
-            exit(1);
-        })
-    } else {
-        reg_arg
-    };
-    let reg_file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .custom_flags(O_SYNC)
-        .open(&reg_path)
-        .expect("open register file");
-    let offset = if reg_path == "/dev/mem" { AXI_BASE } else { 0 };
-    let window = MmapWindow::open(&reg_file, offset, layout::APERTURE_BYTES).expect("mmap registers");
-    let mut device = GepClusterDevice::open(window).expect("the cluster answers with its identity");
+    println!(
+        "{}: {} breeders x {} lanes at {fabric_mhz:.3} MHz, {entries} entries, {n_cases} cases",
+        connection.seam.source, seam.n_breeders, seam.n_lanes
+    );
 
-    println!("cluster: {} breeders x {} lanes, {} entries, {} cases",
-        layout::N_BREEDERS, layout::N_LANES, entries, n_cases);
-    println!("ddr: phys 0x{phys:x} via /dev/{node}");
-
-    device.arm(phys as u32).expect("arm the arena");
-    device.set_auto_mode(false).expect("auto off");
+    device.set_auto_mode(false).unwrap_or_else(|e| fail(e));
 
     // Cases before start: start zeroes the cycle counter, so loading them after
-    // it put ~5,800 cycles of host AXI-Lite writes into every rate printed below.
+    // it put ~5,800 cycles of host register writes into every rate printed below.
     let rows: Vec<&[u32]> = (0..n_cases)
         .map(|k| &cases[k * (var_count + 1)..(k + 1) * (var_count + 1)])
         .collect();
-    device.load_cases(&rows).expect("load cases");
-    device.start(n_cases as u32).expect("start");
+    device.load_cases(&rows).unwrap_or_else(|e| fail(e));
+    device.start(n_cases as u32).unwrap_or_else(|e| fail(e));
 
     let started = Instant::now();
-    device.publish(entries as u32).expect("publish");
-    if device.await_results(entries as u32, 50_000_000).is_err() {
+    device.publish(entries as u32).unwrap_or_else(|e| fail(e));
+    let patience = Duration::from_secs(600);
+    let mut settled = false;
+    while !settled && started.elapsed() < patience {
+        settled = device.results_done().unwrap_or_else(|e| fail(e)) >= entries as u32 && device.all_idle().unwrap_or_else(|e| fail(e));
+        regions.serve().unwrap_or_else(|e| fail(e));
+    }
+    if !settled {
         eprintln!("timed out at results_done = {:?}", device.results_done());
         exit(1);
     }
-    device.await_idle(1_000_000).expect("quiesce");
     let wall = started.elapsed().as_secs_f64() * 1e3;
 
-    let telemetry = device.telemetry().expect("telemetry");
+    let telemetry = device.telemetry().unwrap_or_else(|e| fail(e));
 
     // ---- the verdict ----
-    let ring = get(&mut ddr, ring_off, entries * RESULT_WORDS);
+    let ring = regions.read(RING, 0, entries).unwrap_or_else(|e| fail(e));
     let mut results = vec![
         GepResult { fitness: 0, entry_id: 0, seq: 0 };
         entries
     ];
-    warp11_runtime::gep::parse_results(&ring, &mut results);
+    warp11_runtime::gep::parse_results(&seam, &ring, &mut results);
 
     // Diagnostics that earned their keep: 2026-08-19's silicon failure showed
     // 64 distinct entry ids, sequence numbers in order, and NOT ONE fitness
@@ -254,9 +161,10 @@ fn main() {
         }
     }
 
+    let written = regions.read(POPULATION, dest_base, entries).unwrap_or_else(|e| fail(e));
     let mut genome_ok = 0;
     for e in 0..entries {
-        let got = get(&mut ddr, pop_off + (dest_base + e) * record_words * 4, record_words);
+        let got = &written[e * record_words..(e + 1) * record_words];
         let want = &expected_genomes[e * record_words..(e + 1) * record_words];
         if got == want {
             genome_ok += 1;
@@ -266,12 +174,12 @@ fn main() {
     }
 
     let cycles = telemetry.cycle_count as f64;
-    let fabric_ms = cycles / (PL_CLOCK_MHZ * 1e3);
+    let fabric_ms = cycles / (fabric_mhz * 1e3);
 
     println!();
     println!("fabric   {:>10.0} cycles   {fabric_ms:>8.3} ms   ({:.1} us/offspring)",
         cycles, fabric_ms * 1e3 / entries as f64);
-    println!("wall     {wall:>19.3} ms   (includes staging + AXI-Lite polling)");
+    println!("wall     {wall:>19.3} ms   (includes the register polling)");
     println!("stalls   feed {} breeder {} | busy fill {} pack {} emit {}",
         telemetry.feed_stall_cycles, telemetry.breeder_stall_cycles,
         telemetry.fill_busy_cycles, telemetry.pack_busy_cycles, telemetry.emit_busy_cycles);
@@ -279,11 +187,11 @@ fn main() {
         telemetry.busy_breeder_cycles as f64 / cycles,
         telemetry.busy_lane_cycles as f64 / cycles);
 
-    for b in 0..layout::N_BREEDERS {
+    for b in 0..seam.n_breeders {
         print!(" b{b} {:.0}%", 100.0 * device.breeder_busy(b).unwrap_or(0) as f64 / cycles);
     }
     println!();
-    for l in 0..layout::N_LANES {
+    for l in 0..seam.n_lanes {
         print!(" l{l} {:.0}%", 100.0 * device.lane_busy(l).unwrap_or(0) as f64 / cycles);
     }
     println!();
@@ -291,10 +199,14 @@ fn main() {
     println!("fitness  {fitness_ok}/{entries} bit-exact vs the software chain");
     println!("genomes  {genome_ok}/{entries} bit-exact writebacks");
 
-    // Disarm before anyone unloads the bitstream: a master with writes in
-    // flight at teardown permanently skews the PS HP0 pairing until reboot.
-    device.publish(0).expect("disarm");
-    device.await_idle(1_000_000).ok();
+    // Nothing published and the regions disarmed before anyone unloads the
+    // bitstream: a master with writes in flight at teardown permanently
+    // skews the PS HP0 pairing until reboot.
+    device.publish(0).unwrap_or_else(|e| fail(e));
+    if let Err(e) = connection.close() {
+        eprintln!("disarm failed: {e} — do not unload the app until it is disarmed");
+        exit(1);
+    }
 
     if fitness_ok == entries && genome_ok == entries {
         println!("\nFIRST LIGHT OK");

@@ -19,10 +19,11 @@ pub mod batch;
 pub mod region;
 pub mod frame;
 pub mod gep;
-/// The generated register maps — emitted by hdl's `dotnet run --
-/// hardware`, committed here so the driver's diff shows layout changes. The
-/// one place the two languages agree on offsets.
-pub mod gep_layout;
+/// The names every build of the cluster states, as a type — emitted by hdl's
+/// `dotnet run --project Warp11.Gep -- hardware` and committed, so the
+/// compiler checks the driver's names. The numbers are each build's own
+/// seam, read when a host connects.
+pub mod gep_seam;
 
 /// Byte offsets of the AXI-Lite register file. Both the elaborated slave and the
 /// driver below index by these.

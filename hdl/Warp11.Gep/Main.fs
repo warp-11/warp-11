@@ -2326,20 +2326,21 @@ let main argv =
         0
     | [| "hardware"; repoRoot |] ->
         // The seam: the silicon config's Verilog where Vivado sources it, and
-        // the generated Rust layout where the driver owns it. Both come off the
-        // one register map the slave is elaborated from.
+        // the names every build of the cluster states, as the Rust type the
+        // driver is compiled against. Both come off the one register map the
+        // slave is elaborated from; the numbers are each build directory's.
         let buildDir = System.IO.Path.Combine(repoRoot, "hardware", "build")
         let runtimeSrc = System.IO.Path.Combine(repoRoot, "runtime", "core", "src")
         System.IO.Directory.CreateDirectory buildDir |> ignore
         let verilogPath = System.IO.Path.Combine(buildDir, "GepClusterAxi.v")
-        let layoutPath = System.IO.Path.Combine(runtimeSrc, "gep_layout.rs")
+        let layoutPath = System.IO.Path.Combine(runtimeSrc, "gep_seam.rs")
         let started = System.Diagnostics.Stopwatch.StartNew()
         let verilog = emitDesign ClusterAxi.clusterAxiSilicon.Value.top
         System.IO.File.WriteAllText(verilogPath, verilog + "\n")
 
         System.IO.File.WriteAllText(
             layoutPath,
-            String.concat "\n" (ClusterAxi.clusterLayoutRs ())
+            String.concat "\n" (ClusterAxi.clusterSeamNamesRs ()) + "\n"
         )
 
         printfn $"wrote {verilogPath} ({verilog.Length / 1024} KiB, {started.ElapsedMilliseconds} ms)"
@@ -2370,7 +2371,8 @@ let main argv =
     // second at this shape (measured 2026-11-07), a few seconds a generation
     // at a small population.
     | [| "simserve" |] ->
-        BoardTop.ddrServe ClusterAxi.clusterAxiSilicon.Value.top [] [] (4 <<< 20) 16 "GEPSERVE"
+        let t = ClusterAxi.clusterAxiSilicon.Value
+        BoardTop.ddrServe t.top t.registers (BoardTop.seamLines t) (4 <<< 20) 16 "GEPSERVE"
         0
     // The streaming loop's vector: a population, cases, the policy, and the
     // mirror's answer for every generation — the op-list the fabric must
@@ -2378,10 +2380,20 @@ let main argv =
     // offspring it must write back, their fitness — so the host loop is
     // judged against the same oracle the Sim checks are, generation by
     // generation, in the Sim and on the board alike.
-    | [| "streamvector"; dir; gensText |] ->
+    //
+    // `streamvector <dir> <gens>` is for the silicon shape; a fourth word
+    // names another build's — `icepi` — since the symbol sets are the
+    // shape's and the mirror must draw from the same ones.
+    | [| "streamvector"; dir; gensText |]
+    | [| "streamvector"; dir; gensText; _ |] ->
         System.IO.Directory.CreateDirectory dir |> ignore
         let gens = int gensText
-        let config = ClusterAxi.clusterSiliconConfig
+
+        let config =
+            match argv with
+            | [| _; _; _; "icepi" |] -> ClusterAxi.clusterIcepiConfig
+            | [| _; _; _ |] -> ClusterAxi.clusterSiliconConfig
+            | _ -> failwith $"streamvector: no shape called '{argv[3]}' — icepi, or nothing for the silicon shape"
         let popSize = 16
         let nCases = 32
         let rng = GepRng(2_026_1107L)

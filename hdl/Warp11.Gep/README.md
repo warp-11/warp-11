@@ -58,23 +58,29 @@ dotnet run -c Release --project Warp11.Gep -- problems        # symbolic regress
 dotnet run -c Release --project Warp11.Gep -- diff <dir>      # differential testbenches
 ```
 
-The KV260 directory — block design, overlay, packaging, the Rust seam — and
-the committed seam alone:
+A build directory for each board — the KV260's block design, overlay and
+packaging, the Icepi's open flow, the seam either way — and the names the
+Rust driver is compiled against:
 
 ```sh
-dotnet run -c Release --project Warp11.Gep -- build out/      # then out/build.sh; the app is gep-cluster-axi
-dotnet run -c Release --project Warp11.Gep -- hardware <repo-root>
+dotnet run -c Release --project Warp11.Gep -- build out/      # the KV260, 8x4x2; then out/build.sh; the app is gep-cluster-axi
+dotnet run -c Release --project Warp11.Gep -- icepi out/      # the Icepi, 1x1, its regions over the link
+dotnet run -c Release --project Warp11.Gep -- hardware <repo-root>   # runtime/core/src/gep_seam.rs
 ```
 
-Then `gep_cluster_first_light <vector-dir>` on the board for one
+Then `gep_cluster_first_light <vector-dir> --board <build-dir>` for one
 queue-mode pass against `-- boardvector <dir>`, and the whole streaming
 loop — emit, marshal, breed, generation after generation — against the
-mirror's answer:
+mirror's answer. The host is the same on every board: it is handed the
+build directory (or the seam file out of it), which says how the build is
+reached and where its regions are.
 
 ```sh
-dotnet run -c Release --project Warp11.Gep -- streamvector vec/ 6          # the oracle, six generations
+dotnet run -c Release --project Warp11.Gep -- streamvector vec/ 6          # the oracle, six generations, the silicon shape
+dotnet run -c Release --project Warp11.Gep -- streamvector vec/ 6 icepi    # ...for the Icepi's shape
 (cd ../runtime && cargo run --bin gep_cluster_evolve -- ../hdl/vec --sim)  # the same loop against the Sim, through the bridge
-./gep_cluster_evolve vec/                                                  # and on the board
+./gep_cluster_evolve vec/ --board gep_cluster_axi_layout.rs                # on the KV260
+gep_cluster_evolve vec/ --board out/ --port /dev/ttyUSB0                   # on the Icepi, from the PC
 ```
 
 `gep_cluster_evolve` prints, per generation, how many op-list entries,

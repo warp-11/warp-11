@@ -18,78 +18,64 @@
 //!
 //! The fabric resets its region flag at every start, so the host keeps the
 //! current population in the first half of the region and the offspring
-//! land in the second, every generation. Written once over [`RegisterWindow`]
-//! and a [`Ddr`], so the same loop runs against the F# Sim through the
-//! `simserve` bridge and against the KV260's `u-dma-buf`.
+//! land in the second, every generation. Written once over a
+//! [`RegisterWindow`] and a [`Regions`] — what a `Connection` hands over —
+//! so the same loop runs against the F# Sim, the KV260's memory and a board
+//! that keeps its regions over a serial link.
 
 use std::time::{Duration, Instant};
-use warp11_runtime::gep::{
-    marshal_serial, parse_results, BreedRates, GepClusterDevice, GepError, GepResult, ENTRY_WORDS, RECORD_WORDS, RESULT_WORDS,
-    WORK_ITEM_WORDS,
-};
-use warp11_runtime::gep_layout as layout;
+use warp11_runtime::gep::{marshal_serial, parse_results, BreedRates, GepClusterDevice, GepError, GepResult};
+use std::path::Path;
+use warp11_runtime::gep_seam::GepSeam;
 use warp11_runtime::RegisterWindow;
 
-/// Bulk memory the fabric's masters share with the host, by byte offset
-/// within the arena.
-pub trait Ddr {
-    type Error: std::fmt::Debug;
-    fn read_words(&mut self, offset: usize, words: usize) -> Result<Vec<u32>, Self::Error>;
-    fn write_words(&mut self, offset: usize, words: &[u32]) -> Result<(), Self::Error>;
-    /// Let the fabric run while the host waits — the Sim advances only when
-    /// asked; silicon ignores it.
-    fn idle(&mut self) -> Result<(), Self::Error> {
-        Ok(())
+use crate::connection::{Connection, Window};
+use crate::regions::Regions;
+
+/// The cluster's regions, as its design names them.
+pub const QUEUE: &str = "queue";
+pub const POPULATION: &str = "population";
+pub const RING: &str = "ring";
+pub const OPLIST: &str = "oplist";
+
+/// How the cluster's tools say what to connect to, after their own
+/// arguments.
+pub const CONNECT_USAGE: &str = "(--board <build-dir> [--port <tty>] | --sim [fsproj])";
+
+/// The cluster a tool was pointed at: a board by the build directory of
+/// what is loaded on it, with the serial line where it is reached over one,
+/// or the silicon shape in the Sim behind `Warp11.Gep -- simserve`.
+pub fn connect(args: &[String]) -> Result<Connection, String> {
+    let value = |flag: &str| args.iter().position(|a| a == flag).map(|at| args.get(at + 1).filter(|v| !v.starts_with("--")));
+    match (value("--board"), value("--sim")) {
+        (Some(Some(build)), None) => Connection::board(Path::new(build), value("--port").flatten().map(Path::new)),
+        (None, Some(fsproj)) => {
+            let fsproj = fsproj.map(String::as_str).unwrap_or("../hdl/Warp11.Gep/Warp11.Gep.fsproj");
+            Connection::sim(Path::new(fsproj), &["simserve"], "GEPSERVE")
+        }
+        _ => Err(format!("say what to connect to: {CONNECT_USAGE}")),
     }
 }
 
-/// Where the regions sit in the arena — the build's placement, read off the
-/// seam — and the address the fabric sees for the arena's first byte, which
-/// the driver arms it with.
-#[derive(Clone, Copy, Debug)]
-pub struct Arena {
-    pub phys_base: u32,
-    pub queue: usize,
-    pub pop: usize,
-    pub ring: usize,
-    pub oplist: usize,
+/// The cluster's driver over a connection, refusing a build of anything
+/// else by the name its seam lacks.
+pub fn device(connection: &Connection) -> Result<GepClusterDevice<Window>, String> {
+    let seam = GepSeam::read(|name| connection.seam.number(name))
+        .map_err(|name| format!("{}: no {name} — is this a build of the GEP cluster?", connection.seam.source))?;
+    Ok(GepClusterDevice::new(connection.window.clone(), seam))
 }
 
-impl Arena {
-    /// The regions where the build put them, in an arena the fabric sees at
-    /// `phys_base`.
-    pub fn placed(phys_base: u32) -> Self {
-        Arena {
-            phys_base,
-            queue: layout::QUEUE_REGION_OFFSET,
-            pop: layout::POPULATION_REGION_OFFSET,
-            ring: layout::RING_REGION_OFFSET,
-            oplist: layout::OPLIST_REGION_OFFSET,
+/// Whether a run of `pop` individuals fits the regions the build sized: a
+/// queue item, a ring record and an op-list entry each, and both halves of
+/// the population.
+pub fn holds(regions: &dyn Regions, pop: usize) -> Result<(), String> {
+    for (region, wanted) in [(QUEUE, pop), (POPULATION, 2 * pop), (RING, pop), (OPLIST, pop)] {
+        let records = regions.records(region)?;
+        if wanted > records {
+            return Err(format!("a population of {pop} wants {wanted} records of '{region}', and the build gave it {records}"));
         }
     }
-
-    /// The bytes from the arena's start to the end of its last region.
-    pub fn bytes_needed(&self) -> usize {
-        self.oplist + layout::OPLIST_RECORDS * layout::OPLIST_STRIDE_BYTES
-    }
-
-    /// Whether a run of `pop` individuals fits the regions the build sized:
-    /// a queue item, a ring record and an op-list entry each, and both
-    /// halves of the population.
-    pub fn holds(&self, pop: usize) -> Result<(), String> {
-        let limits = [
-            ("queue", layout::QUEUE_RECORDS, pop),
-            ("population", layout::POPULATION_RECORDS, 2 * pop),
-            ("ring", layout::RING_RECORDS, pop),
-            ("oplist", layout::OPLIST_RECORDS, pop),
-        ];
-        for (region, records, wanted) in limits {
-            if wanted > records {
-                return Err(format!("a population of {pop} wants {wanted} records of '{region}', and the build gave it {records}"));
-            }
-        }
-        Ok(())
-    }
+    Ok(())
 }
 
 /// The run's policy: the breeding rates, the selection seed, the cases.
@@ -103,11 +89,11 @@ pub struct Policy<'a> {
 /// One generation as the fabric produced it.
 #[derive(Clone, Debug, Default)]
 pub struct Generation {
-    /// The op-list the emit pass wrote: `pop` entries of `RECORD_WORDS`.
+    /// The op-list the emit pass wrote: `pop` entries.
     pub oplist: Vec<u32>,
     /// Offspring fitness by entry id.
     pub fitness: Vec<u64>,
-    /// Offspring genomes by entry id, `RECORD_WORDS` each: the next population.
+    /// Offspring genomes by entry id, a record each: the next population.
     pub genomes: Vec<u32>,
     pub emit: Duration,
     pub marshal: Duration,
@@ -118,55 +104,74 @@ pub struct Generation {
 }
 
 #[derive(Debug)]
-pub enum EvolveError<W, D> {
+pub enum EvolveError<W> {
     Device(GepError<W>),
-    Ddr(D),
+    Regions(String),
     /// The ring came back with an entry id outside the population.
     StrayEntry(u32),
 }
 
-impl<W, D> From<GepError<W>> for EvolveError<W, D> {
+impl<W> From<GepError<W>> for EvolveError<W> {
     fn from(e: GepError<W>) -> Self {
         EvolveError::Device(e)
     }
 }
 
-/// Poll `done` until it answers true, idling the DDR side between polls so a
-/// Sim advances; `polls` is the budget.
-fn await_with<W: RegisterWindow, D: Ddr>(
-    ddr: &mut D,
-    polls: u32,
+/// Poll `done` until it answers true, serving the regions between polls —
+/// which is where a link's requests are answered and a Sim advances.
+/// `patience` is how long to keep at it.
+fn await_with<W: RegisterWindow>(
+    regions: &mut dyn Regions,
+    patience: Duration,
     mut done: impl FnMut() -> Result<bool, W::Error>,
-) -> Result<(), EvolveError<W::Error, D::Error>> {
-    for _ in 0..polls {
+) -> Result<(), EvolveError<W::Error>> {
+    let began = Instant::now();
+    while began.elapsed() < patience {
         if done().map_err(|e| EvolveError::Device(GepError::Window(e)))? {
             return Ok(());
         }
-        ddr.idle().map_err(EvolveError::Ddr)?;
+        regions.serve().map_err(EvolveError::Regions)?;
     }
     Err(EvolveError::Device(GepError::Timeout))
+}
+
+/// Every offspring's fitness by entry id, from the ring.
+fn fitness_by_entry<W: RegisterWindow>(
+    device: &GepClusterDevice<W>,
+    regions: &mut dyn Regions,
+    pop: usize,
+) -> Result<Vec<u64>, EvolveError<W::Error>> {
+    let ring = regions.read(RING, 0, pop).map_err(EvolveError::Regions)?;
+    let mut results = vec![GepResult { fitness: 0, entry_id: 0, seq: 0 }; pop];
+    parse_results(device.seam(), &ring, &mut results);
+    let mut fitness = vec![0u64; pop];
+    for r in &results {
+        match fitness.get_mut(r.entry_id as usize) {
+            Some(slot) => *slot = r.fitness,
+            None => return Err(EvolveError::StrayEntry(r.entry_id)),
+        }
+    }
+    Ok(fitness)
 }
 
 /// The whole loop: `generations` of emit, marshal, breed, from `population`
 /// (`pop` records), returning every generation's op-list, fitness and
 /// genomes. Generation 0's score-round fitness of the staged population
 /// comes back first, as `initial_fitness`.
-pub fn evolve<W: RegisterWindow, D: Ddr>(
+pub fn evolve<W: RegisterWindow>(
     device: &mut GepClusterDevice<W>,
-    ddr: &mut D,
-    arena: Arena,
+    regions: &mut dyn Regions,
     policy: &Policy,
     population: &[u32],
     generations: usize,
-    polls: u32,
-) -> Result<(Vec<u64>, Vec<Generation>), EvolveError<W::Error, D::Error>> {
-    let pop = population.len() / RECORD_WORDS;
-    device.arm(arena.phys_base).map_err(GepError::Window)?;
+    patience: Duration,
+) -> Result<(Vec<u64>, Vec<Generation>), EvolveError<W::Error>> {
+    let pop = population.len() / device.seam().record_words();
     let mut current: Vec<u32> = population.to_vec();
     let mut initial_fitness = Vec::new();
     let mut out = Vec::with_capacity(generations);
 
-    ddr.write_words(arena.pop, &current).map_err(EvolveError::Ddr)?;
+    regions.write(POPULATION, 0, &current).map_err(EvolveError::Regions)?;
 
     for g in 0..generations {
         let mut gen = Generation::default();
@@ -183,29 +188,19 @@ pub fn evolve<W: RegisterWindow, D: Ddr>(
             device.load_cases(&policy.cases).map_err(GepError::Window)?;
         }
         device.start(policy.cases.len() as u32).map_err(GepError::Window)?;
-        await_with::<W, D>(ddr, polls, || device.oplist_done())?;
-        await_with::<W, D>(ddr, polls, || device.all_idle())?;
-        gen.oplist = ddr.read_words(arena.oplist, pop * ENTRY_WORDS).map_err(EvolveError::Ddr)?;
+        await_with::<W>(regions, patience, || device.oplist_done())?;
+        await_with::<W>(regions, patience, || device.all_idle())?;
+        gen.oplist = regions.read(OPLIST, 0, pop).map_err(EvolveError::Regions)?;
         if g == 0 {
-            let ring = ddr.read_words(arena.ring, pop * RESULT_WORDS).map_err(EvolveError::Ddr)?;
-            let mut results = vec![GepResult { fitness: 0, entry_id: 0, seq: 0 }; pop];
-            parse_results(&ring, &mut results);
-            initial_fitness = vec![0u64; pop];
-            for r in &results {
-                if (r.entry_id as usize) < pop {
-                    initial_fitness[r.entry_id as usize] = r.fitness;
-                } else {
-                    return Err(EvolveError::StrayEntry(r.entry_id));
-                }
-            }
+            initial_fitness = fitness_by_entry(device, regions, pop)?;
         }
         gen.emit = t.elapsed();
 
         // ---- marshal ----
         let t = Instant::now();
-        let mut items = vec![0u32; pop * WORK_ITEM_WORDS];
-        marshal_serial(&gen.oplist, pop, &current, &mut items);
-        ddr.write_words(arena.queue, &items).map_err(EvolveError::Ddr)?;
+        let mut items = vec![0u32; pop * device.seam().work_item_words()];
+        marshal_serial(device.seam(), &gen.oplist, pop, &current, &mut items);
+        regions.write(QUEUE, 0, &items).map_err(EvolveError::Regions)?;
         gen.marshal = t.elapsed();
 
         // ---- breed ----
@@ -213,27 +208,15 @@ pub fn evolve<W: RegisterWindow, D: Ddr>(
         device.set_auto_mode(false).map_err(GepError::Window)?;
         device.start(policy.cases.len() as u32).map_err(GepError::Window)?;
         device.publish(pop as u32).map_err(GepError::Window)?;
-        await_with::<W, D>(ddr, polls, || Ok(device.results_done()? >= pop as u32))?;
-        await_with::<W, D>(ddr, polls, || device.all_idle())?;
+        await_with::<W>(regions, patience, || Ok(device.results_done()? >= pop as u32))?;
+        await_with::<W>(regions, patience, || device.all_idle())?;
         gen.breed_cycles = device.telemetry().map_err(GepError::Window)?.cycle_count;
         gen.breed = t.elapsed();
 
         // ---- harvest ----
         let t = Instant::now();
-        let ring = ddr.read_words(arena.ring, pop * RESULT_WORDS).map_err(EvolveError::Ddr)?;
-        let mut results = vec![GepResult { fitness: 0, entry_id: 0, seq: 0 }; pop];
-        parse_results(&ring, &mut results);
-        gen.fitness = vec![0u64; pop];
-        for r in &results {
-            if (r.entry_id as usize) < pop {
-                gen.fitness[r.entry_id as usize] = r.fitness;
-            } else {
-                return Err(EvolveError::StrayEntry(r.entry_id));
-            }
-        }
-        gen.genomes = ddr
-            .read_words(arena.pop + pop * layout::POPULATION_STRIDE_BYTES, pop * RECORD_WORDS)
-            .map_err(EvolveError::Ddr)?;
+        gen.fitness = fitness_by_entry(device, regions, pop)?;
+        gen.genomes = regions.read(POPULATION, pop, pop).map_err(EvolveError::Regions)?;
         gen.harvest = t.elapsed();
 
         // The offspring are the next generation: in the host's copy, and in
@@ -241,80 +224,12 @@ pub fn evolve<W: RegisterWindow, D: Ddr>(
         // anything reading it even though the next emit pass, skipping the
         // score, reads nothing from it.
         current = gen.genomes.clone();
-        ddr.write_words(arena.pop, &current).map_err(EvolveError::Ddr)?;
-        // Disarm between passes, so nothing is in flight at teardown.
+        regions.write(POPULATION, 0, &current).map_err(EvolveError::Regions)?;
+        // No entries published between passes, so nothing is in flight at
+        // teardown.
         device.publish(0).map_err(GepError::Window)?;
         out.push(gen);
     }
 
     Ok((initial_fitness, out))
-}
-
-/// The bridge as both halves: registers and DDR through one `FsSimWindow`,
-/// each poll idling the fabric so a wait is cycles rather than spin.
-pub mod sim {
-    use super::Ddr;
-    pub use crate::arena::SIM_ARENA_BASE;
-    use crate::fs_sim_window::{FsSimError, FsSimWindow};
-    use std::cell::RefCell;
-    use std::rc::Rc;
-    use warp11_runtime::RegisterWindow;
-
-    #[derive(Clone)]
-    pub struct Shared(pub Rc<RefCell<FsSimWindow>>);
-
-    impl RegisterWindow for Shared {
-        type Error = FsSimError;
-
-        fn read32(&mut self, offset: usize) -> Result<u32, FsSimError> {
-            self.0.borrow_mut().read32(offset)
-        }
-
-        fn write32(&mut self, offset: usize, value: u32) -> Result<(), FsSimError> {
-            self.0.borrow_mut().write32(offset, value)
-        }
-    }
-
-    impl Ddr for Shared {
-        type Error = FsSimError;
-
-        fn read_words(&mut self, offset: usize, words: usize) -> Result<Vec<u32>, FsSimError> {
-            let bytes = self.0.borrow_mut().read_ddr(SIM_ARENA_BASE + offset, words * 4)?;
-            Ok(bytes.chunks(4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect())
-        }
-
-        fn write_words(&mut self, offset: usize, words: &[u32]) -> Result<(), FsSimError> {
-            let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
-            self.0.borrow_mut().write_ddr(SIM_ARENA_BASE + offset, &bytes)
-        }
-
-        fn idle(&mut self) -> Result<(), FsSimError> {
-            self.0.borrow_mut().free_cycles(2000)
-        }
-    }
-}
-
-/// A mapped `u-dma-buf` as the DDR: bulk copies through the mapping's bytes.
-pub mod board {
-    use super::Ddr;
-    use crate::mmap::MmapWindow;
-
-    pub struct Mapped(pub MmapWindow);
-
-    impl Ddr for Mapped {
-        type Error = std::convert::Infallible;
-
-        fn read_words(&mut self, offset: usize, words: usize) -> Result<Vec<u32>, Self::Error> {
-            let bytes = &self.0.bytes()[offset..offset + words * 4];
-            Ok(bytes.chunks(4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect())
-        }
-
-        fn write_words(&mut self, offset: usize, words: &[u32]) -> Result<(), Self::Error> {
-            let out = &mut self.0.bytes_mut()[offset..offset + words.len() * 4];
-            for (chunk, w) in out.chunks_mut(4).zip(words) {
-                chunk.copy_from_slice(&w.to_le_bytes());
-            }
-            Ok(())
-        }
-    }
 }

@@ -59,7 +59,7 @@ dotnet run $P -- problems                # symbolic regression + classification
 dotnet run $P -- srbench                 # the Feynman starter set, fixed budget
 dotnet run $P -- srbench-seeds I.12.2 40 # ...as a seed distribution (see below)
 dotnet run $P -- sweep "4x8x2@32/256"    # breeders x lanes x fillers @ latency/cases
-dotnet run $P -- hardware <repo-root>    # the silicon seam: RTL + gep_layout.rs
+dotnet run $P -- hardware <repo-root>    # the silicon RTL + gep_seam.rs, the seam's names as a Rust type
 dotnet run $P -- boardvector <dir> [n]   # a first-light vector with its answers
 dotnet run $P -- emit-cluster <dir>      # one .v per arrangement, for linting
 dotnet run $P -- debug <label>           # a debugger on one design; an unknown label lists them

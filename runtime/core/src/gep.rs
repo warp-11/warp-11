@@ -1,13 +1,13 @@
 //! The WarpCPU genetic-programming cluster's driver — the host half of the
-//! streaming redesign, written once against [`RegisterWindow`] so the same code
-//! runs against the F# Sim through a bridge and against `/dev/mem` on the
-//! KV260.
+//! streaming redesign, written once against [`RegisterWindow`] and the
+//! cluster's seam ([`GepSeam`]), so the same code runs against the F# Sim,
+//! a board with the host's memory behind it and a board on a serial link.
 //!
-//! Almost nothing crosses AXI-Lite: the population, the pairing entries, the
-//! op-list and the result ring all live in PS DDR, and the fitness table never
-//! leaves the fabric at all. This driver owns the *control* flow — program the
-//! bases, broadcast the fitness cases, publish entries, poll — while the bulk
-//! path is whatever the caller's DDR buffer is.
+//! Almost nothing crosses the registers: the population, the pairing
+//! entries, the op-list and the result ring are regions, carried however
+//! the board carries them, and the fitness table never leaves the fabric at
+//! all. This driver owns the *control* flow — broadcast the fitness cases,
+//! publish entries, poll — and the shape of the records.
 //!
 //! The generation loop has two shapes, and both are here:
 //!
@@ -22,7 +22,7 @@
 //!   `skip_score` and `rng_continue` carry the fitness table and the selection
 //!   RNG stream across those passes.
 
-use crate::gep_layout as layout;
+use crate::gep_seam::GepSeam;
 use crate::RegisterWindow;
 
 /// What can go wrong talking to the cluster, independent of the backend.
@@ -33,16 +33,6 @@ pub enum GepError<E> {
     Timeout,
     /// The window itself failed.
     Window(E),
-    /// The identity register did not answer with this design's magic. Almost
-    /// always a stale bitstream or a wrong base address — both of which
-    /// otherwise present as plausible rubbish at every other offset, since an
-    /// unmapped read inside the aperture returns zero rather than faulting.
-    WrongId { found: u32 },
-    /// The right design, built from a different revision of the register map.
-    /// Every offset in this driver would be off, and each read would succeed —
-    /// which is why this is checked rather than trusted. Rebuild the bitstream,
-    /// or rebuild the driver against the layout the bitstream was made from.
-    WrongLayout { found: u32, expected: u32 },
 }
 
 impl<E> From<E> for GepError<E> {
@@ -51,14 +41,26 @@ impl<E> From<E> for GepError<E> {
     }
 }
 
-/// The record geometry, read off the regions the seam places — the build's,
+/// The record geometry, read off the regions the seam states — the build's,
 /// not this driver's. A gene record and a pairing entry are both 16 words; a
-/// work item is an entry and two gene records on the queue's stride.
-pub const RECORD_WORDS: usize = layout::POPULATION_RECORD_BYTES / 4;
-pub const ENTRY_WORDS: usize = layout::QUEUE_PARENT_A_RECORD_OFFSET / 4;
-pub const WORK_ITEM_WORDS: usize = layout::QUEUE_STRIDE_BYTES / 4;
-pub const WORK_ITEM_PAYLOAD_WORDS: usize = layout::QUEUE_RECORD_BYTES / 4;
-pub const RESULT_WORDS: usize = layout::RING_STRIDE_BYTES / 4;
+/// work item is an entry and two gene records.
+impl GepSeam {
+    pub fn record_words(&self) -> usize {
+        self.population_record_bytes / 4
+    }
+
+    pub fn entry_words(&self) -> usize {
+        self.queue_parent_a_record_offset / 4
+    }
+
+    pub fn work_item_words(&self) -> usize {
+        self.queue_record_bytes / 4
+    }
+
+    pub fn result_words(&self) -> usize {
+        self.ring_record_bytes / 4
+    }
+}
 
 /// One breeding policy, already quantized the way the fabric reads it: nine
 /// gates as their top 16 bits packed two per word, plus the two spans the creep
@@ -113,27 +115,27 @@ pub struct Pairing {
 /// Pack a pairing into its 16-word DDR entry record. This layout is shared
 /// three ways — the fabric's filler reads it, the fabric's op-list emitter
 /// writes it, and this function produces it — so it is spelled once, here.
-pub fn pack_entry(p: &Pairing, rates: &BreedRates, out: &mut [u32]) {
+pub fn pack_entry(seam: &GepSeam, p: &Pairing, rates: &BreedRates, out: &mut [u32]) {
     let flags = if p.skip_writeback {
-        layout::FLAG_SKIP_WRITEBACK
+        seam.flag_skip_writeback
     } else {
         0
     };
 
-    out[layout::QUEUE_PARENT_A_OFFSET / 4] = p.parent_a;
-    out[layout::QUEUE_PARENT_B_OFFSET / 4] = p.parent_b;
-    out[layout::QUEUE_DEST_OFFSET / 4] = p.dest;
-    out[layout::QUEUE_RATES0_OFFSET / 4] = rates.words[0];
-    out[layout::QUEUE_RATES1_OFFSET / 4] = rates.words[1];
-    out[layout::QUEUE_RATES2_OFFSET / 4] = rates.words[2];
-    out[layout::QUEUE_RATES3_OFFSET / 4] = rates.words[3];
-    out[layout::QUEUE_RECOMB_FLAGS_OFFSET / 4] = (rates.words[4] & 0xFFFF) | (flags << 16);
-    out[layout::QUEUE_SIGMA_OFFSET / 4] = rates.sigma_fx;
-    out[layout::QUEUE_RANGE_OFFSET / 4] = rates.range_fx;
-    out[layout::QUEUE_ENTRY_ID_OFFSET / 4] = p.entry_id;
-    out[layout::QUEUE_RESERVED_OFFSET / 4] = 0;
-    let seed = layout::QUEUE_SEED_OFFSET / 4;
-    out[seed..seed + layout::QUEUE_SEED_WORDS].copy_from_slice(&p.seed);
+    out[seam.queue_parent_a_offset / 4] = p.parent_a;
+    out[seam.queue_parent_b_offset / 4] = p.parent_b;
+    out[seam.queue_dest_offset / 4] = p.dest;
+    out[seam.queue_rates0_offset / 4] = rates.words[0];
+    out[seam.queue_rates1_offset / 4] = rates.words[1];
+    out[seam.queue_rates2_offset / 4] = rates.words[2];
+    out[seam.queue_rates3_offset / 4] = rates.words[3];
+    out[seam.queue_recomb_flags_offset / 4] = (rates.words[4] & 0xFFFF) | (flags << 16);
+    out[seam.queue_sigma_offset / 4] = rates.sigma_fx;
+    out[seam.queue_range_offset / 4] = rates.range_fx;
+    out[seam.queue_entry_id_offset / 4] = p.entry_id;
+    out[seam.queue_reserved_offset / 4] = 0;
+    let seed = seam.queue_seed_offset / 4;
+    out[seed..seed + seam.queue_seed_words].copy_from_slice(&p.seed);
 }
 
 /// One fitness-ring record as the fabric writes it.
@@ -145,14 +147,14 @@ pub struct GepResult {
 }
 
 /// Parse `count` ring records out of a word buffer.
-pub fn parse_results(words: &[u32], out: &mut [GepResult]) {
+pub fn parse_results(seam: &GepSeam, words: &[u32], out: &mut [GepResult]) {
     for (r, slot) in out.iter_mut().enumerate() {
-        let base = r * RESULT_WORDS;
-        let fitness = base + layout::RING_FITNESS_OFFSET / 4;
+        let base = r * seam.result_words();
+        let fitness = base + seam.ring_fitness_offset / 4;
         *slot = GepResult {
             fitness: (words[fitness + 1] as u64) << 32 | words[fitness] as u64,
-            entry_id: words[base + layout::RING_RESULT_ENTRY_ID_OFFSET / 4],
-            seq: words[base + layout::RING_SEQ_OFFSET / 4],
+            entry_id: words[base + seam.ring_result_entry_id_offset / 4],
+            seq: words[base + seam.ring_seq_offset / 4],
         };
     }
 }
@@ -165,23 +167,21 @@ pub fn parse_results(words: &[u32], out: &mut [GepResult]) {
 /// Pure memory movement over disjoint output ranges, which is why the Kotlin
 /// side could parallelize it without a lock. This is the serial form; it is the
 /// definition the parallel one has to agree with.
-pub fn marshal_serial(op_list: &[u32], item_count: usize, population: &[u32], out: &mut [u32]) {
+pub fn marshal_serial(seam: &GepSeam, op_list: &[u32], item_count: usize, population: &[u32], out: &mut [u32]) {
+    let (entry, item, record) = (seam.entry_words(), seam.work_item_words(), seam.record_words());
     for i in 0..item_count {
-        let src = i * ENTRY_WORDS;
-        let dst = i * WORK_ITEM_WORDS;
-        out[dst..dst + ENTRY_WORDS].copy_from_slice(&op_list[src..src + ENTRY_WORDS]);
-        // The tail of the padded stride is never read by the fabric; zero it so
-        // a stale buffer cannot look like data if that ever changes.
-        out[dst + WORK_ITEM_PAYLOAD_WORDS..dst + WORK_ITEM_WORDS].fill(0);
+        let src = i * entry;
+        let dst = i * item;
+        out[dst..dst + entry].copy_from_slice(&op_list[src..src + entry]);
 
         let parents = [
-            (op_list[src + layout::QUEUE_PARENT_A_OFFSET / 4] as usize, layout::QUEUE_PARENT_A_RECORD_OFFSET / 4),
-            (op_list[src + layout::QUEUE_PARENT_B_OFFSET / 4] as usize, layout::QUEUE_PARENT_B_RECORD_OFFSET / 4),
+            (op_list[src + seam.queue_parent_a_offset / 4] as usize, seam.queue_parent_a_record_offset / 4),
+            (op_list[src + seam.queue_parent_b_offset / 4] as usize, seam.queue_parent_b_record_offset / 4),
         ];
         for (slot, at) in parents {
-            let from = slot * RECORD_WORDS;
+            let from = slot * record;
             let to = dst + at;
-            out[to..to + RECORD_WORDS].copy_from_slice(&population[from..from + RECORD_WORDS]);
+            out[to..to + record].copy_from_slice(&population[from..from + record]);
         }
     }
 }
@@ -206,41 +206,19 @@ pub struct GepTelemetry {
 
 pub struct GepClusterDevice<W> {
     window: W,
+    seam: GepSeam,
 }
 
 impl<W: RegisterWindow> GepClusterDevice<W> {
-    /// Open the device, checking it is the design this driver was generated
-    /// against. Offsets in the cluster map are allocated rather than fixed, so
-    /// a driver meeting a bitstream built from a different revision of the map
-    /// would read every register at the wrong address — and read it
-    /// successfully. This is the one read that says so.
-    pub fn open(mut window: W) -> Result<Self, GepError<W::Error>> {
-        let found = window.read32(layout::ID_OFFSET)?;
-
-        if found != layout::ID_VALUE {
-            return Err(GepError::WrongId { found });
-        }
-
-        // The identity says this is the right design; the fingerprint says it
-        // is the right revision of its register map. Offsets here are
-        // allocated, so a map that gained a register moved every address after
-        // it — and the reads would all still succeed.
-        let found = window.read32(layout::LAYOUT_HASH_OFFSET)?;
-
-        if found != layout::LAYOUT_HASH_VALUE {
-            return Err(GepError::WrongLayout {
-                found,
-                expected: layout::LAYOUT_HASH_VALUE,
-            });
-        }
-
-        Ok(GepClusterDevice { window })
+    /// The cluster behind a window, with the seam of the build that window
+    /// reaches. Whether it is the right build is the connection's to check,
+    /// where the seam states an identity to check it by.
+    pub fn new(window: W, seam: GepSeam) -> Self {
+        GepClusterDevice { window, seam }
     }
 
-    /// Without the identity check — for a bring-up window that is not answering
-    /// yet, or a test harness standing in for the fabric.
-    pub fn new(window: W) -> Self {
-        GepClusterDevice { window }
+    pub fn seam(&self) -> &GepSeam {
+        &self.seam
     }
 
     pub fn window(&mut self) -> &mut W {
@@ -251,20 +229,12 @@ impl<W: RegisterWindow> GepClusterDevice<W> {
         Ok((self.window.read32(offset)? & mask) >> shift)
     }
 
-    /// Tell the fabric where the arena is — the address its masters see for
-    /// the arena's first byte. Every region sits at the offset the seam gives
-    /// from there; zero disarms them, which is what to write before the
-    /// bitstream is unloaded.
-    pub fn arm(&mut self, arena_base: u32) -> Result<(), W::Error> {
-        self.window.write32(layout::REGIONS_BASE_OFFSET, arena_base)
-    }
-
     /// Program the case count, then pulse start — which frees every breeder
-    /// and zeroes every counter. The arena must be armed first.
+    /// and zeroes every counter.
     pub fn start(&mut self, n_cases: u32) -> Result<(), W::Error> {
-        self.window.write32(layout::N_CASES_OFFSET, n_cases)?;
+        self.window.write32(self.seam.n_cases_offset, n_cases)?;
         self.window
-            .write32(layout::START_QUEUE_OFFSET, 1 << layout::START_QUEUE_BIT)
+            .write32(self.seam.start_queue_offset, 1 << self.seam.start_queue_bit)
     }
 
     /// Broadcast the epoch's fitness cases into every lane's resident table.
@@ -272,13 +242,13 @@ impl<W: RegisterWindow> GepClusterDevice<W> {
     /// caller's stride and the fabric's field index cannot drift apart.
     pub fn load_cases(&mut self, rows: &[&[u32]]) -> Result<(), W::Error> {
         for (index, row) in rows.iter().enumerate() {
-            self.window.write32(layout::CASE_ADDR_OFFSET, index as u32)?;
+            self.window.write32(self.seam.case_addr_offset, index as u32)?;
 
             for (field, value) in row.iter().enumerate() {
-                self.window.write32(layout::CASE_FIELD_OFFSET, field as u32)?;
-                self.window.write32(layout::CASE_DATA_OFFSET, *value)?;
+                self.window.write32(self.seam.case_field_offset, field as u32)?;
+                self.window.write32(self.seam.case_data_offset, *value)?;
                 self.window
-                    .write32(layout::LD_CASE_OFFSET, 1 << layout::LD_CASE_BIT)?;
+                    .write32(self.seam.ld_case_offset, 1 << self.seam.ld_case_bit)?;
             }
         }
 
@@ -289,22 +259,22 @@ impl<W: RegisterWindow> GepClusterDevice<W> {
     /// repeatedly while work is in flight — that is the trickle the run-forever
     /// mode is built on.
     pub fn publish(&mut self, entries: u32) -> Result<(), W::Error> {
-        self.window.write32(layout::ENTRIES_PUBLISHED_OFFSET, entries)
+        self.window.write32(self.seam.entries_published_offset, entries)
     }
 
     pub fn results_done(&mut self) -> Result<u32, W::Error> {
         self.field(
-            layout::RESULTS_DONE_OFFSET,
-            layout::RESULTS_DONE_SHIFT,
-            layout::RESULTS_DONE_MASK,
+            self.seam.results_done_offset,
+            self.seam.results_done_shift,
+            self.seam.results_done_mask,
         )
     }
 
     pub fn all_idle(&mut self) -> Result<bool, W::Error> {
         Ok(self.field(
-            layout::ALL_IDLE_OFFSET,
-            layout::ALL_IDLE_SHIFT,
-            layout::ALL_IDLE_MASK,
+            self.seam.all_idle_offset,
+            self.seam.all_idle_shift,
+            self.seam.all_idle_mask,
         )? == 1)
     }
 
@@ -336,20 +306,20 @@ impl<W: RegisterWindow> GepClusterDevice<W> {
 
     pub fn telemetry(&mut self) -> Result<GepTelemetry, W::Error> {
         Ok(GepTelemetry {
-            cycle_count: self.window.read32(layout::CYCLE_COUNT_OFFSET)?,
-            results_done: self.window.read32(layout::RESULTS_DONE_OFFSET)?,
-            entries_taken: self.window.read32(layout::ENTRIES_TAKEN_OFFSET)?,
-            feed_stall_cycles: self.window.read32(layout::FEED_STALL_CYCLES_OFFSET)?,
-            breeder_stall_cycles: self.window.read32(layout::BREEDER_STALL_CYCLES_OFFSET)?,
-            fill_busy_cycles: self.window.read32(layout::FILL_BUSY_CYCLES_OFFSET)?,
-            pack_busy_cycles: self.window.read32(layout::PACK_BUSY_CYCLES_OFFSET)?,
-            emit_busy_cycles: self.window.read32(layout::EMIT_BUSY_CYCLES_OFFSET)?,
-            busy_breeder_cycles: self.window.read32(layout::BUSY_BREEDER_CYCLES_OFFSET)?,
-            busy_lane_cycles: self.window.read32(layout::BUSY_LANE_CYCLES_OFFSET)?,
+            cycle_count: self.window.read32(self.seam.cycle_count_offset)?,
+            results_done: self.window.read32(self.seam.results_done_offset)?,
+            entries_taken: self.window.read32(self.seam.entries_taken_offset)?,
+            feed_stall_cycles: self.window.read32(self.seam.feed_stall_cycles_offset)?,
+            breeder_stall_cycles: self.window.read32(self.seam.breeder_stall_cycles_offset)?,
+            fill_busy_cycles: self.window.read32(self.seam.fill_busy_cycles_offset)?,
+            pack_busy_cycles: self.window.read32(self.seam.pack_busy_cycles_offset)?,
+            emit_busy_cycles: self.window.read32(self.seam.emit_busy_cycles_offset)?,
+            busy_breeder_cycles: self.window.read32(self.seam.busy_breeder_cycles_offset)?,
+            busy_lane_cycles: self.window.read32(self.seam.busy_lane_cycles_offset)?,
             streams_active: self.field(
-                layout::STREAMS_ACTIVE_OFFSET,
-                layout::STREAMS_ACTIVE_SHIFT,
-                layout::STREAMS_ACTIVE_MASK,
+                self.seam.streams_active_offset,
+                self.seam.streams_active_shift,
+                self.seam.streams_active_mask,
             )?,
         })
     }
@@ -358,11 +328,11 @@ impl<W: RegisterWindow> GepClusterDevice<W> {
     /// blocks — the per-instance view a balance report is built from.
     pub fn breeder_busy(&mut self, breeder: usize) -> Result<u32, W::Error> {
         self.window
-            .read32(layout::BREEDER0_BUSY_CYCLES_OFFSET + 4 * breeder)
+            .read32(self.seam.breeder0_busy_cycles_offset + 4 * breeder)
     }
 
     pub fn lane_busy(&mut self, lane: usize) -> Result<u32, W::Error> {
-        self.window.read32(layout::LANE0_BUSY_CYCLES_OFFSET + 4 * lane)
+        self.window.read32(self.seam.lane0_busy_cycles_offset + 4 * lane)
     }
 
     // ---- the in-fabric generation loop ----
@@ -377,25 +347,25 @@ impl<W: RegisterWindow> GepClusterDevice<W> {
         rates: &BreedRates,
         seed: [u32; 4],
     ) -> Result<(), W::Error> {
-        self.window.write32(layout::AUTO_POP_OFFSET, pop)?;
-        self.window.write32(layout::AUTO_GENS_OFFSET, generations)?;
-        self.window.write32(layout::AUTO_R0_OFFSET, rates.words[0])?;
-        self.window.write32(layout::AUTO_R1_OFFSET, rates.words[1])?;
-        self.window.write32(layout::AUTO_R2_OFFSET, rates.words[2])?;
-        self.window.write32(layout::AUTO_R3_OFFSET, rates.words[3])?;
-        self.window.write32(layout::AUTO_R4_OFFSET, rates.words[4])?;
-        self.window.write32(layout::AUTO_SIGMA_OFFSET, rates.sigma_fx)?;
-        self.window.write32(layout::AUTO_RANGE_OFFSET, rates.range_fx)?;
-        self.window.write32(layout::AUTO_S0_OFFSET, seed[0])?;
-        self.window.write32(layout::AUTO_S1_OFFSET, seed[1])?;
-        self.window.write32(layout::AUTO_S2_OFFSET, seed[2])?;
-        self.window.write32(layout::AUTO_S3_OFFSET, seed[3])
+        self.window.write32(self.seam.auto_pop_offset, pop)?;
+        self.window.write32(self.seam.auto_gens_offset, generations)?;
+        self.window.write32(self.seam.auto_r0_offset, rates.words[0])?;
+        self.window.write32(self.seam.auto_r1_offset, rates.words[1])?;
+        self.window.write32(self.seam.auto_r2_offset, rates.words[2])?;
+        self.window.write32(self.seam.auto_r3_offset, rates.words[3])?;
+        self.window.write32(self.seam.auto_r4_offset, rates.words[4])?;
+        self.window.write32(self.seam.auto_sigma_offset, rates.sigma_fx)?;
+        self.window.write32(self.seam.auto_range_offset, rates.range_fx)?;
+        self.window.write32(self.seam.auto_s0_offset, seed[0])?;
+        self.window.write32(self.seam.auto_s1_offset, seed[1])?;
+        self.window.write32(self.seam.auto_s2_offset, seed[2])?;
+        self.window.write32(self.seam.auto_s3_offset, seed[3])
     }
 
     /// Arm or disarm the loop. Must be set before `start`, which is what
     /// latches it — and the selection RNG is seeded by that same pulse.
     pub fn set_auto_mode(&mut self, on: bool) -> Result<(), W::Error> {
-        self.window.write32(layout::AUTO_MODE_OFFSET, on as u32)
+        self.window.write32(self.seam.auto_mode_offset, on as u32)
     }
 
     /// The op-list pass's two carry-over flags: skip the score round because
@@ -404,18 +374,18 @@ impl<W: RegisterWindow> GepClusterDevice<W> {
     /// 1 and later; generation 0 clears them.
     pub fn set_pass_flags(&mut self, skip_score: bool, rng_continue: bool) -> Result<(), W::Error> {
         self.window
-            .write32(layout::SKIP_SCORE_OFFSET, skip_score as u32)?;
+            .write32(self.seam.skip_score_offset, skip_score as u32)?;
         self.window
-            .write32(layout::RNG_CONTINUE_OFFSET, rng_continue as u32)
+            .write32(self.seam.rng_continue_offset, rng_continue as u32)
     }
 
     /// Emitted AND committed: every entry accepted and every beat B-acked, so
     /// the op-list ring is safe to read the instant this is true.
     pub fn oplist_done(&mut self) -> Result<bool, W::Error> {
         Ok(self.field(
-            layout::OPLIST_DONE_OFFSET,
-            layout::OPLIST_DONE_SHIFT,
-            layout::OPLIST_DONE_MASK,
+            self.seam.oplist_done_offset,
+            self.seam.oplist_done_shift,
+            self.seam.oplist_done_mask,
         )? == 1)
     }
 
@@ -431,23 +401,23 @@ impl<W: RegisterWindow> GepClusterDevice<W> {
 
     pub fn auto_done(&mut self) -> Result<bool, W::Error> {
         Ok(self.field(
-            layout::AUTO_DONE_OFFSET,
-            layout::AUTO_DONE_SHIFT,
-            layout::AUTO_DONE_MASK,
+            self.seam.auto_done_offset,
+            self.seam.auto_done_shift,
+            self.seam.auto_done_mask,
         )? == 1)
     }
 
     pub fn auto_round(&mut self) -> Result<u32, W::Error> {
-        self.window.read32(layout::AUTO_ROUND_OFFSET)
+        self.window.read32(self.seam.auto_round_offset)
     }
 
     /// Which population region is current. The loop ping-pongs, so a host
     /// reading the final population needs this to know which half to read.
     pub fn auto_base(&mut self) -> Result<u32, W::Error> {
         self.field(
-            layout::AUTO_BASE_OFFSET,
-            layout::AUTO_BASE_SHIFT,
-            layout::AUTO_BASE_MASK,
+            self.seam.auto_base_offset,
+            self.seam.auto_base_shift,
+            self.seam.auto_base_mask,
         )
     }
 
@@ -455,12 +425,12 @@ impl<W: RegisterWindow> GepClusterDevice<W> {
     /// and its fitness.
     pub fn best(&mut self) -> Result<(u32, u64), W::Error> {
         let idx = self.field(
-            layout::BEST_IDX_OFFSET,
-            layout::BEST_IDX_SHIFT,
-            layout::BEST_IDX_MASK,
+            self.seam.best_idx_offset,
+            self.seam.best_idx_shift,
+            self.seam.best_idx_mask,
         )?;
-        let lo = self.window.read32(layout::BEST_FIT_LO_OFFSET)? as u64;
-        let hi = self.window.read32(layout::BEST_FIT_HI_OFFSET)? as u64;
+        let lo = self.window.read32(self.seam.best_fit_lo_offset)? as u64;
+        let hi = self.window.read32(self.seam.best_fit_hi_offset)? as u64;
         Ok((idx, hi << 32 | lo))
     }
 }
@@ -468,6 +438,42 @@ impl<W: RegisterWindow> GepClusterDevice<W> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The record layout as the fabric has always had it, and nothing else:
+    /// these checks are about where this driver puts things given a seam,
+    /// so every other name reads zero.
+    fn seam() -> GepSeam {
+        let layout = [
+            ("QUEUE_PARENT_A_OFFSET", 0x00),
+            ("QUEUE_PARENT_B_OFFSET", 0x04),
+            ("QUEUE_DEST_OFFSET", 0x08),
+            ("QUEUE_RATES0_OFFSET", 0x0c),
+            ("QUEUE_RATES1_OFFSET", 0x10),
+            ("QUEUE_RATES2_OFFSET", 0x14),
+            ("QUEUE_RATES3_OFFSET", 0x18),
+            ("QUEUE_RECOMB_FLAGS_OFFSET", 0x1c),
+            ("QUEUE_SIGMA_OFFSET", 0x20),
+            ("QUEUE_RANGE_OFFSET", 0x24),
+            ("QUEUE_ENTRY_ID_OFFSET", 0x28),
+            ("QUEUE_RESERVED_OFFSET", 0x2c),
+            ("QUEUE_SEED_OFFSET", 0x30),
+            ("QUEUE_SEED_WORDS", 4),
+            ("QUEUE_PARENT_A_RECORD_OFFSET", 0x40),
+            ("QUEUE_PARENT_B_RECORD_OFFSET", 0x80),
+            ("QUEUE_RECORD_BYTES", 192),
+            ("POPULATION_RECORD_BYTES", 64),
+            ("RING_RECORD_BYTES", 16),
+            ("RING_FITNESS_OFFSET", 0x0),
+            ("RING_RESULT_ENTRY_ID_OFFSET", 0x8),
+            ("RING_SEQ_OFFSET", 0xc),
+            ("FLAG_SKIP_WRITEBACK", 1),
+        ];
+        GepSeam::read(|name| Some(layout.iter().find(|(n, _)| *n == name).map_or(0, |(_, v)| *v))).unwrap()
+    }
+
+    const RECORD_WORDS: usize = 16;
+    const ENTRY_WORDS: usize = 16;
+    const WORK_ITEM_WORDS: usize = 48;
 
     /// A pairing's entry record round-trips through the shared layout: the
     /// fields land where the fabric reads them, and a quantized gate's top 16
@@ -493,7 +499,7 @@ mod tests {
         };
 
         let mut words = [0u32; ENTRY_WORDS];
-        pack_entry(&pairing, &rates, &mut words);
+        pack_entry(&seam(), &pairing, &rates, &mut words);
 
         // The words where they have always been — the fabric replays an entry
         // as beats and slices each by position, so the region's placement of
@@ -507,7 +513,7 @@ mod tests {
         assert_eq!(words[5], 0x6666_5555);
         assert_eq!(words[6], 0x8888_7777);
         // Word 7 is the flags over the geneRecomb half.
-        assert_eq!(words[7], (layout::FLAG_SKIP_WRITEBACK << 16) | 0x9999);
+        assert_eq!(words[7], (1 << 16) | 0x9999);
         assert_eq!(words[8], 0x0001_999A);
         assert_eq!(words[9], 0x000A_0000);
         assert_eq!(words[10], 0xD00D);
@@ -542,11 +548,11 @@ mod tests {
             };
 
             let base = i * RECORD_WORDS;
-            pack_entry(&pairing, &rates, &mut op_list[base..base + RECORD_WORDS]);
+            pack_entry(&seam(), &pairing, &rates, &mut op_list[base..base + RECORD_WORDS]);
         }
 
         let mut out = [0u32; ITEMS * WORK_ITEM_WORDS];
-        marshal_serial(&op_list, ITEMS, &population, &mut out);
+        marshal_serial(&seam(), &op_list, ITEMS, &population, &mut out);
 
         for i in 0..ITEMS {
             let dst = i * WORK_ITEM_WORDS;
@@ -569,20 +575,15 @@ mod tests {
         }
     }
 
-    /// The payload is the entry plus two records; the stride the queue's
-    /// carrier chose is padded so a whole item moves as one burst without
-    /// crossing a 4 KB boundary. Both numbers matter and they are not the same
-    /// one — and the second is the region's now, which this pins.
+    /// A work item is the entry and two records, and the seam's geometry
+    /// says so.
     #[test]
-    fn work_item_stride_matches_the_fabric() {
-        assert_eq!(WORK_ITEM_PAYLOAD_WORDS, ENTRY_WORDS + 2 * RECORD_WORDS);
-        assert_eq!(layout::POPULATION_RECORD_BYTES, 64);
-        assert_eq!(layout::QUEUE_STRIDE_BYTES, WORK_ITEM_WORDS * 4);
-        // The stride must divide 4 KB, or a burst straddles the boundary.
-        assert_eq!(4096 % layout::QUEUE_STRIDE_BYTES, 0);
-        assert!(layout::QUEUE_STRIDE_BYTES >= WORK_ITEM_PAYLOAD_WORDS * 4);
-        assert_eq!(layout::QUEUE_PARENT_A_RECORD_OFFSET, ENTRY_WORDS * 4);
-        assert_eq!(layout::QUEUE_PARENT_B_RECORD_OFFSET, (ENTRY_WORDS + RECORD_WORDS) * 4);
+    fn work_item_is_an_entry_and_two_records() {
+        let seam = seam();
+        assert_eq!(seam.record_words(), RECORD_WORDS);
+        assert_eq!(seam.entry_words(), ENTRY_WORDS);
+        assert_eq!(seam.work_item_words(), ENTRY_WORDS + 2 * RECORD_WORDS);
+        assert_eq!(seam.result_words(), 4);
     }
 
     /// Ring records parse back to what the fabric writes: fitness low word
@@ -595,7 +596,7 @@ mod tests {
             entry_id: 0,
             seq: 0,
         }; 2];
-        parse_results(&words, &mut out);
+        parse_results(&seam(), &words, &mut out);
 
         assert_eq!(
             out[0],

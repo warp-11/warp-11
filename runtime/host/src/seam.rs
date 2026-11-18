@@ -137,3 +137,85 @@ pub fn read_field(path: &Path, region: &str, field: &str) -> Result<warp11_runti
     let mask = read_const(path, &format!("{s}_MASK"))?.ok_or_else(|| format!("{}: no {s}_MASK", path.display()))?;
     Ok(Field::Bits { offset, shift, mask })
 }
+
+/// A seam read once and asked by name: what a build directory wrote beside
+/// its bitstream, or what the Sim's bridge answers for the design it is
+/// running. Everything a host needs to know about a build is in here, so a
+/// tool handed one needs no other flag to say which board it is talking to.
+#[derive(Clone, Debug)]
+pub struct Seam {
+    /// Where it came from, for a message.
+    pub source: String,
+    values: std::collections::HashMap<String, String>,
+}
+
+impl Seam {
+    /// The seam file itself, or the build directory holding it — the one
+    /// `*_layout.rs` there.
+    pub fn load(path: &Path) -> Result<Seam, String> {
+        let file = if path.is_dir() {
+            let mut found: Vec<_> = std::fs::read_dir(path)
+                .map_err(|e| format!("{}: {e}", path.display()))?
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|p| p.file_name().is_some_and(|n| n.to_string_lossy().ends_with("_layout.rs")))
+                .collect();
+            match found.len() {
+                1 => found.remove(0),
+                0 => return Err(format!("{}: no *_layout.rs here — is this a build directory?", path.display())),
+                n => return Err(format!("{}: {n} seams here — name the one to use", path.display())),
+            }
+        } else {
+            path.to_path_buf()
+        };
+        let text = std::fs::read_to_string(&file).map_err(|e| format!("{}: {e}", file.display()))?;
+        let mut values = std::collections::HashMap::new();
+        for line in text.lines() {
+            let Some(rest) = line.trim().strip_prefix("pub const ") else { continue };
+            let Some((name, value)) = rest.split_once(':') else { continue };
+            let Some((_, value)) = value.split_once('=') else { continue };
+            values.insert(name.trim().to_string(), value.trim().trim_end_matches(';').trim().trim_matches('"').to_string());
+        }
+        Ok(Seam { source: file.display().to_string(), values })
+    }
+
+    /// The bridge's answer: `NAME=value` pairs, as `FsSimWindow::seam_constants` returns them.
+    pub fn from_pairs(source: &str, pairs: &str) -> Seam {
+        let values = pairs
+            .split_whitespace()
+            .filter_map(|pair| pair.split_once('='))
+            .map(|(name, value)| (name.to_string(), value.to_string()))
+            .collect();
+        Seam { source: source.to_string(), values }
+    }
+
+    /// A constant as the seam wrote it.
+    pub fn text(&self, name: &str) -> Option<&str> {
+        self.values.get(name).map(String::as_str)
+    }
+
+    /// A constant as a number: decimal, hex, or a `bool` as one and zero.
+    pub fn number(&self, name: &str) -> Option<u64> {
+        match self.text(name)? {
+            "true" => Some(1),
+            "false" => Some(0),
+            value => match value.strip_prefix("0x") {
+                Some(hex) => u64::from_str_radix(hex, 16).ok(),
+                None => value.parse().ok(),
+            },
+        }
+    }
+
+    /// A constant the caller cannot do without, or which seam lacked it.
+    pub fn need(&self, name: &str) -> Result<u64, String> {
+        self.number(name).ok_or_else(|| format!("{}: no {name}", self.source))
+    }
+
+    /// The names that end in `suffix`, with it taken off — the regions a
+    /// seam places are its `…_REGION_OFFSET`s or its `…_REGION_ID`s.
+    pub fn names_ending(&self, suffix: &str) -> Vec<String> {
+        let mut names: Vec<String> = self.values.keys().filter_map(|n| n.strip_suffix(suffix)).map(str::to_string).collect();
+        names.sort();
+        names
+    }
+}

@@ -25,11 +25,20 @@ elaborated design before any silicon exists. That is the two-backends property,
 across the language seam — and it is why `mandel_frame_bridge` and
 `mandel_fs_bridge` are the tests that matter most here.
 
-**The register maps are generated, not written.** `core/src/*_layout.rs` is
-emitted by the same F# definition that elaborates the AXI slave
-(`dotnet run --project Warp11.<X> -- hardware <repo-root>`), and **committed**,
-because the crate compiles against it — emit-before-compile would otherwise be
-circular. Host and fabric cannot disagree about an offset.
+**The register maps are generated, not written, and a host reads the one
+its build wrote.** Every build directory carries a seam (`*_layout.rs`),
+emitted by the same F# definition that elaborates the slave: the registers,
+the regions, and how the build is reached — `HOST_BAUD` over a serial line,
+`HOST_APP` through a uio node. `Connection::board(<build-dir>, port)`
+(`host/src/connection.rs`) reads it and hands back a register window and
+the design's regions by name (`host/src/regions.rs`), so a host is the same
+code on a board with the host's memory behind it, on a board that keeps its
+regions over the link, and in the Sim (`Connection::sim`). What stays
+compiled in is the *names*: `core/src/gep_seam.rs` is the names every build
+of the cluster states, as a type
+(`dotnet run --project Warp11.Gep -- hardware <repo-root>`, committed), so a
+driver's spelling is the compiler's to check and the numbers are the
+build's. Host and fabric cannot disagree about an offset.
 
 ## Cross-compiling for the board
 
