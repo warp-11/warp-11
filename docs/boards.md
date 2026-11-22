@@ -19,7 +19,7 @@ for a part whose tools are not.
 | **KV260** (Xilinx Kria) | ZU5EV, `xck26-sfvc784-2LV-c` | 117 120 LUTs | 1 248 DSPs | 5.2 Mbit (+ 18 Mbit UltraRAM) | the processing system's, per app (100 or 166.67 MHz) | AXI-Lite at `0xB0000000`, from Linux on the same chip | `xmutil loadapp`, an app directory under `/lib/firmware/xilinx` |
 | **iCEBreaker** | iCE40 UP5K, `up5k-sg48` | 5 280 | 8 MAC16 | 120 kbit | 12 MHz crystal, a PLL to 24 MHz | a UART at 1 Mbaud on the FTDI's second channel | the SPI flash (`PROG=1`); SRAM loading does not configure this board |
 | **Icepi Zero** | ECP5-25F, `25k-CABGA256` | 24 288 | 28 MULT18 | 1 Mbit | 50 MHz oscillator, a PLL to 25 MHz | a UART at 1 000 000 | `openFPGALoader -b icepi-zero`, SRAM or flash |
-| **Go Board** (Nandland) | iCE40 HX1K, `hx1k-vq100` | 1 280 | none | 64 kbit | 25 MHz oscillator straight in, no PLL | a UART at 115 200 | the SPI flash |
+| **Go Board** (Nandland) | iCE40 HX1K, `hx1k-vq100` | 1 280 | none | 64 kbit | 25 MHz oscillator straight in, no PLL | a UART at 1 Mbaud | the SPI flash |
 
 The fifth is the **DE10-Lite** (Terasic): a MAX 10 10M50 — 49 760 logic
 elements, 144 multipliers, 182 M9K blocks of 9 kbit — with a 50 MHz
@@ -27,10 +27,11 @@ oscillator straight in and no USB-UART of its own, so the host link is a
 3.3 V USB-serial cable on two GPIO header pins (`host_rx` on GPIO_0, `host_tx`
 on GPIO_1, ground on pin 12), loaded over the USB-Blaster by `quartus_pgm`.
 Its preset `de10lite`, the `Quartus` flow and its gate are in the
-repository, and hello has been through Quartus 25.1std: the gate read the
-real `.fit.summary` and the board's three facts agreed with it. The pins
-still want checking against the maker's `DE10_LITE_golden_top.qsf` before
-the first load (`hardware/de10lite/README.md`).
+repository, and eleven designs have run on it — hello's register, rows,
+a 40×40 Life and a ten-lane Mandelbrot — with the pins as the preset has
+them. The link is 500 kbaud, half the other boards', because the cable is
+whatever is to hand and the one it was brought up on drops bytes above
+that (`hardware/de10lite/README.md`).
 
 Every number in the table is the part's, stated in `hdl/Warp11/Board.fs` as
 `PartFacts`, and the post-build gate confirms it from the toolchain's own

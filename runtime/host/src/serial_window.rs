@@ -389,6 +389,17 @@ impl SerialWindow {
             tcflush(fd, TCIOFLUSH);
         }
 
+        // What a run that failed left on its way — frames the fabric had
+        // sent and nobody read — is still coming through an adapter with
+        // buffers of its own (a debug probe's UART, any CDC-ACM bridge)
+        // after the kernel's were emptied, and the next session met it as
+        // the reply to its first request. So: let it arrive, then empty
+        // again.
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        unsafe {
+            tcflush(fd, TCIOFLUSH);
+        }
+
         Ok(SerialWindow { tty, streamed: std::collections::VecDeque::new(), address_bytes })
     }
 

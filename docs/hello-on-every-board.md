@@ -204,7 +204,7 @@ table:
 | iCEBreaker | `iceBreakerAt 24_000_000` | 2 | `PROG=1 ./build.sh` — the flash; SRAM does not configure it | `--port /dev/ttyUSB1` |
 | Go Board | `goBoard` | 4 | `PROG=1 ./build.sh` — the flash | `--port /dev/ttyUSB1` |
 | Icepi Zero | `icepi` | 5 | `PROG=sram ./build.sh` (volatile) or `PROG=1` (flash), through `openFPGALoader -b icepi-zero` | `--port /dev/ttyUSB0` (an FT231X) |
-| DE10-Lite | `de10Lite` | 10 | `PROG=1 ./build.sh` — `quartus_pgm` over the USB-Blaster, volatile | `--port /dev/ttyUSB0`, a 3.3 V USB-serial cable on the GPIO header |
+| DE10-Lite | `de10Lite` | 10 | `PROG=1 ./build.sh` — `quartus_pgm` over the USB-Blaster, volatile | `--port /dev/ttyUSB0` or `/dev/ttyACM0`, a 3.3 V USB-serial cable or a debug probe's UART on the GPIO header |
 | KV260 | `kv260` | none: a 1-bit register, read back | `./build.sh` writes the app; then the three lines it prints | `--board hello_axi_layout.rs`, on the board |
 
 Each one, in the order the toolchains are cheapest to learn:
@@ -240,8 +240,9 @@ against 25.
 **DE10-Lite.** Quartus, and the first board here with no USB-UART of its
 own: the host link is a 3.3 V USB-serial cable on three GPIO header pins
 (`host_rx` on GPIO_0, `host_tx` on GPIO_1, ground on pin 12 —
-`hardware/de10lite/README.md` has the picture, the USB-Blaster udev rule,
-and the pins to check against the maker's `.qsf` before the first load).
+`hardware/de10lite/README.md` has the picture and the udev rules for the
+USB-Blaster and for a debug probe used as the cable, which shows up as
+`/dev/ttyACM0`).
 Ten LEDs. `let board = de10Lite`; then:
 
 ```sh

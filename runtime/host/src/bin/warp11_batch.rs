@@ -538,6 +538,33 @@ fn play_and_read(args: &Args, layout: &PathBuf, window: &mut SerialWindow, regis
     let chunk_rows = (chunk_words / in_words.max(1)).max(1);
     let rows = staged.len() / in_words.max(1);
     let expected = rows * out_words;
+    // Words a run that died left in the fabric's played buffer would go
+    // through the design ahead of this run's, and every row after would be
+    // the wrong one with nothing to say so. Let them through and drop what
+    // they produce before anything is played.
+    let fill = seam::resolve(&format!("{player}LinkFill"), registers)?;
+    let stale = window.read32(fill).map_err(io)?;
+    if stale != 0 {
+        window.write32(record_arm, 1).map_err(io)?;
+        window.write32(play_arm, 1).map_err(io)?;
+        let mut dropped = 0;
+        loop {
+            let more = window.read_streamed(4096).map_err(io)?;
+            if more.is_empty() {
+                break;
+            }
+            dropped += more.len();
+        }
+        window.write32(play_arm, 0).map_err(io)?;
+        window.write32(record_arm, 0).map_err(io)?;
+        window.take_streamed();
+        let left = window.read32(fill).map_err(io)?;
+        if left != 0 {
+            return Err(format!("{left} words from an earlier run are still in the fabric's played buffer and will not drain — reload the design"));
+        }
+        eprintln!("cleared {stale} words an earlier run left in the played buffer ({dropped} words of their output dropped)");
+    }
+
     let started = std::time::Instant::now();
     window.write32(record_arm, 1).map_err(io)?;
     window.write32(play_arm, 1).map_err(io)?;

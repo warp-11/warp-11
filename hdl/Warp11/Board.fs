@@ -845,7 +845,7 @@ let icepi = icepiAt 25_000_000
 /// its 25 MHz oscillator. So the fabric clock is not a choice here: an
 /// `Oscillator` drives `clk` at the rate it has, and `checkBoard` refuses any
 /// other `fabricHz`. The FT2232H's channel A programs the SPI flash
-/// (`iceprog`) and channel B is the UART, 115 200 baud; the four LEDs are
+/// (`iceprog`) and channel B is the UART, 1 Mbaud — 25 cycles a bit, exactly; the four LEDs are
 /// wired pin → resistor → LED → ground, so **active high**; the one Pmod is
 /// the socket a harness plugs into.
 ///
@@ -867,7 +867,7 @@ let goBoard =
       audioClockHz = None
       hostMemory = None
       boardMemory = None
-      host = UartAt 115_200
+      host = UartAt 1_000_000
       loading = Sram
       connectors =
         [ { role = ClockIn; pins = [ "clk25", bare 15 ] }
@@ -889,6 +889,12 @@ let goBoard =
 /// 12. The USB-Blaster II loads SRAM through `quartus_pgm`; the flash
 /// (`.pof`) is not built.
 ///
+/// The link is 500 kbaud, 100 cycles a bit: the cable is whatever is to
+/// hand, and the one it was brought up on — a Raspberry Pi Debug Probe's
+/// UART — dropped a byte every few hundred thousand at 1 Mbaud with rows
+/// going both ways, and none at half that (five 195 312-word runs each way,
+/// 2026-11-21).
+///
 /// Every I/O here is 3.3-V LVTTL. The pins are from the board's user manual
 /// (CD: `DE10_LITE_golden_top.qsf`); **check them against that file before
 /// the first build** — it was not on this machine when the preset was
@@ -909,7 +915,7 @@ let de10Lite =
       audioClockHz = None
       hostMemory = None
       boardMemory = None
-      host = UartAt 115_200
+      host = UartAt 500_000
       loading = Sram
       connectors =
         [ { role = ClockIn; pins = [ "clk50", lvttl "P11" ] }

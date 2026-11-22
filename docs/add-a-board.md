@@ -35,7 +35,7 @@ This is the Go Board's, abridged only in the socket's positions:
   "tool": "OpenFlow",
   "clock": { "source": "Oscillator", "hz": 25000000 },
   "fabricHz": 25000000,
-  "host": { "driver": "Uart", "baud": 115200 },
+  "host": { "driver": "Uart", "baud": 1000000 },
   "loading": { "kind": "Sram" },
   "connectors": [
     { "role": "ClockIn",  "pins": { "clk25": { "pin": "15" } } },

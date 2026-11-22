@@ -1,0 +1,4 @@
+# A Raspberry Pi Debug Probe as the DE10-Lite's host link: its UART port's
+# serial device, for whoever is at the machine, without root or `dialout`.
+# Install: sudo cp 52-debug-probe.rules /etc/udev/rules.d/ && sudo udevadm control --reload-rules && sudo udevadm trigger
+SUBSYSTEM=="tty", ATTRS{idVendor}=="2e8a", ATTRS{idProduct}=="000c", MODE="0660", TAG+="uaccess"
