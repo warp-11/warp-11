@@ -8,8 +8,8 @@ them.
 
 This page puts it on one board, then moves it to the other four. The point
 of the second half is what does **not** change: the design, the verb, the
-host tool. A board is a file, and switching boards is switching which file
-you pass.
+host tool. A board is a value, and switching boards is changing the one
+line that names it.
 
 Fifteen minutes a board once the toolchain is installed. [Boards](boards.md)
 has the tools, once per machine; this page assumes they are there.
@@ -64,8 +64,10 @@ Three things to notice, because they are what the rest of the page leans on:
 - **It declares needs, not pins.** `valueIn` is a value the host sets,
   `valueOut` a value the design reports. Which register, which bus, which pin
   — none of that is here.
-- **It is sized by the part**, through `BoardTop.sized`. Life's world and
-  Mandelbrot's lanes are sized the same way; here the size is the LED count.
+- **It is sized by the board**, through `BoardTop.sized`: the size is the
+  LED count, a fact of the board. Life's world and Mandelbrot's lanes are
+  not sized this way — they are the application's, stated beside the design
+  (`World.side`, `Chunked.lanes`), and the gate says whether they fit.
 
 ## The mapping
 
@@ -77,8 +79,7 @@ line that says which board.
 let mappingFor (board: Board) : Mapping.Mapping =
     { board = board
       path = { viaRegisters with bindings = viaRegisters.bindings @ [ for led in ledsOf board -> { need = ByName led; carrier = OnPin led } ] }
-      plugged = []
-      sizes = [] }
+      plugged = [] }
 
 let board = iceBreakerAt 24_000_000
 
@@ -162,7 +163,7 @@ Build and load. `PROG=1` writes the SPI flash, which is the only loading that
 configures this board; the plain SRAM load exits 0 and does nothing here:
 
 ```sh
-cd out/hello-icebreaker && PROG=1 ./build.sh
+(cd out/hello-icebreaker && PROG=1 ./build.sh)
 ```
 
 The run ends with the gate, which reads nextpnr's own report and writes
@@ -183,7 +184,7 @@ Now the host. The iCEBreaker's UART is the FTDI's second channel, which
 Linux usually enumerates as `/dev/ttyUSB1`; the baud is the board file's:
 
 ```sh
-warp11_regs --board out/ --port /dev/ttyUSB1 --set pattern=3 --get pattern
+warp11_regs --board out/hello-icebreaker --port /dev/ttyUSB1 --set pattern=3 --get pattern
 ```
 
 Both LEDs light, and the read back prints `pattern = 3`. `--set pattern=1`
@@ -204,8 +205,8 @@ table:
 | iCEBreaker | `iceBreakerAt 24_000_000` | 2 | `PROG=1 ./build.sh` — the flash; SRAM does not configure it | `--port /dev/ttyUSB1` |
 | Go Board | `goBoard` | 4 | `PROG=1 ./build.sh` — the flash | `--port /dev/ttyUSB1` |
 | Icepi Zero | `icepi` | 5 | `PROG=sram ./build.sh` (volatile) or `PROG=1` (flash), through `openFPGALoader -b icepi-zero` | `--port /dev/ttyUSB0` (an FT231X) |
-| DE10-Lite | `de10Lite` | 10 | `PROG=1 ./build.sh` — `quartus_pgm` over the USB-Blaster, volatile | `--port /dev/ttyUSB0` or `/dev/ttyACM0`, a 3.3 V USB-serial cable or a debug probe's UART on the GPIO header |
-| KV260 | `kv260` | none: a 1-bit register, read back | `./build.sh` writes the app; then the three lines it prints | `--board hello_axi_layout.rs`, on the board |
+| DE10-Lite | `de10Lite` | 10 | `PROG=sram ./build.sh` — `quartus_pgm` over the USB-Blaster, volatile | `--port /dev/ttyACM0`, a debug probe's UART on the GPIO header at 500 kbaud (`/dev/ttyUSB0` for an FTDI cable) |
+| KV260 | `kv260` | none: a 1-bit register, read back | `./build.sh` writes the app; then the lines it prints | `--board hello_axi_layout.rs`, on the board |
 
 Each one, in the order the toolchains are cheapest to learn:
 
@@ -215,11 +216,11 @@ bits. In `Hello.fs`, `let board = goBoard`; then:
 
 ```sh
 dotnet run --project Warp11.Designs -- hello out/hello-goboard
-cd out/hello-goboard && PROG=1 ./build.sh
-warp11_regs --board out/ --port /dev/ttyUSB1 --set pattern=5 --get pattern
+(cd out/hello-goboard && PROG=1 ./build.sh)
+warp11_regs --board out/hello-goboard --port /dev/ttyUSB1 --set pattern=5 --get pattern
 ```
 
-LEDs 1 and 3 light. The gate's numbers: 199 of 1 280 cells, 166.6 MHz
+LEDs 1 and 3 light. The gate's numbers: 189 of 1 280 cells, 157 MHz
 against 25.
 
 **Icepi Zero.** The ECP5 flow — yosys, nextpnr-ecp5, `ecppack` — and
@@ -229,12 +230,12 @@ runs at a million baud. `let board = icepi`; then:
 
 ```sh
 dotnet run --project Warp11.Designs -- hello out/hello-icepi
-cd out/hello-icepi && PROG=sram ./build.sh
-warp11_regs --board out/ --port /dev/ttyUSB0 --set pattern=21 --get pattern
+(cd out/hello-icepi && PROG=sram ./build.sh)
+warp11_regs --board out/hello-icepi --port /dev/ttyUSB0 --set pattern=21 --get pattern
 ```
 
 `ls /dev/tty*` before and after plugging the board in tells you the device.
-Three of the five light, alternating. The gate: 143 of 24 288 cells, 212 MHz
+Three of the five light, alternating. The gate: 143 of 24 288 cells, 229 MHz
 against 25.
 
 **DE10-Lite.** Quartus, and the first board here with no USB-UART of its
@@ -242,17 +243,18 @@ own: the host link is a 3.3 V USB-serial cable on three GPIO header pins
 (`host_rx` on GPIO_0, `host_tx` on GPIO_1, ground on pin 12 —
 `hardware/de10lite/README.md` has the picture and the udev rules for the
 USB-Blaster and for a debug probe used as the cable, which shows up as
-`/dev/ttyACM0`).
+`/dev/ttyACM0`). The link runs at 500 kbaud, half the other boards', because
+of that cable; the seam says so and the host tool reads it.
 Ten LEDs. `let board = de10Lite`; then:
 
 ```sh
 dotnet run --project Warp11.Designs -- hello out/hello-de10lite
-cd out/hello-de10lite && PROG=1 ./build.sh
-warp11_regs --board out/ --port /dev/ttyUSB0 --set pattern=682 --get pattern
+(cd out/hello-de10lite && PROG=sram ./build.sh)
+warp11_regs --board out/hello-de10lite --port /dev/ttyACM0 --set pattern=682 --get pattern
 ```
 
 Every other LED lights. The gate reads Quartus's fitter summary and timing
-report: 216 of 49 760 logic elements, 218 MHz against 50. The load is over
+report: 208 of 49 760 logic elements, 208 MHz against 50. The load is over
 the USB-Blaster into SRAM, so a power cycle clears it.
 
 **KV260.** The board with a processing system, so the host is on the chip:
@@ -264,7 +266,7 @@ on the board. `let board = kv260`; then:
 
 ```sh
 dotnet run --project Warp11.Designs -- hello out/hello-kv260
-cd out/hello-kv260 && ./build.sh
+(cd out/hello-kv260 && ./build.sh)
 # then the scp, the install and `xmutil loadapp hello-axi` it prints
 ```
 
@@ -274,7 +276,7 @@ On the board, the same tool over the other transport:
 warp11_regs --board hello_axi_layout.rs --set pattern=1 --get pattern
 ```
 
-`pattern = 1` back is the whole proof: the bitstream loaded, the overlay
+`pattern = 1` back is the whole proof (669 LUTs, by Vivado's report): the bitstream loaded, the overlay
 pinned the clock the design was built for, the slave decoded the address.
 `docs/dev-workflow.md` is the board side — `ssh`, `xmutil`, the kernel
 modules — and `runtime/README.md` the cross-compile of `warp11_regs` for

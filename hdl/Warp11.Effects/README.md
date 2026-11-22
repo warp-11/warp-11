@@ -83,16 +83,25 @@ threshold and slope the board is calibrated for it takes **−1.97 dB off the
 first pluck's attack and −0.65 dB off the ring-out**. That is a compressor
 working — transients pulled down, decay left alone — and it is also about two
 decibels, which nobody hears without an A/B switch. The settings are the ones
-`audio_batch_first_light.rs` writes and the ones the ffmpeg reference below is
-built against, so they are calibration rather than taste.
+the `wav` verb writes and the ones the ffmpeg reference below is built
+against, so they are calibration rather than taste.
 
 16-bit stereo WAV in, 16-bit stereo WAV out — you can listen to all of them.
 
 ## Then run it on the board
 
 ```sh
-hardware/board/audio-batch-run.sh in.wav out.wav [board-ip]
+dotnet run -c Release --project Warp11.Effects -- build multiband kv260 memory out/
+out/build.sh                                       # Vivado, the gate, the app
+# load the app on the board, copy the seam beside the driver, then:
+warp11_batch in.wav out.wav --board multiband_batch_layout.rs --set threshold=200000 --set ratio=4 …
 ```
+
+The numbers below were measured on the hand-built top this design replaced
+(`AudioBatchAxi`, retired 2026-11-11), whose write master issued one beat
+at a time; the generated top has run the same WAV through DDR
+byte-identical to the Sim, and writes in 256-beat bursts since 2026-11-16 —
+its timing is not re-measured yet:
 
 ```
 compressed:  15.465 ms for 480000 frames (3.22 cycles/frame @ 100 MHz)
@@ -147,12 +156,11 @@ quality and shows where the time goes:
 
 The datapath's floor is one frame per cycle, and the board measures 3.22. Reads
 cost nothing even at 32 cycles of latency, because the read master bursts 16
-beats with 4 outstanding and hides it. The write master does not burst — it
-issues one single-beat AXI4 write per beat, so every 16 bytes pays a full
-AW + W + B round trip. Bursting it, plus the 166.67 MHz the other accelerators
-run at, is worth several times this number; it is on the backlog rather than
-done, because changing it means re-verifying every bitstream, and an honest
-unoptimized figure is worth more than a rushed optimized one.
+beats with 4 outstanding and hides it. The measured top's write master did
+not burst — it issued one single-beat AXI4 write per beat, so every 16 bytes
+paid a full AW + W + B round trip. The generated top now writes in bursts;
+that, plus the 166.67 MHz the other accelerators run at, is what the board
+re-run is owed to measure.
 
 Two honest qualifications. The filters are not identical — ffmpeg's
 `acrossover` is Linkwitz-Riley and ours is a subtractive split of Butterworth
@@ -190,7 +198,7 @@ DDR path work" stay a separate question from "did the compressor work".
 
 ## The apps
 
-`audioBatchAxi` is the one above: a block of frames in DDR, through the 8-band
+`multiband` is the one above: a block of frames in DDR, through the 8-band
 compressor, back to DDR. No codec, no real time, and a result you can diff.
 
 The rest are a live I2S chain over a Pmod I2S2, and they form a bring-up
@@ -201,14 +209,16 @@ ladder — the order to build them in, if you have the hardware:
 | `tone` | the DAC works. A tone generator into the transmitter, playing 440 Hz on load — the smallest thing that makes a sound. |
 | `passthru` | the ADC works. Line in to line out, plus two readings. |
 | `gain` | the DSP seam works. One stage between receiver and transmitter. |
-| `audioEffectsAxi` | the whole chain: volume → EQ → compressor → limiter. |
+| `effects` | the whole chain: volume → EQ → compressor → limiter. |
 
-The first two are designs in `Rungs.fs`, built for the KV260 by
-`-- build tone kv260 pins out/` (below). The gain is the drawn design in
+The first two are designs in `Rungs.fs`, `effects` and `multiband` in
+`Chains.fs`, all built for the KV260 the same way —
+`-- build tone kv260 pins out/`, `-- build effects kv260 pins out/` (below). The gain is the drawn design in
 `Warp11.Placement.Canvas/examples/gain.json`, built the same way by
 `Warp11.Placement -- build …/gain.json kv260 pins out/`; its `volume`
 starts at 0, so set it before expecting sound — unity is
-`warp11_regs --board gain_patch_axi_layout.rs --set volume=256`.
+`warp11_regs --board gain_patch_axi_layout.rs --set volume=256` (the build
+directory, or the seam file out of it).
 
 The passthru's readings exist because **"no sound" has two completely
 different causes** — a silent ADC and a dead transmitter — and on a board you
@@ -228,11 +238,16 @@ reach the host:
 | `pins` | the I2S converter on the board's header, the Pmod I2S2 | nothing: it is heard |
 
 `-- build tone out/` writes the directory for the rung's own mapping
-(`Rungs.rungs`, the iCEBreaker); `-- build <rung> <board> <path> out/` names
-both on the line — `build tone kv260 pins out/` is the tone out of the
-KV260's Pmod I2S2, `build passthru kv260 memory out/` a WAV through its DDR.
-A board is one of `kv260`, `icebreaker`, `icepi`, `goboard`, `de10lite` or a
-board file; a path is `pins`, `memory`, `count`, `link` or `countlink`. The converter path is where
+(`Rungs.rungs`, on `Rungs.board`, the iCEBreaker; `-- mapping tone` prints
+it); `-- build <rung> <board> <path> out/` names both on the line — `build
+tone kv260 pins out/` is the tone out of the KV260's Pmod I2S2, `build
+passthru kv260 memory out/` a WAV through its DDR. A rung is `tone`,
+`passthru`, `effects` or `multiband`; a board is one of `kv260`,
+`icebreaker`, `icepi`, `goboard` or `de10lite`; a path is `pins`, `memory`,
+`count`, `link` or `countlink`. `-- batchserve <rung> <board> [count]` is
+the Sim half of `warp11_batch --sim <rung> --preset <board> --fsproj
+…/Warp11.Effects.fsproj`: the design on that board's host memory, with the
+driver the board run uses. The converter path is where
 these started (the iCEBreaker's hand tops in `hardware/ice40/`, retired
 2026-11-07), and the living checks still frame the passthru through the
 iCEBreaker's I2S and count the ratios off its pins:
@@ -251,6 +266,16 @@ refuses it rather than landing 2.3% out. On a host path the rows carry no
 rate, so the design is handed the nominal 48 kHz and the tone's step starts
 there; on the converter it starts at the converter's.
 
+Measured on each board, rows over the host path (the converter path on
+the KV260 is registers only so far; its audio is owed to the bench):
+
+| | KV260 | iCEBreaker | Icepi Zero | Go Board | DE10-Lite |
+|---|---|---|---|---|---|
+| `tone` | counted, 48 000 samples | counted over the link, byte-identical to the Sim (617 / 5 280, 32.8 MHz) | the same (561 cells, 151 MHz) | the same (619 / 1 280, 66.8 MHz) | the same (525 LE, 124 MHz) |
+| `passthru` | WAV through DDR | WAV over the link, byte-identical (923 / 5 280, 35.7 MHz) | the same (833 cells, 117 MHz) | the same (923 / 1 280, 91.3 MHz) | the same (768 LE, 77.8 MHz) |
+| `effects` | WAV through DDR (re-run owed) | refused: 60 / 8 multipliers | WAV, two pools shared (28 / 28 multipliers, 4 176 cells, 33.6 MHz) | refused: no multipliers | refused on the clock: 40.3 MHz against 50 |
+| `multiband` | WAV through DDR (re-run owed) | refused: 38 531 / 5 280 cells | refused: 51 306 / 24 288 cells | refused | refused: 196 409 / 49 760 LE |
+
 ## The shape of it
 
 ```
@@ -258,15 +283,19 @@ i2sMaster              MCLK / SCLK / LRCLK, plus two internal edge ticks
   ├── i2sRx            ADC serial line  → stereo stream   (rising-edge tick)
   │     └── audioGain        volume and mute         combinational
   │     └── audioEqBand      one biquad per channel  combinational + state
-  │     └── audioCompressor  envelope and gain       2 cycles
+  │     └── audioCompressor  envelope and gain       a register between its halves
   │     └── audioLimiter     brick wall              combinational
   └── i2sTx            stereo stream → DAC serial line   (falling-edge tick)
-axiLiteSlaveOf         the register map, and the Rust layout generated from it
+boardTop               the register map, and the seam generated from it
 ```
 
 A biquad's output is combinational from its input — only the four state
-registers advance, and only on the sample handshake — so a cascade costs no
-cycles it was not asked for. The compressor's two are the whole chain's latency.
+registers advance, and only on the sample handshake. No stage registers what
+comes out: that is the connection's, and `effects` (`Chains.fs`) connects
+each stage to the next `Both`, so every signal between two of them comes
+from a register. Spliced straight through, gain into a biquad was one cone
+(WNS −2.1 ns at 100 MHz on the KV260). Each stage's multiplies are sockets
+the chain serves — in place by default, or pooled (`Chains.multiplies`).
 
 The two edge ticks are the part worth understanding. `i2sMaster` emits one
 fabric-cycle pulses on *opposite* SCLK edges — receive on the rising edge, where
@@ -311,13 +340,14 @@ dotnet run -c Release --project Warp11.Effects -- tone sine.wav 1000        # a 
 dotnet run -c Release --project Warp11.Effects -- eq sine.wav heard.wav     # one stage, in the debugger
 dotnet run -c Release --project Warp11.Effects -- debug [design]            # the debugger on the catalog
 dotnet run -c Release --project Warp11.Effects -- hardware <repo-root>
-./run_differential.sh                                       # includes these four
+dotnet run -c Release --project Warp11.Effects -- batch-perf                 # the compressor against DDR models
+./run_differential.sh                                       # includes these designs
 ```
 
 `wav` and `listen` are the two halves of the same idea and they enter the design
 at different places. `wav` drives the DSP stage's *stream* ports, which is what
 you want to hear a compressor work; `listen` plays the file into
-`AudioEffectsAxi`'s **I2S pins**, so the clock generator and both framers are in
+the `effects` design's **I2S pins** on the KV260 (`EffectsAxi`), so the clock generator and both framers are in
 the path, and it does it inside the step-through debugger — the recording rides
 `Run` and `Step`, so stepping one cycle steps the audio with it.
 
@@ -355,48 +385,41 @@ through it: a +12 dB peak at 1 kHz reads **+12.00 dB** on the tone, and the
 sweep traces the bell — +0.21 dB at 166 Hz, +3.93 at 521, +12.01 at 921, +7.02
 at 1630, +0.29 at 5100.
 
-`hardware` writes each design's Verilog to `hardware/build/` **and** a Rust
-register layout to `runtime/core/src/audio_*_layout.rs`, both from the same
-map the slave was elaborated from. Nobody transcribes an offset by hand, which
-matters here more than usual: a wrong offset on this board is not a wrong
-answer, it is a hang that needs a power cycle.
+`hardware` writes the two chains' board tops' Verilog to `hardware/build/`
+(`EffectsPins.v`, `MultibandBatch.v`). The Rust seam is each build
+directory's, written by `build` from the same map the slave is elaborated
+from. Nobody transcribes an offset by hand, which matters here more than
+usual: a wrong offset on this board is not a wrong answer, it is a hang that
+needs a power cycle.
 
 ## To the board
 
-### `audio-batch` — runs today
+### `multiband` — through DDR
 
 The batch design needs no codec, so nothing about the Pmod stands between it
 and a bitstream — it is the one audio app whose path to the board is clear.
 
 ```sh
-cd hdl && dotnet run -c Release --project Warp11.Effects -- hardware <repo-root>
-cd hardware/vivado && vivado -stack 2000 -mode batch -source build_audiobatch_axi.tcl
-cd ../xmutil && ./package_audio-batch.sh
+dotnet run -c Release --project Warp11.Effects -- build multiband kv260 memory out/
+out/build.sh
 # then load the app and:
-ssh ubuntu@<board> 'cd warp11-driver && ./audio_batch_first_light in.wav out.wav'
+warp11_batch in.wav out.wav --board multiband_batch_layout.rs --set threshold=200000 --set ratio=4 …
 ```
 
-That is the hand-written path the first bitstream took. The same rows
-through DDR are what any design built from a mapping gets — `-- build
-passthru kv260 out/`, then `out/build.sh` — and
-`warp11_batch in.wav out.wav --board passthru_batch --layout
-out/passthru_batch_layout.rs` drives it with no first-light binary of its own.
+The same rows through DDR are what any design built from a mapping gets —
+`-- build passthru kv260 memory out/`, then `out/build.sh` — and
+`warp11_batch` drives every one of them with no first-light binary of its
+own. The hand-written path the first bitstream took (`AudioBatchAxi`, its
+TCL, its xmutil app and `audio_batch_first_light`) retired 2026-11-11.
 
-Its Vivado scaffolding is cloned from `gepclusterfs`, which is the other design
-here carrying both an AXI-Lite slave and a read+write AXI4 master. The two top
-modules have **identical port sets** — checked, not assumed — so the clone is a
-pure rename.
+Its master lands on `S_AXI_HPC0_FPD`, and the F# AXI masters drive
+`AxCACHE=0` (`Stdlib.fs`), so fabric accesses never snoop the APU caches
+whichever slave they reach — coherence is a property of the transaction, not
+the port. Claiming `dma-coherent` would turn `sync_for_cpu`/`sync_for_device`
+into no-ops and the host would read stale audio out of its own cache —
+silently, and only sometimes. The driver does the syncs for real instead.
 
-One thing its device tree does deliberately, and differently from
-`gep-cluster-fs`: it does **not** claim `dma-coherent`, even though its master
-also lands on `S_AXI_HPC0_FPD`. Coherence is a property of the transaction, not
-the port, and the F# AXI masters drive `AxCACHE=0` (`Stdlib.fs`), so fabric
-accesses never snoop the APU caches whichever slave they reach. Claiming
-coherence would turn `sync_for_cpu`/`sync_for_device` into no-ops and the host
-would read stale audio out of its own cache — silently, and only sometimes. The
-driver does the syncs for real instead.
-
-### `tone` and `passthru` — generated
+### `tone`, `passthru` and `effects` — generated
 
 ```sh
 dotnet run --project Warp11.Effects -- build tone kv260 pins out/
@@ -406,6 +429,9 @@ out/build.sh
 The directory carries the block design, the pin constraints, the overlay and
 the packaging, all derived from the design and the board — the hand TCL and
 xmutil apps (`audio-tone`, `audio-passthru`) went with the hand tops.
+`build effects kv260 pins out/` is the whole chain on the Pmod I2S2 the same
+way; on silicon its registers answer and the receiver frames at 48 828 Hz,
+every control at its no-op default — the audio itself is owed to the bench.
 
 ### The receiving designs — fixed 2026-09-06
 
@@ -438,14 +464,15 @@ here either. What moved in the emitted Verilog is internal instance names
 (`rx` → `audio_rx`) and the order the clock assigns are written; the top-level
 port lists, the module set and the generated Rust seams are byte-identical.
 
-There is no `audio-effects` xmutil app.
-
 ## Files
 
-- `Wrappers.fs` — the effects register map and its design
-- `Rungs.fs` — the tone and the passthru as designs, for any board
-- `Ice.fs` — the same front end on an iCEBreaker: no slave, LEDs for the taps
-- `Main.fs` — the checks, `diff`, and `hardware`
+- `Chains.fs` — the effects chain and the 8-band compressor as designs
+- `Rungs.fs` — the tone and the passthru as designs, the rungs by name, and
+  the board they are built for
+- `Batch.fs` — the stages as bare stream designs, the twins the chains are
+  checked against
+- `Main.fs` — the checks, `diff`, `hardware`, `build`, `mapping`,
+  `batchserve`, and the audio verbs above
 - `../Warp11/Audio.fs` — the stdlib tier all of this is assembled from
 - `../Warp11.Designs/Designs.fs` — `audioChain`, `audioTone`, `i2sLoopback`:
   the same parts under the differential oracle, wired for testing rather than

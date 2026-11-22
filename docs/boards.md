@@ -12,7 +12,7 @@ put something on one. [How to add a new board](add-a-board.md) is the page
 for a board that is not here; [How to add a new toolchain](add-a-toolchain.md)
 for a part whose tools are not.
 
-## The four
+## The five
 
 | board | part | cells | multipliers | block RAM | clock | the host reaches it | loading |
 |---|---|---|---|---|---|---|---|
@@ -70,8 +70,9 @@ after which the harness's pins are the board's. Nothing in the release matrix
 plugs one in: every example reaches every board over what it already has, its
 USB and its LEDs.
 
-**A size** — Life's world, Mandelbrot's lanes — is derived from the part's
-facts unless the mapping names it: `"sizes": { "world": 16 }`.
+**A size** — Life's world, Mandelbrot's lanes — is the application's, stated
+beside the design (`World.side`, `Chunked.lanes`) and never derived from the
+board; the gate says whether what is stated fits.
 
 ## The tools, once per machine
 
@@ -99,26 +100,28 @@ with no headers fitted).
 `hello`: the LEDs showing a register the host writes over the board's link.
 It needs nothing but the board and its USB, and it proves the clock, the link
 and the LEDs together. Its board is one line in `hdl/Warp11.Designs/Hello.fs`
-— `let board = goBoard` — and the verb takes only the directory:
+— `let board = iceBreakerAt 24_000_000` — and the verb takes only the
+directory:
 
 ```sh
 cd hdl
 dotnet run --project Warp11.Designs -- hello out/
-cd out && PROG=1 ./build.sh
-warp11_regs --board out/ --port /dev/ttyUSB1 --set pattern=5
+(cd out && PROG=1 ./build.sh)
+warp11_regs --board out/ --port /dev/ttyUSB1 --set pattern=3
 ```
 
 `build.sh` ends with the gate, which reads the toolchain's own report and
 writes `build/report.json`: cells, block RAMs and multipliers used of the
-part's, and the clock achieved against the target. Measured:
+part's, and the clock achieved against the target. Measured, each one loaded
+and its register round-tripped over the board's link:
 
 | board | hello | cells | clock achieved against target |
 |---|---|---|---|
-| iCEBreaker | `HelloUart` | 192 / 5 280 | 60.2 MHz / 24 |
-| Icepi | `HelloUart` | 143 / 24 288 | 212 MHz / 25 |
-| Go Board | `HelloUart` | 199 / 1 280 | 166.6 MHz / 25 |
-| KV260 | `HelloAxi` | directory written; Vivado run is the bench's | |
-| DE10-Lite | `HelloUart` | 216 / 49 760 | 218 MHz / 50 |
+| iCEBreaker | `HelloUart` | 180 / 5 280 | 60.4 MHz / 24 |
+| Icepi | `HelloUart` | 143 / 24 288 | 229 MHz / 25 |
+| Go Board | `HelloUart` | 189 / 1 280 | 157 MHz / 25 |
+| KV260 | `HelloAxi` | 669 LUTs / 117 120 | |
+| DE10-Lite | `HelloUart` | 208 / 49 760 | 208 MHz / 50 |
 
 [Hello on every board](hello-on-every-board.md) is this section as a
 walkthrough: the design, the mapping, the build on one board, then the same
@@ -137,7 +140,7 @@ verb takes only the directory:
 dotnet run --project Warp11.Effects    -- build tone out/      # the rung, on Rungs.board
 dotnet run --project Warp11.GoL.App    -- life out/            # the world, on GoL's Board.board
 dotnet run --project Warp11.Mandelbrot -- bitstream out/ 8     # the frame, on Chunked.board, eight lanes
-dotnet run --project Warp11.Placement  -- build examples/gain.json examples/gain.icepi.json out/   # a drawn design
+dotnet run --project Warp11.Placement  -- build Warp11.Placement.Canvas/examples/gain.json Warp11.Placement.Canvas/examples/gain.icepi.json out/   # a drawn design
 cd out && ./build.sh
 ```
 
@@ -155,29 +158,37 @@ The directory is the same shape for every board on the same tool — the top's
 Verilog, the constraints, the flow, the Rust seam the host tools read — and
 `build.sh` is the whole of the toolchain run. On the KV260 it also writes the
 block design, the device-tree overlay and the app's packaging, and the app is
-named for the top (`life64x64_batch`).
+named for the top (`life64x64-batch`).
 
 Then the host: `warp11_regs` sets and reads registers by name over either
-link; `warp11_batch` runs a WAV, a PGM or a count through the design over
+link; `warp11_batch` runs a WAV, a PGM, a CSV or a count through the design over
 DDR, over the UART, or against the Sim through a bridge, and the check that
 matters is that **the same file in gives the same bytes out on every board as
 in the Sim**.
 
 ## What fits where
 
-The gate's numbers for this release's examples, through the real toolchains:
+The gate's numbers for this release's examples, through the real toolchains
+— cells, multipliers where the design uses them, the clock achieved. Every
+number is a bitstream that was loaded and checked: byte-identical to the Sim
+through the same host driver, or bit-exact against the software twin.
 
 | design | iCEBreaker (5 280) | Icepi (24 288) | Go Board (1 280) | DE10-Lite (49 760) |
 |---|---|---|---|---|
-| passthru, tone | 656 (tone) | fits | 837 passthru, 629 tone | 652 passthru, 11 M9Ks, 82 MHz |
-| gain | 953, 3 of 30 block RAMs | fits | ✗ 2 096 cells | fits |
-| adder | fits | fits | 916 | fits |
-| three-band EQ | ✗ 5 489 | fits | ✗ | fits |
-| twice | ✗ 8 825 | fits | ✗ | fits |
-| blur (a 64-pixel row) | ✗ 11 364, 32 of 30 block RAMs | fits | ✗ | fits |
-| Life | 8×8 derived | 32×32: 18 697, 49 MHz; 64×64 refused at 75 109 | ✗ 8×8 is ~1 980 | 40×40 derived: 23 738, 15 M9Ks, 67 MHz |
-| Mandelbrot | ✗ a lane takes 12 multipliers | 2 lanes: 4 075 cells, 24 multipliers, 67 MHz | ✗ no multipliers | 10 lanes derived: 39 093, 120 multipliers, register files in M9K, 65 MHz |
+| passthru | 923, 35.7 MHz | 833, 117 MHz | 923, 91.3 MHz | 768, 77.8 MHz |
+| tone | 617, 32.8 MHz | 561, 151 MHz | 619, 66.8 MHz | 525, 124 MHz |
+| gain | 940, 2 of 8 multipliers, 33.9 MHz | 911, 2 of 28, 63.9 MHz | ✗ 2 096 cells | 790, 6 of 144, 67.4 MHz |
+| controls | 940, 2 of 8, 36.2 MHz | 911, 2 of 28, 64.5 MHz | ✗ a multiply, no multipliers | 794, 6 of 144, 66.8 MHz |
+| adder | 902, 39.7 MHz | 792, 118 MHz | 904, 89.3 MHz | 717, 80.2 MHz |
+| twice | ✗ 8 825 | 9 121, 24 of 28, 39.1 MHz | ✗ a multiply, no multipliers | 11 309, 24 of 144, 60.8 MHz |
+| three-band EQ | ✗ 5 489 | 6 495, 12 of 28, 53.0 MHz | ✗ area | 5 975, 12 of 144, 63.4 MHz |
+| blur (a 64-pixel row) | ✗ 11 364 | 12 571, 37.0 MHz | ✗ area | 8 067, 60.9 MHz |
+| effects | ✗ 60 of 8 multipliers in place; pooled, 14 of 8 and 6 410 cells | pooled: 4 176, 28 of 28, 33.6 MHz | ✗ no multipliers | ✗ the clock: 40.3 MHz against 50 |
+| multiband | ✗ 38 531 cells, 1 288 of 8 multipliers | ✗ 51 306 cells, 1 102 of 28 | ✗ no multipliers | ✗ 196 409 |
+| Life | 8×8: 2 196, 32.4 MHz | 32×32: 18 898, 45.0 MHz; 64×64 refused at 75 109 | ✗ 16×16 is 5 575 | 40×40: 23 846, 68.3 MHz |
+| Mandelbrot | ✗ a lane takes 12 multipliers | 2 lanes: 3 780, 24 of 28, 65.6 MHz | ✗ no multipliers | 10 lanes: 16 309, 120 of 144, 70.7 MHz |
+| GEP | not in this release | 1×1, regions over the link: 23 434, 18 of 28, 38.8 MHz | ✗ one breeder exceeds the part | not in this release |
 
 A ✗ is the gate's or the sizing rule's refusal, with its number; nothing on
-this page was estimated. The KV260 holds all of them, and GEP runs there
-alone in this release, over DDR.
+this page was estimated. The KV260 holds all of them — Life at 64×64,
+Mandelbrot at 104 lanes, GEP at 8×4×2, over DDR.

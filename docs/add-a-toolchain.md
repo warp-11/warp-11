@@ -26,7 +26,8 @@ maps the family to the target.
 
 `Warp11.Build.write dir top` (`hdl/Warp11/Build.fs`) writes a directory and
 dispatches on `board.tool`: `Vivado` goes to `writeVivado`, `OpenFlow` to
-`writeOpenFlow`, which itself chooses the iCE40 or the ECP5 script by family.
+`writeOpenFlow`, which itself chooses the iCE40 or the ECP5 script by family,
+and `Quartus` to `writeQuartus`.
 A new tool is a new `BuildTool` case and a `write…` function producing:
 
 - **the top's Verilog**, emitted for the target;
@@ -43,7 +44,7 @@ A new tool is a new `BuildTool` case and a `write…` function producing:
   script put it and the environment sanitised;
 - **the loader**: `Loading` says `OsApp` (the KV260's `xmutil`), `Sram` or
   `Flash`, and the script's `PROG=` handling turns that into `iceprog`,
-  `openFPGALoader -b <boardPart>` or the app's packaging.
+  `openFPGALoader -b <boardPart>`, `quartus_pgm` or the app's packaging.
 
 On a part with a processing system the flow also writes **the block design**
 (the PS, the interconnect, the design as a slave at the board's `AxiLiteAt`
@@ -67,11 +68,12 @@ not carry, which would be the second kind of leak.
 `build/report.json` — cells, block RAMs and multipliers used of the part's
 total, the clock achieved against `fabricHz` — and refusing three things by
 number: a resource over the part, a clock short of the target, and a board
-fact that disagrees with what the tool says the part has. Two parsers exist:
+fact that disagrees with what the tool says the part has. Three parsers exist:
 `nextpnrGate` reads nextpnr's "Device utilisation" block and its
 "Max frequency" lines (and knows nextpnr lists only the primitives a design
 used, so an absent row is none used); `vivadoGate` reads the placed
-utilisation and routed timing reports. A new tool adds the parser for its
+utilisation and routed timing reports; `quartusGate` reads the fitter
+summary and the timing report. A new tool adds the parser for its
 report and names the three primitives it counts — what a cell, a block RAM
 and a multiplier are called in that report — and the gate's refusals and
 `report.json` are then the same on the new board as on the others.
@@ -81,7 +83,9 @@ and a multiplier are called in that report — and the gate's refusals and
 `hdl/tools/install-oss-cad-suite.sh` is the open flow's: pinned, checksummed,
 no root, into `~/tools`. A vendor tool has its own installer; what the flow
 needs is to find it — `build.sh` sources Vivado's `settings64.sh` from where
-Xilinx installs it — and to say clearly when it is not there.
+Xilinx installs it, and finds the newest Quartus under
+`~/tools/intelFPGA_lite` unless `QUARTUS_BIN` names one — and to say clearly
+when it is not there.
 
 ## The fourth flow, as written
 
@@ -100,7 +104,8 @@ the board knows as 9 216-bit M9Ks; multipliers, which Quartus reports as
 9-bit elements, two to an 18×18) and `.sta.rpt`'s Fmax summary. The pin
 gate needed nothing. No sentence about Quartus had to be about anything
 but a flow — the one report quirk, the 9-bit elements, is a number in the
-parser. The numbers this page owes are the first compile's.
+parser. Eleven designs have since built through it and run on the board
+(2026-11-21); [Boards](boards.md) has the gate's numbers.
 
 ## The cross-check
 
@@ -108,12 +113,11 @@ The three flows are described above without special cases, and that is the
 test a fourth has to pass: if describing Quartus's flow needs a sentence that
 is about Quartus rather than about *a flow*, the sentence names something
 `Build.fs` should carry as data or as one more case of an existing choice,
-not as a branch of its own. The DE10-Lite's bring-up is where this page gets
-its worked example and its numbers; until then it is the shape the three
-existing flows share, written down so the fourth is held to it.
+not as a branch of its own. The DE10-Lite's bring-up held Quartus to it,
+and the section above is what that took.
 
 ## See also
 
 - [How to add a new board](add-a-board.md) — the file, when the tool already
   exists.
-- [Boards](boards.md) — the four that have run, with the gate's numbers.
+- [Boards](boards.md) — the five that have run, with the gate's numbers.

@@ -45,8 +45,10 @@ would be correct only while it happened to be written last.
 | `r.RoConst(name, value)` | a fixed identifying pattern |
 | `r.RwArray(name, words)` / `r.RoArray(name, words)` | a block of words. **Rounds the cursor up** to the window's own size — the alignment rule that made windows fiddly to place by hand |
 | `r.Word(fun w -> …)` | one word shared by several small entries — below |
+| `r.Wide(name, width)` | a read-only field wider than a word: the next `ceil(width / 32)` words, low word first. A record's field, never a register's |
 | `r.LayoutHash(name)` | a word answering a fingerprint of the map — which *revision* the fabric was built from |
 | `buildRegMapPinned n (fun r -> …)` | the same, with the aperture stated rather than derived |
+| `buildRegMapAtLeast n (fun r -> …)` | the aperture held at `n` bits while the map fits, grown only when it does not |
 
 ### Packing several entries into one word
 
@@ -195,8 +197,8 @@ silent or fatal:
 
 ```rust
 let found = window.read32(layout::ID_OFFSET)?;
-if found != layout::ID_MAGIC {
-    return Err(MandelFrameError::WrongId { found });
+if found != layout::ID_VALUE {
+    return Err(BatchError::WrongId { found });
 }
 ```
 
@@ -205,8 +207,8 @@ A `roConst` owns only the **read** side of its word and a `pulseBit` only the
 is why Mandelbrot's generated layout reads:
 
 ```rust
-pub const ID_OFFSET: usize = 0x00;    // reads as ID; writes pulse start
-pub const START_OFFSET: usize = 0x00;
+pub const ID_OFFSET: usize = 0x000;    // reads as ID; writes pulse start
+pub const START_OFFSET: usize = 0x000;
 ```
 
 ## Wiring it into a design
@@ -263,18 +265,38 @@ let regs = regMapSlave slavePorts map                        →   spiSlave slav
 ```
 
 **This is not hypothetical — it is the iCE40 path.** An iCEBreaker has no ARM
-cores and no AXI interconnect, so a register seam there is SPI (or UART over the
-FT2232H for bring-up). `spiSlaveOf : RegMap -> SlaveRegs` is planned as the
-**third consumer of the same map**, beside `regMapSlave` and `regMapRsLines`,
-and it does not exist yet.
+cores and no AXI interconnect, so its register seam is a UART over the FT2232H's
+second channel, and `serialRegMapSlave` is the producer:
+
+```fsharp
+(fun p -> (uartPins p "host", p.outPort "control_out" 16))
+…
+let regs = serialRegMapSlave "host" fabricHz baud pins map
+```
+
+The rate is derived from `fabricHz` and `baud`, and refused when the nearest
+whole number of cycles a bit is more than 2% off. The protocol is a sync byte,
+a command byte carrying the word index, four data bytes for a write and an xor
+checksum, answered by a status byte (`SerialRegMap.fs` has the frames); a map
+too wide for seven bits of word index spends one more byte. Nothing in it is
+UART-specific, so SPI would carry the same bytes; there is no SPI producer
+yet. `serialRegMapSlaveWith` and `serialRegMapSlaveLink` add a stream of words
+going out on the same wire, and words played in, as frames the host tells apart
+by their first bytes. `SerialRegMap` in `Warp11.Designs` is the toy.
+
+On the host the seam says which: a build reached over a UART carries
+`HOST_BAUD`, and `warp11_regs --board <build-dir> --port /dev/ttyUSB1 --get
+count` speaks the protocol by register name, as the same command without
+`--port` reaches a KV260's uio mapping.
 
 What survives the move: the map, the design body, and **the generated Rust
 layout** — 32-bit words and `% 4` alignment are kept deliberately so the layout
 file is unchanged across buses, which means the host driver is too.
 
-The part that does not survive for free: `RwArray` arbitration assumes a bus
-with a read-address handshake to borrow the port during. A map with no windows
-sidesteps it entirely.
+Both producers are `regMapSlaveOn` over a channel — word index, write data,
+write fire, a read begun and answered — so a window's arbitration comes with the
+channel: `serialMap` has a `RwArray` in it, read back over the UART as over
+AXI-Lite.
 
 ## Which kind to reach for
 
@@ -311,14 +333,17 @@ this board needs a power cycle.
 | `regs.drive entry expr` | drive a `roField`. **Exactly once**; never driving it fails at emission |
 | `regs.pulse entry` | the one-cycle strobe from a `pulseBit` |
 | `regs.setBit entry expr` | set a `w1cBit` from hardware. Set wins over a same-cycle host clear |
-| `regs.window entry addr` | the arbitrated read port onto a `rwArray` — call it **once** |
+| `regs.readArray entry addr` | the arbitrated read port onto a `rwArray`: `.read.data`, plus `hostTurn` for the cycles the host has borrowed it. Call it **once** |
 | `regs.driveArray entry` | the `Mem` behind a `roArray`, for the design to write |
 | `regs.irq` | the OR of every `w1cBit`, for the board's interrupt line |
 
 ## Generating the Rust seam
 
-`regMapRsLines` turns the same map into constants. Emit them into the driver
-crate and commit the result, so a layout change shows up in the driver's diff:
+`regMapRsLines` turns the same map into constants. A board top built by the
+generator writes them into its build directory as `{name}_layout.rs`, with
+`FABRIC_HZ` and `HOST_BAUD` or `HOST_APP` after them, and the host reads that
+file when it connects. Called directly, it is lines to write wherever you want
+them:
 
 ```fsharp
 let layout = regMapRsLines blinkerMap
@@ -332,13 +357,17 @@ pub const APERTURE_BYTES: usize = 16;
 pub const ID_OFFSET: usize = 0x000;
 pub const ID_VALUE: u32 = 0x000b11ed;
 pub const ENABLE_OFFSET: usize = 0x004;
+pub const ENABLE_WIDTH: u32 = 1;
+pub const ENABLE_RESET: u32 = 0x0;
 pub const COUNT_OFFSET: usize = 0x008;
 pub const COUNT_SHIFT: u32 = 0;
 pub const COUNT_MASK: u32 = 0xffffff;
 ```
 
-Names become `UPPER_SNAKE`. A `pulseBit` or `w1cBit` also emits `_BIT`, a
-`roField` emits `_SHIFT` and `_MASK`, a window emits `_WORDS`.
+Names become `UPPER_SNAKE`. A `rwReg` also emits `_WIDTH` and `_RESET`, a
+`pulseBit` or `w1cBit` `_BIT`, a `roField` `_SHIFT` and `_MASK` (`_WORDS` when
+it is wider than a word), a window `_WORDS`, and a window with initial
+contents `_INIT`.
 
 ## Rules that bite, all checked at elaboration
 
@@ -373,6 +402,10 @@ surprises. Each names the register:
   `MmapWindow`, and driving the design from a host program.
 - [Register map (tutorial)](../../hdl/Warp11.Tutorial/doc/registerMap.md) — the
   five AXI-Lite channels themselves, steppable in the debugger. It teaches the
-  **list-driven** `axiLiteSlave`, which is a different and simpler surface: it
+  **list-driven** `axiLiteSlaveOn`, which is a different and simpler surface: it
   is for understanding the bus, not for building a design with a host seam.
-- `hdl/Warp11.Effects/Wrappers.fs` — four real maps side by side.
+- `hdl/Warp11.Designs/Designs.fs` — `scratchMap` (every kind of entry, the
+  aperture pinned) and `serialMap` (the same surface behind a UART), each
+  with the design that serves it.
+- `hdl/Warp11/BoardTop.fs` — the map the generator assembles for a board top:
+  identity, layout hash, the batch contract, every control a register.

@@ -7,11 +7,11 @@
 /// exists only to make an oracle happy.
 ///
 /// That is why they are duplicated rather than shared. Two artifacts with
-/// different jobs were compromising each other, and eight tiny designs is a
+/// different jobs were compromising each other, and a few dozen tiny designs is a
 /// cheap price for letting each be good at its own.
 ///
 /// Every one is differentially tested against Verilator by
-/// `Warp11.Tutorial.Checks` — a page that teaches something the silicon does not
+/// `Warp11.Tutorial.App -- check` — a page that teaches something the silicon does not
 /// do would be worse than no page.
 [<AutoOpen>]
 module Warp11.Tutorial.Designs
@@ -295,12 +295,12 @@ let fsm =
                           (eq count (lit 3UL 8), fun () -> stage.Goto Done)
                           (otherwise, fun () -> stage.Goto Fetch) ] ])
 
-/// A Q format is one line: a total width, a count of fraction bits, and a
-/// measure binding the two so the type system can carry it. Q5.3 is the same
+/// A Q format is one line: a total width and a count of fraction bits, a
+/// `NumberFormat` the value carries and elaboration checks. Q5.3 is the same
 /// eight bits as `q4_4` with the point moved.
 let private q5_3 = signedFixed 8 3
 
-/// Fixed-point arithmetic where the Q format is part of the type. A multiply
+/// Fixed-point arithmetic where the Q format travels with the value. A multiply
 /// changes format — widths add and fraction bits add — and the renormalization
 /// back is a slice the target format names.
 let fixedPoint =

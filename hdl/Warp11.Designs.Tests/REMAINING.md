@@ -1,6 +1,6 @@
 # Test Migration Complete
 
-Current state: `Warp11.Designs.Tests` has 148 passing Expecto tests. Run from `hdl/`:
+Current state: `Warp11.Designs.Tests` has 220 passing Expecto tests (counted 2026-11-16). Run from `hdl/`:
 
 ```sh
 dotnet run --project Warp11.Designs.Tests

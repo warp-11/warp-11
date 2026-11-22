@@ -78,14 +78,17 @@ walk rather than spot-check.
 ## The loop
 
 ```fsharp
+// in the io factory:
+[ for i in 0..3 -> p.outPort $"hot{i}" 1 ]
+// ...and in the body:
 for i in 0..3 do
-    let o = outputBit $"hot{i}"
-    hot[i] ==> o
+    hot[i] ==> hotOuts[i]
 ```
 
-An ordinary F# `for` loop, creating four output ports. This does **not** loop at
-run time — there is no run time. The loop runs once during elaboration and
-leaves four ports behind, exactly as if you had typed them out.
+An ordinary F# list comprehension, creating four output ports, and a `for`
+loop wiring them. Neither loops at run time — there is no run time. Both run
+once during elaboration and leave four ports behind, exactly as if you had
+typed them out.
 
 That is the general shape of generation in Warp 11: F# is the metaprogram, and
 anything you can compute in F# — a list, a fold, a recursive function — can

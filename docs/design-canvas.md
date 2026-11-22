@@ -147,7 +147,9 @@ The edges' order is the lanes' order, and what priority serves first;
 A unit's box becomes a **service** when a socket is connected to it: draw an
 edge from a box's `multiply` socket to a multiplier's `service` port. One
 socket on a service is the unit in place; several share the one copy behind
-an arbiter, whose policy and timing are set on the edge's panel. A socket
+an arbiter, whose policy and timing are set on the edge's panel. A service
+box with **copies** above one is a pool: the sockets are dealt to the copies
+in turn, each copy arbitrating its own share (`sharingAmong`). A socket
 nobody connected is served in place, a copy of its own for each — which is
 why a plain `gain` box needs nothing drawn for its multiplies.
 
@@ -227,7 +229,7 @@ has no `format` and is refused, saying so: it is redrawn, one edge a stream.
 
 **Build → Export to F#…** asks where to write the typed form: the units by
 their F# names and each call the elaboration makes, in its order — `stage`,
-`farm`, `connectAs`, `streamMergeWith`, `sharingWith` — which elaborates to
+`farm`, `connectAs`, `streamMergeWith`, `sharingWith`, `sharingAmong` — which elaborates to
 the same bytes. It is one-way: the typed form cannot be read back as a graph.
 
 ---
@@ -265,12 +267,12 @@ by name. The rows:
 | row | what it decides |
 |---|---|
 | part | the toolchain's part arguments, what memory the fabric has, whether there is a processing system |
-| build tool | Vivado for Xilinx parts, yosys → nextpnr → icepack for iCE40 |
+| build tool | Vivado for Xilinx parts, yosys → nextpnr → icepack for iCE40 (→ ecppack for ECP5), Quartus for the MAX 10 |
 | clock | where the fabric clock comes from — a PS clock the overlay pins, a crystal through a PLL — and its rate, which every derived rate divides |
-| data path | **pins**: the boundary on the I2S pins, a converter on the header. **memory**: the boundary in the host's DDR — rows in a DMA buffer the fabric reads, runs the design over and writes back, no converter needed. **count**: nothing read — the input box's one field is the beat index, the host writes how many and reads the rows back; a generator's path, the Mandelbrot example's |
+| data path | **pins**: the boundary on the I2S pins, a converter on the header. **memory**: the boundary in the host's DDR — rows in a DMA buffer the fabric reads, runs the design over and writes back, no converter needed. **count**: nothing read — the input box's one field is the beat index, the host writes how many and reads the rows back; a generator's path. **scatter**: counted the same way, each beat written at the place it carries. **link** and **countlink**: the same two over a board's UART, rows played in and frames streamed back. **registers**: no stream, only the register map |
 | host memory | which PS slave port the fabric's master lands on, its width, the arena the overlay reserves |
 | host driver | how a host reaches the registers: AXI-Lite at a base (a uio device on the OS), a UART at a baud, or none (a fixed-function design with its controls baked at their starting values) |
-| loading | an OS app the FPGA manager loads (`xmutil`), or SRAM / SPI flash (`iceprog`) |
+| loading | an OS app the FPGA manager loads (`xmutil`), or SRAM / SPI flash (`iceprog`, `openFPGALoader`, `quartus_pgm`) |
 | connectors | per device role, which package pin each port lands on. The I2S pinout follows the connector: the Pmod I2S2's separate converters, or a shared bus |
 
 **File → Save** writes the mapping file beside the design and the design's default.
@@ -313,7 +315,13 @@ Icepi's files are the ECP5's, `.lpf` for `.pcf`, `openFPGALoader` for
 | `{Name}.v` | the top |
 | `{name}_top.v` | the wrapper: the PLL from the crystal to the fabric rate, computed as `icepll` computes it, a reset released on lock, the design instance |
 | `{name}_top.pcf` | the pin map from the connector table |
+| `{name}_layout.rs` | the seam, where the board has a host link |
 | `build.sh` | yosys, a pin gate, nextpnr, a timing gate, icepack; `PROG=1 ./build.sh` writes the flash |
+
+**Quartus** (the DE10-Lite): `{Name}.v`, a `{name}_top.v` wrapper, the
+project's `.qpf`, `.qsf` (pins and sources) and `.sdc` (the clock), the
+seam, and a `build.sh` that runs `quartus_sh --flow compile` and, with
+`PROG=1`, `quartus_pgm` over the USB-Blaster.
 
 Before any tool runs, the **pin gate** checks that every pin port of the
 top has a pin on the board and every pin the board names is a port, refusing
@@ -393,8 +401,7 @@ code; the build follows from the code.
   burst; the driver does both. A count that is not whole bursts never
   finishes.
 - **The differential** (`hdl/run_differential.sh`) verifies the toolchain,
-  not a design. Run it before a release or a bitstream build when the
-  library has moved.
+  not a design. Run it before a release.
 
 ## What was measured
 

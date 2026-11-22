@@ -100,18 +100,20 @@ A pipeline is a list of stages, and one call builds it:
 
 ```fsharp
 let stages =
-    [ Stream.spec "scale" scaleModule |> Stream.lanes 4
-      Stream.spec "clamp" clampModule
+    [ Stream.specOf "scale" scaleStage |> Stream.lanes 4
+      Stream.specOf "clamp" clampStage
       Stream.specFromFunction saturateStage |> Stream.probed "sat" ]
 
 source |> Stream.pipeline stages |> streamSink outPorts
 ```
 
 The pipeline vocabulary lives in the nested `Stream` module, so it is spelled
-`Stream.spec` where the operators above are bare — `Stream.pipeline`,
+`Stream.specOf` where the operators above are bare — `Stream.pipeline`,
 `Stream.farm` and the rest read the same way at every call site in the repo.
 
-`Stream.spec` names a module, `Stream.specFromFunction` takes a plain function,
+`Stream.specOf` takes a function that plants a named instance (it is handed the
+lane-derived name, `scale0`, `scale1`, …), `Stream.specFromFunction` takes a
+plain function,
 and **a call site cannot tell which it got** — that is the call-site invariance
 rule, and it means a stage can switch between inline logic and its own module
 without touching the pipeline that composes it. `Stream.lanes n` replicates a
@@ -121,6 +123,57 @@ payload type changes between stages.
 
 `Stream.farm n worker` is the direct form: replicate a worker n ways, dispatch
 and merge around it.
+
+## Connections, meetings and groups
+
+**What a connection registers is the parent's choice.** A module does not
+register its own output, because whether a path is too long depends on what it
+is connected to. `connectAs` puts a stream through one:
+
+```fsharp
+s |> connectAs Connection.Forward
+```
+
+| `Connection.` | registers | cost |
+|---|---|---|
+| `Wire` | nothing | none |
+| `Forward` | data and `valid` (`streamStageFor`); `ready` passes through | one cycle; breaks a long forward path |
+| `Backward` | `ready` (`streamSkidFor`); data and `valid` pass through | no cycle while nothing stalls; breaks a `ready` rippling back through a chain |
+| `Both` | `Backward` then `Forward` | one cycle; every signal across it comes from a register |
+
+**Several streams meeting at one place** are a fork leaving
+(`streamForkEager n`, every branch sees every beat; `streamBalance n`, each
+beat to one branch) or a merge arriving:
+
+```fsharp
+streamMergeWith Arbitration.roundRobin [ a; b; c ]
+streamMergeWith { policy = ArbitrationPolicy.Priority; timing = ArbitrationTiming.Registered } [ urgent; rest ]
+```
+
+`Arbitration` is one record — the `policy` (`RoundRobin`, every asker an equal
+share under load; `Priority`, the lowest-numbered asker) and the `timing`
+(`SameCycle`, chosen and granted in one cycle; `Registered`, chosen one cycle and
+offered the next, so `valid` and the mux's select come from registers, at the
+cost of an idle cycle after an input's last beat). A shared unit's clients
+(`Fu.sharingWith`) choose from the same record. The arbiter is one pick over
+every input, so the share is the policy's at any count; at one stream the merge
+is that stream.
+
+**One stage per group of fields.** `eachGroup group stage s` takes a beat's
+fields `group` at a time — a wide beat's frames, a vector's lanes — sends each
+group through a `stage` of its own (told which group it is, so its instances can
+be named apart) and puts the results back in order:
+
+```fsharp
+// Two stereo frames a beat, the stereo gain on each.
+wide |> eachGroup sampleLayout (fun i -> audioGain "AudioGain" $"gain%d{i}" volume mute)
+```
+
+The groups are forked and rejoined (`streamJoinGroups`), never assumed in step;
+at one group there is no fork and no join. Each group must come back at the
+formats it went in at. **Each group has a stage of its own**, which is right for
+a stage with no memory between beats and wrong for consecutive frames of one
+stream through a stage that remembers — each copy would see every k-th frame.
 
 ## Buffering
 

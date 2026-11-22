@@ -22,12 +22,13 @@ random-accesses memory it does not own.
 ## The shape of it
 
 ```
-GepClusterPool           the generation loop
-  ├── GepBreederBlock × 4      selection and recombination
-  ├── GepUnitEngine × 8        one chromosome at a time, 16 threads deep
-  │     └── GepAluPipelined    the operator set
-  │           └── warpFu       the shared divider socket
-  └── GepRecordRouter          results back out to DDR
+GepClusterAxi            the generated board top: controls, reports, regions
+  └── gepClusterPool       the generation loop
+        ├── GepBreederBlock × 8      selection and recombination
+        ├── GepUnitEngine × 4        one chromosome at a time, 16 threads deep
+        │     └── GepAluPipelined    the operator set, the divider per lane
+        │                            or pooled behind `warpFu`
+        └── GepRecordRouter          results back out to DDR
 ```
 
 Two ideas do most of the work:
@@ -41,10 +42,18 @@ thread each cycle and the arithmetic stays busy.
 and is used rarely. Giving every engine its own divider is most of the area
 budget spent on an operator that is mostly idle, so instead the engines share a
 pod of dividers through a request socket (`warpFu`). The engine issuing a divide
-parks that thread and picks up another.
+parks that thread and picks up another. Which one is the shape's choice
+(`FuSharing`: `PerLane` or `Pooled`); the silicon shape keeps a divider per
+lane, because the breeders, not the dividers, bind the LUTs, and pooling
+cost 44–118% throughput.
 
-The cluster is LUT-bound, not DSP-bound — the opposite of Mandelbrot — and the
-4×8×2 configuration that ships uses 34.5% of the board's LUTs.
+The cluster is LUT-bound, not DSP-bound — the opposite of Mandelbrot. It is
+a `Design` on regions (`ClusterAxi.fs`, `notes/DEVICES.md` §13): its needs
+are the host's controls, what it reports, and four regions — the queue, the
+population, the ring and the op-list — and the board says where they live,
+so the top, the register map and the seam all come from one definition.
+The 8×4×2 shape that ships (the re-swept mix) uses 43.7% of the KV260's
+LUTs; the 4×8×2 before it, 34.5%.
 
 ## Running it
 
@@ -89,11 +98,15 @@ is every one of them, every generation.
 
 ## Files
 
-- `Karva.fs`, `Chromosome.fs`, `Operators.fs`, `Engine.fs` — the software twin
-- `GepAlu.fs`, `GepUnitEngine.fs`, `GepBreederBlock.fs`, `GepClusterPool.fs` —
-  the fabric
-- `ClusterAxi.fs` — the slave and the generated register map
+- `Fixed.fs`, `Rng.fs`, `Opcodes.fs`, `Karva.fs`, `Chromosome.fs`,
+  `MicroProgram.fs`, `HwBreeding.fs`, `Fitness.fs`, `Engine.fs` — the
+  software twin
+- `Hdl.fs` — the fabric: the ALU, the unit engine, the breeder block, the
+  record router
+- `Cluster.fs` — the cluster pool, its shapes and its regions
+- `ClusterAxi.fs` — the cluster as a design, on the KV260 and the Icepi
 - `Problems.fs`, `Srbench.fs` — the benchmark set
+- `Golden.fs`, `golden/` — the golden vectors from the original engine
 
 ## Numbers
 
@@ -102,6 +115,12 @@ is every one of them, every generation.
 - 34.5% LUT utilization
 - division solved exactly in fabric, not approximated
 
+| board | shape | measured |
+|---|---|---|
+| KV260 | 8 × 4 × 2 | first light 64/64 and the streaming loop 3 generations bit-exact, 43.7% LUT, WNS +0.623 |
+| Icepi Zero | 1 × 1 | regions over the link: the streaming loop's score round and 3 generations bit-exact against the mirror, 16/16 each, 7.1 ms an offspring at 1 Mbaud (23 434 / 24 288 cells, 18 / 28 multipliers, 38.8 MHz) |
+| Go Board | — | refused: one breeder exceeds the part |
+
 ## Known gaps
 
 - **ADFs raise the ceiling but not the floor.** Automatically defined functions
@@ -109,4 +128,4 @@ is every one of them, every generation.
   starter problem is still unsolved at 0/40 seeds with 3, 4 or 6 ADFs. Both
   engines call it a search-power gap rather than a budget one. The next lever
   is the homeotic alphabet.
-- Scaling past 4×8×2 does not fit: 6×12×2 models at 131% of the board.
+- Scaling the old 4×8×2 up does not fit: 6×12×2 models at 131% of the board.

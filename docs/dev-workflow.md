@@ -56,7 +56,7 @@ ssh ubuntu@<board-ip> 'sudo -n /usr/bin/xmutil listapps | head -3'
 
 `u-dma-buf` (the DDR framebuffer and work queues) and optionally `warp11-dma`.
 Both are DKMS-managed so they survive kernel updates. See
-`hardware/board/README.md` §3.
+`hardware/board/README.md` §8.
 
 ## The loop
 
@@ -82,12 +82,12 @@ that reads Vivado's reports back:
 out/build.sh
 ```
 
-(`Warp11.GoL.App -- build out/`, `Warp11.Gep -- build out/`
+(`Warp11.GoL.App -- life out/`, `Warp11.Gep -- build out/`
 and `Warp11.Placement -- build my.json my.kv260.json out/` are the same shape.
 The hand-written `hardware/vivado/*.tcl` scripts the first accelerators were
 built with are retired as each regenerated bitstream is run bit-exact.)
 
-A good free window for the differential oracle — four minutes of Verilator
+A good free window for the differential oracle — eleven minutes of Verilator
 against twenty of Vivado costs nothing but contention, and a failure arrives in
 time to kill the build.
 

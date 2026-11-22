@@ -1,8 +1,7 @@
-/// What the Game of Life project is built for: the one board both its tops
-/// — the hand `GolAxi` and the world as a design — build for. Moving the
-/// project to another board is `board` below.
+/// What the Game of Life project is built for: the one board its world's
+/// tops build for. Moving the project to another board is `board` below.
 ///
-/// `golfs_bd_bd.tcl` programs PL0 at 166.666672 MHz, which is the whole
+/// The generated block design programs PL0 at 166.666672 MHz, which is the whole
 /// headline: one generation per cycle is 167 million generations a second at
 /// this clock and nothing like it at another. The number lives here so the
 /// generated seam carries it to the daemon rather than the daemon restating

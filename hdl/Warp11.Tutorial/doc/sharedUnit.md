@@ -95,6 +95,13 @@ is as cheap as fusing the arm straight into the pipeline, because that is
 exactly what it elaborates to: no arbiter, no routing, the result lands in a
 statically known slot.
 
+A design rarely writes `warpFu` itself. An operation worth sharing is a
+**socket** on the unit that needs it, and the parent serves it: `Fu.inPlace`
+gives each socket a copy of its own — byte-identical to writing the operation
+inline — and `Fu.sharingWith` puts several sockets on one copy, which is this
+page's machinery underneath. `Fu.Serving` (`InPlace | Shared of copies`) is
+that choice, stated beside the design.
+
 And at one client, the pod *is* the unit. No arbiter, no grant register, no
 demux — `ready` ties high, and only the tag delay line survives. A design
 parameterized by client count does not sprout a pointless one-way arbiter in

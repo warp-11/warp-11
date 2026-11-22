@@ -2,8 +2,8 @@
 
 The board side of the `de10lite` preset: what to install once, how the one
 cable goes on, and what to check before the first compile. The build itself
-is a generated directory — `dotnet run --project Warp11.Designs -- hello
-Warp11.Designs/hello.de10lite.json out/`, then `out/build.sh` — and
+is a generated directory — with `Hello.board` set to `de10Lite`, `dotnet
+run --project Warp11.Designs -- hello out/`, then `out/build.sh` — and
 [`docs/boards.md`](../../docs/boards.md) is the page.
 
 ## Quartus
@@ -41,16 +41,41 @@ plugged once:
 | GND | 12 | ground | |
 
 It must be a 3.3 V cable: the MAX 10's banks are 3.3 V and a 5 V TTL cable
-would exceed them. The link runs at 115 200 baud.
+would exceed them. Pin 11, beside the ground on pin 12, is 5 V: count twice.
+
+**A Raspberry Pi Debug Probe is such a cable**, and is what the board was
+brought up on (2026-11-21): its **U** port (not **D**), TX to header pin 1,
+RX to pin 2, GND to pin 12. It is a CDC-ACM device, so it is `/dev/ttyACM0`
+rather than `/dev/ttyUSB0`, and root's until `52-debug-probe.rules` beside
+this file is installed the way the USB-Blaster's rule is, above.
+
+**The link runs at 500 kbaud** (the seam says so; no tool is told), half
+the other boards', and the reason is the cable. Measured 2026-11-21 with
+two-way runs of 1.4 MB each way:
+
+| | jumpers lying together | TX and RX separated |
+|---|---|---|
+| 500 kbaud | 2 of 10 runs lost bytes, then 1 of 10 | 0 of 36 |
+| 1 Mbaud | 4 of 6, and the probe locked up once | 7 of 50 |
+
+**Keep the TX and RX jumpers apart**: side by side they couple, and it
+showed only with rows going both ways at once — one-way runs (a tone, a
+Mandelbrot frame) never lost a byte. What is left at 1 Mbaud did not go
+away with the wiring and may be the probe; an FTDI cable on the other four
+boards never showed any. Every frame carries a checksum, so a run that
+lost bytes stops and says so — `malformed reply […]` — rather than writing
+a wrong file; run it again. `warp11_batch` clears what a run that died
+left in the fabric's buffer before it plays anything.
 
 ## Before the first compile: the pins
 
 The preset's pins were written from the board's user manual without the
-maker's constraints file to hand. **Check them against Terasic's
-`DE10_LITE_golden_top.qsf`** (on the board's CD and on their site) before
-trusting a bitstream: the 50 MHz oscillator on `P11`, LEDR0–9 on `A8 A9 A10
-B10 D13 C13 E14 D14 A11 B11`, GPIO_0 on `V10`, GPIO_1 on `W10`. A wrong LED
-pin is a dark LED; a wrong GPIO pin is an hour on the bench.
+maker's constraints file to hand, and the bench of 2026-11-21 found them
+right as written: the 50 MHz oscillator on `P11`, LEDR0–9 on `A8 A9 A10 B10
+D13 C13 E14 D14 A11 B11`, GPIO_0 on `V10`, GPIO_1 on `W10`. A board of your
+own on this part should still be checked against Terasic's
+`DE10_LITE_golden_top.qsf` (on the board's CD and on their site): a wrong
+LED pin is a dark LED; a wrong GPIO pin is an hour on the bench.
 
 The first compile also checks the gate against a real report: it reads
 `output_files/<top>.fit.summary` for logic elements, memory bits and 9-bit

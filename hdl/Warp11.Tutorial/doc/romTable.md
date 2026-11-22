@@ -13,7 +13,7 @@ initialization sequence — the answers are there from the first cycle.
 - `prime` reads 2, 3, 5, 7, 11 — and then **0, 0, 0**.
 
 Press **Reset** and look again. Still there. That is the difference from
-[**RAM**](ram.md): a `mem` starts as whatever the silicon happened to contain, and a `rom`
+[**RAM**](ram.md): a memory starts as whatever the silicon happened to contain, and a `rom`
 starts as what you said.
 
 ## Reading the source
@@ -27,12 +27,6 @@ A name, a word width, and the contents — an ordinary F# array, evaluated at
 elaboration time. It could have been a `List.map` or a loop or anything else F#
 can compute, because none of it exists at run time:
 
-`distributedRom` rather than `rom` for the same reason [**RAM**](ram.md)'s memory says
-`distributedMem`: the read here is combinational, and a combinational read is
-only legal on storage declared to be built from LUTs. `rom` exists too and leaves
-the choice to the synthesiser — use it with `memRead` when the table is large
-enough to want a block RAM and you can afford the cycle.
-
 ```fsharp
 let squares = distributedRom "squares" 8 [| for i in 0UL..7UL -> i * i |]
 ```
@@ -41,6 +35,13 @@ is the same ROM. That is the general shape from [**Bit shapes**](bitShapes.md) a
 metaprogram — and it is how real tables get built: sine values, reciprocal
 estimates, gamma curves, CRC constants. You write the *derivation*, and the
 bitstream carries the *answer*.
+
+The table is a `distributedRom` for the same reason [**RAM**](ram.md)'s memory says
+`distributedMem`: the read here is combinational, and a combinational read is
+only legal on storage declared to be built from LUTs. `blockRom` is the other
+declaration — for a table large enough to want a block RAM, read with
+`memReadPort` because the cycle is the price. A bare `rom`, leaving the choice
+to the synthesiser, is a compile error, as `mem` is.
 
 ## Why a table is a good idea
 
@@ -84,7 +85,7 @@ The simulator models the same thing: contents loaded at construction, and
 **`Reset()` reloads them**, so pressing Reset in the debugger models
 reconfiguring the FPGA rather than just clearing registers.
 
-Nothing stops a design *writing* to a `rom` — it is the same declaration with
+Nothing stops a design *writing* to a ROM — it is the same declaration with
 initial contents, so a preloaded RAM is spelled exactly this way.
 
 ## Try this

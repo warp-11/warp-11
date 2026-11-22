@@ -87,8 +87,9 @@ one-at-a-time workers want 2, not 6.
 - Issue the same `in_id` twice and watch it come back twice. Nothing here is
   checking that ids are unique; that is the caller's business, and what the
   field means is entirely up to you.
-- Look for `dv_0_context_store` in the signal list. That is one lane's context
-  FIFO — eight bits wide, because that is what an id costs.
+- Look for `dv_0_context_word0` and `dv_0_context_word1` in the signal list.
+  That is one lane's context FIFO — two words of eight bits, because that is
+  what an id costs.
 
 ## See also
 

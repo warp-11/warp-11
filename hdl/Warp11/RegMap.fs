@@ -2,7 +2,7 @@
 module Warp11.RegMap
 
 /// The declarative AXI-Lite register map: one definition consumed twice — by
-/// `axiLiteSlaveOf` for the slave elaboration and by `regMapRsLines` for the
+/// `regMapSlave` for the slave elaboration and by `regMapRsLines` for the
 /// generated Rust layout — so the register file and the driver cannot
 /// disagree. The original `AxiLiteRegs` (GoLRegs et al.), re-thought for
 /// the F# surface: entries are plain values a wrapper holds on to, and the

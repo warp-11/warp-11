@@ -255,7 +255,7 @@ Nothing above needed hardware, and the step to a board is not a rewrite. A
 design declares what it needs — rows in and out, a value the host sets, a
 bit it reports — and a **mapping** beside it, in code, names a board and how
 those needs are carried: through the host's memory on a KV260, as frames on a UART
-on an iCEBreaker, an Icepi or a Go Board. The build directory the mapping
+on an iCEBreaker, an Icepi, a Go Board or a DE10-Lite. The build directory the mapping
 produces runs the board's toolchain, ends with a gate that reads the tool's
 own report, and writes the seam the host tools read, so `warp11_regs` and
 `warp11_batch` need telling nothing but which file.
@@ -274,7 +274,7 @@ that is not there, and it is a file rather than source.
 - **Change the width.** Make `count` 8 bits and slice bit 7, then step it. A
   blink slow enough to watch turn over by hand is the fastest way to feel what a
   register is.
-- **Add a port.** `let speed = input "speed" 2`, and choose which bit drives the
+- **Add a port.** `p.inPort "speed" 2` in the io factory, and choose which bit drives the
   LED with `selectIndexed` — now the design is configurable while it runs.
 - **Then parameterise it at elaboration instead**, by making `blinker` a
   *function* of the counter width. That is the move the whole toolkit is built

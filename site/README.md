@@ -40,7 +40,8 @@ and says which is missing rather than failing.
 
 ## What it is
 
-`build.fsx` is about a hundred lines: a page list, a template, and Markdig.
+`build.fsx` is about seven hundred lines: a page list, a template, Markdig,
+the search index, and the copies of the debugger, the demo and the reference.
 Output goes to `site/out`, which is gitignored — the site is built, never
 committed.
 
@@ -58,7 +59,7 @@ right on one clock. Warp 10 is the asymptote — every point in the universe at
 once — so what lies past it is not a longer streak, it is everything advancing
 at the same time, which is also the argument the front page is making.
 
-`site/hero.js` is that animation: ~230 lines of canvas 2D, no dependencies, one
+`site/hero.js` is that animation: ~240 lines of canvas 2D, no dependencies, one
 `requestAnimationFrame` loop that stops via `IntersectionObserver` when the hero
 scrolls away. `prefers-reduced-motion` skips the journey and draws the
 destination as a single static frame. Every word in the hero is also in the page
@@ -85,7 +86,7 @@ is, twelve lines above the first F# it shows you.
 fsdocs generates the **API reference** at `/reference/` from the `///` comments
 in `Warp11` — around a hundred pages, and not a word of it written twice. The guides and the
 tutorial stay with `build.fsx`, because their content is prose we author and a
-hundred lines we control iterates faster than a template system.
+script we control iterates faster than a template system.
 
 Three things make the two halves look like one site:
 
@@ -262,5 +263,5 @@ discovered now than on launch day.
 
 ## Known rough edges
 
-- No search, no syntax highlighting, no dark/light toggle — the site follows
-  the reader's system preference.
+- No syntax highlighting, no dark/light toggle — the site follows the
+  reader's system preference.

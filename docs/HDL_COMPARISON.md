@@ -16,7 +16,7 @@ Unlike every other entry here, Warp 11 is **not one host language**. That is del
 
 - **F# is the DSL half.** Designs, the standard library, elaboration, the simulator, Verilog emission. Chosen at the *use* site: instances are ordinary functions, so `accumulate (multiply a b) (multiply (bump c) d)` is a design, and whether each of those is a module instance or inline logic is a definition-site decision invisible to the caller.
 - **Rust is the runtime half.** The board-side driver, the daemons, the memory-mapped register access, the DMA. Chosen for board reach: the smallest targets in scope run no managed runtime at all.
-- **The seam between them is generated, not agreed.** An AXI-Lite register map declared once in F# emits both the slave's RTL and a Rust layout module of offsets, bit positions and masks that the driver imports. Neither side can drift from the other, because only one of them is authored.
+- **The seam between them is generated, not agreed.** An AXI-Lite register map declared once in F# emits both the slave's RTL and a Rust seam of offsets, bit positions and masks that the host reads when it connects to that build. Neither side can drift from the other, because only one of them is authored.
 
 The cost is real and was measured before being accepted: two toolchains, and one artifact crossing between them. The benefit is that neither half is compromised to keep the other happy — which is what happens when a single language has to be good at both algebraic data types and `#![no_std]`.
 
@@ -31,7 +31,7 @@ The cost is real and was measured before being accepted: two toolchains, and one
 | **Clash** | Haskell (GHC) | Verilog/VHDL/SV | Functional stdlib (Vec, signals); narrower than Chisel-class | Interactive REPL, simulation in GHC | Via standard tools | Decent (Hackage + tutorial) | QBayLogic, niche academic |
 | **Bluespec (BSV)** | BSV (own lang, SV-or-Haskell flavored) | Verilog | Guarded-atomic-actions stdlib (rules, methods, FIFOs, BRAMs, NoC fabric) | bluesim included | Recent partnership w/ Axiomise for RISC-V cores | Decent, BSC has 20+ yrs of materials | Flute, Piccolo, Shakti RISC-V; Achronix integrations |
 | **Veryl** | own lang (Rust-syntax-inspired) | SystemVerilog | Thin (it's a transpiler, leans on SV ecosystem) | Defer to SV simulators (Verilator, VCS) | Defer to SV tools | Good, modern site, LSP integration | Early adopters, growing |
-| **Warp 11** | F# (DSL) + Rust (runtime) | Verilog (multi-module, hierarchical) | Audio (biquad EQ + RBJ cookbook, FIR, broadband compressor, limiter, gain, tone, host-written dB gain tables, I2S, PDM microphones through a CIC decimator); AXI-Lite slave from a declarative register map with generated Rust layouts (registers, pulse/W1C bits, and windows in both directions — host-written with arbitrated readback, and design-written for the host to read), AXI4 master read+write (burst, multi-outstanding); typed streams with `wormhole` connect + operator chains, replication, unions, merge/dispatch trees, arbitration and connections chosen by the parent, units shared through sockets, stall telemetry; a stream through the host's memory over one to five ports at the ports' rate; snapshot buffer (CONFLATE/N=3); `reduceTree`/`countWhere`/`neighborhood`/`warpFu`/xoshiro; state machines over a union of states, decoded by name in the debugger; one numeric layer over the width-only IR — width, fraction bits and signedness in one format, so signed/unsigned integers and signed/unsigned fixed point are one type and the five sign-dependent primitives are chosen by the format rather than by the call site. no image-processing or crypto modules | Compiled cycle-based interpreter; Verilator differential across narrow + wide; **step-through debugger with signal breakpoints**; Rust driver runs against the F# sim over a bridge | None | This file + README + per-area design docs | One developer; three accelerators (Mandelbrot, GoL, GEP) running on a KV260, F#-elaborated and driven by the Rust runtime |
+| **Warp 11** | F# (DSL) + Rust (runtime) | Verilog (multi-module, hierarchical) | Audio (biquad EQ + RBJ cookbook, FIR, broadband compressor, limiter, gain, tone, host-written dB gain tables, I2S, PDM microphones through a CIC decimator); a UART and an SDRAM controller; clock-domain crossings (synchronizers, a Gray counter, an async FIFO); AXI-Lite slave from a declarative register map with generated Rust layouts (registers, pulse/W1C bits, and windows in both directions — host-written with arbitrated readback, and design-written for the host to read), AXI4 master read+write (burst, multi-outstanding); typed streams with `wormhole` connect + operator chains, replication, unions, merge/dispatch trees, arbitration and connections chosen by the parent, units shared through sockets, stall telemetry; a stream through the host's memory over one to five ports at the ports' rate; snapshot buffer (CONFLATE/N=3); `reduceTree`/`countWhere`/`neighborhood`/`warpFu`/xoshiro; state machines over a union of states, decoded by name in the debugger; one numeric layer over the width-only IR — width, fraction bits and signedness in one format, so signed/unsigned integers and signed/unsigned fixed point are one type and the five sign-dependent primitives are chosen by the format rather than by the call site. no image-processing or crypto modules | Compiled cycle-based interpreter; Verilator differential across narrow + wide; **step-through debugger with signal breakpoints**; Rust driver runs against the F# sim over a bridge | None | This file + README + per-area design docs | One developer; three accelerators (Mandelbrot, GoL, GEP) running on a KV260, F#-elaborated and driven by the Rust runtime |
 
 ## Per-HDL deep dive
 
@@ -242,6 +242,28 @@ The pair matters more than either half. `ifElse` arms are `unit -> unit`: they d
 
 Both fold to the same nested `mux`, first arm outermost, so first-match-wins is the rule in either form and the emitted Verilog is byte-identical to writing the nest by hand — asserted as a living check over a ladder with deliberately overlapping conditions, which is the only configuration that tells a first-match ladder apart from a one-hot select.
 
+### Small parts
+
+The pieces every design reaches for, named against Chisel's `chisel3.util`,
+which has the most familiar set.
+
+| what | Chisel | Warp 11 |
+|---|---|---|
+| a counter that wraps | `Counter(n)` | `counter name n enable` (a period), `counterTo name last enable` (a bound the design computes, inclusive); `satInc` saturates |
+| bits set | `PopCount` | `popCount x`, and `countWhere width pred xs` over a list of signals |
+| a one-hot select | `Mux1H` | `mux1H selects values` |
+| index ↔ one-hot | `UIntToOH` / `OHToUInt` | `uintToOneHot n idx` / `oneHotToUInt bits` |
+| first valid of many | `PriorityMux` | `priorityPick valids fields`, a log-depth tree rather than a linear fold |
+| fair pick | `RRArbiter` | `roundRobinPick bits baseIdx width`; `streamMergeWith` for streams |
+| a reduction | `Vec.reduceTree` | `reduceTree combine xs`; `reduceTreePipelined` / `adderTreePipelined` as a stream stage, every level registered; `reduceTreeRegistered` for a value nothing is aligned to |
+| pseudo-random | `LFSR` | `lfsr name width seed step` (maximal-length taps, with `lfsrNext` the software reference); `xoshiro128pp` |
+| an edge | by hand, `x && !RegNext(x)` | `edgeDetect name enable signal` |
+
+The registered trees are the ones with a reason beyond convenience: a
+combinational tree feeding DSP blocks is re-flattened by synthesis into a
+linear cascade, and registers are the one thing it cannot move across. They
+present a `Stream`, so nothing outside says how deep the tree is.
+
 ### Division
 
 | HDL | what `/` gives you |
@@ -318,7 +340,7 @@ is the simulator's default too.
 | SpinalHDL | `Mem`; reads as `mem.readSync(...)` / `mem.readAsync(...)` |
 | HardCaml | RAM primitives, plus Xilinx-specific wrappers |
 | Amaranth | `lib.memory.Memory` with `.read_port()` / `.write_port()` |
-| Warp 11 | `mem name addrWidth width` with `memRead` (combinational, `distributedMem` only) / `memReadPort` (1 cycle, any storage, carries the caller's values across itself) / `memWrite` / `memWriteMasked` (one bit per lane — AXI's `wstrb`, the byte-enabled block-RAM shape), plus initialized ROMs. Depth is `2^addrWidth`, so an address can never leave the array. BRAM-shaped semantics; read-first on same-cycle write; initialized memories emit a Verilog `initial` block → BRAM INIT, and `Reset()` reloads them so the sim models reconfiguration |
+| Warp 11 | `distributedMem` / `blockMem` / `ultraMem name addrWidth width` with `memRead` (combinational, `distributedMem` only) / `memReadPort` (1 cycle, any storage, carries the caller's values across itself) / `memWrite` / `memWriteMasked` (one bit per lane — AXI's `wstrb`, the byte-enabled block-RAM shape), plus initialized ROMs. Depth is `2^addrWidth`, so an address can never leave the array. BRAM-shaped semantics; read-first on same-cycle write; initialized memories emit a Verilog `initial` block → BRAM INIT, and `Reset()` reloads them so the sim models reconfiguration |
 
 Three of Vivado's behaviours are respected *by construction* here rather than
 by documentation.
@@ -622,7 +644,7 @@ caller, where every direction is flipped. Operators: `streamStageFor`/`streamMap
 - **The connect call carries the timing lesson.** The clustered fan builds the ~√N registered dispatch/merge tree that MandelPod needed to get from ~106 MHz to 166 MHz, so the next design gets it without a bitstream build and a timing report. Measured: at 104 lanes the generated tree's critical path has **zero logic levels** — pure route delay.
 - **Exactly-once consumption is checked at elaboration.** A stream has one consumer; `checkStreams` counts drives of each ready net and refuses to emit a design where a stream was dropped or double-consumed. Dangling a stream is expressible, but only by saying so.
 
-`Flow[T]` is valid-only: `streamToFlow`/`flowToStream`, `flowStage`, `flowMap`. The conversion back to a stream returns an `overflowed` term rather than swallowing it, because that is the one place a design silently loses data and the loss should be something the caller has to spend. Three sites that had been writing `1 ==> ready` by hand say so in the type now (the Mandelbrot pod's framebuffer write, the GEP cluster's burst response, `warpFu`'s single-client path), byte-identically. Still missing versus SpinalHDL: conditional routing, `Fragment`-style packetization, and Flow's CDC helpers — the last of which is the real reason Spinal has the type, and needs multi-clock support here first.
+`Flow[T]` is valid-only: `streamToFlow`/`flowToStream`, `flowStage`, `flowMap`. The conversion back to a stream returns an `overflowed` term rather than swallowing it, because that is the one place a design silently loses data and the loss should be something the caller has to spend. Three sites that had been writing `1 ==> ready` by hand say so in the type now (the Mandelbrot pod's framebuffer write, the GEP cluster's burst response, `warpFu`'s single-client path), byte-identically. Still missing versus SpinalHDL: conditional routing, `Fragment`-style packetization, and Flow's CDC helpers — the last of which is the real reason Spinal has the type; here a flow crosses a clock domain as a stream, through `asyncFifo` ([below](#clock-domains-and-crossing-them)).
 
 ### Bus libraries (AXI/etc.)
 
@@ -632,11 +654,11 @@ caller, where every direction is flipped. Operators: `streamStageFor`/`streamMap
 | SpinalHDL | AXI4, AXI4-Lite, AXI4-Stream, AHB-Lite, APB3, Wishbone, TileLink — all built-in |
 | HardCaml | `hardcaml_axi` |
 | Amaranth | `amaranth-soc` for SoC interconnect (CSR bus etc.); AXI via separate libs |
-| Warp 11 | A **declarative register map** — a list of `pulseBit` / `rwReg` / `roField` / `w1cBit` / `roConst` / `rwArray` / `roArray` entries — from which `regMapSlave` synthesizes the W/R FSMs, register storage, multi-source IRQ OR and read mux, *and* `regMapRsLines` emits the Rust layout the driver imports. A window declares its storage like any memory, and a host-written one may carry initial contents (`preloadedBlockMem`): the design boots on them, the seam carries them as `{NAME}_INIT`, and a board with no processor is fitted from configuration. The same map goes behind a **UART** (`serialRegMapSlave`, 8N1, a framed request/reply with a checksum) with the design unable to tell which link it is behind. Written with `buildRegMap`, which **allocates the offsets**: registers are declared in order, packed words are a scope, and windows round the cursor up to their own alignment, so a map states widths and nothing states an address. `axiMasterReader` (multi-beat INCR bursts, `maxOutstanding`), `axiMasterReaderBurst`, `axiMasterWriter` (single- and multi-outstanding ring-buffer modes), `axiMasterWriterBurstOn` (a descriptor and its beats, WLAST counted against the descriptor, one `landed` pulse per burst on its write response) |
+| Warp 11 | A **declarative register map** — a list of `pulseBit` / `rwReg` / `roField` / `w1cBit` / `roConst` / `rwArray` / `roArray` entries — from which `regMapSlave` synthesizes the W/R FSMs, register storage, multi-source IRQ OR and read mux, *and* `regMapRsLines` emits the Rust layout the driver imports. A window declares its storage like any memory, and a host-written one may carry initial contents (`preloadedBlockMem`): the design boots on them, the seam carries them as `{NAME}_INIT`, and a board with no processor is fitted from configuration. The same map goes behind a **UART** (`serialRegMapSlave`, 8N1, a framed request/reply with a checksum) with the design unable to tell which link it is behind. Written with `buildRegMap`, which **allocates the offsets**: registers are declared in order, packed words are a scope, and windows round the cursor up to their own alignment, so a map states widths and nothing states an address. `axiMasterReaderOn` (multi-beat INCR bursts, `maxOutstanding`), `axiMasterReaderBurstOn`, `axiMasterWriterOn` (single- and multi-outstanding ring-buffer modes), `axiMasterWriterBurstOn` (a descriptor and its beats, WLAST counted against the descriptor, one `landed` pulse per burst on its write response) |
 
 Warp 11 doesn't ship higher-level fabrics (TileLink, Wishbone, etc.) or an AXI4 *slave* beyond AXI-Lite, but the AXI-Lite + AXI4-master pair covers KV260 deployments and is what every demo runs on — including GEP's sustained burst feed and Mandelbrot's 16-px-per-beat framebuffer egress.
 
-The **generated seam** is the piece with the least prior art among the embedded HDLs: the register map is written once, and both the RTL and the host's constants are outputs of it, so offsets and bit positions provably cannot drift. LiteX is the closest analogue in the wider field — it generates CSR maps and host-side access from the SoC description — and is more general, being a whole SoC framework. The difference is which direction the artifact flows: here a single design-level declaration produces both sides, and the generated file is committed, so a review sees the seam move.
+The **generated seam** is the piece with the least prior art among the embedded HDLs: the register map is written once, and both the RTL and the host's constants are outputs of it, so offsets and bit positions provably cannot drift. LiteX is the closest analogue in the wider field — it generates CSR maps and host-side access from the SoC description — and is more general, being a whole SoC framework. The difference is which direction the artifact flows: here a single design-level declaration produces both sides: every build directory carries the seam its fabric was built from, and the host reads it when it connects; where a driver spells register names, those names are generated and committed as a type, so a review sees the seam move and the compiler checks the spelling.
 
 ### Memory windows, and what "done" means
 
@@ -769,12 +791,12 @@ asked of them — and what each HDL offers for the board half of it.
 | HardCaml | The design; boards through the user's build scripts |
 | Amaranth | `amaranth-boards`: a platform per board, resources by name, `platform.request("led")` in the design, and the platform's toolchain runs from the same program |
 | Clash, Bluespec, Veryl | The design; boards through the toolchain's own files |
-| Warp 11 | A design declares *needs* — one value, one reported bit per LED — and never names a pin or a link. A board is a record of facts (part, clock, host link, connectors by role, sockets), a value in code or a file. A mapping binds the two, and is code where the design is: `Hello.mappingFor` says the host's registers and `led1 → OnPin:led1` for whatever LEDs the board has, and `Hello.board` is the one line that moves it. `hello` then builds for the KV260 over AXI-Lite and for three boards over a UART from the same source, `warp11_regs --set pattern=5` writes it over either, and the build's gate reads the toolchain's own report back |
+| Warp 11 | A design declares *needs* — one value, one reported bit per LED — and never names a pin or a link. A board is a record of facts (part, clock, host link, connectors by role, sockets), a value in code or a file. A mapping binds the two, and is code where the design is: `Hello.mappingFor` says the host's registers and `led1 → OnPin:led1` for whatever LEDs the board has, and `Hello.board` is the one line that moves it. `hello` then builds for the KV260 over AXI-Lite and for four boards over a UART from the same source, `warp11_regs --set pattern=5` writes it over either, and the build's gate reads the toolchain's own report back |
 
 Amaranth's platforms are the nearest thing: a board as a Python object the
-design asks for resources from. Warp 11 puts the board in a data file a
-design never sees, so a board can be added without source and a design
-moved by changing one file — which is what the release matrix (every
+design asks for resources from. Warp 11 puts the board in a record — a
+value in code or a data file — a design never sees, so a board can be added
+without source and a design moved by changing one line — which is what the release matrix (every
 example on every board) is built on.
 
 ### Formal verification
@@ -919,7 +941,7 @@ The honest limits, all of them:
   is read, and the one construct that does not survive that is dynamic indexing
   into a vector (`multibit_mux`).
 - **Preloaded ROM contents cannot be exported.** `.fir` has no initialiser, so
-  four designs are refused by name rather than silently emitting an empty
+  every such design is refused by name rather than silently emitting an empty
   memory.
 - **A lane-masked memory exports but does not come back.** A FIRRTL write
   port's mask mirrors its data type, so a scalar carries one mask bit and only a
@@ -952,7 +974,7 @@ Two capabilities the field mostly leaves to the user, treated here as first-clas
 | SpinalHDL | Stream fan-out/fan-in with arbitration; explicit pipelining API | Hand-written counters |
 | Amaranth / HardCaml / Clash | Manual | Hand-written counters |
 | LiteX / LiteScope | — | **LiteScope**: an embedded logic analyzer with configurable triggers, capture into FPGA memory, upload to a host, VCD/sigrok/CSV export |
-| Warp 11 | Lane count is **one integer**: the fan builder instantiates N copies, dispatches into them and merges their results, choosing flat or a ~√N registered tree by size. `MANDEL_NUM_LANES = 104` is the whole knob for filling 100% of the chip's 1,248 DSPs. A unit as one stage is `Fu.stage`; `Fu.farm order controls unit name k` is k of it over one stream, in order or as each finishes, and at one copy is the stage and nothing else | `streamProbe` puts two saturating counters on any link — `blocked` (`valid && !ready`) and `starved` (`ready && !valid`) — and `streamReport` walks a design for them. The same registers are peeked in the simulator and read over AXI-Lite on the board. Every design on the host's memory also carries `readWaits` and `writeWaits` beside its cycle count: the cycles it had no row to work on and the cycles a row could not leave |
+| Warp 11 | Lane count is **one integer**: the fan builder instantiates N copies, dispatches into them and merges their results, choosing flat or a ~√N registered tree by size. `Chunked.lanes = 104` is the whole knob for filling 100% of the chip's 1,248 DSPs. A unit as one stage is `Fu.stage`; `Fu.farm order controls unit name k` is k of it over one stream, in order or as each finishes, and at one copy is the stage and nothing else | `streamProbe` puts two saturating counters on any link — `blocked` (`valid && !ready`) and `starved` (`ready && !valid`) — and `streamReport` walks a design for them. The same registers are peeked in the simulator and read over AXI-Lite on the board. Every design on the host's memory also carries `readWaits` and `writeWaits` beside its cycle count: the cycles it had no row to work on and the cycles a row could not leave |
 
 The distinction from LiteScope is worth being precise about, because LiteScope is the better tool for its own job. It is a *logic analyzer*: you trigger, capture a window of samples into BRAM, and upload it to look at waveforms. Warp 11's counters are *aggregate occupancy* — no window, no trigger, no waveform, just "this link blocked 17,749 times". That is much less information, and it is available continuously, in simulation, at zero upload cost, which turns out to be the shape that answers "where is the bottleneck" in one `tick` and one `peek`.
 
@@ -1038,18 +1060,17 @@ writes later; two stages held 142 bits each to carry them. Now `issueTaps`
 fetches each history word as the tap issues, exactly as it fetches the
 coefficient — two ports, this tap and the next — and the history is two slots
 of `x` and `y` indexed by the sample's parity, so a sample writes two words
-and nothing is shifted. The makeup gains went the same way: a sixteen-word
-table the `boost` stage asks by `(ear, band)` rather than sixteen wires,
-because on the UP5K sixteen host-written registers and their readback mux
-were the difference between fitting and not — a window costs a block, a
-register file costs the fabric — and because the table is where every later
-per-band term goes. That is the one place the two engines' surfaces differ:
-`MultibandFoldedSettings` carries a `MakeupTable` where the spatial engine,
-which needs all sixteen at once, takes the wires. The law itself — the
-envelope step, the gain computer — is written once, in halves that take
-their multiplier as an argument, so the spatial engine hands it `mul` and a
-`podStage` computes one half before the shared multiplier and the other
-after.
+and nothing is shifted. The gains went the same way, and further: the
+folded engine's law is a table — a per-band gain curve the bank reads a word
+at a time by `ear ++ band ++ entry` — rather than sixteen wires, because on
+the UP5K sixteen host-written registers and their readback mux were the
+difference between fitting and not — a window costs a block, a register file
+costs the fabric. The curve says the total gain at every level, so it
+replaces the threshold and the ratio as well as the makeup gains, and that is
+where the two engines now differ: `MultibandFoldedSettings` carries
+`attack`, `releaseRate` and a `curve: GainTable`, where the spatial engine
+takes a threshold, a ratio and sixteen gains. The call shape is the same;
+the law is not.
 
 **No stage states a latency, and nothing is scheduled.** A beat moves when the
 next stage can take it. A stage holds one beat, so a result from the shared
@@ -1073,8 +1094,9 @@ twice, did not place.
 
 **Since then, sharing is the parent's decision and the module does not
 change.** A module that needs a multiply declares a **socket** — the operands
-out, the product back — and whoever instantiates it serves the socket: with
-a multiplier of its own (`Fu.inPlace`), or as one client of a shared copy
+out, the product back; `Fu.fu` wraps any combinational function as one,
+`Fu.multiplier` the multiply — and whoever instantiates it serves the socket: with
+a multiplier of its own (`Fu.inPlace`, whose emitted Verilog is byte-identical to the inline multiply), or as one client of a shared copy
 (`Fu.sharingWith arbitration unit name`), the arbitration the same record a
 merge takes. The stereo gain's two channels on one multiplier, and a
 three-band EQ's thirty products on three or on one, are the same modules
@@ -1156,7 +1178,7 @@ A divider is arithmetic on the fabric clock, so anything that generates a baud r
 | Clash | In the *type* — a domain carries its period, so connecting logic from mismatched domains is a type error rather than a runtime one |
 | Amaranth | On the board object — `platform.default_clk_frequency`, which the platform supplies and a design reads during elaboration |
 | Chisel / HardCaml / Bluespec / Veryl | No built-in notion; the frequency is an ordinary parameter threaded by the designer |
-| Warp 11 | A plain frequency, passed to whatever divides it. A `Board` record holds one per target alongside the host bus binding, but it is the application's to hold — constructors take the number, not the record. `ClockSpec` still names the clock and reset *ports* only, and nothing is ambient |
+| Warp 11 | A plain frequency, passed to whatever divides it. A `Board` record holds one per target alongside the host bus binding, but it is the application's to hold — constructors take the number, not the record. A clock domain names a clock, not a rate ([below](#clock-domains-and-crossing-them)), and no frequency is ambient |
 
 Warp 11's position is the last row deliberately, and the interesting part is what it does at the point of use instead. A constructor that needs a rate takes the fabric frequency and the rate, derives the divisors, and then **checks the rate it actually achieved against the one requested**:
 
@@ -1167,7 +1189,7 @@ i2sMasterHz 100_000_000 48_000 32 "I2sMaster"      // elaboration error
 
 The second line fails because 100 MHz does not divide into 48 kHz — the nearest divisor gives 48.828 kHz, 1.7% out. That is the case the pattern exists for: divisors chosen by hand are silently wrong on a board with a different clock, and the failure is inaudible in simulation because a cycle-accurate model has no opinion about what a converter expects. Naming the rate turns a comment into a build failure.
 
-The honest limit is that the frequency is passed rather than implied, so nothing stops two modules in one design from being handed different ones — which the ambient and type-level answers above both rule out by construction. That is a deliberate trade twice over. An ambient clock domain would be a second piece of hidden elaboration state beside the builder's; and threading a `Board` record through instead would put a fact about *targets* into the signature of everything that divides a clock, which is a different kind of leak rather than a fix. A stage that needs a number asks for the number. The `Board` record still exists — it carries the frequency and the host bus binding (`AxiLiteAt 0xB0000000`, or `SpiBus` on a part with no bus) for a per-board build-script generator to read — but it is the application's to hold, and call sites that have one write `kv260.fabricHz`. It is held **per app rather than per part**: `kv260At <hz>` is the constructor, because each app's device-tree overlay pins its own PL clock and this repository runs one KV260 at three different frequencies. The generated register-map seam carries that frequency to the host as `FABRIC_HZ`, so a driver's milliseconds and the fabric's cycles cannot disagree.
+The honest limit is that the frequency is passed rather than implied, so nothing stops two modules in one design from being handed different ones — which the ambient and type-level answers above both rule out by construction. That is a deliberate trade twice over. An ambient clock domain would be a second piece of hidden elaboration state beside the builder's; and threading a `Board` record through instead would put a fact about *targets* into the signature of everything that divides a clock, which is a different kind of leak rather than a fix. A stage that needs a number asks for the number. The `Board` record still exists — it carries the frequency and the host bus binding (`AxiLiteAt 0xB0000000`, `UartAt <baud>` on a part with no bus, or `NoHost`) for the build generator to read — but it is the application's to hold, and call sites that have one write `kv260.fabricHz`. It is held **per app rather than per part**: `kv260At <hz>` is the constructor, because each app's device-tree overlay pins its own PL clock and this repository runs one KV260 at three different frequencies. The generated register-map seam carries that frequency to the host as `FABRIC_HZ`, so a driver's milliseconds and the fabric's cycles cannot disagree.
 
 ### Clock domains, and crossing them
 
@@ -1211,6 +1233,8 @@ An I2S front end is a clock generator, two framers, a set of pins and a rule abo
 The interesting property is not the line count. **The edge ticks never reach the caller**, so routing the transmit tick to the receiver — a bug that elaborates cleanly, passes every stream check, and cannot be caught in simulation at all, because it is a setup/hold question and there is no timing model — is not expressible through the interface. The pin sets are a closed set of variants for the same reason: a design must declare exactly what its constraint file binds, so `SharedBus` and `SeparateCodecs` are board facts the type system enumerates rather than free-form port declarations a design gets right by convention.
 
 What keeps that from being an abstraction that costs something: the emitted Verilog is **byte-identical** to the hand-wiring, asserted as a living check over both pinouts, so the choice is invisible below the call site. The underlying `i2sMaster` / `i2sRx` / `i2sTx` remain public for the cases the link does not cover — two links at different rates, a receiver with no transmitter, an undescribed pin set.
+
+A UART is the same shape at the byte: `uartReceive name fabricHz baud rx` hands back a `Flow` of bytes and `uartTransmit name fabricHz baud bytes` takes a `Stream` of them, each deriving its bit time from the fabric clock and refusing a baud the clock cannot reach within 2%, which is where 8N1 starts to miss its tenth bit.
 
 ### PDM microphones
 
@@ -1296,13 +1320,13 @@ Where the board enters, how a design moves between boards, and what runs the ven
 | Amaranth | `amaranth-boards`: a platform class per board with its resources — pins, I/O standards, clocks — and `platform.request("led")` in the design; `amaranth.vendor` knows the Lattice, Xilinx, Intel and other toolchains | `platform.build()` runs the toolchain from the same program and returns the products |
 | LiteX | A platform per board and a target per SoC; the SoC generator produces the interconnect, the CSR map, a BIOS and a host bridge (UART, Ethernet, PCIe) | The builder runs Yosys, Vivado or Quartus, and the field's broadest board catalogue |
 | Clash, Bluespec, Veryl | None in the language; Bluespec's Connectal was a host-and-FPGA integration layer with board platforms | Yours |
-| Warp 11 | A **board is data**: a record of facts — the part and what it holds (cells, multipliers, block RAM, a processing system), the clock, how the host reaches the design (an AXI-Lite aperture, a UART), how a bitstream is loaded, which pins carry which role, where a harness plugs in — kept as a JSON file or an F# value. A **design declares needs** (rows in and out, a value, a bit, a surface) and never names a pin. A **mapping** binds the two and is a file beside the design. A board on a toolchain the library knows is a file with no source change | `Build.write` derives the directory the board's toolchain builds from — the top, a PLL wrapper where the clock needs one, constraints, the flow, and on a Zynq the block design, overlay and packaging — and its `build.sh` ends with a **gate that reads the toolchain's own report**: resources used of the part's, the clock achieved against the target, and a refusal if a fact in the board file disagrees with what the tool says the part has |
+| Warp 11 | A **board is data**: a record of facts — the part and what it holds (cells, multipliers, block RAM, a processing system), the clock, how the host reaches the design (an AXI-Lite aperture, a UART), how a bitstream is loaded, which pins carry which role, where a harness plugs in — kept as a JSON file or an F# value. A **design declares needs** (rows in and out, a value, an action, a bit, a table, a surface, a region of records) and never names a pin. A **mapping** binds the two: code beside the design where the design is code, a file beside it where the design is a file. A board on a toolchain the library knows is a file with no source change | `Build.write` derives the directory the board's toolchain builds from — the top, a PLL wrapper where the clock needs one, constraints, the flow, and on a Zynq the block design, overlay and packaging — and its `build.sh` ends with a **gate that reads the toolchain's own report**: resources used of the part's, the clock achieved against the target, and a refusal if a fact in the board file disagrees with what the tool says the part has |
 
 Amaranth's platforms are the nearest thing, and the comparison is worth being exact about. Both put the board in a value a program builds from and run the toolchain from the same place. Amaranth's design asks the platform for a resource by name, so the design knows it is on a board with an LED; Warp 11's design declares a bit it reports and the mapping says whether that is an LED, a register, or both — the same source elaborates with no board at all for the simulator, and a board is added without touching it. The cost is the mapping, a record beside the design. LiteX goes further than either on the host side, generating a whole SoC with its CSR map and bridge; Warp 11 generates the register seam and the carriers for rows, not a processor.
 
 **The memory's own facts are board facts too.** How long a burst is and how many ports a stream is spread over sit in the board's record beside its ports and their width, so they are in the mapping file and a design never states them; the host's tools read the resulting row and burst shape from the generated seam. Moving a design from one memory port to four is that one number ([above](#a-stream-through-memory-over-several-ports)).
 
-Two things the carriers do that the table cannot show. **The same design moves between host transports**: rows through a Zynq's DDR on one board and frames on a UART beside the register map on another, with the host tools reading the shape from the generated seam, and the test is the same file in and the same bytes out on every board as in the simulator. And **a design that scales reads its size from the part** — Mandelbrot's lanes from the multipliers, Life's world from the cells — unless the mapping names one, and a part that cannot hold the smallest is refused by number before any tool runs.
+Two things the carriers do that the table cannot show. **The same design moves between host transports**: rows through a Zynq's DDR on one board and frames on a UART beside the register map on another, with the host tools reading the shape from the generated seam, and the test is the same file in and the same bytes out on every board as in the simulator. And **a design's size is the design's, not the board's** — Mandelbrot's lanes and Life's world are parameters stated beside the design (`Chunked.lanes = 104`, `World.side = 64`), so moving a design to a smaller part is a board line and a size line, and a size the part cannot hold is refused by the gate with the tool's own numbers.
 
 Measured, 2026-11: five boards (a KV260 through Vivado; an iCEBreaker, a Go Board and an Icepi Zero through yosys and nextpnr; a DE10-Lite through Quartus), every example in the release built for every board that holds it by naming the board, and every board that does not hold one saying so with the gate's number.
 
@@ -1314,13 +1338,13 @@ The part of the loop the other entries mostly consider out of scope — and, for
 |---|---|
 | Chisel / SpinalHDL / HardCaml / Clash / Veryl | Emit RTL; the vendor flow, the register map and the driver are yours. Register offsets are agreed by hand between HDL and host code |
 | Amaranth | Same, unless you adopt **LiteX**, which is the field's strongest answer: a full SoC framework that generates the interconnect, a CSR map, and host-side access (plus LiteScope for capture) |
-| Warp 11 | One declarative register map → the AXI-Lite slave *and* the Rust layout the driver imports. A Rust runtime (`RegisterWindow` over `/dev/mem` mmap, `/dev/uioN` with blocking IRQ, udmabuf contiguous buffers, a GDMA bulk-read path worth 12–16× on large reads). Board daemons publish over Zenoh to a desktop GUI. Emit is a `dotnet run -- hardware` mode that writes the RTL *and* the layout together; the board binary is a cross-compiled `cargo build` (aarch64 musl); `xmutil` switches which bitstream is loaded |
+| Warp 11 | One declarative register map → the slave (AXI-Lite, or the same map over a UART) *and* the Rust seam the host reads. The generator writes the RTL and the seam into one build directory, and a host names that directory (`Connection`) and is handed the register window and the design's regions — a uio mapping and the host's memory, a serial line, or the simulator's bridge. A Rust runtime (`RegisterWindow` over `/dev/mem` mmap, `/dev/uioN` with blocking IRQ, udmabuf contiguous buffers, a GDMA bulk-read path worth 12–16× on large reads). Board daemons publish over Zenoh to a desktop GUI. The board binary is a cross-compiled `cargo build` (aarch64 musl); `xmutil` switches which bitstream is loaded |
 
 The piece with the least prior art is what the runtime's `RegisterWindow` trait makes possible: **the same driver code runs against silicon and against the simulator**, because a register window can be backed by `/dev/mem` *or* by the cycle simulator driving the slave's `s_axi_*` pins through real five-channel handshakes. It goes one step further than that across the language seam — `FsSimWindow` spawns the F# project in a `simserve` mode and speaks a line protocol to it, so a Rust driver exercises an F#-elaborated design with **no board and no bitstream**, through the same handshakes it will use on hardware.
 
 That is what makes a host-side bug cheap: the AXI rehearsal that replays every host action as a real transaction, reading frames back out of a fake DDR, is the same sequence the board driver runs, and it runs in a test.
 
-Two honest limits. Boards are five and toolchains three — a Linux-class PS driving a PL slave over AXI on the KV260 through Vivado, a UART register link on three Lattice boards through the open flow and on a DE10-Lite through Quartus — described as data (a board file, a mapping) with the toolchain's flow generated from them and gated on its own report; place-and-route itself is not abstracted beyond that. And "the same driver against silicon and simulator" holds for the register map and the batch path; a design with its own DDR traffic (GEP's cluster) has its own driver and its own bridge.
+Two honest limits. Boards are five and toolchains three — a Linux-class PS driving a PL slave over AXI on the KV260 through Vivado, a UART register link on three Lattice boards through the open flow and on a DE10-Lite through Quartus — described as data (a board file, a mapping) with the toolchain's flow generated from them and gated on its own report; place-and-route itself is not abstracted beyond that. And "the same driver against silicon and simulator" holds for the register map, the batch path and a design's regions: GEP's cluster runs one host program against the KV260, the Icepi over its link and the simulator.
 
 ## The WarpCPU shape — an architectural pattern, not a language feature
 
@@ -1363,8 +1387,8 @@ Measured, on the same 4 DSPs:
 
 Issue→writeback latency is 7, hidden by 8 threads. The predicted ~4× clock, at
 identical DSP cost. Mandelbrot's `mandelBarrelLane` is the same shape around a
-4-stage `mandelStep` cone, with an elaboration check that `nThreads >
-MANDEL_STEP_LATENCY`.
+4-stage `mandelStep` cone, built on `barrel mandelStepLatency nThreads`, which
+refuses `nThreads <= latency` at elaboration.
 
 The pattern's *negative* result is equally load-bearing and is why it's stated as
 a principle rather than a preference: GEP's breeder is the one pod that stayed a
@@ -1382,14 +1406,16 @@ genuinely hard and still open.)
 | Bluespec | A different answer to the same problem — guarded atomic actions let the compiler schedule concurrent rules, so keeping a datapath busy is the compiler's job. Arguably the most principled approach in the field. |
 | Chisel | Manual. Rocket/BOOM contain hand-built pipelines; nothing in the stdlib generalizes them. |
 | HardCaml / Amaranth / Clash / Veryl | Manual. |
-| Warp 11 | Manual too — **but** the surrounding machinery (streams, replication, telemetry, a simulator fast enough to sweep shapes) is what makes it practical, and the pattern is documented with its measurements. |
+| Warp 11 | The invariant and the carry chains are a stdlib entry (`barrel`); the control is manual — **but** the surrounding machinery (streams, replication, telemetry, a simulator fast enough to sweep shapes) is what makes it practical, and the pattern is documented with its measurements. |
 
 **Being honest about the gap:** there is no `barrel(threads, body)` primitive.
-Mandelbrot's lane and GEP's engine share a *pattern*, not code. Two instances is
-enough to describe a shape and not enough to abstract one — the project's own rule
-is to lift to `stdlib` on the second real user, and the two here differ enough
-(thread-state layout, refill discipline, egress) that the useful common core isn't
-obvious yet. A third barrel design is what would settle it.
+What Mandelbrot's lane and GEP's engine share is in the stdlib as `barrel latency
+threads`: the cone's depth stated once, `threads > latency` checked at
+elaboration, and `Carry` delaying a thread's context by exactly that depth. The
+control is not — Mandelbrot free-runs its turn counter and refills empty slots at
+issue, GEP nests thread inside program counter inside case-wave under a
+six-state scheduler — and a shape that covered both would be a parameter list,
+not an abstraction. A third barrel design is what would settle it.
 
 ### 2. Scaling as a number you edit
 
@@ -1403,12 +1429,12 @@ fillers ──queue──▶ breeders ──queue──▶ eval lanes ──inte
 
 Each ratio is sized by `service_time × frequency`. Three properties fall out:
 
-- **Replication is one integer.** `replicate(n, template, input, output)`
-  instantiates n copies, dispatches into them, and merges their results, so lane
-  count is a number you tune. `MANDEL_NUM_LANES = 104` is the whole knob for
+- **Replication is one integer.** `Stream.farm n worker` instantiates n
+  copies, dispatches into them, and merges their results, so lane count is a
+  number you tune. `Chunked.lanes = 104` is the whole knob for
   "fill 100% of the chip's 1,248 DSPs" — each lane is a fixed 12-DSP quantum.
-- **The fan gets the right topology for free.** `Shape.Auto` builds the ~√N
-  registered dispatch/merge tree, which is what took MandelPod from ~106 MHz to
+- **The fan gets the right topology for free.** Above `fanFlatMax` lanes the
+  farm builds the ~√N registered dispatch/merge tree, which is what took MandelPod from ~106 MHz to
   166 MHz, so scaling up doesn't quietly reintroduce the fan-out wall.
 - **Per-operator placement is a knob, not a redesign.** An operator can be
   **absent** (not in the function set → elides from the bitstream entirely,
@@ -1436,7 +1462,7 @@ The part with the least prior art in the surveyed HDLs. Counters are authored in
 HDL, so **the same registers serve both worlds**: the simulator peeks them while
 tuning, and the board reads them over AXI-Lite through the generated layout.
 
-- `wormhole(..., instrument = true)` puts two saturating counters on any link —
+- `streamProbe name s` puts two saturating counters on any link —
   `blocked` (`valid && !ready`, consumer too slow) and `starved`
   (`ready && !valid`, producer too slow). That pair localizes a bottleneck to a
   specific link and names the fix.
@@ -1455,7 +1481,7 @@ re-ranked GEP's roadmap twice:
 | after that fix: fill 59.0%, lanes 96.9% | the wall had *moved* to eval capacity, so lane scaling paid again |
 | flat 71 cyc/offspring across 6×12 and 8×16, fill saturated ~77%, breeders 29–39% idle | a single dispatcher cannot feed 6–8 breeders; warping it restored linear throughput-per-area (8×16 went 71 → 40) |
 
-The last row came from `runStreamProbe`, which sweeps breeders × lanes × fillers
+The last row came from the shape sweep (`Warp11.Gep -- sweep`), which sweeps breeders × lanes × fillers
 **in simulation**, with a per-shape hardware-vs-software divergence oracle, and
 picks the bitstream shape before Vivado runs at all. That is the payoff of a
 cycle-based simulator fast enough to be a design tool rather than only a check —
@@ -1463,7 +1489,7 @@ and of instrumentation that exists in the design rather than in the testbench.
 
 Two caveats on the claim. Every HDL can hand-write a counter; nothing here is
 unreachable elsewhere. And this is measured on one chip (KV260 / ZU5EV) by one
-developer, so the *thresholds* (`FAN_FLAT_MAX`, the pooling rule, filler counts)
+developer, so the *thresholds* (`fanFlatMax`, the pooling rule, filler counts)
 are calibrated to that target, not established generally.
 
 ## Where Warp 11 sits
@@ -1474,7 +1500,7 @@ are calibrated to that target, not established generally.
   - **GEP symbolic regression** — the *whole* generation loop (selection, breeding, Karva compilation, fitness) in fabric, bit-exact against a software twin. Solved Feynman I.12.2 exactly on silicon; the cluster runs 512/512 offspring bit-exact at 0.85 µs/offspring.
   - [**Game of Life**](../hdl/Warp11.GoL/README.md) — 64×64 at 166.67 MHz, the whole grid in one cycle: **167M generations/s**, CONFLATE/N=3 triple-buffered into PS DDR for tear-free display.
 - **Board and host integration as a first-class concern.** One declarative register map produces the slave *and* the driver's constants; the same driver code runs against `/dev/mem` and against the simulator, across the language seam. [Section above.](#board-and-host-integration) The caveat is the second toolchain, and it is smaller than it sounds: designing, simulating, debugging and emitting Verilog need .NET alone — Rust enters only when you deploy to a board. Every entry here needs a host-language toolchain plus the vendor flow, so the marginal cost is one more, paid at the point you have hardware in hand rather than at the front door. Against the HDLs surveyed that is the price of a capability they do not offer at all; against **LiteX**, which generates a CSR map and host-side access from Python end to end, it is a real comparative cost.
-- **Boards as data, and the build derived from them.** A design declares needs, a board is a file of facts, a mapping binds them, and the directory the toolchain builds from — with its gate reading the tool's own report — is written from the three. Five boards and three toolchains at 0.1.0, every example on every board that holds it, and a board on a known toolchain added with no source change. [Section above.](#boards-toolchains-and-the-build)
+- **Boards as data, and the build derived from them.** A design declares needs, a board is a record of facts (a value or a file), a mapping binds them, and the directory the toolchain builds from — with its gate reading the tool's own report — is written from the three. Five boards and three toolchains at 0.1.0, every example on every board that holds it, and a board on a known toolchain added with no source change. [Section above.](#boards-toolchains-and-the-build)
 - **The step-through debugger.** Watch lists, memory windows, breakpoints written as expressions over the design's own signals, and state machines that read as their state names — attachable to the session an application is already driving. [Section above.](#interactive-debugging)
 - **Memory as a stream, at the ports' rate.** A design declares rows in and rows out; the mapping says the host's memory, how long a burst is and how many ports; the generated top reaches 98% of one port's ceiling and adds four ports almost in full, with the design and the host unchanged — measured on a KV260, byte-identical to the simulator. [Section above.](#a-stream-through-memory-over-several-ports)
 - **Structure decided by the parent.** What a connection registers, how streams that meet are arbitrated, how many copies of a unit there are and whether a multiplier is shared are values the instantiating module passes; the module below does not change and does not know. The same values are what a drawn design's edges carry.
@@ -1488,10 +1514,10 @@ are calibrated to that target, not established generally.
 **Weak at:**
 - **No model checker.** `assert` exists and is checked in simulation and under Verilator, but nothing proves a property for *all* inputs, and `assume` — which a solver needs and simulation cannot use — is deliberately absent until one arrives. The field's clearest remaining advantage.
 - **A short list of things to plug into.** AXI4-Lite from the register map, AXI4 master read and write, a UART register link, I2S and PDM in and out — where SpinalHDL ships AXI4/AXI4-Lite/AXI4-Stream, AHB-Lite, APB3, Wishbone, TileLink and BMB plus UART/I2C/SPI/JTAG, and LiteX brings DRAM, Ethernet, PCIe and SATA controllers. This is about the hardware edges, not the library as a whole — the audio chain and the stream connect layer are deep.
-- **Three toolchains and five boards**, where Amaranth's vendor layer and LiteX's board catalogue each cover far more. A part on a toolchain the library does not know is source, not a file ([how to add a toolchain](add-a-toolchain.md)). And one design does not yet move: GEP's cluster reaches DDR through two AXI masters and runs on the KV260 alone.
+- **Three toolchains and five boards**, where Amaranth's vendor layer and LiteX's board catalogue each cover far more. A part on a toolchain the library does not know is source, not a file ([how to add a toolchain](add-a-toolchain.md)). GEP's cluster, its memory a set of regions, runs on the KV260 and at one breeder and one lane on the Icepi; one breeder exceeds the iCE40 parts.
 - **Clock domains are new.** A default clock plus declared domains, checked crossings and a CDC stdlib landed late in 2026; the audio tops use them, and the differential covers them, but no large design has been written across several yet.
 - **No `BitPat`-style decode tables.** Chisel's `decode`/`BitPat` turns a truth table of don't-care patterns into minimized logic; here a decoder is written as the slices and muxes it is. The gap is narrower than it sounds, and for a specific reason: `BitPat` pays for encodings you did not choose — RISC-V, x86 — where the fields are scattered and the patterns overlap with don't-cares. Every decoder in this repo decodes an encoding it designed itself, so the property needed is a field and the decode is a slice (GEP's karva compiler: "arity comes from the opcode's class bits, terminal/constant from bit 5 — no ROMs, pure slicing"). The gap becomes real the day something implements an ISA it does not own.
-- **No conditional stream routing, no `Fragment`-style packetization.** `Flow[T]` exists for a producer that cannot be stopped, and the CDC stdlib crosses it; what is missing is SpinalHDL's vocabulary above it — `Fragment` for packets, `StreamDemux` keyed on the payload — which a design here writes as the muxes it is.
+- **No conditional stream routing, no `Fragment`-style packetization.** `Flow[T]` exists for a producer that cannot be stopped, and crosses a clock domain as a stream through `asyncFifo`; what is missing is SpinalHDL's vocabulary above it — `Fragment` for packets, `StreamDemux` keyed on the payload — which a design here writes as the muxes it is.
 
 **At parity with the field:**
 - Typed IO / bundles, and ahead on call-site invariance and Q-format typing.

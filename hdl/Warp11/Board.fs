@@ -896,10 +896,9 @@ let goBoard =
 /// 2026-11-21).
 ///
 /// Every I/O here is 3.3-V LVTTL. The pins are from the board's user manual
-/// (CD: `DE10_LITE_golden_top.qsf`); **check them against that file before
-/// the first build** — it was not on this machine when the preset was
-/// written, which is why the pin gate and Quartus's own assignment report are
-/// the first things to read on the bench. Not in the connector table, since
+/// (CD: `DE10_LITE_golden_top.qsf`); written before that file was on this
+/// machine, and confirmed by use on the bench 2026-11-21 — hello's LEDs, the
+/// link on GPIO_0/1. Not in the connector table, since
 /// no role reads them: the two push buttons KEY0 B8, KEY1 A7 (active low);
 /// the ten switches SW0–9 C10, C11, D12, C12, A12, B12, A13, A14, B14, F15;
 /// the six seven-segment digits; VGA; the accelerometer; the Arduino header

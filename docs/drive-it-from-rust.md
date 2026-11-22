@@ -85,6 +85,8 @@ pub const APERTURE_BYTES: usize = 16;
 pub const ID_OFFSET: usize = 0x000;
 pub const ID_VALUE: u32 = 0x000b11ed;
 pub const ENABLE_OFFSET: usize = 0x004;
+pub const ENABLE_WIDTH: u32 = 1;
+pub const ENABLE_RESET: u32 = 0x0;
 pub const COUNT_OFFSET: usize = 0x008;
 pub const COUNT_SHIFT: u32 = 0;
 pub const COUNT_MASK: u32 = 0xffffff;
@@ -96,8 +98,8 @@ to compile.
 
 ## The driver
 
-A normal Rust crate. Both dependencies are path references, since Warp 11 is not
-published to crates.io any more than it is to NuGet:
+A normal Rust crate. Both dependencies are path references, since Warp 11's
+crates are not yet published to crates.io:
 
 ```toml
 [dependencies]
@@ -173,8 +175,12 @@ twice.
 
 ## On to a board
 
-Nothing above changes. `run` is generic over `RegisterWindow`; you construct an
-`MmapWindow` instead of an `FsSimWindow` and pass it the same function. What
+Nothing above changes. `run` is generic over `RegisterWindow`; on a board you
+pass it the `window` of a `warp11_host::connection::Connection` instead of an
+`FsSimWindow`. `Connection::board(build_dir, port)` reads the seam the build
+directory wrote and reaches the registers the way it says — an `MmapWindow` over
+the app's uio node on a KV260, a `SerialWindow` over the UART (`port`) on the
+others — and refuses a fabric whose `ID` is not the one the seam states. What
 *does* change is everything around it — synthesis, timing closure, loading a
 bitstream, and the class of bug that only appears on real silicon. That is the
 [**Hardware workflow**](dev-workflow.md) guide.

@@ -52,15 +52,15 @@ ssh ubuntu@192.168.1.172 'cd warp11-driver && ./mandel-daemon --board mandelbrot
 ```
 
 A bitstream is the same shape. A design project writes the directory Vivado
-builds from (`dotnet run --project Warp11.GoL.App -- build out/`), its
-`build.sh` runs Vivado and packages the app, and the package is copied and
-loaded like this — the app named for the top, `gol-axi` here:
+builds from (`dotnet run --project Warp11.GoL.App -- life out/`), its
+`build.sh` runs Vivado, packages the app and prints the lines that copy and
+load it — the app named for the top, `life64x64-batch` here:
 
 ```sh
-scp out/build/gol-axi/* ubuntu@192.168.1.172:/tmp/gol-axi-app/
-ssh ubuntu@192.168.1.172 'sudo mkdir -p /lib/firmware/xilinx/gol-axi &&
-                          sudo cp /tmp/gol-axi-app/* /lib/firmware/xilinx/gol-axi/ &&
-                          sudo xmutil unloadapp && sudo xmutil loadapp gol-axi'
+scp out/app/* ubuntu@192.168.1.172:/tmp/life64x64-batch/
+ssh ubuntu@192.168.1.172 'sudo install -d -m 755 -o root -g root /lib/firmware/xilinx/life64x64-batch &&
+                          sudo install -m 644 -o root -g root /tmp/life64x64-batch/* /lib/firmware/xilinx/life64x64-batch/ &&
+                          sudo xmutil unloadapp; sudo xmutil loadapp life64x64-batch'
 ```
 
 ## 4. gol-daemon (GoL control plane)
@@ -78,7 +78,8 @@ ssh ubuntu@192.168.1.172 'sudo udevadm control --reload-rules && sudo udevadm tr
 
 cd runtime
 cargo build --release --target aarch64-unknown-linux-musl -p gol-daemon
-scp target/aarch64-unknown-linux-musl/release/gol-daemon ubuntu@192.168.1.172:warp11-driver/
+scp target/aarch64-unknown-linux-musl/release/gol-daemon \
+    <build dir>/life64x64_batch_layout.rs ubuntu@192.168.1.172:warp11-driver/
 scp ../hardware/board/gol-daemon.service ubuntu@192.168.1.172:.config/systemd/user/
 ssh ubuntu@192.168.1.172 'systemctl --user daemon-reload && systemctl --user restart gol-daemon'
 ```
@@ -103,8 +104,9 @@ the binary's own default. **7447, not 7448** — mandel-daemon has that one, and
 keeping them apart means the units never fight over a port even though only one
 of their bitstreams can be loaded at a time.
 
-Prereq: the `gol-axi` bitstream must be loaded (`sudo xmutil loadapp gol-axi`) and
-`udmabuf.service` must have run, otherwise the uio probe fails. Like
+Prereq: the `life64x64-batch` app must be loaded (`sudo xmutil loadapp
+life64x64-batch`) and `udmabuf.service` must have run, otherwise the uio probe
+fails. Like
 mandel-daemon it exits non-zero with the reason rather than crash-looping, and
 `StartLimitBurst=3` stops systemd retrying after three tries in a minute.
 
@@ -121,7 +123,7 @@ stopping the unit does *not* disarm the fabric's write master.
 
 ```sh
 ssh ubuntu@192.168.1.172 'systemctl --user stop gol-daemon'
-ssh ubuntu@192.168.1.172 'cd warp11-driver && ./gol_disarm'
+ssh ubuntu@192.168.1.172 'cd warp11-driver && ./gol-daemon --board life64x64_batch --layout life64x64_batch_layout.rs disarm'
 ssh ubuntu@192.168.1.172 'sudo xmutil unloadapp'
 ```
 
@@ -198,7 +200,7 @@ mandel-daemon up: 1400x800 frame, arena 0x37200000, listening on tcp/0.0.0.0:744
 which its overlay makes; the daemon finds it by name and programs its
 physical address as the batch's destination on every render. Nothing needs
 reserving by hand, and the Kotlin-era `memmap=` reservation in
-`/boot/firmware/cmdline.txt` is obsolete (see the udmabuf notes in §3).
+`/boot/firmware/cmdline.txt` is obsolete (see the udmabuf notes in §8).
 
 Unloading is lighter than GoL's protocol — this accelerator is
 demand-driven, so an idle daemon has nothing in flight and there is no
@@ -222,7 +224,7 @@ Procedure to switch from gol → mandel:
 ```sh
 # 1. Stop the outgoing daemon — and for gol, disarm before the unload (§4).
 ssh ubuntu@192.168.1.172 'systemctl --user stop gol-daemon'
-ssh ubuntu@192.168.1.172 'cd warp11-driver && ./gol_disarm'
+ssh ubuntu@192.168.1.172 'cd warp11-driver && ./gol-daemon --board life64x64_batch --layout life64x64_batch_layout.rs disarm'
 
 # 2. Swap the bitstream (packaged from this repo; see §3 for the full recipe).
 ssh ubuntu@192.168.1.172 'sudo xmutil unloadapp && sudo xmutil loadapp mandelbrot-batch'
@@ -262,10 +264,7 @@ before the driver's aperture scan caught it.
 
 **Validate it locally before shipping it**: `visudo -cf hardware/board/warp11-sudoers`.
 The board-side `visudo -c` in the install line runs *after* the file is in
-place, and a malformed sudoers file locks you out of sudo entirely. The current file has entries
-for `gol` and `mandel`; adding a third app means editing the sudoers
-file + re-installing it on the board (see header of that file for the
-install command).
+place, and a malformed sudoers file locks you out of sudo entirely.
 
 **No need to stop services when you're done for the day** — they idle
 at near-zero CPU and ~150 MB resident memory each on the KV260's 4 GB
@@ -281,7 +280,7 @@ the Kria stock default, so after every reboot you'd `xmutil unloadapp` +
 is up.
 
 ```sh
-# Pick the app: edit WARP11_APP in the unit (default: mandel).
+# Pick the app: edit WARP11_APP in the unit.
 scp hardware/board/warp11-loadapp.service ubuntu@192.168.1.172:/tmp/
 ssh ubuntu@192.168.1.172 \
   'sudo install -m 644 -o root -g root /tmp/warp11-loadapp.service \

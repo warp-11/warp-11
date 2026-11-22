@@ -102,8 +102,7 @@ SD   ──pad─┼──────┬─────┬─────┬─
 ```
 
 That empty bit time is exactly what `i2sRx` treats as its no-data transition
-tick, and it is why a fabric loopback shows `output = input << 1` further down
-this page.
+tick, and what `i2sTx` sends a zero in before the MSB.
 
 ### Slots are usually wider than samples
 
@@ -482,8 +481,8 @@ divisors, and checks what it actually achieved:
 instanceNamed "clocks" (i2sMasterHz kv260.fabricHz 48_828 32 "I2sMaster")
 ```
 
-`kv260` is a `Board` — a fabric frequency plus a host bus binding, and the
-record an application holds per target. **The constructors take the frequency,
+`kv260` is a `Board` — the part, the build tool, the clock, the host link and
+the rest of what a target is, and the record an application holds per target. **The constructors take the frequency,
 not the board**, so a fact about targets stays out of the signature of
 everything that divides a clock; a call site with a board in hand writes
 `kv260.fabricHz` and one without writes the number.
@@ -595,27 +594,23 @@ shipped version: it exposes `in_*` and `out_*` stream ports, transmits onto an
 internal wire and receives from it, so a test pokes a known sample in and reads
 one out with no framing to hand-build.
 
-That check — `i2sLoopbackRoundTrip` — asserts **`output = input << 1`, not
-equality**, and the reason is worth knowing because it looks like a bug and is
-not. `i2sTx` drives the MSB on the tick where LRCLK turns; `i2sRx`, by its own
-correct rule, treats that tick as the no-data transition and discards what is on
-the line — which is that MSB. It then takes bits 22..0 plus a trailing pad zero,
-giving exactly `input << 1`.
-
-**Each framer is right against a converter, and they are off by one against each
-other**, because on real hardware the converter defines the timing rather than
-the other framer. So a check asserting equality is one you could only pass by
-breaking a framer. Assert the measured relationship instead — that way it still
-fails if the link breaks in some *other* way.
+That check — *framer loopback returns the exact stereo frame*, in
+`Warp11.Designs.Tests/I2sTests.fs` — asserts **equality** of the settled frame.
+`i2sTx` sends a zero on the tick where LRCLK turns and the MSB one bit clock
+later; `i2sRx` treats that tick as the no-data transition and takes the MSB from
+the next. Both follow the standard, so they agree with each other because each
+agrees with a converter. Equality is the strong assertion here: a bit position
+or a channel wrong on either side fails it.
 
 Whichever loop you write, drive several frames. A framer that gets the first
 frame right and then drifts is exactly what a single-frame check misses, and the
 first frame catches the transmitter mid-slot anyway, so judge the settled link
 rather than the first thing out of it.
 
-`i2sRxDecodes` and `i2sTxEmits` are the third pattern: each framer alone, driven
-by a hand-built ideal frame. That is the only way to test one without the other,
-and it is what pins the frame convention itself.
+*Receiver decodes an ideal I2S frame* and *transmitter emits transition bit
+then MSB-first words*, in the same file, are the third pattern: each framer
+alone, against a hand-built ideal frame. That is the only way to test one
+without the other, and it is what pins the frame convention itself.
 
 ## Real audio through the pins
 
@@ -676,8 +671,9 @@ there is something to run before you write any of it:
 dotnet run --project Warp11.Effects -- listen Warp11.Effects/in.wav heard.wav
 ```
 
-It opens `AudioEffectsAxi` — gain, one EQ band, a compressor, a limiter — with
-the file on its codec pins. Filter the signal list for `left` and the chain is
+It opens `EffectsAxi` — the `effects` chain in `Warp11.Effects/Chains.fs`,
+gain, one EQ band, a compressor, a limiter, built for the KV260's Pmod I2S2 pins
+by the board-top generator — with the file on its codec pins. Filter the signal list for `left` and the chain is
 there to watch a sample move down: `audio_rx_out_left`, `gain_out_left`,
 `eq_out_left`, `compressor_out_left`, `limiter_out_left`, `audio_tx_in_left`.
 Every register resets to a no-op, so at rest the sample arrives at the
@@ -706,7 +702,6 @@ this design at about **153k cycles/s**, so a second of wall clock is 75 frames:
 | `sclkRxTick` and `sclkTxTick` swapped | passes elaboration and every gate, and **is not detectable in simulation** — it is a setup/hold property and there is no timing model. Only a bench or a fabric loopback shows it. **Use `i2sLink` and it is not expressible** |
 | two links in one design sharing a prefix | instance names collide. Give each its own `prefix` |
 | two clock generators | drift. One generator, driven to every clock pin, always |
-| asserting equality in a software loopback | fails for a correct design — see above |
 | a pin in the `.xdc` that no port declares | will not build for the board |
 | `PULLDOWN TRUE` on UltraScale+ | silently ignored; use `PULLTYPE PULLDOWN` |
 | expecting the receiver to stall | it ignores `ready`. Add a `streamFifo` if you need slack |

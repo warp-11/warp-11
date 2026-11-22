@@ -26,21 +26,21 @@ chip at once — thousands of memories readable in the same cycle.
 They meet on exactly two kinds of link, and a real design uses both:
 
 - **The host reaches into the fabric** — one 32-bit word per transaction,
-  through the AXI-Lite slave (SPI on a part with no AXI). This is control,
+  through the AXI-Lite slave (a UART on a part with no AXI). This is control,
   status, configuration, and small blocks moved rarely.
 - **The fabric reaches out to DRAM** — bursts of many beats, through an AXI
   master. This is bulk: frames, populations, streams.
 
 **Mandelbrot uses both at once**, and it is the clearest example of the split:
-`cxOrigin`, `dx`, `start` and `busy` go through the AXI-Lite slave — nine words
+`cxOrigin`, `dx`, `start` and `busy` go through the AXI-Lite slave — twelve words
 of control — while the 1.1 MB frame goes out over an AXI master to DDR. The host
-tells the fabric *where* to write via one register (`fbBaseAddr`) and then stays
+tells the fabric *where* to write via one register (`dstAddr`) and then stays
 out of the way. Pushing 1.1 MB through the aperture would be 281,600 separate
 transactions.
 
 **`RegMap` is not a third link.** It is a *description*: one definition that
 elaborates the AXI-Lite slave **and** generates the Rust constants the host
-compiles against, which is why the two cannot disagree about the map. See
+reads, which is why the two cannot disagree about the map. See
 [Create a register map](register-map.md).
 
 ### The KV260 — a hard ARM host on the same chip
@@ -72,12 +72,12 @@ AXI ports.
 ### The iCEBreaker — a separate host, one serial link
 
 ```
-    host: a PC over the FT2232H, or
-    an MCU over SPI                            iCE40 UP5K fabric
+    host: a PC over the FT2232H's
+    second channel                             iCE40 UP5K fabric
  ┌───────────────────────────────┐        ┌────────────────────────────────────┐
- │  your program                 │  SPI   │  registers   flip-flops            │
- │  (register reads and writes)  │───────►│  EBR         blockMem   120 kbit   │
- │                               │  UART  │                                    │
+ │  your program                 │  UART  │  registers   flip-flops            │
+ │  (register reads and writes)  │◄──────►│  EBR         blockMem   120 kbit   │
+ │                               │        │                                    │
  └───────────────────────────────┘        │  no LUTRAM and no URAM — the part  │
                                           │  has neither primitive             │
                                           │                                    │
@@ -97,11 +97,11 @@ land a combinational read in sync-read EBR — a cycle wrong on silicon while th
 Sim and Verilator pass), and `ultraMem` is refused for having no counterpart. So
 on this part a memory is `blockMem`, read through `memReadPort`.
 
-The register seam is **planned, not built**: `spiSlaveOf : RegMap -> SlaveRegs`
-is designed as a third consumer of the same map beside `regMapSlave` and the
-Rust generator, and the generated layout is deliberately unchanged across buses
-so the host driver survives the move. The QSPI PSRAM, the flash and the UP5K's
-128 KB SPRAM have no DSL storage class yet. See
+The register seam is the same map behind a UART: `serialRegMapSlave` hands the
+body the `SlaveRegs` `regMapSlave` does, the generated layout is unchanged, and
+the seam adds `HOST_BAUD` so a host reaches it by the build directory alone.
+The QSPI PSRAM, the flash and the UP5K's 128 KB SPRAM have no DSL storage class
+yet. See
 [What if the design is not on AXI?](register-map.md#what-if-the-design-is-not-on-axi)
 
 ### The five places data can sit
@@ -143,6 +143,7 @@ transaction at a time.
 | [Let the host see the latest frame](#let-the-host-see-the-latest-frame) | fabric, host samples | DDR | fast |
 | [Get at that DDR buffer from the host](#get-at-that-ddr-buffer-from-the-host) | host | DDR | fast in bulk, slow per word |
 | [Write a client that does not know the storage](#write-a-client-that-does-not-know-the-storage) | fabric | any of them | either |
+| [Name records and let the board place them](#name-records-and-let-the-board-place-them) | fabric | whatever the board has | either |
 
 ## Set a parameter, read a status word
 
@@ -206,8 +207,8 @@ let loadRow = r.RwArray("loadRow", 128)     // the host writes, the design reads
 
 These occupy the aperture — one 32-bit address per entry — and they exist for one
 situation: **a few kilobytes the host moves rarely, where building the DDR path
-is not worth it.** Game of Life's initial grid is the case: the host writes the
-pattern once, then the fabric runs for billions of generations. The alternative —
+is not worth it.** A coefficient table or a small starting pattern is the case:
+the host writes it once, then the fabric runs for billions of cycles. The alternative —
 an AXI master to DDR — needs a contiguous physical buffer, a udmabuf, cache
 management and a base-address handshake, all to move 512 bytes once.
 
@@ -234,20 +235,25 @@ ignore a one-cycle glitch only the reading host could observe.
 "window" already meant `ReadWindow`/`WriteWindow`, which is a different idea, and
 having one word for both was the single most confusing thing on this page.
 
-### The current limit, stated plainly
+### Storage, and the limit that is left
 
-**Aperture arrays are always 32-bit LUTRAM.** `rwArray`/`roArray` fabricate a
-`distributedMem name aw 32` and you cannot hand them a memory you already have.
-That is fine at 16 or 128 words and wrong past that: the Mandelbrot pod's
-framebuffer is 4096 × 8 bits in **block RAM**, and as an aperture array it would
-become 4096 × 32 bits of LUTRAM — four times the bits, in the most expensive
-place to put them. The pod therefore uses the older list-driven slave
-(`axiLiteSlaveOn`), whose memory regions take a `Mem` of any width and any
-storage class.
+**An aperture array is LUTRAM unless it says otherwise:**
 
-So: **BRAM behind an aperture array is a real need and is not expressible
-through `RegMap` yet.** URAM behind one almost certainly never is — 288 kbit at
-one word per transaction is 9,216 reads, and anything that size wants a master.
+```fsharp
+let preset = r.RwArray("preset", 8, storage = Block, init = [ 10UL; 20UL ])
+```
+
+`storage` is `Distributed`, `Block` or `Ultra`, as any memory declares it — an
+iCE40 has no LUTRAM, so a map there says `Block`. `init` is what a host-written
+array holds from configuration, which matters on a board with no processor to
+load it; it reaches the seam as `{NAME}_INIT`.
+
+**The words are always 32 bits, and you cannot hand an array a memory you
+already have.** A 4096 × 8-bit block RAM as an aperture array becomes 4096 × 32
+bits. Where that matters, the list-driven slave (`axiLiteSlaveOn`) takes a
+`Mem` of any width and storage class as a memory window. Past a few thousand
+words, either is the wrong tool — 288 kbit at one word per transaction is 9,216
+reads, and anything that size wants a master.
 
 ## Read a small result block back
 
@@ -312,7 +318,14 @@ the latency where you can see it.
 The companion trap is on the write side: **multiple `memWrite` calls on one mem
 fold to one priority-muxed write site**, because two write sites on one array
 kill BRAM inference in Vivado. That is a property of the DSL here rather than a
-discipline you have to keep.
+discipline you have to keep. The fold is correct only while the writes never
+fire together, so every folded memory carries an assertion that simulation
+checks each cycle.
+
+A write may carry a lane mask — `memWriteMasked m addr data enable strb`, one
+bit per lane, lanes dividing the word evenly. A 32-bit memory with a 4-bit mask
+is AXI's `wstrb`, and emits the byte-enable template a synthesiser infers as one
+block RAM rather than read-modify-write logic.
 
 **Tutorial:** [RAM](../../hdl/Warp11.Tutorial/doc/ram.md) — the same page, and it
 carries this gotcha as its point.
@@ -409,7 +422,9 @@ The fabric writes whichever of three buffers the host is not reading and
 publishes the index in a register; the host reads that register, then that
 buffer. The fabric never stalls and the host never sees a torn frame. Game of
 Life's board view runs on exactly this at 167M generations per second, sampling
-a few times a second.
+a few times a second. A design need not write it: one that declares a
+`surfaceOut` need gets this path from the board top, on a board with the host's
+memory.
 
 **Guide:** [Streams — conflate, keep-latest into DDR](../streams.md#conflate-keep-latest-into-ddr)
 
@@ -483,6 +498,42 @@ how far "landed" is varies from one cycle to a full AXI write response.
 | owns the memory and wants it now | `memRead` |
 | owns the memory and can wait a known number of cycles | `memReadPort` |
 | should work whatever the memory turns out to be | `ReadWindow` / `WriteWindow` |
+
+## Name records and let the board place them
+
+A **region** is records a design reads or writes by index, declared as a need
+beside its other needs, and placed by the board the design is built for:
+
+```fsharp
+let entry = pins4 ("key", unsignedInt 32) ("payload", unsignedInt 64) ("weight", signedInt 16) ("note", unsignedInt 24)
+
+(fun n ->
+    { start = n.pulseIn "start"
+      source = n.region ("source", entry, 64, Reads, SharedWithHost)
+      copied = n.region ("copied", entry, 64, Writes, SharedWithHost)
+      landed = n.valueOut ("landed", unsignedInt 16) })
+```
+
+The body holds a `Region<'r>`: `source.read` takes a stream of indices and gives
+records back in order; `copied.write` takes (index, record, context) and gives
+the context back once the record has *landed*. Nothing in it says where the
+records live, and the mapping decides:
+
+| carrier | where the records are |
+|---|---|
+| `InHostMemory` | the host's DRAM, behind AXI masters the top shares by record — the KV260 |
+| `InLinkFrames` | kept by the host program, over the serial link — a board with no DRAM path |
+| `OnBoardMemory` | a chip on the board, behind `sdramController` — the Icepi Zero's 32 MiB SDRAM. `Private` regions only: no host reaches it yet |
+| `OnChip` | block RAM. `Private` regions only, and where a private region goes unless a mapping says otherwise |
+
+A `Private` region has no entry in the seam; one shared with the host and
+placed where no host reaches is refused by name.
+
+Bursts, strides, the 4 KB rule and which port a region rides are decided in
+`Regions.fs` and printed in the seam, so the host reaches a region by name
+through the same `Connection` it reaches the registers through.
+`Warp11.Designs/RecordCopy.fs` is the toy, on the KV260 and over the link;
+`notes/DEVICES.md` §13 is the plan.
 
 ## See also
 

@@ -34,6 +34,8 @@ then **Open in sim**, then **Play** (or **Run**, which is not paced).
 | `mac.json` | `a * b + c` from three streams: `join` boxes make the beats the multiplier and the adder take. No source drives it (three streams in); `emit` and `export` do |
 | `blur.json` | an image design: rows in, a 3×3 blur, rows out. Open it with `gradient.pgm`, Run, **Save heard** writes `gradient.heard.pgm` |
 | `adder.json` | a table design: columns `x` and `y` in, `sum` out. Open it with `numbers.csv`, Run, Save heard writes `numbers.heard.csv` |
+| `gain-wide.json`, `gain-wide4.json`, `gain-wide16.json` | several stereo frames a row (2, 4, 16): a `fields` box picks each frame out, a `gain` box of its own takes it, a `join` puts them back side by side. The KV260 mappings spread the rows over one, two and five memory ports |
+| `copy.json` | the stream in is the stream out, a row eight 128-bit beats wide: what measures the memory ports themselves. `copy.kv260-1.json` … `copy.kv260-5.json` are the same design over one to five ports |
 
 With a design running, a box's panel shows its outlets as a waveform over
 the last beats, every signal wire carries a level bar, and the toolbar's
@@ -50,7 +52,8 @@ canvas (and refuses in a browser, which has no compiler).
 Warp11.Placement -- export <file>` prints it, and `-- emit <file>` the Verilog.
 
 **Target** (in the design panel, nothing selected) is where the design
-goes: a preset (`kv260`, `icebreaker`) fills every row — part, build tool,
+goes: a board by name (`kv260`, `icebreaker`, `icepi`, `goboard`,
+`de10lite` — the canvas's own menu, `Warp11.Design/Boards.fs`) fills every row — part, build tool,
 clock and fabric rate, data path (the boundary on the I2S pins, or in the
 host's memory: a recording in, the design, a recording out, no codec
 needed), host driver, loading, connectors — and any row edited makes it
@@ -65,4 +68,6 @@ for a folder and writes everything the board's toolchain builds from into
 it, and says how to run it; `dotnet run --project Warp11.Placement --
 build <file> <dir>` does the same from the shell. The iCEBreaker frames at
 46 875 Hz, so a design goes there made for that rate (the refusal says so).
+`-- build <file> <board> <path> <dir>` names a board (or a board file, such
+as `kv260-audio.board.json`) and a data path on the line instead.
 `notes/BUILD.md` is the plan.

@@ -1,7 +1,7 @@
 # Warp11.GolView — the GoL live view
 
-The Avalonia FuncUI view for the `gol-axi` accelerator (the generated name of
-what the hand scripts called `gol-fs`): renders the fabric's
+The Avalonia FuncUI view for the `life64x64-batch` accelerator (the
+generated world, `Warp11.GoL.App -- life out/`): renders the fabric's
 conflate frames live and drives load/run/stop/reset. This project is the
 library — the view and the buses; the runnable heads sit next door.
 The comms sit behind `IGolBus` (`Bus.fs`) with three implementations — which
@@ -46,10 +46,13 @@ unzip zenohc.zip -d zenohc && export LD_LIBRARY_PATH=$PWD/zenohc/lib
 the 1.6.2 client and the daemon's zenoh 1.9 is protocol-compatible,
 verified live.)
 
-The daemon side:
+The daemon side — the binary, and the seam the build wrote beside it, which
+the daemon reads at start (`--board life64x64_batch --layout
+life64x64_batch_layout.rs`):
 
 ```sh
-scp runtime/target/aarch64-unknown-linux-musl/release/gol-daemon ubuntu@<board>:warp11-driver/
+scp runtime/target/aarch64-unknown-linux-musl/release/gol-daemon \
+    <the build directory>/life64x64_batch_layout.rs ubuntu@<board>:warp11-driver/
 scp hardware/board/gol-daemon.service ubuntu@<board>:.config/systemd/user/
 ssh ubuntu@<board> 'systemctl --user daemon-reload && systemctl --user restart gol-daemon'
 ```

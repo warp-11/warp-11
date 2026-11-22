@@ -24,7 +24,7 @@ row. That works, and its **depth is seven adders**: the last one cannot start
 until the sixth has finished, because it needs the answer.
 
 ```fsharp
-reduceTree (+) widened ==> flat
+reduceTree (+) (List.map widen incoming.payload) ==> flat
 ```
 
 `reduceTree` pairs them up instead: four adds, then two, then one. Same seven
@@ -56,8 +56,9 @@ fix, when it is needed, is this page's second half.
 
 ```fsharp
 incoming
-|> streamMapTo widened (List.map widen)
+|> streamMapTo (layoutOfList [ for i in 0..7 -> $"w{i}", unsignedInt 11 ]) (List.map widen)
 |> adderTreePipelined "acc" 11
+|> streamSink outPorts
 ```
 
 Every level of the tree gets a register, and the tree is a stream stage: a beat

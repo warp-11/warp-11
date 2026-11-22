@@ -13,17 +13,17 @@ cd runtime && cargo test --workspace
 
 | crate | what | `std`? |
 |---|---|---|
-| **`core`** (`warp11-runtime`) | `RegisterWindow`, the generated register maps, and the device drivers written against them | **`no_std`, zero dependencies** |
-| **`host`** | the backends — `MmapWindow` (uio / `/dev/mem`), `Warp11Dma`, udmabuf, `FsSimWindow`, the software twins, and the first-light binaries | std |
+| **`core`** (`warp11-runtime`) | `RegisterWindow`, and the drivers written against it — the batch contract (`BatchDevice`), regions, the counted frame, the GEP cluster — with `gep_seam.rs`, the cluster's names as a type | **`no_std`, zero dependencies** |
+| **`host`** (`warp11-host`) | `Connection` and the backends under it — `MmapWindow` (uio / `/dev/mem`), `SerialWindow`, `FsSimWindow`, `Warp11Dma`, udmabuf, the seam reader — the software twins, and the tools under `src/bin/` (`warp11_batch`, `warp11_regs`, `warp11_snapshot`, `warp11_record`, `warp11_region_copy`, `gep_cluster_evolve`, `gep_cluster_first_light`) | std |
 | **`gol-daemon`**, **`mandel-daemon`** | Zenoh peers serving the board views | std |
 | **`gol-engine`** | Game of Life's software twin, on the same wire as the daemon | std |
 
 **A driver is written once against `RegisterWindow` and runs in both worlds.**
 `MmapWindow` is the board; `FsSimWindow` drives the *F# simulator* over a
-bridge, so the same code that will mmap `/dev/mem` is exercised against the
+bridge, so the same code that will map a uio node is exercised against the
 elaborated design before any silicon exists. That is the two-backends property,
-across the language seam — and it is why `mandel_frame_bridge` and
-`mandel_fs_bridge` are the tests that matter most here.
+across the language seam — and it is why `batch_bridge` and `region_bridge`
+(`host/tests/`) are the tests that matter most here.
 
 **The register maps are generated, not written, and a host reads the one
 its build wrote.** Every build directory carries a seam (`*_layout.rs`),
@@ -58,8 +58,11 @@ Don't delete the 8-byte file; the config comment explains it.
 
 Each accelerator has a first-light run that drives it on the board and
 compares against a software twin, bit for bit: `mandel-daemon … check` for
-the Mandelbrot, and under `host/src/bin/` `gol_first_light` and
-`gep_cluster_first_light`, plus `gol_disarm` and `gol_debug`.
+the Mandelbrot, `gol-daemon`'s skew canary at start (and `gol-daemon …
+disarm` before an unload) for Game of Life, and `gep_cluster_first_light`
+under `host/src/bin/` for the GEP cluster. The rows-through designs are
+checked with `warp11_batch`, byte for byte against the same run with
+`--sim`.
 
 Run one after any bitstream change. Sim green and timing green still do not
 imply a correct picture.

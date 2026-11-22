@@ -37,8 +37,10 @@ parallel and the board is big enough, the time goes to one cycle.
 ```
 GameOfLife            the grid, and one update rule instanced per cell
   └── neighborhood    the 3×3 stencil, with an edge policy
-GoLAxi                the slave: control registers, and the snapshot path
-  └── streamConflate3 triple-buffered frames out to PS DDR
+Life64x64          the world as a design (`World.fs`, `lifeAt`): seed rows
+                   in, the world a surface out, the pace as values
+Life64x64Batch     the generated KV260 top: control registers, and the
+  └── streamConflate3 snapshot path — triple-buffered frames out to PS DDR
 ```
 
 **The stencil is a stdlib entry, not bespoke code.** `neighborhood` takes a
@@ -53,24 +55,26 @@ and always hands the host the newest complete frame, dropping the ones nobody
 could have seen. The host never waits for the fabric and the fabric never waits
 for the host.
 
-**The same world as a design, for any board** (`World.fs`, `life w h`): the
+**The same world as a design, for any board** (`World.fs`, `lifeAt w h`): the
 seed rows are a stream in, the world is a *surface* the host takes whole,
-and `run`, `intervalCycles`, `generation` and `population` are values. On a
+`tick`, `stop` and `reset` are pulses the host fires, and `tickCount`,
+`intervalCycles`, `ticking`, `generation` and `population` are values. On a
 board whose only connection is a UART the surface comes out as snapshots over
 it — latched in one cycle when the host pulls, sent a row at a time, nothing
 between pulls ever seen — which is the same conflation with the host's pull
 as the pace. `-- life out/` builds it for the project's board,
 `Board.board` in `Board.fs` — the KV260 at 166.67 MHz, one line to change
-for another board — at the largest world the part holds, 64×64 on the
-KV260, 32×32 on the Icepi; the Go Board is refused by number, 8×8 being
-more than its 1 280 cells. On the KV260 it
-builds with the world in the same triple buffer `GolAxi`
-uses (`Life64x64Batch`: 32 beats a snapshot, 512-byte slots), the seed rows
-in through the batch contract;
-`warp11_snapshot --board out/ --port … --seed
-glider.txt --set run=1 --pull 10 --every 100` seeds it, runs it and prints
-what it pulled. The KV260 keeps `GolAxi` as its live app until the daemon
-and the view drive the generated top.
+for another board — at the world's side, `World.side = 64`, a design
+parameter stated on its own line and nothing to do with the board. The
+board's gate says whether it fits: 32×32 on the Icepi, 40×40 on the
+DE10-Lite; the Go Board is refused by number, 16×16 being more than its
+1 280 cells. On the KV260 the world goes into a triple buffer in DDR
+(`Life64x64Batch`: 32 beats a snapshot, 512-byte slots), the seed rows in
+through the batch contract, and that generated top is the live app the
+`gol-daemon` serves. On a board with a UART,
+`warp11_snapshot --board out/ --port … --seed glider.txt --set tickCount=0
+--set tick=1 --pull 10 --every 100` seeds it, runs it free and prints
+what it pulled.
 
 ## Running it
 
@@ -156,10 +160,23 @@ obvious:
 Emit and deploy:
 
 ```sh
-dotnet run -c Release --project Warp11.GoL.App -- build out/   # the KV260 directory: block design, overlay, packaging, the seam
-cd out && ./build.sh                                           # Vivado, the gate, the gol-axi app
+dotnet run -c Release --project Warp11.GoL.App -- life out/    # the KV260 directory: block design, overlay, packaging, the seam
+cd out && ./build.sh                                           # Vivado, the gate, the life64x64-batch app
 # then gol-daemon on the board (hardware/board/README.md)
 ```
+
+### Run it on
+
+Measured, the generated world on each board (the side changed on its one
+line):
+
+| board | world | measured |
+|---|---|---|
+| KV260 | 64×64, through DDR | the daemon's skew canary bit-exact, 166.67 MHz |
+| iCEBreaker | 8×8, over the link | two seeds × 40 generations and a 25-generation burst bit-exact against a software Life (2 196 / 5 280 cells, 32.4 MHz) |
+| Icepi Zero | 32×32, over the link | 37 generations bit-exact (18 898 / 24 288 cells, 45.0 MHz) |
+| Go Board | — | refused: 16×16 is 5 575 cells against 1 280 |
+| DE10-Lite | 40×40, over the link | 30 generations and a 100-generation burst bit-exact against a software Life (23 846 LE, 68.3 MHz) |
 
 ## A hardware lesson this example paid for
 
@@ -173,15 +190,16 @@ populations and registers are perfect. If you see that, do not debug the RTL —
 reboot the board.
 
 The defenses are in the design: the write path is armed by a host-written
-register so nothing flows before a driver arrives, and `gol-disarm` stops it
-cleanly before unload. Both are there because of this bug.
+register so nothing flows before a driver arrives, and `gol-daemon … disarm`
+stops it cleanly before unload. Both are there because of this bug.
 
 ## Files
 
 - `Core.fs` — the grid and the update rule
 - `Twin.fs` — the software twin the checks diff against
-- `Wrapper.fs` — the slave, the snapshot path, the generated register map
-- `../Warp11.GoL.App/` — checks, `diff`, `hardware`
+- `World.fs` — the world as a design: its needs, its side, its mapping
+- `Board.fs` — the board the project builds for, on one line
+- `../Warp11.GoL.App/` — checks, `diff`, `life`, `mapping`, `emit`, `perf`, `bench`
 - `../Warp11.GolView/` — the UI and the `IGolBus` seam;
   `../Warp11.GolView.Desktop/` runs it, `../Warp11.GoL.Browser/` is the
   site's live demo of this design in the simulator

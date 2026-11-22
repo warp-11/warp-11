@@ -7,8 +7,8 @@ subject here.
 ## What to look at
 
 Poke `a`, `b`, `c`, `d` and watch `out`. Then look at the group dropdown on the
-left: the signal list is no longer flat. There are instances now — `mul1`,
-`mul2`, `acc`, `bump` — each with its own internal signals, and you can watch
+left: the signal list is no longer flat. There are instances now — `mul8_1`,
+`mul8_2`, `adder16_1`, `satInc8_1` — each with its own internal signals, and you can watch
 what is happening *inside* a submodule from out here.
 
 ## Instantiation is function application
@@ -95,10 +95,10 @@ silently lost its top half would be a bug.
 
 ## Try this
 
-- Change `mulOf 8` to `mulLogic 8` and look at the group dropdown — `mul1` and
-  `mul2` are gone; the multiply is now part of the top module.
+- Change `mulOf 8` to `mulLogic 8` and look at the group dropdown — `mul8_1` and
+  `mul8_2` are gone; the multiply is now part of the top module.
 - Add a third product and widen `out`. Watch the instance count grow.
-- Watch a signal *inside* `mul1` while poking `a`.
+- Watch a signal *inside* `mul8_1` while poking `a`.
 
 ## See also
 

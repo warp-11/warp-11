@@ -6,12 +6,11 @@
 //! `String`, a heap, or a syscall. The backends that do those things live
 //! outside it — see `warp11-host`.
 //!
-//! The register map lives here rather than beside the HDL, and `warp11-hdl`
-//! depends on this crate to get it. That is the one declaration both sides read,
-//! so a design and its driver cannot disagree about an offset. warp11 does this
-//! with codegen today (`HARDWARE_SLAVES` writes `GoLSlaveLayout.kt`, committed
-//! because the build is circular); when the DSL and the driver are the same
-//! language it is just a module.
+//! The register map is not here: each build directory carries its own seam,
+//! written by the same F# definition that elaborates the slave and read when a
+//! host connects, so a design and its driver cannot disagree about an offset.
+//! What is committed is names only (`gep_seam.rs`), so the compiler checks a
+//! driver's spelling.
 
 #![no_std]
 

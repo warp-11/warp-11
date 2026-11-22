@@ -68,12 +68,14 @@ frame's width, the chunk, the iteration cap, the view's fraction bits — are
 stated there as facts and reach the host in the seam (`FRAME_WIDTH`,
 `CHUNK_PIXELS`, `MAX_ITERATIONS`, `FRACTION_BITS`), so the daemon reads
 them rather than writing them down. The board is `Chunked.board`, one line
-(`kv260At fabricHz`); change it and the same verb builds for another, with
-the lanes that part holds — its multipliers at twelve a lane, or its logic
-at the lane's measured cost, whichever binds first: 104 on the KV260, 2 on
-the Icepi, 10 on the DE10-Lite (whose lanes keep their per-thread state in
-block RAM, having no LUT RAM). `Chunked.mapping` scatters into the host's
-memory where the board has one and counts over its link where it does not.
+(`kv260At fabricHz`); change it and the same verb builds for another. The
+lanes are a design parameter, `Chunked.lanes = 104`, stated on their own
+line and nothing to do with the board — 104 is every lane the KV260's DSPs
+hold at twelve a lane; the Icepi holds 2, the DE10-Lite 10 (whose lanes
+keep their per-thread state in block RAM, having no LUT RAM) — and the
+board's gate says whether what is stated fits. `Chunked.mapping` scatters
+into the host's memory where the board has one and counts over its link
+where it does not.
 
 ## Running it
 
@@ -88,6 +90,7 @@ The bitstream, and the board:
 
 ```sh
 dotnet run -c Release --project Warp11.Mandelbrot -- bitstream out/   # the KV260 directory: Verilog, block design, overlay, seam
+                                                                      # (`bitstream out/ 8` overrides the lanes, for a sweep)
 out/build.sh                                                          # Vivado, the gate, the app in out/app
 # copy out/app to the board as build.sh prints, then on the board
 sudo xmutil unloadapp && sudo xmutil loadapp mandelbrot-batch
@@ -99,10 +102,22 @@ software twin, and its fabric cycles; exit 0 only if every pixel matches.
 Without it the daemon serves the live view
 (`hardware/board/mandel-daemon.service`), reading the same seam. A frame
 straight to a file is `warp11_batch frame:1400x800 out.pgm --board
-mandelbrot_batch --layout mandelbrot_batch_layout.rs --chunk 128 --set
-cxOrigin=…`.
+mandelbrot_batch_layout.rs --chunk 128 --set cxOrigin=…` — `--board` is the
+build directory or the seam file out of it.
 
 See [docs/dev-workflow.md](../../docs/dev-workflow.md) for the deploy path.
+
+### Run it on
+
+Measured, the same design with `Chunked.board` and `Chunked.lanes` changed:
+
+| board | lanes | measured |
+|---|---|---|
+| KV260 | 104, through DDR | 1400×800 bit-exact, 4.345 ms |
+| iCEBreaker | — | refused: a lane takes 12 multipliers, the UP5K has 8 |
+| Icepi Zero | 2, over the link | 1400×800 bit-exact against the twin, 24.7 s (3 780 cells, 24 / 28 multipliers, 65.6 MHz) |
+| Go Board | — | refused: no multipliers |
+| DE10-Lite | 10, over the link | 1400×800 bit-exact against the twin, 49.3 s (16 309 LE, 120 / 144 multipliers, 70.7 MHz) |
 
 ## Files
 
@@ -116,7 +131,8 @@ See [docs/dev-workflow.md](../../docs/dev-workflow.md) for the deploy path.
   from the same lane, kept as oracle inputs; `Host.fs`, `FrameHost.fs` —
   their Sim renders, and `lanescale`
 - `Units.fs` — the units a drawn design may name
-- `Main.fs` — the living checks, `bitstream`, the simulation probes
+- `Main.fs` — the living checks, `bitstream`, `mapping`, `diff`, the
+  simulation probes
 
 ## Numbers, and where they come from
 

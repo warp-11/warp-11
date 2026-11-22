@@ -1,7 +1,8 @@
 # The iCEBreaker on the bench
 
 What was learned putting designs on this board that is still true now that
-the build directory is generated (`Warp11.Build`, from a mapping file) and
+the build directory is generated (`Warp11.Build`, from the design's board
+and mapping) and
 the hand tops that used to live in `hardware/ice40/` are gone. Nothing here
 is a build step: `build.sh` in any generated directory runs the pinned
 yosys → nextpnr-ice40 → icepack flow and loads the result (`PROG=1` for the
@@ -45,8 +46,9 @@ here.
 flash a bitstream: USB, the FT2232H and the configuration flash are all on
 board. Connectors are only needed once something has to be *attached*, and
 the release's examples attach nothing: every one reaches the board over its
-USB — the register map and the rows on the FTDI's second channel, as
-`warp11_regs` and `warp11_batch` speak it, at the baud the seam states.
+USB — the register map and the rows on the FTDI's second channel
+(`/dev/ttyUSB1` here), as `warp11_regs` and `warp11_batch` speak it, at the
+baud the seam states: 1 Mbaud.
 
 If you do fit a socket: **PMOD1A** is the one nearest the FPGA, and the
 preset's `I2sSeparateCodecs` connector is a Pmod I2S2 there — the D/A on the
@@ -72,4 +74,5 @@ nothing downstream of them has been reached yet.
 The two hand tops on `iCE40UP5K-SG48`, 2026-09-12: the tone 282 / 5 280
 logic cells at 40.9 MHz, the passthru 424 at 37.8 MHz, against 24 MHz. The
 same designs through the generator land in `build/report.json` now, which
-is where the current numbers are.
+is where the current numbers are; `docs/boards.md` has the ones loaded and
+checked on 2026-11-21.

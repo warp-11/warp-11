@@ -55,7 +55,8 @@ Field by field:
 
 - **`part`** is what the toolchain is told, and what the part has.
   `family` picks the toolchain's dialect — `UltraScalePlus` for Vivado,
-  `Ice40` or `Ecp5` for yosys and the matching nextpnr — and the emitter and
+  `Ice40` or `Ecp5` for yosys and the matching nextpnr, `Max10` for
+  Quartus — and the emitter and
   the build script follow from it. `device` and `package` are what that tool
   is given: nextpnr's `--hx1k --package vq100`; for Vivado `device` is the
   `-part` string and `package` is empty. `boardPart` is the toolchain's own
@@ -67,7 +68,7 @@ Field by field:
   counts, and its block RAM in bits. A design that sizes itself reads them
   first; the board check refuses what they rule out; the post-build gate
   confirms them from the toolchain's report. **On a part the library knows**
-  (`xck26-sfvc784-2LV-c`, `up5k`, `hx1k`, `25k`) **the whole `facts` object
+  (`xck26-sfvc784-2LV-c`, `up5k`, `hx1k`, `25k`, `10M50DAF484C7G`) **the whole `facts` object
   may be left out** and the library's own are used. On any other part it is
   required, and the reader says which five fields when it is missing.
 - **`clock` and `fabricHz`.** An `Oscillator` drives the clock pin at the
@@ -81,7 +82,8 @@ Field by field:
   with a processing system. The Go Board's FT2232H has two channels, A for
   the flash and B for the UART; the design never sees which.
 - **`loading`.** `Sram` and `Flash` are the open flow's, through `iceprog`
-  or openFPGALoader; `OsApp` is a Zynq's FPGA manager.
+  or openFPGALoader, and Quartus's `Sram`, through `quartus_pgm`; `OsApp` is
+  a Zynq's FPGA manager.
 - **`connectors`** are the pins behind each device role the board carries
   on its own, keyed by role so the port names are the role's, not the
   board's. The names matter: `host_rx` is into the fabric and `host_tx` out,
@@ -169,7 +171,8 @@ let goBoard =
       fabricHz = 25_000_000
       audioClockHz = None
       hostMemory = None
-      host = UartAt 115_200
+      boardMemory = None
+      host = UartAt 1_000_000
       loading = Sram
       connectors =
         [ { role = ClockIn; pins = [ "clk25", bare 15 ] }
@@ -214,7 +217,7 @@ board = goBoard`. Then:
 
 ```sh
 dotnet run --project Warp11.Designs -- hello out/
-cd out && PROG=1 ./build.sh
+(cd out && PROG=1 ./build.sh)
 warp11_regs --board out/ --port /dev/ttyUSB1 --set pattern=5
 ```
 

@@ -35,7 +35,10 @@ what it is built from**, and there are three ways to say it:
 |---|---|---|
 | `distributedMem` | LUTs — "distributed RAM" | this cycle **or** next |
 | `blockMem` | block RAM | next cycle only |
-| `mem` | the synthesiser chooses | next cycle only |
+| `ultraMem` | UltraRAM, starting at zero | next cycle only |
+
+There is no fourth way. A bare `mem`, leaving the choice to the synthesiser,
+is a compile error that names the three.
 
 This design says `distributedMem` because it wants a combinational read, and
 that is the only declaration a combinational read is legal on. The next two
@@ -101,20 +104,20 @@ only, with every test green. No cycle-accurate model can catch that, because it
 is not a cycle-modelling question.
 
 **The fix was to stop leaving the decision to the synthesiser.** That is what
-`distributedMem`/`blockMem`/`mem` are for, and why a combinational read is
+`distributedMem`/`blockMem`/`ultraMem` are for, and why a combinational read is
 refused on the latter two:
 
 ```
-memRead on 'store', whose storage the synthesiser chooses — and if it chooses
-block RAM this read gains a cycle on silicon that no check here would catch.
-Declare it distributedMem to mean it, or use memReadPort and pipeline the
-consumer
+memRead on 'store', which is a blockMem — block RAM cannot read
+combinationally, so this would gain a cycle on silicon that no check here
+would catch. Use memReadPort and pipeline the consumer, or declare it
+distributedMem if it is small enough to live in LUTs
 ```
 
 The declaration also reaches the emitted Verilog as a `ram_style` attribute, so
 the synthesiser is told rather than asked, and the cost shows up as LUTs in the
 utilization report instead of as a wrong answer on the board. Try it: change
-`distributedMem` to `mem` in the source and the design stops elaborating.
+`distributedMem` to `blockMem` in the source and the design stops elaborating.
 
 The general lesson survives the specific fix — **some classes of bug are visible
 only to a synthesis tool**, which is why this repo keeps a list of hardware
@@ -141,7 +144,9 @@ Try it: `waddr = 5, wdata = 0x11, wen = 1, raddr = 5`, then step and watch
   something much worse. Like the read-latency trap above, this one has been
   taken out of your hands: several `memWrite` calls on one memory **fold into a
   single priority-muxed write site**, latest call winning, so the merge happens
-  whether or not you knew you needed it.
+  whether or not you knew you needed it. The fold is only right while the
+  writes never fire together, so the simulator checks that every cycle and
+  names the memory when they do.
 
 ## Try this
 

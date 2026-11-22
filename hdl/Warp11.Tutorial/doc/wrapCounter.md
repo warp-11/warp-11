@@ -30,10 +30,11 @@ let columns = Warp11.Stdlib.counter "columns" 5 enable
 let rows = Warp11.Stdlib.counter "rows" 3 columns.wrap
 ```
 
-`counter name n enable` counts 0 to n−1 and returns two things:
+`counter name n enable` counts 0 to n−1 and returns two things, as a
+`WrapCounter`:
 
 ```fsharp
-{| count = ...; wrap = ... |}
+{ count = ...; wrap = ... }
 ```
 
 The width is computed from `n` — five states needs three bits, and nobody had to

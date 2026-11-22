@@ -2,7 +2,7 @@
 //! register map — a Life world, a framebuffer — and shown or kept.
 //!
 //!   warp11_snapshot --board out/ --port /dev/ttyUSB1 \
-//!       [--need world] [--seed glider.txt] [--set run=1] [--set intervalCycles=1000000] \
+//!       [--need world] [--seed glider.txt] [--set tickCount=0 --set tick=1] [--set intervalCycles=1000000] \
 //!       [--pull 10] [--every 100] [out.pbm]
 //!
 //! A surface bound to the host link (`notes/DEVICES.md`, the snapshot

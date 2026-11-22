@@ -68,15 +68,15 @@ The [**Counter**](../hdl/Warp11.Tutorial/doc/counter.md) tutorial walks exactly 
        │                     (compiled, cycle-accurate)
        │                            │
        ▼                            ├──► the step-through debugger
-   Vivado                           │
+   the toolchain                    │
        │                            └──► your Rust driver, over a bridge
        ▼                                          ▲
-   bitstream ──► the FPGA ◄── AXI ──► Rust runtime ┘
+   bitstream ──► the FPGA ◄── AXI / UART ──► Rust runtime ┘
                                           ▲
                                           │
                     one register-map definition generates BOTH
-                    the AXI slave in the fabric and the Rust
-                    struct the host reads it through
+                    the slave in the fabric and the Rust
+                    constants the host reads it through
 ```
 
 **The elaborator and the IR** (`hdl/`, F#). The DSL builds an intermediate
@@ -103,8 +103,8 @@ set breakpoints written as expressions over the design's own signals, export
 VCD. It is also the thing you can try in a browser without installing anything.
 
 **The runtime** (`runtime/`, Rust). What runs on the board's CPU — or on your
-workstation — to drive the design over AXI: register access, DMA, the device
-drivers for each accelerator. Rust rather than F# because this half *ships* onto
+workstation — to drive the design over AXI or a UART: register access, DMA,
+the device drivers for each accelerator. Rust rather than F# because this half *ships* onto
 boards that may have no Linux-class host, where the F# half never leaves your
 machine.
 
@@ -119,8 +119,10 @@ master reaching out to the PS's DRAM, which is what "PS DDR" means wherever you
 see it.
 
 **The seam between them.** One register-map definition generates two things: the
-AXI slave that appears in the fabric, and the Rust structs the host reads it
-through (`runtime/core/src/*_layout.rs`, generated and committed). Because both
+AXI slave that appears in the fabric, and the Rust constants the host reads it
+through (the `*_layout.rs` seam each build directory carries, read when a host
+connects; `runtime/core/src/gep_seam.rs` commits the names the GEP driver spells, so
+the compiler checks them). Because both
 come from one source, the program and the hardware cannot disagree about which
 register lives at which offset — the class of bug that otherwise costs an
 afternoon every time a field moves.
@@ -134,12 +136,13 @@ design never names a board: it declares *needs* — rows in and out, a value
 the host sets, a surface it keeps live — and a **board** is a record of facts:
 the part and what it holds, the clock, how the host reaches the design (an
 AXI-Lite aperture, a UART), how a bitstream is loaded, which pins carry which
-role. A **mapping** binds the two, and is a file beside the design. From
+role. A **mapping** binds the two, and is a record in code beside the
+design (a file only where the design is one, on the canvas). From
 those three `BoardTop` builds the top module — the converter on the pins, or
 rows through the host's memory, or rows as frames on a UART — with every
 control a register, and `Build` writes the directory the board's toolchain
 builds from, ending in a gate that reads the tool's own report back. Moving a
-design to another board is changing one file; a board that cannot hold it
+design to another board is changing one line; a board that cannot hold it
 says so by number. [Boards](boards.md) is the page.
 
 **Clock domains.** A design has a default clock and may declare others;
@@ -165,7 +168,8 @@ dotnet run --project Warp11.Tutorial.App     # the step-through debugger
 dotnet run --project Warp11.Mandelbrot -- bitstream out/
 ```
 
-From there it is vendor territory: Vivado turns the Verilog into a bitstream,
+From there it is vendor territory: the board's toolchain — Vivado, Quartus, or
+yosys and nextpnr — turns the Verilog into a bitstream,
 the board loads it, and the Rust runtime drives it. That path — synthesis,
 timing, deploying to a KV260, the gotchas that only appear on real hardware —
 is the [**Hardware workflow**](dev-workflow.md) guide, and it is the part that is genuinely

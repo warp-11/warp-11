@@ -61,19 +61,20 @@ A counter, in the Warp 11 DSL:
 
 ```fsharp
 let counter =
-    design "Counter" (fun () ->
-        let enable = inputBit "enable"
-        let clear = inputBit "clear"
-        let count = output "count" 8
-        let r = reg "r" 8
+    defModule
+        "Counter"
+        (fun p -> (p.inPort "enable" 1, p.inPort "clear" 1, p.outPort "count" 8))
+        (fun (enable, clear, count) ->
+            let r = reg "r" 8
 
-        If clear (fun () -> 0UL ==> r)
-        Else (fun () -> If enable (fun () -> r + 1UL ==> r))
+            ifElse [
+                (clear, fun () -> 0UL ==> r)
+                (otherwise, fun () -> If enable (fun () -> r + 1UL ==> r)) ]
 
-        r ==> count)
+            r ==> count)
 ```
 
-`emitDesign counter` produces:
+`emitDesign counter.def` produces:
 
 ```verilog
 module Counter (input clk, input rst, input enable, input clear, output [7:0] count);
@@ -119,11 +120,11 @@ board's own toolchain report:
 
 | board | part | hello | what fits |
 |---|---|---|---|
-| KV260 | ZU5EV, 117 k LUTs, 1 248 DSPs | AXI-Lite | everything here |
-| Icepi Zero | ECP5-25F, 24 k cells | 143 cells, 212 MHz | Mandelbrot at 2 lanes, Life at 32×32, every audio and table example |
-| iCEBreaker | iCE40 UP5K, 5 280 cells | 192 cells, 60 MHz | gain, adder, passthru, tone, Life at 8×8 |
-| Go Board | iCE40 HX1K, 1 280 cells | 199 cells, 167 MHz | passthru, tone, adder |
-| DE10-Lite | MAX 10 10M50, 49 760 LEs, 144 multipliers | 216 LEs, 218 MHz | Mandelbrot at 10 lanes, Life at 40×40, every audio and table example |
+| KV260 | ZU5EV, 117 k LUTs, 1 248 DSPs | 669 LUTs, AXI-Lite | everything here |
+| Icepi Zero | ECP5-25F, 24 k cells | 143 cells, 229 MHz | Mandelbrot at 2 lanes, Life at 32×32, GEP at 1×1, every audio and table example but the multiband compressor |
+| iCEBreaker | iCE40 UP5K, 5 280 cells | 180 cells, 60 MHz | passthru, tone, gain, controls, adder, Life at 8×8 |
+| Go Board | iCE40 HX1K, 1 280 cells | 189 cells, 157 MHz | passthru, tone, adder |
+| DE10-Lite | MAX 10 10M50, 49 760 LEs, 144 multipliers | 208 LEs, 208 MHz | Mandelbrot at 10 lanes, Life at 40×40, every audio and table example but effects and the multiband compressor |
 
 Every ✗ in the full matrix is a refusal with its number, not a guess —
 [Boards](https://warp11.org/guides/boards) has the whole table.
@@ -150,7 +151,7 @@ cd warp-11/hdl/Warp11.Tutorial.App
 dotnet run -c Release
 ```
 
-That opens the tutorial: **34 designs**, from a counter to a register map and an
+That opens the tutorial: **36 designs**, from a counter to a register map and an
 AXI master, each with a page explaining what it teaches and the source that
 defines it, in a debugger you can step. Every page's claims are checked against
 the design that makes them, so a page cannot drift from what the hardware does.
@@ -184,7 +185,7 @@ the IR did not invent its own semantics gets measured.
 **Then, in any order:**
 
 - **[The tutorial](https://warp11.org/tutorial/counter)** — start at Counter and
-  read through Sequencer, which is the first tier and enough to build something.
+  read through FSM, which is the first tier and enough to build something.
   Streams, the stdlib and the board-facing pages follow. It assumes you can
   program and does not assume you have written RTL.
 - **[Streams](https://warp11.org/guides/streams)** — the ready/valid layer, and `wormhole`, the
@@ -211,11 +212,13 @@ Being clear about this is cheaper than letting you find out:
   Lattice boards through the open flow, and a Terasic DE10-Lite through
   Quartus, the newest and the least exercised. What a design can plug into
   is short: AXI4-Lite
-  from a register map, AXI4 master read and write, a UART register link, I2S
-  and PDM in and out — where the established libraries ship half a dozen bus
+  from a register map, AXI4 master read and write, a UART register link, an
+  SDR SDRAM controller, I2S and PDM in and out — where the established libraries ship half a dozen bus
   families and a shelf of controllers.
-- **GEP runs on the KV260 alone.** Its cluster reaches DDR through two AXI
-  masters, and carrying it over a UART is a redesign that did not make this
+- **GEP runs on the KV260 and the Icepi Zero only.** Its cluster keeps its
+  records in regions the board places — the host's DDR on the KV260, the far
+  end of the UART on the Icepi, at 1×1 and link-bound. One breeder exceeds
+  the Go Board, and the iCEBreaker and the DE10-Lite are not built for this
   release.
 - **No formal verification.** Clock domains and checked crossings exist;
   nothing proves a design beyond simulation and the differential.

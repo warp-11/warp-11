@@ -4,8 +4,10 @@
 driven from the host the same way — and the same design on another board by
 changing one file.
 
-The whole of it is a **mapping**: a JSON file beside the design that names the
-board and how the design's needs are carried. The design does not change, and
+The whole of it is a **mapping**: the board and how the design's needs are
+carried. For a drawn design it is a JSON file beside the design, which is
+what this page shows; a typed design states the same record in code beside
+itself (`Hello.mapping`, `Chunked.mapping`) and binds its board in one line. The design does not change, and
 neither does the host program, because the register map and the row shapes
 the host reads come out of the build directory as a Rust seam.
 
@@ -25,8 +27,8 @@ The same design on the Icepi, over its UART:
 
 ```sh
 dotnet run --project Warp11.Placement -- build my.json my.icepi.json out/
-cd out && ./build.sh
-warp11_batch in.wav out.wav --board out/ --port /dev/ttyUSB1 --set volume=512
+(cd out && ./build.sh)
+warp11_batch in.wav out.wav --board out/ --port /dev/ttyUSB0 --set volume=512
 ```
 
 And on the KV260, through its DDR — a different file, the same design, the
@@ -41,7 +43,7 @@ warp11_batch in.wav out.wav --board out/my_batch_layout.rs --set volume=512
 ```
 
 The board object is the board record written out — `Warp11.Mapping.write
-{ board = icepi; path = viaLink; plugged = []; sizes = [] }` prints one, and
+{ board = icepi; path = viaLink; plugged = [] }` prints one, and
 the canvas's **Target** panel saves one — or a file of your own ([How to add
 a new board](../add-a-board.md)).
 
@@ -95,16 +97,13 @@ for one board's Pmod plugs into another's unchanged, because the two meet at
 the position number. A connector the board carries on its own — the
 iCEBreaker's Pmod I2S2 — needs no harness.
 
-## The size: derived, or named
+## The size: the application's, not the board's
 
-A design that scales — Life's world, Mandelbrot's lanes — reads its size from
-the part's facts, and a mapping may say otherwise:
-
-```json
-{ "board": { … }, "path": "link", "sizes": { "world": 16 } }
-```
-
-A size named for a design that does not ask for it is refused by name.
+A design that scales — Life's world, Mandelbrot's lanes — takes its size as
+an application parameter stated beside the design (`World.side = 64`,
+`Chunked.lanes = 104`), never from the board or the mapping. Moving it to a
+smaller part is stating a smaller size; the gate says whether what is
+stated fits, by number.
 
 ## What the build directory gives the host
 

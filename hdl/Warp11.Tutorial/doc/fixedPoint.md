@@ -33,8 +33,8 @@ The second one is the interesting one and the section below explains it.
 ## Reading the source
 
 ```fsharp
-let a = Number.input "a" Number.q4_4
-let b = Number.input "b" Number.q4_4
+Number.inPort p "a" Number.q4_4
+Number.inPort p "b" Number.q4_4
 ```
 
 `q4_4` is a **format**: one line saying how to read a bag of bits as a number.
@@ -65,7 +65,7 @@ rather than handing you a number that means nothing. The whole class of "the
 point ended up somewhere else" bugs becomes a message instead of a picture.
 
 ```fsharp
-(Number.renormTo Number.q4_4 wide).bits ==> product
+(Number.renormTo Number.q4_4 wide) ==> product
 ```
 
 `renormTo` brings the wide result back to Q4.4 by dropping the extra four
@@ -78,7 +78,7 @@ format explicitly, and why it is one of exactly two such escapes.
 ### The one that costs nothing
 
 ```fsharp
-(Number.reinterpret q5_3 a).bits ==> doubled
+(Number.reinterpret q5_3 a) ==> doubled
 ```
 
 `q5_3` is the same eight bits with three fraction bits instead of four. The bits

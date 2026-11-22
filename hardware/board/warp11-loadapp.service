@@ -5,8 +5,9 @@
 # it) after dfx-mgrd is up.
 #
 # Change the app: edit WARP11_APP below to the xmutil app you want as default
-# (e.g. audio-passthru, audio-batch, mandel, gol). The app must already be
-# installed under /lib/firmware/xilinx/<app>/ (deployBitstreamToBoard does that).
+# (e.g. life64x64-batch, gep-cluster-axi — the name a build directory's
+# build.sh prints). The app must already be installed under
+# /lib/firmware/xilinx/<app>/ (hardware/board/README.md shows the install).
 #
 # Install (one-time):
 #   scp hardware/board/warp11-loadapp.service ubuntu@192.168.1.172:/tmp/

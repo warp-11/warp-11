@@ -23,8 +23,11 @@ You have just done, by hand, what a driver does with `*(volatile uint32_t *)`.
 ## The three kinds of register
 
 ```fsharp
-axiLiteSlave
-    4                                              // aperture: four words
+// in the io factory: four address bits, a 16-byte aperture — four words
+axiLiteSlavePorts p 4
+// ...and in the body:
+axiLiteSlaveOn
+    slavePorts
     [ "control", 0x0UL, 32 ]                       // host writes, design reads
     [ 0x4UL, lit 0xA57AUL 32; 0x8UL, ticks ]       // design provides, host reads
     []                                             // memory windows: none here
@@ -52,13 +55,13 @@ everything on the [**Stream pipe**](streamPipe.md) page. There is no clever part
 one way, an acknowledgement comes back, and the whole thing exists because
 processors and memory-mapped peripherals settled on it decades ago.
 
-`axiLiteSlave` implements one transaction at a time, OKAY only. Two things it
+`axiLiteSlaveOn` implements one transaction at a time, OKAY only. Two things it
 deliberately does not do: byte-enables are accepted and ignored (full-word
 writes only), and read data is assumed stable while `RVALID` waits. Both are
 fine at the scope this is used — a host that pokes a slave — and both are
 written down rather than discovered.
 
-There is also `axiLiteSlaveFull`, which adds **pulse registers**: writing a 1
+There is also `axiLiteSlaveFullOn`, which adds **pulse registers**: writing a 1
 produces a one-cycle strobe rather than a level. That is the shape for "start"
 — a level start needs the host to write it back to 0, and a design that misses
 the clear runs twice.
@@ -67,7 +70,8 @@ the clear runs twice.
 
 The half of this that matters is not on this page. A register map defined once
 in F# emits *both* the slave you see here **and** the host-side layout — the
-offsets, widths and names, as a Rust source file the driver compiles against.
+offsets, widths and names, as a Rust source file written into the build
+directory beside the bitstream, which the host reads when it connects.
 
 That file is the only thing the two languages share. Nobody maintains a
 matching pair of constants; there is no pair. The single most common way to

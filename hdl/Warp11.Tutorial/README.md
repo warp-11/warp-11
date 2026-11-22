@@ -33,8 +33,8 @@ substrates real accelerators are built from.
   for. Also: an F# loop generating ports at elaboration time.
 - **Signed operations** — the bits are identical, so signedness lives on the
   *operation* rather than the type.
-- **Fixed-point** — a Q format in the type, where a multiply changes the format
-  and renormalizing is a slice the target names.
+- **Fixed-point** — a Q format that travels with the value, where a multiply
+  changes the format and renormalizing is a slice the target names.
 - **RAM** — synchronous versus combinational reads as a silicon question, and
   the gotcha that passes both simulators and fails on the board.
 - **ROM** — contents fixed at elaboration, so the bitstream arrives loaded.
@@ -92,8 +92,8 @@ substrates real accelerators are built from.
   multiplies: each operation a stage holding one beat, the multiplier shared
   behind them, and the bits unchanged.
 - **Multiband, folded** — the real one: an 8-band stereo compressor, 588 DSP
-  blocks spatially, on six of an iCE40's eight — sixteen stages, one word at
-  the call site, and a check that the bits are the spatial engine's.
+  blocks spatially, on six of an iCE40's eight — a chain of one-beat stages
+  over one shared multiplier, and a check that every stage was granted it.
 - **Register map** — the host seam, and the layout generated from the same
   definition the slave was.
 - **DDR master** — the fabric reaching out to memory, and the arm gate that
@@ -114,11 +114,14 @@ purpose.
 **The debugger is a component, not an application.** `Warp11.SimView` is a
 library. It knows how to watch signals, window a memory and draw a trace — the
 things true of *any* design — and nothing about what a particular design means.
-This project supplies the catalog *and* the two extra panels (`about` and
-`source`) as ordinary values:
+This project supplies the catalog *and* the three extra panels (the page,
+the source and the Verilog) as ordinary values:
 
 ```fsharp
-let panels = Pages.both Registry.catalog
+let panels =
+    [ { Pages.about Registry.catalog with label = "tutorial" }
+      Pages.source Registry.catalog
+      Pages.verilog ]
 let source initial = View.FromCatalog(Registry.catalog, initial)
 ```
 
@@ -126,8 +129,8 @@ That is the seam any project uses. A Game of Life grid, an AXI register-map
 view, a custom display for whatever you built — all arrive the same way, as a
 `Panel` with a label, a render function, and a `placement`.
 
-**Placement is why the tutorial reads the way it does.** `about` and `source`
-ask to be `Alongside`, so they get a column of their own and stay on screen
+**Placement is why the tutorial reads the way it does.** All three ask to be
+`Alongside`, so they get a column of their own and stay on screen
 while you work — a page can say *poke `enable` and press Step* and you can do it
 without leaving the words. A panel that is a thing to look *at* rather than read
 from asks for `WithInstruments` instead and becomes another tab beside `watch`,
@@ -139,8 +142,9 @@ column at all.
 the counter *holds*, that `sel1` outranks `sel0`, that the async read leads the
 sync one by exactly one cycle, that the one-hot round trip is the identity. A
 page teaching something the silicon does not do would be worse than no page.
-There are also two that guard the set rather than the designs: every entry has
-a page, and every "see also" link resolves.
+There are also checks that guard the set rather than the designs: every entry
+loads and has a page, labels are unique, every signal an entry watches exists,
+and every "see also" link resolves.
 
 All thirty-seven run through the Verilator differential alongside everything else.
 

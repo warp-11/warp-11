@@ -121,7 +121,7 @@ what you hold.
 **Cycles.** A beat here takes about five cycles a stage; the spatial map takes
 none. The fold trades multipliers for time, and the trade is only good when
 there is time to spend — an audio sample at 48 kHz on a 24 MHz fabric has 512
-cycles, and the whole eight-band engine uses 204 of them.
+cycles, and the whole eight-band engine uses 368 of them.
 
 ## Try this
 

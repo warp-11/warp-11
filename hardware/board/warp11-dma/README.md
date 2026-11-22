@@ -56,12 +56,11 @@ timings at 4 KB..1 MB.
   `dir` 0 = DDR→buffer (read path), 1 = buffer→DDR. Source/destination
   `phys` is unvalidated (root-only device).
 
-JVM side: `org.warp11.runtime.Warp11Dma` is the FFM wrapper (open + INFO
-ioctl, per-buffer cached mmap, blocking COPY in both directions);
-`org.warp11.runtime.DmaCopyBuffer` wraps any `DmaBuffer` so bulk
-`readWordsInto` goes through a copy buffer while writes stay on the
-write-combine mapping. `Warp11Dma.openOrNull()` returns null when the
-module isn't loaded, so callers keep a slow-but-correct fallback.
+Host side: `Warp11Dma` in `runtime/host/src/warp11_dma.rs` (open + INFO
+ioctl, buffer 0's cached mmap, `read_phys_into` / `read_phys` through a
+blocking COPY). `Warp11Dma::open()` returns an error when the module isn't
+loaded or the caller isn't root, so callers keep a slow-but-correct
+fallback.
 
 ## Measured (KV260, 5.15.0-1070-xilinx-zynqmp, 2026-07-23)
 
@@ -84,4 +83,5 @@ buffer.
 Gotcha that bit during bring-up (now baked into the test): u-dma-buf's
 mmap is CACHED unless the fd is opened with `O_SYNC` — pattern writes
 through a cached mapping sit dirty in the CPU caches where no DMA
-master sees them. Warp 11's `UdmabufDmaBuffer` already opens O_SYNC.
+master sees them. Warp 11's `Udmabuf` (`runtime/host/src/udmabuf.rs`)
+documents the choice: open `O_SYNC`, or keep the cached mapping and sync.
