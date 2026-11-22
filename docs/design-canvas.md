@@ -334,11 +334,11 @@ Two host tools, in `runtime/`, both reading the seam the build wrote:
 
 ```sh
 # a WAV through the design's host-memory top, and back
-warp11_batch in.wav out.wav --board gain_patch_batch --layout gain_patch_batch_layout.rs --set volume=512
+warp11_batch in.wav out.wav --board gain_patch_batch_layout.rs --set volume=512
 
 # the design's registers by name, over a uio device or a UART
-warp11_regs --uio gain_patch_axi --layout gain_patch_axi_layout.rs --set volume=256 --get volume
-warp11_regs --serial /dev/ttyUSB1 --layout gain_ice_uart_layout.rs --set volume=256
+warp11_regs --board gain_patch_axi_layout.rs --set volume=256 --get volume
+warp11_regs --board out/ --port /dev/ttyUSB1 --set volume=256
 ```
 
 The same batch binary runs against the simulator, through a bridge, before
@@ -355,7 +355,7 @@ come back for each it asks for, the view as registers, a PGM out —
 ```sh
 warp11_batch frame:1400x800 out.pgm --sim my.json --chunk 128 \
     --set cxOrigin=0xE0000000 --set cyOrigin=0x10000000 --set dx=575219 --set dy=0xFFF5C28F
-warp11_batch frame:1400x800 out.pgm --board my_batch --layout my_batch_layout.rs --chunk 128 --set ...
+warp11_batch frame:1400x800 out.pgm --board my_batch_layout.rs --chunk 128 --set ...
 ```
 
 and `-- frame my.json 1400x800 out.pgm cxOrigin=…` draws the same through

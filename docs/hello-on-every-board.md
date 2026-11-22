@@ -97,7 +97,7 @@ iCEBreaker's, shortened to its shape:
     "tool": "OpenFlow",
     "clock": { "source": "Crystal", "hz": 12000000 },
     "fabricHz": 24000000,
-    "host": { "driver": "Uart", "baud": 115200 },
+    "host": { "driver": "Uart", "baud": 1000000 },
     "loading": { "kind": "Sram" },
     "connectors": [
       { "role": "ClockIn",  "pins": { "clk12": { "pin": "35" } } },
@@ -183,7 +183,7 @@ Now the host. The iCEBreaker's UART is the FTDI's second channel, which
 Linux usually enumerates as `/dev/ttyUSB1`; the baud is the board file's:
 
 ```sh
-warp11_regs --serial /dev/ttyUSB1 --baud 115200 --layout hello_uart_layout.rs --set pattern=3 --get pattern
+warp11_regs --board out/ --port /dev/ttyUSB1 --set pattern=3 --get pattern
 ```
 
 Both LEDs light, and the read back prints `pattern = 3`. `--set pattern=1`
@@ -201,11 +201,11 @@ table:
 
 | board | `Hello.board` | LEDs → `pattern` bits | build and load | the link |
 |---|---|---|---|---|
-| iCEBreaker | `iceBreakerAt 24_000_000` | 2 | `PROG=1 ./build.sh` — the flash; SRAM does not configure it | `--serial /dev/ttyUSB1 --baud 115200` |
-| Go Board | `goBoard` | 4 | `PROG=1 ./build.sh` — the flash | `--serial /dev/ttyUSB1 --baud 115200` |
-| Icepi Zero | `icepi` | 5 | `PROG=sram ./build.sh` (volatile) or `PROG=1` (flash), through `openFPGALoader -b icepi-zero` | `--serial /dev/ttyUSB0 --baud 1000000` (an FT231X) |
-| DE10-Lite | `de10Lite` | 10 | `PROG=1 ./build.sh` — `quartus_pgm` over the USB-Blaster, volatile | `--serial /dev/ttyUSB0 --baud 115200`, a 3.3 V USB-serial cable on the GPIO header |
-| KV260 | `kv260` | none: a 1-bit register, read back | `./build.sh` writes the app; then the three lines it prints | `--uio hello_axi`, on the board |
+| iCEBreaker | `iceBreakerAt 24_000_000` | 2 | `PROG=1 ./build.sh` — the flash; SRAM does not configure it | `--port /dev/ttyUSB1` |
+| Go Board | `goBoard` | 4 | `PROG=1 ./build.sh` — the flash | `--port /dev/ttyUSB1` |
+| Icepi Zero | `icepi` | 5 | `PROG=sram ./build.sh` (volatile) or `PROG=1` (flash), through `openFPGALoader -b icepi-zero` | `--port /dev/ttyUSB0` (an FT231X) |
+| DE10-Lite | `de10Lite` | 10 | `PROG=1 ./build.sh` — `quartus_pgm` over the USB-Blaster, volatile | `--port /dev/ttyUSB0`, a 3.3 V USB-serial cable on the GPIO header |
+| KV260 | `kv260` | none: a 1-bit register, read back | `./build.sh` writes the app; then the three lines it prints | `--board hello_axi_layout.rs`, on the board |
 
 Each one, in the order the toolchains are cheapest to learn:
 
@@ -216,7 +216,7 @@ bits. In `Hello.fs`, `let board = goBoard`; then:
 ```sh
 dotnet run --project Warp11.Designs -- hello out/hello-goboard
 cd out/hello-goboard && PROG=1 ./build.sh
-warp11_regs --serial /dev/ttyUSB1 --baud 115200 --layout hello_uart_layout.rs --set pattern=5 --get pattern
+warp11_regs --board out/ --port /dev/ttyUSB1 --set pattern=5 --get pattern
 ```
 
 LEDs 1 and 3 light. The gate's numbers: 199 of 1 280 cells, 166.6 MHz
@@ -230,7 +230,7 @@ runs at a million baud. `let board = icepi`; then:
 ```sh
 dotnet run --project Warp11.Designs -- hello out/hello-icepi
 cd out/hello-icepi && PROG=sram ./build.sh
-warp11_regs --serial /dev/ttyUSB0 --baud 1000000 --layout hello_uart_layout.rs --set pattern=21 --get pattern
+warp11_regs --board out/ --port /dev/ttyUSB0 --set pattern=21 --get pattern
 ```
 
 `ls /dev/tty*` before and after plugging the board in tells you the device.
@@ -247,7 +247,7 @@ Ten LEDs. `let board = de10Lite`; then:
 ```sh
 dotnet run --project Warp11.Designs -- hello out/hello-de10lite
 cd out/hello-de10lite && PROG=1 ./build.sh
-warp11_regs --serial /dev/ttyUSB0 --baud 115200 --layout hello_uart_layout.rs --set pattern=682 --get pattern
+warp11_regs --board out/ --port /dev/ttyUSB0 --set pattern=682 --get pattern
 ```
 
 Every other LED lights. The gate reads Quartus's fitter summary and timing
@@ -270,7 +270,7 @@ cd out/hello-kv260 && ./build.sh
 On the board, the same tool over the other transport:
 
 ```sh
-warp11_regs --uio hello_axi --layout hello_axi_layout.rs --set pattern=1 --get pattern
+warp11_regs --board hello_axi_layout.rs --set pattern=1 --get pattern
 ```
 
 `pattern = 1` back is the whole proof: the bitstream loaded, the overlay

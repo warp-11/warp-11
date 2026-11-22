@@ -1,39 +1,40 @@
 //! A design's surface, pulled whole over the wire it shares with its
 //! register map — a Life world, a framebuffer — and shown or kept.
 //!
-//!   warp11_snapshot --serial /dev/ttyUSB1 --baud 1000000 --layout life64x64_link_layout.rs \
+//!   warp11_snapshot --board out/ --port /dev/ttyUSB1 \
 //!       [--need world] [--seed glider.txt] [--set run=1] [--set intervalCycles=1000000] \
 //!       [--pull 10] [--every 100] [out.pbm]
 //!
 //! A surface bound to the host link (`notes/DEVICES.md`, the snapshot
 //! carrier) is latched in one cycle when `…LinkPull` is pulsed and sent as
 //! streamed frames, a row's words at a time; `…LinkMissed` counts pulls that
-//! landed while a snapshot was still leaving. The seam says the shape —
-//! `WORLD_ROWS`, `WORLD_WORDS` — so nothing here is told it.
+//! landed while a snapshot was still leaving. `--board` is the build
+//! directory of what is loaded, or its seam file: the seam says the shape —
+//! `WORLD_ROWS`, `WORLD_WORDS` — and the baud, so nothing here is told
+//! either.
 //!
 //! `--seed` plays a text picture into the design's input need (its rows as
 //! `.`/`#`, top row first, bit 0 the leftmost cell) over the same link, the
-//! way `warp11_batch --serial` plays rows: the input need's `…LinkArm` is
+//! way `warp11_batch` plays rows: the input need's `…LinkArm` is
 //! set around it. Each pull is printed as the same picture, or the last one
 //! is written as a PBM when a path is given.
 
 use std::path::{Path, PathBuf};
-use warp11_host::seam::{read_aperture_words, read_const, read_layout, resolve};
-use warp11_host::serial_window::SerialWindow;
+use warp11_host::connection;
+use warp11_host::seam::{read_const, read_layout, resolve, Seam};
 use warp11_runtime::RegisterWindow;
 
 fn usage() -> ! {
     eprintln!(
-        "usage: warp11_snapshot --serial <tty> [--baud 1000000] --layout <seam.rs> [--need world] \
+        "usage: warp11_snapshot --board <build-dir> --port <tty> [--need world] \
          [--seed <picture.txt>] [--set name=value]... [--pull 1] [--every <ms>] [out.pbm]"
     );
     std::process::exit(2)
 }
 
 struct Args {
-    tty: PathBuf,
-    baud: u32,
-    layout: PathBuf,
+    board: PathBuf,
+    port: Option<PathBuf>,
     need: String,
     seed: Option<PathBuf>,
     sets: Vec<(String, u32)>,
@@ -45,9 +46,8 @@ struct Args {
 fn parse_args() -> Args {
     let mut args = std::env::args().skip(1);
     let mut parsed = Args {
-        tty: PathBuf::new(),
-        baud: 1_000_000,
-        layout: PathBuf::new(),
+        board: PathBuf::new(),
+        port: None,
         need: "world".to_string(),
         seed: None,
         sets: Vec::new(),
@@ -58,9 +58,8 @@ fn parse_args() -> Args {
     while let Some(flag) = args.next() {
         let mut value = || args.next().unwrap_or_else(|| usage());
         match flag.as_str() {
-            "--serial" => parsed.tty = PathBuf::from(value()),
-            "--baud" => parsed.baud = value().parse().unwrap_or_else(|_| usage()),
-            "--layout" => parsed.layout = PathBuf::from(value()),
+            "--board" => parsed.board = PathBuf::from(value()),
+            "--port" => parsed.port = Some(PathBuf::from(value())),
             "--need" => parsed.need = value(),
             "--seed" => parsed.seed = Some(PathBuf::from(value())),
             "--pull" => parsed.pulls = value().parse().unwrap_or_else(|_| usage()),
@@ -75,7 +74,7 @@ fn parse_args() -> Args {
             _ => usage(),
         }
     }
-    if parsed.tty.as_os_str().is_empty() || parsed.layout.as_os_str().is_empty() || parsed.pulls == 0 {
+    if parsed.board.as_os_str().is_empty() || parsed.pulls == 0 {
         usage();
     }
     parsed
@@ -117,16 +116,17 @@ fn write_pbm(path: &Path, rows: &[Vec<u32>], width: usize) -> Result<(), String>
 }
 
 fn run(args: &Args) -> Result<(), String> {
-    let (registers, _hash) = read_layout(&args.layout)?;
+    let seam = Seam::load(&args.board)?;
+    let layout = PathBuf::from(&seam.source);
+    let (registers, _hash) = read_layout(&layout)?;
     let upper = warp11_host::seam::screaming(&args.need);
-    let rows = read_const(&args.layout, &format!("{upper}_ROWS"))?
+    let rows = read_const(&layout, &format!("{upper}_ROWS"))?
         .ok_or_else(|| format!("the seam says nothing about {upper}_ROWS — is '{}' a surface over the link?", args.need))? as usize;
-    let words = read_const(&args.layout, &format!("{upper}_WORDS"))?
+    let words = read_const(&layout, &format!("{upper}_WORDS"))?
         .ok_or_else(|| format!("the seam says nothing about {upper}_WORDS"))? as usize;
     let pull = resolve(&format!("{}LinkPull", args.need), &registers)?;
     let missed = resolve(&format!("{}LinkMissed", args.need), &registers)?;
-    let aperture = read_aperture_words(&args.layout)?.unwrap_or(64);
-    let mut window = SerialWindow::open_words(&args.tty, args.baud, 5, aperture).map_err(|e| format!("{}: {e}", args.tty.display()))?;
+    let mut window = connection::serial(&seam, args.port.as_deref(), 5)?;
     let io = |e: warp11_host::serial_window::SerialError| e.to_string();
     // Cells a row: the last word may be partial, which the seam does not say,
     // so a picture shows whole words.

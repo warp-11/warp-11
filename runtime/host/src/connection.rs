@@ -75,6 +75,44 @@ impl Arena for Shared<FsSimWindow> {
     }
 }
 
+/// How a build is reached, as its seam states it.
+pub enum Reach {
+    /// Its register map spoken over a serial line at this baud.
+    Serial { baud: u32 },
+    /// An OS app: a uio node and, where it has one, a `u-dma-buf`, both
+    /// named after it.
+    App { name: String },
+}
+
+impl Reach {
+    pub fn of(seam: &Seam) -> Result<Reach, String> {
+        if let Some(baud) = seam.number("HOST_BAUD") {
+            return Ok(Reach::Serial { baud: baud as u32 });
+        }
+        match seam.text("HOST_APP") {
+            Some(name) => Ok(Reach::App { name: name.to_string() }),
+            None => Err(format!(
+                "{}: no HOST_BAUD and no HOST_APP — write the build directory again; this seam is from before it said how it is reached",
+                seam.source
+            )),
+        }
+    }
+}
+
+/// The serial line a build is reached over, opened as its seam says: the
+/// baud, and the frame's shape from the map's width. For a tool that plays
+/// and reads the link's streamed words itself. `quiet_tenths` is how long
+/// the line may say nothing, in tenths of a second, before a read gives up
+/// — longer than the design ever takes between words.
+pub fn serial(seam: &Seam, port: Option<&Path>, quiet_tenths: u8) -> Result<SerialWindow, String> {
+    let Reach::Serial { baud } = Reach::of(seam)? else {
+        return Err(format!("{}: this build is not reached over a serial line", seam.source));
+    };
+    let port = port.ok_or_else(|| format!("{}: this build is reached over a serial line — say which with --port", seam.source))?;
+    let words = seam.need("APERTURE_BYTES")? as usize / 4;
+    SerialWindow::open_words(port, baud, quiet_tenths, words).map_err(|e| format!("{}: {e}", port.display()))
+}
+
 pub struct Connection {
     /// Everything the build says about itself.
     pub seam: Seam,
@@ -92,22 +130,18 @@ impl Connection {
         let seam = Seam::load(build)?;
         let aperture = seam.need("APERTURE_BYTES")? as usize;
 
-        if let Some(baud) = seam.number("HOST_BAUD") {
-            let port = port.ok_or_else(|| format!("{}: this build is reached over a serial line — say which with --port", seam.source))?;
-            let link = SerialWindow::open_words(port, baud as u32, 1, aperture / 4).map_err(|e| format!("{}: {e}", port.display()))?;
-            let link = Rc::new(RefCell::new(link));
-            let regions: Box<dyn Regions> = if seam.names_ending("_REGION_ID").is_empty() {
-                Box::new(NoRegions)
-            } else {
-                Box::new(LinkedRegions::from_seam(&seam, link.clone())?)
-            };
-            return Connection { seam, window: Window(Rc::new(RefCell::new(Shared(link)))), regions, armed: None }.identified();
-        }
-
-        let app = seam
-            .text("HOST_APP")
-            .ok_or_else(|| format!("{}: no HOST_BAUD and no HOST_APP — write the build directory again; this seam is from before it said how it is reached", seam.source))?
-            .to_string();
+        let app = match Reach::of(&seam)? {
+            Reach::Serial { .. } => {
+                let link = Rc::new(RefCell::new(serial(&seam, port, 1)?));
+                let regions: Box<dyn Regions> = if seam.names_ending("_REGION_ID").is_empty() {
+                    Box::new(NoRegions)
+                } else {
+                    Box::new(LinkedRegions::from_seam(&seam, link.clone())?)
+                };
+                return Connection { seam, window: Window(Rc::new(RefCell::new(Shared(link)))), regions, armed: None }.identified();
+            }
+            Reach::App { name } => name,
+        };
         let uio = app.replace('-', "_");
         let node = find_uio(&uio).ok().flatten().ok_or_else(|| format!("no uio node named '{uio}' — is the app '{app}' loaded?"))?;
         let file = OpenOptions::new().read(true).write(true).custom_flags(O_SYNC).open(&node).map_err(|e| format!("{}: {e}", node.display()))?;

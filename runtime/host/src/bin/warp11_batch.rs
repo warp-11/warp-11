@@ -5,14 +5,19 @@
 //! nothing staged, the count and the view written, the frame read back as a
 //! PGM.
 //!
-//!   warp11_batch in.wav out.wav --board gain_patch_batch --layout gain_patch_batch_layout.rs [--set volume=512]
-//!   warp11_batch in.wav out.wav --serial /dev/ttyUSB1 --baud 1000000 --layout gain_link_layout.rs [--set volume=512]
+//!   warp11_batch in.wav out.wav --board out/ [--port /dev/ttyUSB1] [--set volume=512]
 //!   warp11_batch in.wav out.wav --sim gain.json [--preset kv260] [--fsproj ../hdl/Warp11.Placement/Warp11.Placement.fsproj] [--set volume=512]
-//!   warp11_batch numbers.csv sums.csv --serial /dev/ttyUSB0 --layout adder_link_layout.rs
+//!   warp11_batch numbers.csv sums.csv --board out/ --port /dev/ttyUSB0
 //!   warp11_batch gradient.pgm out.pgm --sim blur.json --preset kv260
 //!   warp11_batch frame:1400x800 out.pgm --sim mandelbrot.json --chunk 128 --set cxOrigin=0xE0000000 ...
-//!   warp11_batch frame:320x200 out.pgm --serial /dev/ttyUSB1 --layout mandelbrot_link_layout.rs --chunk 128 --set ...
-//!   warp11_batch count:48000 tone.wav --serial /dev/ttyUSB1 --layout tone_link_layout.rs [--rate 48000]
+//!   warp11_batch frame:320x200 out.pgm --board out/ --port /dev/ttyUSB1 --chunk 128 --set ...
+//!   warp11_batch count:48000 tone.wav --board out/ --port /dev/ttyUSB1 [--rate 48000]
+//!
+//! `--board` is the build directory of what is loaded — or the seam file
+//! out of it, which is all a board with its own OS needs copied to it. The
+//! seam says how the build is reached and which carrier its rows ride, so
+//! the same command runs a design on every board that holds it; `--port` is
+//! the serial line, for a build reached over one.
 //!
 //! Three layers, and none reaches into another. **The file** is this tool's
 //! alone: a recording's channels fill the design's input fields in order,
@@ -31,22 +36,19 @@
 //! `--chunk` is the design's chunk width in pixels: a frame is drawn in whole
 //! chunks, so the width is rounded up to one and the PGM cropped back.
 //!
-//! On the board `--board` names the uio device the overlay made
-//! (`gain_patch_batch`); the arena is the `u-dma-buf` named after it
-//! (`udmabuf-gain-patch-batch`), input rows in its first half, output rows
-//! in its second. `--layout` is the seam the build directory wrote, read for
-//! the controls' offsets, the rows and the layout hash; against the Sim the
+//! In the host's memory the arena is the app's `u-dma-buf`, input rows in
+//! its first half, output rows in its second, and the seam is read for the
+//! controls' offsets, the rows and the layout hash; against the Sim the
 //! bridge answers those itself.
 //!
-//! `--serial` is a board whose only connection is a UART, the design built
-//! on the link path (`viaLink`): rows go in as played words and come back
-//! as streamed frames, on the wire the register map is on. The link paces
-//! it: a chunk of rows is played, their answers read back, and the fabric's
-//! `…LinkSent` and `…LinkDropped` say afterwards whether every row made it.
-//! A frame over the link is the counted path on the same wire
-//! (`viaCountLink`): the count goes into `…CountTotal`, `…CountStart`
-//! pulses it, and the pixels come back as streamed frames until the count's
-//! worth has.
+//! Over a serial line the design is built on the link path (`viaLink`):
+//! rows go in as played words and come back as streamed frames, on the wire
+//! the register map is on. The link paces it: a chunk of rows is played,
+//! their answers read back, and the fabric's `…LinkSent` and `…LinkDropped`
+//! say afterwards whether every row made it. A frame over the link is the
+//! counted path on the same wire (`viaCountLink`): the count goes into
+//! `…CountTotal`, `…CountStart` pulses it, and the pixels come back as
+//! streamed frames until the count's worth has.
 
 use std::fs::OpenOptions;
 use std::path::PathBuf;
@@ -54,7 +56,8 @@ use warp11_host::fs_sim_window::FsSimWindow;
 use warp11_host::mmap::MmapWindow;
 use warp11_host::pgm::{image_to_rows, read_pgm, rows_to_image, write_pgm};
 use warp11_host::rows::{self, row_shape, Constants, RowShape};
-use warp11_host::seam::{self, parse_number, read_aperture_words, read_layout};
+use warp11_host::connection::{self, Reach};
+use warp11_host::seam::{self, parse_number, read_layout, Seam};
 use warp11_host::serial_window::SerialWindow;
 use warp11_host::table::{self, read_csv, write_csv, Table};
 use warp11_host::udmabuf::{find_uio, Udmabuf};
@@ -83,10 +86,10 @@ enum Source {
 struct Args {
     input: Source,
     output: PathBuf,
-    board: Option<String>,
-    serial: Option<PathBuf>,
-    baud: u32,
-    layout: Option<PathBuf>,
+    /// The build directory of what is loaded on a board, or its seam file.
+    board: Option<PathBuf>,
+    /// The serial line, for a build reached over one.
+    port: Option<PathBuf>,
     sim: Option<PathBuf>,
     preset: Option<String>,
     fsproj: PathBuf,
@@ -114,7 +117,7 @@ fn parse_frame(text: &str) -> Option<Source> {
 }
 
 fn usage() -> ! {
-    eprintln!("usage: warp11_batch (in.wav out.wav | in.pgm out.pgm | in.csv out.csv | frame:<w>x<h> out.pgm [--chunk <pixels>] | count:<n> out.wav [--rate 48000]) (--board <uio name> --layout <seam.rs> | --serial <tty> [--baud 1000000] --layout <seam.rs> | --sim <design.json> [--preset kv260] [--fsproj <fsproj>]) [--set name=value]...");
+    eprintln!("usage: warp11_batch (in.wav out.wav | in.pgm out.pgm | in.csv out.csv | frame:<w>x<h> out.pgm [--chunk <pixels>] | count:<n> out.wav [--rate 48000]) (--board <build-dir> [--port <tty>] | --sim <design.json> [--preset kv260] [--fsproj <fsproj>]) [--set name=value]...");
     std::process::exit(2)
 }
 
@@ -127,9 +130,7 @@ fn parse_args() -> Args {
         input,
         output,
         board: None,
-        serial: None,
-        baud: 1_000_000,
-        layout: None,
+        port: None,
         sim: None,
         preset: None,
         fsproj: PathBuf::from("../hdl/Warp11.Placement/Warp11.Placement.fsproj"),
@@ -140,10 +141,8 @@ fn parse_args() -> Args {
     while let Some(flag) = args.next() {
         let mut value = || args.next().unwrap_or_else(|| usage());
         match flag.as_str() {
-            "--board" => parsed.board = Some(value()),
-            "--serial" => parsed.serial = Some(PathBuf::from(value())),
-            "--baud" => parsed.baud = value().parse().unwrap_or_else(|_| usage()),
-            "--layout" => parsed.layout = Some(PathBuf::from(value())),
+            "--board" => parsed.board = Some(PathBuf::from(value())),
+            "--port" => parsed.port = Some(PathBuf::from(value())),
             "--sim" => parsed.sim = Some(PathBuf::from(value())),
             "--preset" => parsed.preset = Some(value()),
             "--fsproj" => parsed.fsproj = PathBuf::from(value()),
@@ -160,8 +159,7 @@ fn parse_args() -> Args {
             _ => usage(),
         }
     }
-    let transports = [parsed.board.is_some(), parsed.serial.is_some(), parsed.sim.is_some()];
-    if transports.iter().filter(|&&t| t).count() != 1 {
+    if parsed.board.is_some() == parsed.sim.is_some() {
         usage();
     }
     parsed
@@ -376,16 +374,25 @@ fn run_sim(args: &Args, file: &File) -> Result<Output, String> {
     memory_output(&run, file, &out)
 }
 
+/// The build on a board, whichever way its seam says it is reached.
 fn run_board(args: &Args, file: &File) -> Result<Output, String> {
-    let name = args.board.as_ref().unwrap();
-    let layout = args.layout.as_ref().ok_or("--board needs --layout <seam.rs> for the controls' offsets")?;
+    let seam = Seam::load(args.board.as_ref().unwrap())?;
+    match Reach::of(&seam)? {
+        Reach::Serial { .. } => run_serial(args, file, &seam),
+        Reach::App { name } => run_memory(args, file, &seam, &name),
+    }
+}
+
+fn run_memory(args: &Args, file: &File, seam: &Seam, app: &str) -> Result<Output, String> {
+    let layout = &PathBuf::from(&seam.source);
     let (registers, hash) = read_layout(layout)?;
     let sets = resolve(&args.sets, &registers)?;
 
-    let uio = find_uio(name)
+    let name = app.replace('-', "_");
+    let uio = find_uio(&name)
         .map_err(|e| format!("{e}"))?
-        .ok_or_else(|| format!("no uio device called '{name}' — is the app loaded?"))?;
-    let arena_name = format!("udmabuf-{}", name.replace('_', "-"));
+        .ok_or_else(|| format!("no uio device called '{name}' — is the app '{app}' loaded?"))?;
+    let arena_name = format!("udmabuf-{app}");
     let arena = Udmabuf::find(&arena_name)
         .map_err(|e| format!("{e}"))?
         .ok_or_else(|| format!("no u-dma-buf called '{arena_name}' — is the app loaded?"))?;
@@ -477,9 +484,8 @@ fn ending_in(registers: &[(String, usize)], suffix: &str) -> Result<(String, usi
     Ok((need, first.1))
 }
 
-fn run_serial(args: &Args, file: &File) -> Result<Output, String> {
-    let tty = args.serial.as_ref().unwrap();
-    let layout = args.layout.as_ref().ok_or("--serial needs --layout <seam.rs> for the registers' offsets")?;
+fn run_serial(args: &Args, file: &File, seam: &Seam) -> Result<Output, String> {
+    let layout = &PathBuf::from(&seam.source);
     let (registers, _hash) = read_layout(layout)?;
     let sets = resolve(&args.sets, &registers)?;
     // The recorder's registers are the need's name plus `Link…`, and `Sent`
@@ -488,8 +494,7 @@ fn run_serial(args: &Args, file: &File) -> Result<Output, String> {
     let record_arm = seam::resolve(&format!("{recorder}LinkArm"), &registers)?;
     let record_dropped = seam::resolve(&format!("{recorder}LinkDropped"), &registers)?;
 
-    let words = read_aperture_words(layout)?.unwrap_or(64);
-    let mut window = SerialWindow::open_words(tty, args.baud, 5, words).map_err(|e| format!("{}: {e}", tty.display()))?;
+    let mut window = connection::serial(seam, args.port.as_deref(), 5)?;
     let io = |e: warp11_host::serial_window::SerialError| e.to_string();
 
     for (offset, value) in sets {
@@ -506,7 +511,7 @@ fn run_serial(args: &Args, file: &File) -> Result<Output, String> {
     let back_words = rows.count * rows.output.words;
     let out = match &rows.input {
         None => count_over_link(args, &mut window, &registers, rows.count, back_words, record_arm, sent, record_dropped)?,
-        Some(input) => play_and_read(args, &mut window, &registers, &rows.words, input.words, rows.output.words)?,
+        Some(input) => play_and_read(args, layout, &mut window, &registers, &rows.words, input.words, rows.output.words)?,
     };
     from_rows(file, &rows, &out)
 }
@@ -517,9 +522,8 @@ fn run_serial(args: &Args, file: &File) -> Result<Output, String> {
 /// to spare, where the seam says how much — and the fabric's own counts say
 /// afterwards whether every word made it. `in_words` and `out_words` are a
 /// row's words each way.
-fn play_and_read(args: &Args, window: &mut SerialWindow, registers: &[(String, usize)], staged: &[u32], in_words: usize, out_words: usize) -> Result<Vec<u32>, String> {
-    let tty = args.serial.as_ref().unwrap();
-    let layout = args.layout.as_ref().unwrap();
+fn play_and_read(args: &Args, layout: &PathBuf, window: &mut SerialWindow, registers: &[(String, usize)], staged: &[u32], in_words: usize, out_words: usize) -> Result<Vec<u32>, String> {
+    let tty = args.port.as_ref().unwrap();
     let io = |e: warp11_host::serial_window::SerialError| e.to_string();
     let (player, _fill) = ending_in(registers, "LinkFill")?;
     let (recorder, sent) = ending_in(registers, "LinkSent")?;
@@ -625,7 +629,7 @@ fn count_over_link(
         ));
     }
 
-    eprintln!("{} beats in {:.3} s over {}", total, elapsed.as_secs_f64(), args.serial.as_ref().unwrap().display());
+    eprintln!("{} beats in {:.3} s over {}", total, elapsed.as_secs_f64(), args.port.as_ref().unwrap().display());
     Ok(back)
 }
 
@@ -692,13 +696,7 @@ fn place_by_index(words: &[u32], beats: usize) -> Result<Vec<u8>, String> {
 fn main() {
     let args = parse_args();
     let result = read_file(&args).and_then(|file| {
-        let out = if args.sim.is_some() {
-            run_sim(&args, &file)
-        } else if args.serial.is_some() {
-            run_serial(&args, &file)
-        } else {
-            run_board(&args, &file)
-        }?;
+        let out = if args.sim.is_some() { run_sim(&args, &file) } else { run_board(&args, &file) }?;
         write_output(&args, &file, out)
     });
 

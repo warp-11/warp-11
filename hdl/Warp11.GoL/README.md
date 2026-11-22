@@ -67,7 +67,7 @@ more than its 1 280 cells. On the KV260 it
 builds with the world in the same triple buffer `GolAxi`
 uses (`Life64x64Batch`: 32 beats a snapshot, 512-byte slots), the seed rows
 in through the batch contract;
-`warp11_snapshot --serial … --layout out/life64x64_link_layout.rs --seed
+`warp11_snapshot --board out/ --port … --seed
 glider.txt --set run=1 --pull 10 --every 100` seeds it, runs it and prints
 what it pulled. The KV260 keeps `GolAxi` as its live app until the daemon
 and the view drive the generated top.

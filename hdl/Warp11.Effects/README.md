@@ -208,7 +208,7 @@ The first two are designs in `Rungs.fs`, built for the KV260 by
 `Warp11.Placement.Canvas/examples/gain.json`, built the same way by
 `Warp11.Placement -- build …/gain.json kv260 pins out/`; its `volume`
 starts at 0, so set it before expecting sound — unity is
-`warp11_regs --uio gain_patch_axi --layout gain_patch_axi_layout.rs --set volume=256`.
+`warp11_regs --board gain_patch_axi_layout.rs --set volume=256`.
 
 The passthru's readings exist because **"no sound" has two completely
 different causes** — a silent ADC and a dead transmitter — and on a board you
@@ -224,7 +224,7 @@ reach the host:
 | mapping path | what the rows are | host tool |
 |---|---|---|
 | `memory` / `count` (KV260) | rows through DDR, the batch contract | `warp11_batch in.wav out.wav --board …`, `count:N` for the tone |
-| `link` / `countlink` (iCEBreaker, Icepi, Go Board) | played words in, streamed frames out, on the UART beside the register map | `warp11_batch … --serial` |
+| `link` / `countlink` (iCEBreaker, Icepi, Go Board) | played words in, streamed frames out, on the UART beside the register map | `warp11_batch … --board <build-dir> --port <tty>` |
 | `pins` | the I2S converter on the board's header, the Pmod I2S2 | nothing: it is heard |
 
 `-- build tone out/` writes the directory for the rung's own mapping

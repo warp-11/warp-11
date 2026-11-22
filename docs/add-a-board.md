@@ -215,7 +215,7 @@ board = goBoard`. Then:
 ```sh
 dotnet run --project Warp11.Designs -- hello out/
 cd out && PROG=1 ./build.sh
-warp11_regs --serial /dev/ttyUSB1 --baud 115200 --layout hello_uart_layout.rs --set pattern=5
+warp11_regs --board out/ --port /dev/ttyUSB1 --set pattern=5
 ```
 
 [Hello on every board](hello-on-every-board.md) walks the five here; the

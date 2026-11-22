@@ -26,7 +26,7 @@ The same design on the Icepi, over its UART:
 ```sh
 dotnet run --project Warp11.Placement -- build my.json my.icepi.json out/
 cd out && ./build.sh
-warp11_batch in.wav out.wav --serial /dev/ttyUSB1 --layout out/my_link_layout.rs --set volume=512
+warp11_batch in.wav out.wav --board out/ --port /dev/ttyUSB1 --set volume=512
 ```
 
 And on the KV260, through its DDR — a different file, the same design, the
@@ -37,7 +37,7 @@ same driver, the same bytes out:
 ```
 
 ```sh
-warp11_batch in.wav out.wav --board my_batch --layout out/my_batch_layout.rs --set volume=512
+warp11_batch in.wav out.wav --board out/my_batch_layout.rs --set volume=512
 ```
 
 The board object is the board record written out — `Warp11.Mapping.write

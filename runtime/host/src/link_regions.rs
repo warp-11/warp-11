@@ -133,8 +133,12 @@ impl LinkRegions {
         let mut served = 0;
         loop {
             let mut words = link.take_streamed();
+            // One word at a time: asking for more waits out the line's
+            // timeout on every request, since a read is a single header
+            // word and the fabric sends nothing more until it is answered —
+            // measured at 100 ms a request, 312 ms an offspring.
             if words.is_empty() {
-                words = link.read_streamed(64).map_err(LinkPumpError::Link)?;
+                words = link.read_streamed(1).map_err(LinkPumpError::Link)?;
             }
             if words.is_empty() {
                 return Ok(served);

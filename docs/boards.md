@@ -17,7 +17,7 @@ for a part whose tools are not.
 | board | part | cells | multipliers | block RAM | clock | the host reaches it | loading |
 |---|---|---|---|---|---|---|---|
 | **KV260** (Xilinx Kria) | ZU5EV, `xck26-sfvc784-2LV-c` | 117 120 LUTs | 1 248 DSPs | 5.2 Mbit (+ 18 Mbit UltraRAM) | the processing system's, per app (100 or 166.67 MHz) | AXI-Lite at `0xB0000000`, from Linux on the same chip | `xmutil loadapp`, an app directory under `/lib/firmware/xilinx` |
-| **iCEBreaker** | iCE40 UP5K, `up5k-sg48` | 5 280 | 8 MAC16 | 120 kbit | 12 MHz crystal, a PLL to 24 MHz | a UART at 115 200 on the FTDI's second channel | the SPI flash (`PROG=1`); SRAM loading does not configure this board |
+| **iCEBreaker** | iCE40 UP5K, `up5k-sg48` | 5 280 | 8 MAC16 | 120 kbit | 12 MHz crystal, a PLL to 24 MHz | a UART at 1 Mbaud on the FTDI's second channel | the SPI flash (`PROG=1`); SRAM loading does not configure this board |
 | **Icepi Zero** | ECP5-25F, `25k-CABGA256` | 24 288 | 28 MULT18 | 1 Mbit | 50 MHz oscillator, a PLL to 25 MHz | a UART at 1 000 000 | `openFPGALoader -b icepi-zero`, SRAM or flash |
 | **Go Board** (Nandland) | iCE40 HX1K, `hx1k-vq100` | 1 280 | none | 64 kbit | 25 MHz oscillator straight in, no PLL | a UART at 115 200 | the SPI flash |
 
@@ -104,7 +104,7 @@ and the LEDs together. Its board is one line in `hdl/Warp11.Designs/Hello.fs`
 cd hdl
 dotnet run --project Warp11.Designs -- hello out/
 cd out && PROG=1 ./build.sh
-warp11_regs --serial /dev/ttyUSB1 --baud 115200 --layout hello_uart_layout.rs --set pattern=5
+warp11_regs --board out/ --port /dev/ttyUSB1 --set pattern=5
 ```
 
 `build.sh` ends with the gate, which reads the toolchain's own report and

@@ -46,7 +46,7 @@ flash a bitstream: USB, the FT2232H and the configuration flash are all on
 board. Connectors are only needed once something has to be *attached*, and
 the release's examples attach nothing: every one reaches the board over its
 USB — the register map and the rows on the FTDI's second channel, as
-`warp11_regs` and `warp11_batch --serial` speak it.
+`warp11_regs` and `warp11_batch` speak it, at the baud the seam states.
 
 If you do fit a socket: **PMOD1A** is the one nearest the FPGA, and the
 preset's `I2sSeparateCodecs` connector is a Pmod I2S2 there — the D/A on the

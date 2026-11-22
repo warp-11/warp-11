@@ -1003,7 +1003,7 @@ let private openFlowSh (t: BoardTop) (top: string) (sources: string list) =
     // On a part with multipliers, `-dsp` or every multiply maps to logic and
     // every area number is meaningless; on one without, the flag would ask
     // for a primitive the part does not have.
-    let gate = nextpnrGate t top "ICESTORM_LC" "ICESTORM_RAM" 4096 "SB_MAC16"
+    let gate = nextpnrGate t top "ICESTORM_LC" "ICESTORM_RAM" 4096 "ICESTORM_DSP"
 
     let dsp, dspNote =
         if hasMultipliers t.board.part then

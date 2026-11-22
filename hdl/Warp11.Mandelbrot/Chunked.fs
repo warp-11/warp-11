@@ -110,7 +110,7 @@ let renderThroughBoardTop (width: int) (height: int) (pixels: int) (maxIter: int
 /// The frame over a board's host link, in the Sim: the count written over
 /// the UART, each beat back as a frame of its index then its pixels, and
 /// placed by the index rather than by when it came — what `warp11_batch
-/// --serial frame:…` does on the Icepi.
+/// frame:…` does over a serial line.
 let renderThroughLink (width: int) (height: int) (pixels: int) (maxIter: int) (fracBits: int) (threads: int) (lanes: int) (view: uint64 * uint64 * uint64 * uint64) =
     let design = mandelScatter "MandelScatter" width pixels maxIter fracBits threads lanes
     let top = BoardTop.boardTop icepi viaCountLink design

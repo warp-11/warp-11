@@ -60,7 +60,7 @@ The boundary is the batch contract's **counted** path: nothing is read; the
 host writes the chunk count and the view, and each beat is written at its
 place — into the KV260's DDR by address. On a board whose only wire is a
 UART the beats come back as the index then the pixels, and the host places
-them (`warp11_batch frame:… --serial …`), refusing a frame with a place
+them (`warp11_batch frame:… --board <build-dir> --port <tty>`), refusing a frame with a place
 filled twice or never; the index is a fifth word every sixteen pixels.
 
 `Chunked.fs` is the design. The numbers a host has to agree with — the

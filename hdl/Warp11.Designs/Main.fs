@@ -2254,10 +2254,14 @@ let private seamConstants (t: BoardTop.BoardTop) =
             | [| name; rest |] ->
                 let value = rest.Split('=').[1].Trim().TrimEnd(';').Trim()
 
-                let parsed =
-                    if value.StartsWith "0x" then System.Convert.ToInt64(value.Substring 2, 16) else int64 value
-
-                Some(name.Trim(), parsed)
+                // The seam's numbers: what it states as text — the app a
+                // host reaches it by — is not one.
+                if value.StartsWith "\"" then
+                    None
+                elif value.StartsWith "0x" then
+                    Some(name.Trim(), System.Convert.ToInt64(value.Substring 2, 16))
+                else
+                    Some(name.Trim(), int64 value)
             | _ -> None
         else
             None)

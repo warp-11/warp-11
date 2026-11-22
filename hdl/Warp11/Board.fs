@@ -708,8 +708,11 @@ let kv260At (fabricHz: int) =
 let kv260 = kv260At 100_000_000
 
 /// The baud the iCEBreaker's register map is spoken at over the FTDI's second
-/// channel.
-let iceBreakerBaud = 115_200
+/// channel: 1 Mbaud, an exact 12 or 24 cycles a bit at the crystal or twice
+/// it, and well inside what the FT2232H does. It was 115 200 while the link
+/// carried only registers; rows and surfaces ride it now, and they are
+/// link-bound.
+let iceBreakerBaud = 1_000_000
 
 /// The iCEBreaker at a fabric clock **the caller pins**, for the same reason
 /// `kv260At` exists: the number a design divides is the clock reaching its
